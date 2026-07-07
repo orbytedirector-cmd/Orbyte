@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="letter-header">
+  <div class="letter-nav">
+    <a href="/" class="track-btn ghost">🏠</a>
+    <a href="javascript:history.back()" class="track-btn ghost">← Volver</a>
+  </div>
+  <h1 class="letter-heading">
+    Artistas — <span class="letter-char">{{ letter }}</span>
+    <span class="letter-count">{{ artists|length }} artistas</span>
+  </h1>
+</div>
+
+<div class="artist-list">
+  {% for artist in artists %}
+  {% set score = (artist.pop_score or 0)|int %}
+  {% set stars = [score // 20, 5] | min %}
+  {% set flag_html = nationality_flag(artist.nationality or '') %}
+  {% set listeners = artist.lastfm_listeners or 0 %}
+
+  <a href="/artist/{{ artist.id }}" class="artist-row">
+
+    <!-- LEFT: flag + name + meta -->
+    <div class="artist-row-main">
+      <div class="artist-name-row">
+        {% if flag_html %}
+        <span class="ar-flag">{{ flag_html|safe }}</span>
+        {% endif %}
+        <span class="artist-name">{{ artist.name }}</span>
+        {% if artist.nationality and not flag_html %}
+        <span class="ar-nat-text">{{ artist.nationality }}</span>
+        {% endif %}
+      </div>
+      <div class="artist-row-meta">
+        <span class="ar-meta-pill">
+          {{ artist.album_count }} álbum{{ 's' if artist.album_count != 1 else '' }}
+        </span>
+        {% if artist.most_common_genre %}
+        <span class="ar-meta-sep">·</span>
+        <span class="ar-meta-genre">{{ artist.most_common_genre }}</span>
+        {% endif %}
+        {% if listeners > 0 %}
+        <span class="ar-meta-sep">·</span>
+        <span class="ar-listeners">
+          {{ '{:,}'.format(listeners).replace(',', '.') }}
+          <span class="ar-listeners-label">oyentes</span>
+        </span>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- RIGHT: stars + score -->
+    <div class="artist-row-right">
+      <span class="artist-stars" title="{{ score }} puntos de popularidad">
+        {%- for i in range(5) -%}
+          <span class="star {{ 'star-on' if i < stars else 'star-off' }}">★</span>
+        {%- endfor -%}
+      </span>
+      {% if score > 0 %}
+      <span class="ar-pop-score">{{ score }} pts</span>
+      {% endif %}
+    </div>
+
+  </a>
+  {% endfor %}
+</div>
+
+<style>
+/* ── Letter page layout ─────────────────────────────────────────────── */
+.letter-header { display:flex; align-items:center; gap:1.2rem; margin-bottom:1.5rem; flex-wrap:wrap; }
+.letter-nav { display:flex; gap:0.5rem; }
+.letter-heading {
+  font-family:'Orbitron',system-ui,sans-serif; font-size:1.5rem; font-weight:700;
+  color:var(--text-primary); margin:0;
+  display:flex; align-items:baseline; gap:0.75rem;
+}
+.letter-char  { color:var(--accent); font-size:2rem; }
+.letter-count { font-family:'Orbitron',system-ui,sans-serif; font-size:0.72rem;
+                color:rgba(200,146,10,0.55); font-weight:600; letter-spacing:0.08em; }
+
+/* ── Artist row ─────────────────────────────────────────────────────── */
+.artist-list { display:flex; flex-direction:column; gap:0.4rem; max-width:860px; }
+
+.artist-row {
+  display:flex; align-items:center; justify-content:space-between; gap:1rem;
+  padding:0.85rem 1.2rem;
+  background:var(--bg-card); border:1px solid var(--border);
+  border-radius:10px; text-decoration:none; color:inherit;
+  transition:border-color 0.18s, background 0.18s;
+  border-left:3px solid transparent;
+}
+.artist-row:hover {
+  border-color:var(--border-gold);
+  border-left-color:var(--accent);
+  background:rgba(200,146,10,0.04);
+}
+
+.artist-row-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:0.3rem; }
+
+/* Name row: flag + name */
+.artist-name-row { display:flex; align-items:center; gap:0.5rem; min-width:0; }
+.ar-flag { flex-shrink:0; display:flex; align-items:center; }
+.ar-flag img { height:18px; border-radius:2px; }
+.ar-nat-text { font-size:0.72rem; color:rgba(200,146,10,0.4); flex-shrink:0; }
+.artist-name { font-size:1.05rem; font-weight:700; color:var(--accent);
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.artist-row:hover .artist-name { color:var(--text-gold); }
+
+/* Meta row: albums · genre · listeners */
+.artist-row-meta { display:flex; align-items:center; gap:0.45rem; flex-wrap:wrap; }
+.ar-meta-pill    { font-family:'Orbitron',system-ui,sans-serif; font-size:0.68rem;
+                   font-weight:600; color:rgba(200,146,10,0.65); letter-spacing:0.05em; }
+.ar-meta-sep     { color:rgba(200,146,10,0.25); font-size:0.75rem; }
+.ar-meta-genre   { font-size:0.75rem; color:rgba(245,197,24,0.5); font-style:italic;
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:220px; }
+.ar-listeners      { font-size:0.78rem; font-weight:600; color:rgba(0,212,255,0.75); }
+.ar-listeners-label{ font-size:0.7rem; font-weight:400; color:rgba(0,212,255,0.45); margin-left:2px; }
+
+/* Right column: stars + pts */
+.artist-row-right { flex-shrink:0; display:flex; flex-direction:column; align-items:flex-end; gap:0.2rem; }
+.artist-stars { display:flex; gap:2px; cursor:default; }
+.star          { font-size:0.95rem; }
+.star-on       { color:var(--text-gold); text-shadow:0 0 6px rgba(245,197,24,0.5); }
+.star-off      { color:rgba(200,146,10,0.18); }
+.ar-pop-score  { font-family:'Orbitron',system-ui,sans-serif; font-size:0.6rem;
+                 color:rgba(200,146,10,0.4); letter-spacing:0.04em; }
+</style>
+
+{% endblock %}

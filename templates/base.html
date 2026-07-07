@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Orbyte</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Orbyte">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png">
+
+  <!-- Open Graph (share / banner preview) -->
+  <meta property="og:title" content="Orbyte — Hi-Res Audio Browser">
+  <meta property="og:description" content="Navegador de música Hi-Fi personal">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="/static/og-image.png">
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="base-container">
+    <header class="header">
+      <div class="header-top">
+        <a href="/" class="logo-link">
+          <img src="/static/logo-full.png" alt="Orbyte" class="logo-icon-img">
+          <span class="logo-wordmark" style="display:none">ORBYTE</span>
+        </a>
+        <div class="header-search-wrap">
+          <div class="search-container">
+            <span class="search-icon">🔍</span>
+            <input type="text" class="search-input" placeholder="Buscar… (Enter para buscar)"
+                   id="search-input" autocomplete="off">
+            <div class="search-dropdown" id="search-dropdown"></div>
+          </div>
+          <nav class="alphabet-bar">
+            {% for l in ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R','S','T','U','V','W','X','Y','Z'] %}
+            <a href="/letter/{{ l }}" class="alphabet-btn">{{ l }}</a>
+            {% endfor %}
+            <a href="/letter/" class="alphabet-btn">#</a>
+          </nav>
+        </div>
+      </div>
+    </header>
+
+    <!-- Track Info Drawer -->
+    <div class="track-drawer" id="track-drawer">
+      <div class="track-drawer-inner">
+        <button class="drawer-close" onclick="closeDrawer()">✕</button>
+        <div id="drawer-content"></div>
+      </div>
+    </div>
+    <div class="drawer-overlay" id="drawer-overlay" onclick="closeDrawer()"></div>
+
+    <main class="main-content">{% block content %}{% endblock %}</main>
+
+    <!-- ─── PWA Install FAB ──────────────────────────────────────────────── -->
+    <div class="pwa-fab" id="pwa-fab">
+      <button class="pwa-fab-btn" onclick="pwaTriggerInstall()" title="Instalar app">⬇</button>
+      <span class="pwa-fab-label">Instalar</span>
+    </div>
+
+    <!-- ─── Full-Screen Now Playing ──────────────────────────────────────── -->
+    <div class="np-overlay" id="np-overlay" onclick="if(event.target===this)closeNowPlaying()">
+      <div class="np-card" id="np-card">
+        <button class="np-close" onclick="closeNowPlaying()" title="Minimizar">✕</button>
+
+        <!-- Cover -->
+        <div class="np-cover-wrap" id="np-cover-wrap">
+          <div class="np-cover-placeholder" id="np-cover-ph">♪</div>
+          <img id="np-cover-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:cover">
+        </div>
+
+        <!-- Right column (used in landscape) -->
+        <div class="np-right-col" id="np-right-col">
+
+          <!-- Info -->
+          <div class="np-info">
+            <div class="np-title"  id="np-title">—</div>
+            <div class="np-artist" id="np-artist"></div>
+            <div class="np-album"  id="np-album"></div>
+            <div class="np-tags">
+              <span class="player-fmt-badge" id="np-badge"></span>
+              <div class="player-led"  id="np-led"></div>
+            </div>
+          </div>
+
+          <!-- Progress -->
+          <div class="np-progress-row">
+            <span class="np-time" id="np-current">0:00</span>
+            <div class="np-progress-bar" id="np-progress-bar">
+              <div class="np-progress-fill" id="np-progress-fill" style="width:0%"></div>
+            </div>
+            <span class="np-time" id="np-total">0:00</span>
+          </div>
+
+          <!-- Controls -->
+          <div class="np-controls">
+            <button class="np-ctrl" onclick="prevTrack()" title="Anterior">⏮</button>
+            <button class="np-ctrl np-play" id="np-play-btn" onclick="togglePlayPause()" title="Play/Pausa">▶</button>
+            <button class="np-ctrl" onclick="nextTrack()" title="Siguiente">⏭</button>
+          </div>
+
+          <!-- Actions: fav, lyrics, queue toggle -->
+          <div class="np-actions">
+            <button class="np-action np-fav-heart" id="np-fav-btn" onclick="toggleFavorite(window._currentTrack&&window._currentTrack.id)" title="Favorito">
+              <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+            </button>
+            <button class="np-action" id="np-lyrics-btn" onclick="openLyricsFromNP()" title="Letra">🎵</button>
+            <button class="np-action" id="np-queue-toggle" onclick="npToggleQueue()" title="Cola">☰</button>
+          </div>
+
+          <!-- Queue panel (collapsible) -->
+          <div class="np-tab-panel" id="np-panel-queue"></div>
+
+        </div><!-- /np-right-col -->
+      </div><!-- /np-card -->
+    </div><!-- /np-overlay -->
+
+    <!-- ─── Player Bar ─────────────────────────────────────────────────────── -->
+    <footer class="player-bar" id="player-bar">
+
+      <!-- Mobile row-1 wrapper: cover/info + action icons side by side -->
+      <div class="player-row1">
+      <!-- Left: cover + info -->
+      <div class="player-left">
+        <div class="player-cover-wrap" id="player-cover-wrap" onclick="openNowPlaying()" title="Ver reproductor">
+          <div class="player-cover-placeholder">♪</div>
+          <img src="" alt="" class="player-cover" id="player-cover" style="visibility:hidden">
+        </div>
+        <div class="player-info">
+          <div class="player-title"  id="player-title">—</div>
+          <a class="player-artist" id="player-artist" href="#" style="cursor:pointer;text-decoration:none;color:inherit"></a>
+          <a class="player-album" id="player-album" href="#" style="cursor:pointer;text-decoration:none;color:var(--text-muted);font-size:0.7rem;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></a>
+          <div class="player-tags">
+            <span class="player-fmt-badge" id="player-format"></span>
+            <div class="player-led" id="player-led"></div>
+            <span id="mpd-status" style="font-size:0.7rem;color:var(--led-green);"></span>
+          </div>
+        </div>
+      </div><!-- /player-left -->
+
+      <!-- Center: visualizer + controls + progress -->
+      <div class="player-center">
+        <div class="player-viz-row">
+          <div class="player-visualizer" id="player-visualizer">
+            <svg viewBox="0 0 80 80" class="viz-disc">
+              <defs>
+                <radialGradient id="discGrad" cx="50%" cy="50%" r="50%">
+                  <stop offset="0%"   stop-color="var(--led-current, #fff)" stop-opacity="0.3"/>
+                  <stop offset="60%"  stop-color="var(--led-current, #fff)" stop-opacity="0.05"/>
+                  <stop offset="100%" stop-color="transparent"/>
+                </radialGradient>
+              </defs>
+              <circle cx="40" cy="40" r="38" fill="#111" stroke="var(--led-current,#444)" stroke-width="1.5"/>
+              <circle cx="40" cy="40" r="34" fill="url(#discGrad)"/>
+              <circle cx="40" cy="40" r="28" fill="none" stroke="var(--led-current,#333)" stroke-width="0.8" opacity="0.5"/>
+              <circle cx="40" cy="40" r="22" fill="none" stroke="var(--led-current,#333)" stroke-width="0.8" opacity="0.4"/>
+              <circle cx="40" cy="40" r="16" fill="none" stroke="var(--led-current,#333)" stroke-width="0.8" opacity="0.3"/>
+              <circle cx="40" cy="40" r="10" fill="none" stroke="var(--led-current,#333)" stroke-width="0.8" opacity="0.5"/>
+              <circle cx="40" cy="40" r="4"  fill="var(--bg-primary)"/>
+              <ellipse cx="32" cy="28" rx="7" ry="4" fill="white" opacity="0.06" transform="rotate(-30 32 28)"/>
+            </svg>
+          </div>
+          <div class="viz-eq" id="viz-eq">
+            <div class="eq-bar"></div><div class="eq-bar"></div><div class="eq-bar"></div>
+            <div class="eq-bar"></div><div class="eq-bar"></div>
+          </div>
+        </div>
+
+        <div class="player-controls-wrap">
+          <div class="player-controls">
+            <button class="control-btn" id="prev-btn">⏮</button>
+            <button class="control-btn play-btn" id="play-btn" data-empty="true">▶</button>
+            <button class="control-btn" id="next-btn">⏭</button>
+          </div>
+          <div class="player-progress">
+            <span id="current-time" class="time-label">0:00</span>
+            <div class="progress-bar" id="progress-bar">
+              <div class="progress-fill" id="progress-fill"></div>
+              <div class="progress-thumb" id="progress-thumb"></div>
+              <div class="progress-tooltip" id="progress-tooltip">0:00</div>
+            </div>
+            <span id="total-time" class="time-label">0:00</span>
+          </div>
+        </div>
+      </div><!-- /player-center -->
+
+      <!-- Right: volume + lyrics btn + fav + outputs + playlist -->
+      <div class="player-right">
+        <button class="icon-btn" id="lyrics-toggle-btn" onclick="toggleLyricsPanel()" title="Letra">🎵</button>
+        <button class="icon-btn fav-btn" id="player-fav-btn" title="Añadir a favoritos" onclick="toggleFavorite(window._currentTrack && window._currentTrack.id)">
+          <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        </button>
+
+        <div class="volume-wrap">
+          <span class="vol-icon" id="vol-icon" onclick="toggleMute()" title="Silenciar / Activar" style="cursor:pointer">🔊</span>
+          <input type="range" class="volume-slider" id="volume-slider" min="0" max="1" step="0.01" value="1"
+                 oninput="setVolume(this.value)">
+        </div>
+
+        <div class="outputs-wrap">
+          <button class="outputs-main-btn" id="outputs-btn" onclick="toggleOutputsPanel()" title="Salidas de audio MPD — activa/desactiva outputs del servidor">
+            <span class="outputs-btn-icon">🔈</span>
+            <span class="outputs-btn-label" id="outputs-btn-label">Salida</span>
+          </button>
+          <div class="outputs-panel" id="outputs-panel" style="display:none">
+            <div class="outputs-panel-header">
+              <span>Dispositivos de salida</span>
+              <button class="outputs-close-btn" onclick="toggleOutputsPanel()">✕</button>
+            </div>
+            <div id="outputs-list">
+              <span style="color:var(--text-muted);font-size:0.82rem;padding:0.5rem;display:block">Cargando…</span>
+            </div>
+          </div>
+        </div>
+
+        <button class="icon-btn playlist-icon-btn" onclick="togglePlaylist()" title="Playlist">
+          ☰ <span id="playlist-count" class="pl-badge">0</span>
+        </button>
+      </div><!-- /player-right -->
+      </div><!-- /player-row1 -->
+
+    </footer>
+
+    <!-- Lyrics centered modal -->
+    <div id="lyrics-modal-overlay" onclick="if(event.target===this)closeLyricsModal()"
+         style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);backdrop-filter:blur(10px);z-index:8000;align-items:center;justify-content:center;">
+      <div style="background:#080808;border:1px solid var(--border-gold);border-radius:18px;width:min(680px,94vw);max-height:82vh;display:flex;flex-direction:column;box-shadow:0 24px 80px rgba(0,0,0,0.95),0 0 60px rgba(200,146,10,0.08);">
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:1.1rem 1.5rem;border-bottom:1px solid rgba(200,146,10,0.25);flex-shrink:0;">
+          <span id="lyrics-modal-track-name" style="font-size:0.95rem;font-weight:600;color:var(--accent);font-family:'Orbitron',system-ui,sans-serif;letter-spacing:0.06em">Letra</span>
+          <button onclick="closeLyricsModal()" style="background:none;border:1px solid rgba(200,146,10,0.2);color:var(--accent);font-size:1.2rem;cursor:pointer;padding:0.2rem 0.6rem;border-radius:6px;line-height:1;transition:border-color 0.2s">✕</button>
+        </div>
+        <div id="lyrics-modal-body" style="overflow-y:auto;padding:1.4rem 1.6rem;flex:1;scroll-behavior:smooth;"></div>
+      </div>
+    </div>
+
+    <!-- Playlist panel -->
+    <div class="playlist-panel" id="playlist-panel">
+      <div class="playlist-header">
+        <span>Playlist (<span id="pl-count">0</span>)</span>
+        <button onclick="clearPlaylist()">🗑</button>
+        <button onclick="downloadM3U()">⬇ M3U</button>
+        <button onclick="togglePlaylist()">✕</button>
+      </div>
+      <div id="pl-items"></div>
+    </div>
+
+    <!-- Drawer Lyrics Modal -->
+    <div id="dlm-overlay" onclick="closeDrawerLyricsModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:9000"></div>
+    <div id="dlm-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(700px,92vw);max-height:80vh;background:#0f0f0f;border:1px solid #2a2a2a;border-radius:16px;flex-direction:column;z-index:9001;box-shadow:0 20px 60px rgba(0,0,0,0.8)">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:1.2rem 1.5rem;border-bottom:1px solid #1e1e1e">
+        <span style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">Letra</span>
+        <button onclick="closeDrawerLyricsModal()" style="background:none;border:none;color:var(--text-secondary);font-size:1.3rem;cursor:pointer;padding:0.2rem 0.5rem;border-radius:6px">✕</button>
+      </div>
+      <div id="dlm-body" style="overflow-y:auto;padding:1.5rem;flex:1"></div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='player.js') }}?v=20260606b"></script>
+  <script>
+    // Favourites set — loaded from server on each page render
+    window._favIds = new Set({{ fav_ids|list|tojson|safe if fav_ids is defined else '[]' }});
+    // ── Controls — addEventListener only (no onclick attrs) ─────────────────
+    document.getElementById('play-btn').addEventListener('click', togglePlayPause);
+    document.getElementById('prev-btn').addEventListener('click', prevTrack);
+    document.getElementById('next-btn').addEventListener('click', nextTrack);
+    document.getElementById('volume-slider').addEventListener('input', e => setVolume(e.target.value));
+    document.getElementById('progress-bar').addEventListener('click', e => {
+      const r = e.currentTarget.getBoundingClientRect();
+      seekTo(((e.clientX - r.left) / r.width) * 100);
+    });
+
+    // Progress bar tooltip — show seek position on hover
+    document.getElementById('progress-bar').addEventListener('mousemove', e => {
+      const bar     = e.currentTarget;
+      const r       = bar.getBoundingClientRect();
+      const pct     = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+      const tip     = document.getElementById('progress-tooltip');
+      if (!tip || !currentAudio) return;
+      const dur = (currentAudio.duration && isFinite(currentAudio.duration))
+          ? currentAudio.duration : 0;
+      if (!dur) return;
+      const secs = Math.floor(pct * dur);
+      const mm   = Math.floor(secs / 60);
+      const ss   = String(secs % 60).padStart(2, '0');
+      tip.textContent  = `${mm}:${ss}`;
+      tip.style.left   = `${pct * 100}%`;
+    });
+
+    // ── Visualizer spin on play ───────────────────────────────────────────────
+    // Re-render playlist highlight whenever track changes
+    document.addEventListener('playerStateChange', e => {
+      renderPlaylist();
+      const viz  = document.getElementById('player-visualizer');
+      const disc = viz && viz.querySelector('.viz-disc');
+      const eq   = document.getElementById('viz-eq');
+      if (viz) {
+        if (e.detail.playing) {
+          viz.classList.add('spinning');
+          // Set on disc directly — CSS inherit doesn't pick up JS style on parent
+          if (disc) disc.style.animationPlayState = 'running';
+        } else {
+          // Keep 'spinning' class so it resumes from same position
+          if (disc) disc.style.animationPlayState = 'paused';
+        }
+      }
+      if (eq) eq.classList.toggle('active', e.detail.playing);
+    });
+
+    // ── Search (Enter only, no auto-redirect) ─────────────────────────────────
+    const searchInput = document.getElementById('search-input');
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        const q = searchInput.value.trim();
+        if (q) navigateTo(`/search?q=${encodeURIComponent(q)}`);
+      }
+    });
+
+    // ── Track drawer ──────────────────────────────────────────────────────────
+    async function showTrackInfo(trackId) {
+      const drawer  = document.getElementById('track-drawer');
+      const overlay = document.getElementById('drawer-overlay');
+      const content = document.getElementById('drawer-content');
+      content.innerHTML = '<div class="drawer-loading">Cargando…</div>';
+      drawer.classList.add('open');
+      overlay.classList.add('open');
+      try {
+        const t = await fetch(`/api/track/${trackId}`).then(r => r.json());
+        content.innerHTML = renderTrackDrawer(t);
+        loadDrawerPopularity(t.artist || t.artist_name || '', t.title || '');
+      } catch(e) {
+        content.innerHTML = '<div style="padding:2rem;color:var(--led-red)">Error</div>';
+      }
+    }
+
+    // Store current drawer track globally to avoid JSON injection issues
+    window._drawerTrack = null;
+
+    function renderTrackDrawer(t) {
+      window._drawerTrack = t;
+      const MOOD_LABELS_JS = {{ MOOD_LABELS|tojson }};
+      const moodLabel = m => MOOD_LABELS_JS[m] || m;
+      const ledHtml = t.led_color
+        ? `<span class="drawer-led led-d-${t.led_color}">${_makeDiamondSVG(t.led_color, 'sm')}</span>`
+        : '';
+      const rows = [
+        ['Álbum', t.album_name || '—'],
+        ['Artista', t.artist || '—'],
+        ['Año', t.album_year || '—'],
+        ['Género', t.genre || '—'],
+        ['Sello', t.publisher || '—'],
+        ['Calidad', `${t.sample_rate_fmt || ''} / ${t.bit_depth_fmt || ''}`],
+        ['Bitrate', t.bitrate_fmt || '—'],
+        ['Duración', t.duration_fmt || '—'],
+        ['Codec', t.codec || '—'],
+      ].map(([k,v]) => `<div class="ds-row"><span>${k}</span><span>${v}</span></div>`).join('');
+
+      // Meta pills
+      const metaPills = [
+        t.meta_mood ? `<a href="/mood/${encodeURIComponent(t.meta_mood)}" class="dr-meta-pill dr-mood">${moodLabel(t.meta_mood)}</a>` : '',
+        t.meta_momento && t.meta_momento !== 'anytime' ? `<a href="/momento/${encodeURIComponent(t.meta_momento)}" class="dr-meta-pill dr-momento">${t.meta_momento}</a>` : '',
+        t.meta_era ? `<a href="/era/${encodeURIComponent(t.meta_era)}" class="dr-meta-pill dr-era">${t.meta_era.replace('_era','')}</a>` : '',
+        t.meta_tema_lirico ? `<a href="/tema/${encodeURIComponent(t.meta_tema_lirico)}" class="dr-meta-pill dr-tema">${t.meta_tema_lirico}</a>` : '',
+      ].filter(Boolean).join('');
+
+      // Energy/Valence/Bailabilidad mini bars
+      function metaBar(label, val, color) {
+        if (val === null || val === undefined) return '';
+        const pct = Math.round(((val + 1) / 2) * 100);
+        return `<div class="dr-bar-row">
+          <span class="dr-bar-label">${label}</span>
+          <div class="dr-bar-wrap"><div class="dr-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+          <span class="dr-bar-val">${pct}%</span>
+        </div>`;
+      }
+
+      const metaBars = [
+        metaBar('Energía', t.meta_energy, 'var(--led-red)'),
+        metaBar('Positividad', t.meta_valence, 'var(--led-green)'),
+        metaBar('Tensión', t.meta_tension, 'var(--led-cyan)'),
+      ].filter(Boolean).join('');
+
+      const bailBar = (t.meta_bailabilidad !== null && t.meta_bailabilidad !== undefined)
+        ? `<div class="dr-bar-row"><span class="dr-bar-label">Bailabilidad</span><div class="dr-bar-wrap"><div class="dr-bar-fill" style="width:${Math.max(0,t.meta_bailabilidad)}%;background:var(--led-yellow)"></div></div><span class="dr-bar-val">${Math.max(0,t.meta_bailabilidad)}/100</span></div>` : '';
+
+      const bpmKey = t.meta_bpm ? `<span class="dr-kv">BPM <strong>${Math.round(t.meta_bpm)}</strong></span>` : '';
+      const tonKey = t.meta_tonalidad ? `<span class="dr-kv">🎹 <strong>${t.meta_tonalidad}</strong></span>` : '';
+
+      // Build star HTML from a 0-100 pop_score
+      const popScore = t.pop_score || 0;
+      const popStars = Math.min(5, Math.floor(popScore / 20));
+      const popStarsHtml = Array.from({length:5}, (_,i) =>
+        `<span class="${i < popStars ? 'star-on' : 'star-off'}" style="font-size:1.05rem">★</span>`
+      ).join('');
+      const popInitial = `<div class="dr-pop-row">
+        <span class="artist-stars">${popStarsHtml}</span>
+        <span class="dr-pop-score">${popScore} pts</span>
+      </div>`;
+
+      return `
+        <div class="drawer-track">
+          <img src="${t.cover_url || ''}" class="drawer-cover" onerror="this.style.background='#1a1a2e'">
+          <div class="drawer-title">${t.title || '—'}</div>
+          <div class="drawer-artist">${t.artist || t.artist_name || ''}</div>
+          <div class="drawer-meta">
+            <span class="track-format-badge format-${t.format_color || 'white'}">${t.format_display || ''}</span>
+            ${t.led_color ? ledHtml : ''}
+          </div>
+          ${metaPills ? `<div class="dr-meta-pills">${metaPills}</div>` : ''}
+          <div class="drawer-popularity" id="drawer-popularity">
+            ${popInitial}
+          </div>
+          ${metaBars || bailBar ? `<div class="dr-bars">${metaBars}${bailBar}</div>` : ''}
+          ${bpmKey || tonKey ? `<div class="dr-kv-row">${bpmKey}${tonKey}</div>` : ''}
+          <div class="drawer-specs">${rows}</div>
+          <div class="drawer-actions">
+            <button class="track-btn primary" onclick="playFromDrawer(window._drawerTrack)">▶ Reproducir</button>
+            <button class="track-btn ghost" onclick="addDrawerToPlaylist()">➕ Playlist</button>
+            <button class="track-btn ghost" onclick="openDrawerLyricsModal()">🎵 Letra</button>
+          </div>
+          <div id="drawer-feedback" class="action-feedback" style="display:none"></div>
+        </div>
+        <style>
+          .dr-meta-pills{display:flex;flex-wrap:wrap;gap:0.35rem;margin:0.5rem 0;}
+          .dr-meta-pill{padding:0.15rem 0.55rem;border-radius:14px;font-size:0.7rem;font-weight:600;text-decoration:none;}
+          .dr-mood{background:rgba(167,139,250,0.15);color:#a78bfa;border:1px solid rgba(167,139,250,0.3);}
+          .dr-momento{background:rgba(251,191,36,0.12);color:#fbbf24;border:1px solid rgba(251,191,36,0.25);}
+          .dr-era{background:rgba(99,102,241,0.12);color:#818cf8;border:1px solid rgba(99,102,241,0.25);}
+          .dr-tema{background:rgba(52,211,153,0.12);color:#34d399;border:1px solid rgba(52,211,153,0.25);}
+          .dr-bars{margin:0.6rem 0;display:flex;flex-direction:column;gap:0.35rem;}
+          .dr-bar-row{display:grid;grid-template-columns:80px 1fr 36px;align-items:center;gap:0.4rem;}
+          .dr-bar-label{font-size:0.68rem;color:var(--text-muted);}
+          .dr-bar-wrap{height:4px;background:rgba(255,255,255,0.07);border-radius:2px;overflow:hidden;}
+          .dr-bar-fill{height:100%;border-radius:2px;min-width:2px;}
+          .dr-bar-val{font-size:0.65rem;color:var(--text-muted);text-align:right;}
+          .dr-kv-row{display:flex;gap:0.75rem;margin:0.4rem 0;}
+          .dr-kv{font-size:0.75rem;color:var(--text-muted);}
+          .dr-kv strong{color:var(--text-primary);}
+        </style>`;
+    }
+
+    function addDrawerToPlaylist() {
+      if (!window._drawerTrack) return;
+      addToPlaylist(window._drawerTrack);
+      const fb = document.getElementById('drawer-feedback');
+      if (fb) { fb.textContent = '✓ Añadido a la playlist'; fb.className='action-feedback feedback-ok'; fb.style.display='block'; setTimeout(()=>fb.style.display='none',2000); }
+    }
+
+    // Last.fm popularity for drawer
+    async function loadDrawerPopularity(artist, title) {
+      const el = document.getElementById('drawer-popularity');
+      if (!el || !artist || !title) return;
+      try {
+        const r = await fetch(
+          `https://ws.audioscrobbler.com/2.0/?method=track.getInfo` +
+          `&api_key=5ae4b43802aade3c7132427e83822282` +
+          `&artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(title)}&format=json`
+        );
+        const d = await r.json();
+        if (d.track && d.track.listeners) {
+          const listeners = parseInt(d.track.listeners);
+          const playcount = parseInt(d.track.playcount || 0);
+          let nStars = 1;
+          if (listeners >= 50000)   nStars = 2;
+          if (listeners >= 300000)  nStars = 3;
+          if (listeners >= 1000000) nStars = 4;
+          if (listeners >= 5000000) nStars = 5;
+          // Fill percentage for the bar: log scale capped at 10M
+          const fillPct = Math.min(100, Math.round((Math.log10(listeners + 1) / Math.log10(10000001)) * 100));
+          const starsHtml = Array.from({length:5}, (_,i) =>
+            `<span class="${i < nStars ? 'star-on' : 'star-off'}" style="font-size:1.05rem">★</span>`
+          ).join('');
+          el.innerHTML = `
+            <div class="dr-pop-row">
+              <span class="artist-stars">${starsHtml}</span>
+              <span class="dr-pop-score">${nStars * 20} pts Last.fm</span>
+            </div>
+            <div class="dr-pop-fill-wrap" title="${listeners.toLocaleString()} oyentes">
+              <div class="dr-pop-fill-bar" style="width:${fillPct}%"></div>
+            </div>
+            <div class="dr-pop-listeners">
+              ${listeners.toLocaleString()} oyentes · ${playcount.toLocaleString()} plays
+            </div>`;
+        } else {
+          el.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted)">Sin datos en Last.fm</span>';
+        }
+      } catch(e) {
+        el.innerHTML = '<span style="font-size:0.75rem;color:var(--text-muted)">Last.fm no disponible</span>';
+      }
+    }
+
+    // Drawer lyrics modal
+    function openDrawerLyricsModal() {
+      const t = window._drawerTrack;
+      if (!t) return;
+      document.getElementById('dlm-overlay').style.display = 'block';
+      document.getElementById('dlm-modal').style.display   = 'flex';
+      document.body.style.overflow = 'hidden';
+      // Trigger load
+      fetchDrawerLyricsModal(t.artist || t.artist_name || '', t.title || '');
+    }
+
+    function closeDrawerLyricsModal() {
+      document.getElementById('dlm-overlay').style.display = 'none';
+      document.getElementById('dlm-modal').style.display   = 'none';
+      document.body.style.overflow = '';
+      _dlmLoaded = false;
+    }
+
+    let _dlmLoaded = false;
+    async function fetchDrawerLyricsModal(artist, title) {
+      const body = document.getElementById('dlm-body');
+      body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-secondary)">Buscando en lrclib.net…</div>';
+      try {
+        const d = await fetch(`/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`).then(r=>r.json());
+        if (d.has_lyrics) {
+          const txt = d.has_synced && d.synced
+            ? d.synced.replace(/\[\d+:\d+\.\d+\]\s*/g, '')
+            : d.lyrics;
+          body.innerHTML = `<pre class="lyrics-body-text">${txt.replace(/</g,'&lt;')}</pre>`;
+        } else {
+          body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Letra no encontrada</div>';
+        }
+      } catch(e) {
+        body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--led-red)">Error al conectar con lrclib.net</div>';
+      }
+    }
+
+    function closeDrawer() {
+      document.getElementById('track-drawer').classList.remove('open');
+      document.getElementById('drawer-overlay').classList.remove('open');
+    }
+
+    function playFromDrawer(track) {
+      loadQueue([track]);
+      playTrack(0);
+      closeDrawer();
+      // Load synced lyrics in player
+      if (track.artist && track.title) {
+        loadPlayerLyrics(track.artist, track.title, track.id);
+      }
+    }
+
+    // ── Lyrics — centered modal with sync, pre-fetch & alternatives ───────────
+    const _lyricsCache = {};   // key: "artist|title" → lyrics data
+    let _lyricsCurrentKey = null;
+    let _lyricsSyncInterval = null;
+
+    function _lyricsKey(artist, title) { return `${artist}|${title}`; }
+
+    // Pre-fetch lyrics when track changes — always send track_id for DB lrclib_id lookup.
+    // If the lyrics modal is open while the track advances (e.g. next song in an album),
+    // refresh its contents immediately instead of leaving the previous track's lyrics showing.
+    document.addEventListener('playerStateChange', e => {
+      const artist = document.getElementById('player-artist').textContent.trim();
+      const title  = document.getElementById('player-title').textContent.trim();
+      if (artist && title && title !== '—') {
+        const key = _lyricsKey(artist, title);
+        const trackChanged = key !== _lyricsCurrentKey;
+        _lyricsCurrentKey = key;
+        const overlay   = document.getElementById('lyrics-modal-overlay');
+        const modalOpen = overlay && overlay.style.display === 'flex';
+        if (_lyricsSyncInterval) { clearInterval(_lyricsSyncInterval); _lyricsSyncInterval = null; }
+        if (_lyricsCache[key]) {
+          if (modalOpen && trackChanged) _renderLyricsModal(_lyricsCache[key]);
+        } else {
+          if (modalOpen && trackChanged) {
+            document.getElementById('lyrics-modal-body').innerHTML =
+              '<div style="text-align:center;padding:3rem;color:var(--text-secondary)">Buscando letra…</div>';
+          }
+          const trackId = window._currentTrack ? window._currentTrack.id : null;
+          _prefetchLyrics(artist, title, trackId);
+        }
+      }
+    });
+
+    async function _prefetchLyrics(artist, title, trackId) {
+      const key = _lyricsKey(artist, title);
+      try {
+        let url = `/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`;
+        if (trackId) url += `&track_id=${trackId}`;
+        const d = await fetch(url).then(r => r.json());
+        _lyricsCache[key] = d;
+        // If modal is open waiting, render now
+        const overlay = document.getElementById('lyrics-modal-overlay');
+        if (overlay && overlay.style.display === 'flex' && _lyricsCurrentKey === key) {
+          _renderLyricsModal(d);
+        }
+      } catch(e) { /* silent fail */ }
+    }
+
+    function toggleLyricsPanel() {
+      const overlay = document.getElementById('lyrics-modal-overlay');
+      if (overlay.style.display === 'flex') {
+        closeLyricsModal();
+      } else {
+        openLyricsModal();
+      }
+    }
+
+    function openLyricsModal() {
+      const artist  = document.getElementById('player-artist').textContent.trim();
+      const title   = document.getElementById('player-title').textContent.trim();
+      if (!artist || !title || title === '—') return;
+      document.getElementById('lyrics-modal-overlay').style.display = 'flex';
+      document.body.style.overflow = 'hidden';
+      const key = _lyricsKey(artist, title);
+      if (_lyricsCache[key]) {
+        _renderLyricsModal(_lyricsCache[key]);
+      } else {
+        document.getElementById('lyrics-modal-body').innerHTML =
+          '<div style="text-align:center;padding:3rem;color:var(--text-secondary)">Buscando letra…</div>';
+        const trackId = window._currentTrack ? window._currentTrack.id : null;
+        _prefetchLyrics(artist, title, trackId);
+      }
+    }
+
+    function closeLyricsModal() {
+      document.getElementById('lyrics-modal-overlay').style.display = 'none';
+      document.body.style.overflow = '';
+      if (_lyricsSyncInterval) { clearInterval(_lyricsSyncInterval); _lyricsSyncInterval = null; }
+    }
+
+    function _renderLyricsModal(d, selectedId) {
+      const body = document.getElementById('lyrics-modal-body');
+
+      // Source label
+      const sourceLabels = {
+        'embedded_tag':   '📁 Desde archivo (tag embebido)',
+        'lrclib_id':      '🌐 lrclib.net (ID directo)',
+        'lrclib_search':  '🌐 lrclib.net (búsqueda)',
+        'db_id':          '🌐 lrclib.net (ID guardado)',
+      };
+      const sourceLabel = d.source ? (sourceLabels[d.source] || d.source) : '';
+
+      if (!d || (!d.has_lyrics && !d.has_synced)) {
+        body.innerHTML = '<div style="text-align:center;padding:3rem;color:var(--text-muted)">Letra no encontrada</div>';
+        return;
+      }
+
+      // Source chip
+      const sourceChip = sourceLabel
+        ? `<div style="font-size:0.72rem;color:var(--text-muted);margin-bottom:0.75rem;padding:0.25rem 0.6rem;background:rgba(255,255,255,0.04);border-radius:6px;display:inline-block">${sourceLabel}</div>`
+        : '';
+
+      // Alternatives selector
+      let altHtml = '';
+      if (d.alternatives && d.alternatives.length > 1) {
+        altHtml = `<div style="margin-bottom:1rem">
+          <label style="font-size:0.78rem;color:var(--text-secondary);margin-bottom:0.3rem;display:block">Versión alternativa:</label>
+          <select id="lyrics-version-select" style="background:var(--bg-card);color:var(--text-primary);border:1px solid var(--border);border-radius:6px;padding:0.3rem 0.5rem;font-size:0.8rem;width:100%" onchange="selectLyricsVersion(this.value)">
+            ${d.alternatives.map(a =>
+              `<option value="${a.id}" ${a.id == (selectedId || d.id) ? 'selected' : ''}>
+                ${a.title} — ${a.artist}${a.album ? ' ('+a.album+')' : ''} ${a.has_synced ? '🎵' : ''}
+              </option>`
+            ).join('')}
+          </select>
+        </div>`;
+      }
+
+      // Lyrics content — synced (LRC) or plain
+      let lyricsHtml = '';
+      if (d.has_synced && d.synced) {
+        const lines = d.synced.split('\n').filter(l => /^\[\d+:\d+/.test(l));
+        if (lines.length === 0) {
+          // Malformed LRC — show as plain text
+          lyricsHtml = `<pre class="lyrics-body-text">${d.synced.replace(/</g,'&lt;')}</pre>`;
+        } else {
+          lyricsHtml = `<div id="lyrics-lines">` + lines.map((line, i) => {
+            const match = line.match(/^\[(\d+):(\d+(?:\.\d+)?)\]\s*(.*)/);
+            if (!match) return '';
+            const secs = parseInt(match[1]) * 60 + parseFloat(match[2]);
+            const text = match[3].trim() || '♪';
+            return `<div class="lyric-line" data-t="${secs}" data-i="${i}">${text.replace(/</g,'&lt;')}</div>`;
+          }).filter(Boolean).join('') + `</div>`;
+          setTimeout(() => _startLyricsSync(), 100);
+        }
+      } else {
+        lyricsHtml = `<pre class="lyrics-body-text">${(d.lyrics || '').replace(/</g,'&lt;')}</pre>`;
+      }
+
+      body.innerHTML = sourceChip + altHtml + lyricsHtml;
+    }
+
+    function _makeWaitDots(extraClass) {
+      const wrap = document.createElement('div');
+      wrap.className = 'lyric-wait-dots' + (extraClass ? ' ' + extraClass : '');
+      for (let i = 0; i < 3; i++) {
+        const d = document.createElement('div');
+        d.className = 'lyric-dot';
+        wrap.appendChild(d);
+      }
+      return wrap;
+    }
+
+    function _startLyricsSync() {
+      if (_lyricsSyncInterval) clearInterval(_lyricsSyncInterval);
+
+      // Pre-compute silence gaps (> 2s between lines) once at sync start
+      function _buildGaps() {
+        const lines = document.querySelectorAll('#lyrics-lines .lyric-line');
+        const times = Array.from(lines).map(l => parseFloat(l.dataset.t));
+        const gaps  = [];
+        for (let i = 0; i < times.length; i++) {
+          const prev = i === 0 ? 0 : times[i - 1];
+          if (times[i] - prev >= 2.2) gaps.push({ from: prev, to: times[i], idx: i });
+        }
+        return gaps;
+      }
+      const gaps = _buildGaps();
+
+      // State: track what's currently shown so we only mutate DOM on changes
+      let _activeLineEl  = null;   // the <div class="lyric-line"> element currently highlighted
+      let _dotsGapKey    = null;   // string key of the gap currently showing dots ("pre" | "gap-N")
+      let _dotsEl        = null;   // the live .lyric-wait-dots element
+
+      function _removeDots() {
+        if (_dotsEl && _dotsEl.parentNode) _dotsEl.remove();
+        _dotsEl = null;
+        _dotsGapKey = null;
+      }
+
+      function _showDots(key, anchorEl, inline) {
+        if (_dotsGapKey === key) return; // already showing for this gap — don't recreate
+        _removeDots();
+        _dotsGapKey = key;
+        _dotsEl = _makeWaitDots(inline ? 'lyric-wait-inline' : '');
+        anchorEl.parentNode.insertBefore(_dotsEl, anchorEl);
+        if (!inline) _dotsEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+
+      _lyricsSyncInterval = setInterval(() => {
+        const audio = window.currentAudio;
+        if (!audio || audio.paused) return;
+        const t     = audio.currentTime;
+        const lines = document.querySelectorAll('#lyrics-lines .lyric-line');
+        if (!lines.length) return;
+
+        // Find the last line whose timestamp has passed
+        let newActive = null;
+        lines.forEach(line => {
+          if (parseFloat(line.dataset.t) <= t) newActive = line;
+        });
+
+        // Update active-line highlight only when it changes
+        if (newActive !== _activeLineEl) {
+          if (_activeLineEl) _activeLineEl.classList.remove('lyric-active');
+          _activeLineEl = newActive;
+          if (_activeLineEl) {
+            _activeLineEl.classList.add('lyric-active');
+            _activeLineEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+          }
+        }
+
+        // ── Waiting dots ─────────────────────────────────────────────────────
+        if (!newActive) {
+          // Before the first lyric line
+          const firstLineTime = parseFloat(lines[0].dataset.t);
+          if (t < firstLineTime) {
+            _showDots('pre', lines[0], false);
+          } else {
+            _removeDots();
+          }
+        } else {
+          // Check if we're inside a mid-song gap
+          const activeIdx = parseInt(newActive.dataset.i ?? Array.from(lines).indexOf(newActive));
+          const inGap = gaps.find(g =>
+            g.idx === activeIdx + 1 &&
+            t >= parseFloat(newActive.dataset.t) + 1.5 &&
+            t < g.to
+          );
+          if (inGap && lines[activeIdx + 1]) {
+            _showDots(`gap-${inGap.idx}`, lines[activeIdx + 1], true);
+          } else {
+            _removeDots();
+          }
+        }
+      }, 150);
+    }
+
+    async function selectLyricsVersion(id) {
+      const artist = document.getElementById('player-artist').textContent.trim();
+      const title  = document.getElementById('player-title').textContent.trim();
+      document.getElementById('lyrics-modal-body').innerHTML =
+        '<div style="text-align:center;padding:3rem;color:var(--text-secondary)">Cargando versión…</div>';
+      const d = await fetch(`/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}&version=${id}`)
+                  .then(r => r.json());
+      // Keep alternatives from cache
+      const key = _lyricsKey(artist, title);
+      if (_lyricsCache[key]) d.alternatives = _lyricsCache[key].alternatives;
+      _renderLyricsModal(d, id);
+    }
+
+    // Delegated to player.js — accepts optional trackId
+    async function loadPlayerLyrics(artist, title, trackId) {
+      if (window.loadPlayerLyrics && window.loadPlayerLyrics !== loadPlayerLyrics) {
+        return window.loadPlayerLyrics(artist, title, trackId);
+      }
+    }
+
+    // ── Audio outputs ─────────────────────────────────────────────────────────
+    function toggleOutputsPanel() {
+      const panel = document.getElementById('outputs-panel');
+      const showing = panel.style.display !== 'none';
+      panel.style.display = showing ? 'none' : 'block';
+      if (!showing) loadOutputs();
+    }
+
+    async function loadOutputs() {
+      const list    = document.getElementById('outputs-list');
+      const btnLbl  = document.getElementById('outputs-btn-label');
+      try {
+        const outputs = await fetch('/api/outputs').then(r => r.json());
+        const active  = outputs.filter(o => o.enabled);
+        if (btnLbl) btnLbl.textContent = active.length ? active[0].name : 'Sin salida';
+        list.innerHTML = outputs.length
+          ? outputs.map(o => `
+            <div class="output-item">
+              <div class="output-item-info">
+                <span class="output-name">${o.name}</span>
+                <span class="output-status ${o.enabled ? 'out-on' : 'out-off'}">${o.enabled ? '● Activa' : '○ Inactiva'}</span>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" ${o.enabled ? 'checked' : ''} onchange="toggleOutput(${o.id}, this.checked)">
+                <span class="toggle-track"></span>
+              </label>
+            </div>`).join('')
+          : '<span style="color:var(--text-muted);padding:0.5rem;display:block;font-size:0.82rem">No se encontraron salidas MPD.<br>¿Está MPD corriendo?</span>';
+      } catch(e) {
+        list.innerHTML = '<span style="color:var(--led-red);padding:0.5rem;display:block;font-size:0.82rem">⚠️ MPD no disponible</span>';
+        if (btnLbl) btnLbl.textContent = 'Sin MPD';
+      }
+    }
+
+    async function toggleOutput(id, enable) {
+      await fetch('/api/output/toggle', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id, enable})
+      });
+      // Refresh after toggle
+      setTimeout(loadOutputs, 400);
+    }
+
+    // ── Playlist ──────────────────────────────────────────────────────────────
+    window.userPlaylist = [];
+
+    function togglePlaylist() {
+      document.getElementById('playlist-panel').classList.toggle('open');
+    }
+
+    function addToPlaylist(track) {
+      // Append to player internal queue so play button continues with it
+      if (window.appendToQueue) window.appendToQueue(track);
+      else window.userPlaylist.push(track);
+      // userPlaylist stays in sync via queueLoaded event dispatched by appendToQueue
+    }
+
+    function clearPlaylist() {
+      // Clear the display list and fully reset the player
+      window.userPlaylist = [];
+      if (window.resetPlayerBar) window.resetPlayerBar();
+      renderPlaylist();
+    }
+
+    function renderPlaylist() {
+      const count = window.userPlaylist.length;
+      document.getElementById('pl-count').textContent = count;
+      document.getElementById('playlist-count').textContent = count;
+      // Anchor active highlight to track ID, not numeric index.
+      // When items are removed, the index shifts but the playing track doesn't change.
+      const playingId = window._currentTrack ? window._currentTrack.id : null;
+      document.getElementById('pl-items').innerHTML = window.userPlaylist.map((t,i) => {
+        const isPlaying = playingId && t.id === playingId;
+        return `<div class="pl-item${isPlaying ? ' pl-playing' : ''}">
+          <span class="pl-num">${isPlaying ? '▶' : i+1}</span>
+          <span class="pl-title">${t.title}</span>
+          <span class="pl-artist">${t.artist||''}</span>
+          <button onclick="playPlaylistFrom(${i})" title="Reproducir">▶</button>
+          <button onclick="removeFromPlaylist(${i})" title="Quitar">✕</button>
+        </div>`;
+      }).join('');
+    }
+
+    function removeFromPlaylist(i) {
+      window.userPlaylist.splice(i, 1);
+      // Keep player queue in sync
+      if (window.loadQueue) window.loadQueue(window.userPlaylist);
+      else renderPlaylist();
+    }
+
+    function playPlaylistFrom(i) { loadQueue(window.userPlaylist); playTrack(i); }
+
+    function downloadM3U() {
+      const lines = ['#EXTM3U', ...window.userPlaylist.map(t =>
+        `#EXTINF:${Math.round(t.duration||0)},${t.artist} - ${t.title}\n${t.file_path||''}`)];
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([lines.join('\n')], {type:'audio/x-mpegurl'}));
+      a.download = 'playlist.m3u'; a.click();
+    }
+
+    // ── Globals ───────────────────────────────────────────────────────────────
+    window.showTrackInfo  = showTrackInfo;
+    window.closeDrawer    = closeDrawer;
+    window.addToPlaylist  = addToPlaylist;
+    window.playFromDrawer = playFromDrawer;
+
+    // Sync playlist panel whenever the player queue is loaded
+    document.addEventListener('queueLoaded', e => {
+      window.userPlaylist = (e.detail && e.detail.tracks) ? [...e.detail.tracks] : [];
+      renderPlaylist();
+    });
+    window.playMPD = function(path) {
+      const clean = path.replace(/^['"]|['"]$/g, '');
+      fetch('/play-mpd', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({path:clean})})
+        .then(r=>r.json()).then(d => {
+          const el = document.getElementById('mpd-status');
+          if (el) { if (d.status==='ok') { el.textContent='✓ DAC'; setTimeout(()=>{if(el)el.textContent='';},4000); } else { el.textContent='✗ '+d.message; } }
+        });
+    };
+
+    // ── SPA Navigation — preserve player across page loads ────────────────────
+    const MAIN = document.querySelector('main.main-content');
+
+    let _navigating = false;
+    async function navigateTo(url, pushState = true) {
+      if (_navigating) return;
+      _navigating = true;
+      try {
+        const res  = await fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
+        const html = await res.text();
+        const doc  = new DOMParser().parseFromString(html, 'text/html');
+        const newMain = doc.querySelector('main.main-content');
+        if (!newMain) { window.location.href = url; return; }
+        MAIN.innerHTML = newMain.innerHTML;
+        // Re-run any inline scripts in the new content
+        MAIN.querySelectorAll('script').forEach(old => {
+          const s = document.createElement('script');
+          s.textContent = old.textContent;
+          old.replaceWith(s);
+        });
+        if (pushState) history.pushState({url}, '', url);
+        window.scrollTo(0, 0);
+      } catch(e) {
+        window.location.href = url;
+      } finally {
+        _navigating = false;
+      }
+    }
+
+    // Intercept clicks on internal links
+    document.addEventListener('click', e => {
+      const a = e.target.closest('a[href]');
+      if (!a) return;
+      const href = a.getAttribute('href');
+      if (!href || href.startsWith('#') || href.startsWith('http') ||
+          href.startsWith('mailto') || href.startsWith('javascript') ||
+          a.target === '_blank') return;
+      e.preventDefault();
+      navigateTo(href);
+    });
+
+    // Handle browser back/forward
+    window.addEventListener('popstate', e => {
+      navigateTo(e.state?.url || window.location.pathname, false);
+    });
+
+    // Update output label when DAC is plugged/unplugged
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener('devicechange', async () => {
+        try {
+          const outs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audiooutput');
+          const btnLbl = document.getElementById('outputs-btn-label');
+          if (btnLbl && outs.length) {
+            const def = outs.find(d => d.deviceId === 'default');
+            if (def && def.label) btnLbl.textContent = def.label.slice(0,16);
+          }
+          if (window.currentAudio && window.currentAudio.setSinkId) {
+            const sinkGone = window._selectedWebSinkId && !outs.find(d => d.deviceId === window._selectedWebSinkId);
+            if (sinkGone) { window._selectedWebSinkId = ''; window.currentAudio.setSinkId('').catch(()=>{}); }
+          }
+        } catch(_) {}
+      });
+    }
+
+    // Push initial state
+    history.replaceState({url: window.location.pathname + window.location.search}, '', window.location.href);
+
+    // ── PWA Service Worker + Install prompt ─────────────────────────────────
+    // ── PWA Install FAB ──────────────────────────────────────────────────────
+    let _pwaInstallEvent = null;
+
+    // Show FAB immediately on mobile if not running in standalone PWA mode
+    (function() {
+      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+      const isStandalone = window.navigator.standalone === true ||
+                           window.matchMedia('(display-mode: standalone)').matches;
+      if (isMobile && !isStandalone) {
+        const fab = document.getElementById('pwa-fab');
+        if (fab) fab.style.display = 'flex';
+      }
+    })();
+
+    window.addEventListener('beforeinstallprompt', e => {
+      e.preventDefault();
+      _pwaInstallEvent = e;
+      const fab = document.getElementById('pwa-fab');
+      if (fab) fab.style.display = 'flex';
+    });
+
+    window.addEventListener('appinstalled', () => {
+      const fab = document.getElementById('pwa-fab');
+      if (fab) fab.style.display = 'none';
+      _pwaInstallEvent = null;
+    });
+
+    window.pwaTriggerInstall = async function() {
+      if (_pwaInstallEvent) {
+        // Chrome/Android: native install prompt
+        _pwaInstallEvent.prompt();
+        const { outcome } = await _pwaInstallEvent.userChoice;
+        _pwaInstallEvent = null;
+        if (outcome === 'accepted') {
+          const fab = document.getElementById('pwa-fab');
+          if (fab) fab.style.display = 'none';
+        }
+      } else {
+        // iOS Safari: show instruction toast
+        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const msg = isIOS
+          ? '📲 En Safari: toca el botón Compartir (□↑) y luego "Añadir a pantalla de inicio"'
+          : '📲 Abre el menú del navegador (⋮) y selecciona "Instalar app" o "Añadir a pantalla de inicio"';
+        // Show a simple toast
+        let toast = document.getElementById('pwa-toast');
+        if (!toast) {
+          toast = document.createElement('div');
+          toast.id = 'pwa-toast';
+          toast.style.cssText = [
+            'position:fixed','bottom:calc(var(--player-h) + 70px)','right:10px',
+            'left:10px','z-index:900','background:rgba(20,20,20,0.97)',
+            'color:#fff','border:1px solid rgba(255,255,255,0.12)',
+            'border-radius:12px','padding:14px 16px','font-size:0.88rem',
+            'line-height:1.5','box-shadow:0 8px 32px rgba(0,0,0,0.6)',
+            'backdrop-filter:blur(12px)','transition:opacity 0.3s'
+          ].join(';');
+          document.body.appendChild(toast);
+        }
+        toast.textContent = msg;
+        toast.style.opacity = '1';
+        toast.style.display = 'block';
+        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => { toast.style.display='none'; }, 300); }, 5000);
+      }
+    };
+
+    // ── Full-Screen Now Playing ───────────────────────────────────────────────
+    let _npOpen = false;
+
+    function openNowPlaying() {
+      if (!window._currentTrack) return;
+      const ov = document.getElementById('np-overlay');
+      ov.classList.add('open');
+      document.body.style.overflow = 'hidden';
+      _npOpen = true;
+      // Queue panel starts collapsed
+      document.getElementById('np-panel-queue').classList.remove('active');
+      document.getElementById('np-queue-toggle').classList.remove('np-action-active');
+      _npSyncState();
+    }
+
+    function closeNowPlaying() {
+      document.getElementById('np-overlay').classList.remove('open');
+      document.body.style.overflow = '';
+      _npOpen = false;
+    }
+
+    window.openNowPlaying  = openNowPlaying;
+    window.closeNowPlaying = closeNowPlaying;
+
+    function _npSyncState() {
+      const t = window._currentTrack;
+      if (!t) return;
+      // Cover
+      const img  = document.getElementById('np-cover-img');
+      const ph   = document.getElementById('np-cover-ph');
+      if (t.cover_url) {
+        img.src = t.cover_url; img.style.display = 'block'; ph.style.display = 'none';
+      } else {
+        img.style.display = 'none'; ph.style.display = 'flex';
+      }
+      // Info
+      document.getElementById('np-title').textContent  = t.title  || '—';
+      document.getElementById('np-artist').textContent = t.artist || '';
+      document.getElementById('np-album').textContent  = t.album  || '';
+      // Badge + LED
+      const c = (t.led_color || 'white').toLowerCase();
+      const badge = document.getElementById('np-badge');
+      badge.textContent = t.format_display ||
+        (t.is_dsd ? (t.dsd_rate||'DSD') : t.is_mqa ? 'MQA' : (t.codec||'FLAC').toUpperCase());
+      badge.className = 'player-fmt-badge fmt-' + c;
+      const led = document.getElementById('np-led');
+      led.innerHTML = _makeDiamondSVG(c, 'np');
+      led.className = 'player-led led-d-' + c;
+      // Sync progress fill color to the track's LED color
+      const fill = document.getElementById('np-progress-fill');
+      if (fill) fill.style.setProperty('--np-led-color', `var(--led-${c})`);
+      // Play state
+      const audio = window.currentAudio || null;
+      document.getElementById('np-play-btn').textContent = (audio && !audio.paused) ? '⏸' : '▶';
+      // Time — set immediately on open/track-change (don't wait for next 500ms tick)
+      const dur = audio ? ((audio.duration && isFinite(audio.duration)) ? audio.duration : (audio._trackDuration || t.duration || 0))
+                         : (t.duration || 0);
+      document.getElementById('np-current').textContent = formatTime(audio ? audio.currentTime : 0);
+      document.getElementById('np-total').textContent   = formatTime(dur);
+      document.getElementById('np-progress-fill').style.width = (dur ? ((audio ? audio.currentTime : 0) / dur * 100) : 0) + '%';
+      // Fav
+      const isFav = !!(window._favIds && t.id && window._favIds.has(Number(t.id)));
+      const favBtn = document.getElementById('np-fav-btn');
+      if (favBtn) {
+        const heartOn  = `<svg class="heart-svg" viewBox="0 0 24 24"><path fill="#f43f5e" stroke="#f43f5e" stroke-width="1.5" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
+        const heartOff = `<svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>`;
+        favBtn.innerHTML = isFav ? heartOn : heartOff;
+        favBtn.classList.toggle('np-fav-active', isFav);
+      }
+    }
+
+    // Keep NP in sync when track changes
+    document.addEventListener('playerStateChange', e => {
+      if (_npOpen) {
+        _npSyncState();
+        document.getElementById('np-play-btn').textContent = e.detail.playing ? '⏸' : '▶';
+      }
+    });
+
+    // Progress sync for NP — reuses the same DSD-aware duration fallback as the
+    // playerbar's updateProgress() in player.js (audio.duration is Infinity/NaN
+    // while a DSD stream is live-transcoding; _trackDuration carries the known value).
+    setInterval(() => {
+      if (!_npOpen) return;
+      const audio = window.currentAudio;
+      if (!audio) return;
+      const dur = (audio.duration && isFinite(audio.duration))
+          ? audio.duration : (audio._trackDuration || 0);
+      if (!dur) return;
+      const pct = (audio.currentTime / dur) * 100;
+      document.getElementById('np-progress-fill').style.width = pct + '%';
+      document.getElementById('np-current').textContent = formatTime(audio.currentTime);
+      document.getElementById('np-total').textContent   = formatTime(dur);
+    }, 500);
+
+    // Seek from NP progress bar — delegates to the unified seekTo() in player.js,
+    // which already handles DSD streams (server-side restart via ?start=) correctly.
+    document.getElementById('np-progress-bar').addEventListener('click', e => {
+      const r = e.currentTarget.getBoundingClientRect();
+      const pct = ((e.clientX - r.left) / r.width) * 100;
+      if (window.seekTo) window.seekTo(Math.max(0, Math.min(100, pct)));
+    });
+
+    function _npRenderQueue() {
+      const panel = document.getElementById('np-panel-queue');
+      const q = window.userPlaylist || [];
+      const ci = (typeof window.currentIndex !== 'undefined') ? window.currentIndex : -1;
+      panel.innerHTML = q.map((t, i) => {
+        const active = i === ci ? ' np-queue-active' : '';
+        return '<div class="np-queue-item' + active + '" onclick="playPlaylistFrom(' + i + ');_npSyncState();_npRenderQueue()">' +
+          '<span class="np-queue-num">' + (i === ci ? '▶' : i + 1) + '</span>' +
+          '<div class="np-queue-info">' +
+            '<div class="np-queue-title">' + (t.title || '—') + '</div>' +
+            '<div class="np-queue-artist">' + (t.artist || '') + '</div>' +
+          '</div></div>';
+      }).join('') || '<div style="color:rgba(255,255,255,0.3);font-size:0.8rem;padding:0.5rem">Cola vacía</div>';
+    }
+
+    function npToggleQueue() {
+      const panel = document.getElementById('np-panel-queue');
+      const btn   = document.getElementById('np-queue-toggle');
+      const showing = panel.classList.toggle('active');
+      btn.classList.toggle('np-action-active', showing);
+      if (showing) { panel.innerHTML = ''; _npRenderQueue(); }
+    }
+    window.npToggleQueue = npToggleQueue;
+
+    function openLyricsFromNP() {
+      // Layer the unified gold lyrics modal on top of the NP overlay (no need to close NP —
+      // the modal has its own opaque blurred backdrop at a higher z-index).
+      openLyricsModal();
+    }
+    window.openLyricsFromNP = openLyricsFromNP;
+
+    // Keep queue panel updated when queue changes
+    document.addEventListener('queueLoaded', () => {
+      const panel = document.getElementById('np-panel-queue');
+      if (_npOpen && panel.classList.contains('active')) _npRenderQueue();
+    });
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js')
+          .then(reg => console.log('[SW] registered, scope:', reg.scope))
+          .catch(err => console.warn('[SW] registration failed:', err));
+      });
+    }
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

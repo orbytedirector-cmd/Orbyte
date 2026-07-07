@@ -1,0 +1,489 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-nav-bar" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.9rem">
+  <a href="/" class="track-btn ghost" style="text-decoration:none;padding:0.35rem 0.7rem" title="Inicio">🏠</a>
+  <a href="javascript:history.back()" class="track-btn ghost" style="text-decoration:none;padding:0.35rem 0.7rem">← Volver</a>
+</div>
+<div class="track-page-wide">
+
+  <!-- Cover + side info -->
+  <div class="track-hero">
+    <img src="{{ track.cover_path|cover_url }}"
+         alt="{{ track.album_name }}"
+         class="track-hero-cover"
+         onerror="this.style.background='linear-gradient(135deg,#1a1a2e,#16213e)'">
+
+    <div class="track-hero-info">
+      <div class="track-disc-label">Disco {{ track.disc_number or 1 }} · Pista {{ track.track_number or '?' }}</div>
+      <h1 class="track-hero-title">{{ track.title }}</h1>
+      <div class="track-hero-artist">{{ track.artist or track.artist_name or '—' }}</div>
+      <a href="/album/{{ track.album_id }}" class="track-hero-album">
+        {{ track.album_name }}{% if track.album_year %} · {{ track.album_year }}{% endif %}
+      </a>
+
+      <!-- Badges row -->
+      <div class="track-hero-badges">
+        <span class="track-format-badge format-{{ format_color }}">{{ format_display }}</span>
+        <span class="track-quality-badge">{{ sample_rate }} / {{ bit_depth }}</span>
+        {% if track.led_color %}
+        <span class="led-pill" style="background:var(--led-{{ track.led_color }});box-shadow:0 0 12px var(--led-{{ track.led_color }})">
+          {{ track.led_color|capitalize }}
+        </span>
+        <span class="led-desc-tag">{{ led_labels.get(track.led_color, '') }}</span>
+        {% endif %}
+        {% set stars = [(track_pop_score or 0) // 20, 5] | min %}
+        <span class="meta-tier-badge tier-pop" title="{{ track_pop_score }} puntos">
+          {%- for i in range(5) -%}
+            <span class="{{ 'star-on' if i < stars else 'star-off' }}">★</span>
+          {%- endfor -%}
+          <span class="pop-score-num">{{ track_pop_score }}</span>
+        </span>
+      </div>
+
+      <!-- Meta mood/momento row -->
+      {% if track_meta.mood or track_meta.momento %}
+      <div class="track-meta-pills">
+        {% if track_meta.mood %}
+        <!-- Point 10: 🎭 icon = Mood (estado de ánimo del oyente) -->
+        <a href="/mood/{{ track_meta.mood }}" class="meta-pill mood-pill" title="Mood: estado de ánimo">🎭 Mood · {{ MOOD_LABELS.get(track_meta.mood, track_meta.mood) }}</a>
+        {% endif %}
+        {% if track_meta.momento and track_meta.momento != 'anytime' %}
+        {% set momento_icons = {'morning': '☀️', 'evening': '🌅', 'night': '🌙', 'sleep': '😴', 'party': '🎉', 'workout': '💪', 'focus': '🎯'} %}
+        <a href="/momento/{{ track_meta.momento }}" class="meta-pill momento-pill">
+          {{ momento_icons.get(track_meta.momento, '🕐') }} {{ track_meta.momento }}
+        </a>
+        {% endif %}
+        {% if track_meta.era %}
+        <a href="/era/{{ track_meta.era }}" class="meta-pill era-pill">📅 {{ track_meta.era|replace('_era','') }}</a>
+        {% endif %}
+        {% if track_meta.tema_lirico %}
+        <!-- Point 10: 📖 icon = Tema Lírico (contenido de la letra) -->
+        <a href="/tema/{{ track_meta.tema_lirico }}" class="meta-pill tema-pill" title="Tema lírico: contenido de la letra">📖 Letra · {{ track_meta.tema_lirico }}</a>
+        {% endif %}
+        {% if track_meta.genre_primary %}
+        <a href="/genre/{{ track_meta.genre_primary }}" class="meta-pill" style="background:rgba(99,102,241,0.1);color:#818cf8;border-color:rgba(99,102,241,0.3)">🎸 {{ track_meta.genre_primary }}</a>
+        {% endif %}
+        {% if track_meta.idioma %}
+        <a href="/language/{{ track_meta.idioma }}" class="meta-pill" style="background:rgba(16,185,129,0.08);color:#6ee7b7;border-color:rgba(16,185,129,0.2)">🌐 {{ track_meta.idioma|upper }}</a>
+        {% endif %}
+      </div>
+      {% endif %}
+
+      <!-- Popularity -->
+      <div class="track-lastfm-row">
+        <span class="lastfm-icon">♪</span>
+        <div id="track-popularity"><span class="loading-dot">···</span></div>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="track-hero-actions">
+        {% if track.is_dsd %}
+        <button class="track-btn primary" onclick="window.playMPD('{{ track.file_path }}')">
+          ▶ Reproducir (MPD)
+        </button>
+        {% else %}
+        <button class="track-btn primary" id="play-this-btn" onclick="playThisTrack()">
+          ▶ Reproducir
+        </button>
+        <button class="fav-btn" id="track-fav-btn"
+                data-fav-id="{{ track.id }}"
+                onclick="toggleFavorite({{ track.id }})"
+                title="Añadir a favoritos">
+          <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        </button>
+        <button class="track-btn ghost" onclick="window.playMPD('{{ track.file_path }}')">
+          ▶ MPD local
+        </button>
+        {% endif %}
+        <button class="track-btn ghost" id="add-pl-btn" onclick="addThisToPlaylist()">
+          ➕ Playlist
+        </button>
+        <button class="track-btn ghost" onclick="openTrackLyricsModal()">
+          🎵 Letra
+        </button>
+      </div>
+      <div id="action-feedback" class="action-feedback"></div>
+    </div>
+  </div>
+
+  <!-- Meta attributes panel (energy/valence/etc.) -->
+  {% if track_meta %}
+  <div class="track-meta-section">
+    <h2 class="specs-title">Análisis semántico</h2>
+    <div class="track-meta-grid">
+
+      {% if track_meta.energy is not none %}
+      <div class="meta-card">
+        <div class="meta-card-label">Energía</div>
+        <div class="meta-bar-wrap">
+          <div class="meta-bar-fill" style="width:{{ ((track_meta.energy + 1) / 2 * 100)|round }}%;background:var(--led-red)"></div>
+        </div>
+        <div class="meta-card-value">{{ ((track_meta.energy + 1) / 2 * 100)|round|int }}%</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.valence is not none %}
+      <div class="meta-card">
+        <div class="meta-card-label">Valencia (positividad)</div>
+        <div class="meta-bar-wrap">
+          <div class="meta-bar-fill" style="width:{{ ((track_meta.valence + 1) / 2 * 100)|round }}%;background:var(--led-green)"></div>
+        </div>
+        <div class="meta-card-value">{{ ((track_meta.valence + 1) / 2 * 100)|round|int }}%</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.tension is not none %}
+      <div class="meta-card">
+        <div class="meta-card-label">Tensión</div>
+        <div class="meta-bar-wrap">
+          <div class="meta-bar-fill" style="width:{{ ((track_meta.tension + 1) / 2 * 100)|round }}%;background:var(--led-cyan)"></div>
+        </div>
+        <div class="meta-card-value">{{ ((track_meta.tension + 1) / 2 * 100)|round|int }}%</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.depth is not none %}
+      <div class="meta-card">
+        <div class="meta-card-label">Profundidad</div>
+        <div class="meta-bar-wrap">
+          <div class="meta-bar-fill" style="width:{{ ((track_meta.depth + 1) / 2 * 100)|round }}%;background:var(--led-blue)"></div>
+        </div>
+        <div class="meta-card-value">{{ ((track_meta.depth + 1) / 2 * 100)|round|int }}%</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.bailabilidad is not none %}
+      <div class="meta-card">
+        <div class="meta-card-label">Bailabilidad</div>
+        <div class="meta-bar-wrap">
+          <div class="meta-bar-fill" style="width:{{ [track_meta.bailabilidad, 0]|max|min(100) }}%;background:var(--led-yellow)"></div>
+        </div>
+        <div class="meta-card-value">{{ [track_meta.bailabilidad, 0]|max|int }}/100</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.bpm %}
+      <div class="meta-card meta-card-stat">
+        <div class="meta-card-label">BPM</div>
+        <div class="meta-stat-value">{{ track_meta.bpm|round|int }}</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.tonalidad %}
+      <div class="meta-card meta-card-stat">
+        <div class="meta-card-label">Tonalidad (Camelot)</div>
+        <div class="meta-stat-value">{{ track_meta.tonalidad }}</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.idioma %}
+      <div class="meta-card meta-card-stat">
+        <div class="meta-card-label">Idioma</div>
+        <div class="meta-stat-value">{{ track_meta.idioma|upper }}</div>
+      </div>
+      {% endif %}
+
+      {% if track_meta.arco_energia %}
+      <div class="meta-card meta-card-stat">
+        <div class="meta-card-label">Arco de energía</div>
+        <div class="meta-stat-value" style="font-size:0.9rem">{{ track_meta.arco_energia|replace('_',' ') }}</div>
+      </div>
+      {% endif %}
+
+    </div>
+
+    <!-- Top moods -->
+    {% if track_meta.top_moods_json %}
+    <div class="top-moods-row">
+      <div class="top-moods-label">Moods detectados</div>
+      <div class="top-moods-chips" id="top-moods-chips"></div>
+    </div>
+    {% endif %}
+
+  </div>
+  {% endif %}
+
+  <!-- Specs grid -->
+  <div class="track-specs-section">
+    <h2 class="specs-title">Información técnica</h2>
+    <div class="track-specs-grid">
+      <div class="spec-card">
+        <div class="spec-label">Sello</div>
+        <div class="spec-value">{{ track.publisher or '—' }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Género</div>
+        <div class="spec-value">{{ track.genre or '—' }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Duración</div>
+        <div class="spec-value">{{ track.duration|format_duration }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Bitrate</div>
+        <div class="spec-value">{{ bitrate_fmt }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Tamaño</div>
+        <div class="spec-value">{{ track.file_size|format_size }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Canales</div>
+        <div class="spec-value">
+          {% if track.channels == 2 %}Stereo
+          {% elif track.channels == 6 %}5.1 Surround
+          {% else %}{{ track.channels or 2 }}ch{% endif %}
+        </div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Codec</div>
+        <div class="spec-value">{{ track.codec or 'FLAC' }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Modo</div>
+        <div class="spec-value">{{ track.compression_mode or '—' }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">ISRC</div>
+        <div class="spec-value small">{{ track.isrc or '—' }}</div>
+      </div>
+      <div class="spec-card">
+        <div class="spec-label">Copyright</div>
+        <div class="spec-value small">{{ track.copyright or '—' }}</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Lyrics Modal ──────────────────────────────────────────────────────── -->
+<div class="lyrics-modal-overlay" id="lyrics-overlay" onclick="closeTrackLyricsModal()" style="display:none"></div>
+<div class="lyrics-modal" id="lyrics-modal" style="display:none">
+  <div class="lyrics-modal-header">
+    <div class="lyrics-modal-title">
+      <span class="lyrics-modal-track">{{ track.title }}</span>
+      <span class="lyrics-modal-artist">{{ track.artist or '' }}</span>
+    </div>
+    <button class="lyrics-modal-close" onclick="closeTrackLyricsModal()">✕</button>
+  </div>
+  <div class="lyrics-modal-body" id="lyrics-modal-body">
+    <div class="lyrics-placeholder">Presiona "Cargar letra" para buscar</div>
+  </div>
+  <div class="lyrics-modal-footer">
+    <button class="track-btn primary" id="load-lyrics-btn" onclick="fetchLyricsModal()">🎵 Cargar letra</button>
+    <span id="lyrics-source-tag" class="lyrics-source-tag"></span>
+  </div>
+</div>
+
+<style>
+/* ── Meta section ── */
+.track-meta-section {
+  margin: 1.5rem 0;
+  padding: 1.2rem 1.5rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+.track-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.meta-card {
+  padding: 0.75rem 0.9rem;
+  background: rgba(255,255,255,0.03);
+  border-radius: 10px;
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.meta-card-label { font-size: 0.62rem; font-family:'Orbitron',system-ui,sans-serif; color: var(--accent); font-weight: 700; margin-bottom: 0.4rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.meta-bar-wrap { height: 6px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow:hidden; margin-bottom:0.3rem; }
+.meta-bar-fill { height:100%; border-radius:3px; min-width:2px; transition: width 0.6s ease; }
+.meta-card-value { font-size: 0.8rem; color: var(--text-secondary); }
+.meta-card-stat { display:flex; flex-direction:column; gap:0.3rem; }
+.meta-stat-value { font-size: 1.4rem; font-weight: 700; color: var(--text-primary); line-height:1; }
+.top-moods-row { margin-top: 0.5rem; }
+.top-moods-label { font-size: 0.62rem; font-family:'Orbitron',system-ui,sans-serif; color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.5rem; }
+.top-moods-chips { display:flex; flex-wrap:wrap; gap:0.4rem; }
+.mood-chip { padding:0.2rem 0.65rem; border-radius:20px; font-size:0.72rem; font-weight:600; cursor:pointer; text-decoration:none; color:inherit; }
+.mood-chip-bar { display:inline-block; width:30px; height:3px; border-radius:2px; margin-left:4px; vertical-align:middle; background:var(--accent); }
+
+/* ── Meta pills ── */
+.track-meta-pills { display:flex; flex-wrap:wrap; gap:0.4rem; margin: 0.6rem 0; }
+.meta-pill { padding:0.2rem 0.6rem; border-radius:20px; font-size:0.72rem; font-weight:600; text-decoration:none; }
+.mood-pill { background:rgba(167,139,250,0.15); color:#a78bfa; border:1px solid rgba(167,139,250,0.3); }
+.momento-pill { background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.25); }
+.era-pill { background:rgba(99,102,241,0.12); color:#818cf8; border:1px solid rgba(99,102,241,0.25); }
+.tema-pill { background:rgba(52,211,153,0.12); color:#34d399; border:1px solid rgba(52,211,153,0.25); }
+.led-desc-tag { font-size: 0.72rem; color: var(--text-muted); margin-left: 0.3rem; }
+.tier-pop { background:rgba(200,146,10,0.1); border:1px solid var(--border-gold); display:inline-flex; align-items:center; gap:1px; }
+.tier-pop .star-on  { color:var(--text-gold); font-size:0.82rem; text-shadow:0 0 5px rgba(245,197,24,0.5); }
+.tier-pop .star-off { color:rgba(200,146,10,0.2); font-size:0.82rem; }
+.pop-score-num { font-size:0.68rem; color:rgba(200,146,10,0.5); margin-left:0.3rem; font-family:'Orbitron',system-ui,sans-serif; }
+</style>
+
+<script>
+// ── Track data ────────────────────────────────────────────────────────────────
+const TRACK_DATA = {{ track|tojson }};
+TRACK_DATA.cover_url = '{{ track.cover_path|cover_url }}';
+TRACK_DATA.audio_url = '{{ track.file_path|audio_url }}';
+const TRACK_META = {{ track_meta|tojson }};
+
+// ── Top moods chips ───────────────────────────────────────────────────────────
+(function() {
+  const raw = TRACK_META.top_moods_json;
+  if (!raw) return;
+  try {
+    const moods = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const container = document.getElementById('top-moods-chips');
+    if (!container || !moods) return;
+    const maxScore = moods[0]?.score || 1;
+    container.innerHTML = moods.map(m => {
+      const pct = Math.round((m.score / maxScore) * 100);
+      return `<a href="/mood/${encodeURIComponent(m.mood)}" class="mood-chip" style="background:rgba(167,139,250,0.12);border:1px solid rgba(167,139,250,0.25)">
+        ${m.mood}<span class="mood-chip-bar" style="width:${pct*0.4}px"></span>
+      </a>`;
+    }).join('');
+  } catch(e) {}
+})();
+
+// ── Play / Playlist ───────────────────────────────────────────────────────────
+function playThisTrack() {
+  if (!TRACK_DATA.audio_url) {
+    showFeedback('❌ No se pudo construir la URL de audio', 'error');
+    return;
+  }
+  // Insert at current position without clearing existing queue, then play it
+  if (window.prependAndPlay) {
+    window.prependAndPlay(TRACK_DATA);
+  } else {
+    loadQueue([TRACK_DATA]);
+    playTrack(0);
+  }
+  showFeedback('▶ Reproduciendo en el player', 'ok');
+  const artist = {{ (track.artist or '')|tojson }};
+  const title  = {{ track.title|tojson }};
+  const tid    = {{ track.id }};
+  if (artist && title) loadPlayerLyrics(artist, title, tid);
+}
+
+function addThisToPlaylist() {
+  addToPlaylist(TRACK_DATA);
+  showFeedback('✓ Añadido a la playlist', 'ok');
+}
+
+function showFeedback(msg, type) {
+  const el = document.getElementById('action-feedback');
+  el.textContent = msg;
+  el.className = 'action-feedback ' + (type === 'ok' ? 'feedback-ok' : 'feedback-err');
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 2500);
+}
+
+// ── Lyrics modal ──────────────────────────────────────────────────────────────
+function openTrackLyricsModal() {
+  document.getElementById('lyrics-overlay').style.display = 'block';
+  document.getElementById('lyrics-modal').style.display   = 'flex';
+  document.body.style.overflow = 'hidden';
+  // Auto-load if we have lrclib_id or if it's first open
+  if (!lyricsLoaded) fetchLyricsModal();
+}
+
+function closeTrackLyricsModal() {
+  document.getElementById('lyrics-overlay').style.display = 'none';
+  document.getElementById('lyrics-modal').style.display   = 'none';
+  document.body.style.overflow = '';
+}
+
+let lyricsLoaded = false;
+
+async function fetchLyricsModal() {
+  if (lyricsLoaded) return;
+  const body = document.getElementById('lyrics-modal-body');
+  const btn  = document.getElementById('load-lyrics-btn');
+  const tag  = document.getElementById('lyrics-source-tag');
+  btn.textContent = '⏳ Buscando…';
+  btn.disabled = true;
+  body.innerHTML = '<div class="lyrics-loading">Buscando letra…</div>';
+
+  const artist = {{ (track.artist or '')|tojson }};
+  const title  = {{ track.title|tojson }};
+  const tid    = {{ track.id }};
+  try {
+    // Always send track_id so backend uses stored lrclib_id first
+    let url = `/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}&track_id=${tid}`;
+    const d = await fetch(url).then(r => r.json());
+    if (d.has_synced && d.synced) {
+      body.innerHTML = `<div class="lyrics-synced-note">🎵 Letra sincronizada</div>` + parseLRCtoHTML(d.synced);
+      tag.textContent = d.source === 'db_id' ? 'DB · lrclib · Sincronizada' : 'lrclib.net · Sincronizada';
+      lyricsLoaded = true;
+      btn.style.display = 'none';
+    } else if (d.has_lyrics && d.lyrics) {
+      body.innerHTML = `<pre class="lyrics-body-text">${escapeHTML(d.lyrics)}</pre>`;
+      tag.textContent = d.source === 'db_id' ? 'DB · lrclib' : 'lrclib.net';
+      lyricsLoaded = true;
+      btn.style.display = 'none';
+    } else {
+      body.innerHTML = '<div class="lyrics-not-found">Letra no encontrada</div>';
+      btn.textContent = '↻ Reintentar';
+      btn.disabled = false;
+    }
+  } catch(e) {
+    body.innerHTML = '<div class="lyrics-not-found" style="color:var(--led-red)">Error al conectar</div>';
+    btn.textContent = '↻ Reintentar';
+    btn.disabled = false;
+  }
+}
+
+function parseLRCtoHTML(synced) {
+  const lines = [];
+  const regex = /\[(\d+):(\d+\.\d+)\]\s*(.*)/g;
+  let match;
+  while ((match = regex.exec(synced)) !== null) {
+    lines.push(match[3] || '♪');
+  }
+  return `<div class="lyrics-body-text">${lines.join('\n')}</div>`;
+}
+
+function escapeHTML(str) {
+  return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Last.fm popularity ────────────────────────────────────────────────────────
+(async () => {
+  const artist = {{ (track.artist or '')|tojson }};
+  const title  = {{ track.title|tojson }};
+  const el = document.getElementById('track-popularity');
+  if (!artist || !title) { el.innerHTML = '<span class="pop-na">N/A</span>'; return; }
+  try {
+    const r = await fetch(
+      `https://ws.audioscrobbler.com/2.0/?method=track.getInfo` +
+      `&api_key=5ae4b43802aade3c7132427e83822282` +
+      `&artist=${encodeURIComponent(artist)}` +
+      `&track=${encodeURIComponent(title)}&format=json`
+    );
+    const d = await r.json();
+    if (d.track && d.track.listeners) {
+      const listeners = parseInt(d.track.listeners);
+      const playcount = parseInt(d.track.playcount || 0);
+      let stars = 1;
+      if (listeners >= 50000)   stars = 2;
+      if (listeners >= 300000)  stars = 3;
+      if (listeners >= 1000000) stars = 4;
+      if (listeners >= 5000000) stars = 5;
+      const starsHTML = '★'.repeat(stars) + '<span class="star-empty">' + '★'.repeat(5-stars) + '</span>';
+      el.innerHTML = `
+        <div class="pop-stars">${starsHTML}</div>
+        <div class="pop-stats">
+          <span class="pop-stat"><span class="pop-num">${listeners.toLocaleString()}</span> oyentes</span>
+          <span class="pop-sep">·</span>
+          <span class="pop-stat"><span class="pop-num">${playcount.toLocaleString()}</span> reproducciones</span>
+        </div>`;
+    } else {
+      el.innerHTML = '<span class="pop-na">Sin datos en Last.fm</span>';
+    }
+  } catch(e) {
+    el.innerHTML = '<span class="pop-na">Last.fm no disponible</span>';
+  }
+})();
+</script>
+{% endblock %}

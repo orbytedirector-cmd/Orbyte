@@ -1,0 +1,20 @@
+{
+  "name": "Orbyte — Hi-Res Audio",
+  "short_name": "Orbyte",
+  "description": "Navegador de música Hi-Fi personal. DSD, FLAC, MQA.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "lang": "es",
+  "icons": [
+    { "src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "categories": ["music", "entertainment"],
+  "shortcuts": [
+    { "name": "Inicio",    "url": "/",          "description": "Biblioteca" },
+    { "name": "Favoritos", "url": "/favorites", "description": "Tus favoritos" }
+  ]
+}

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 200 52" width="200" height="52">
+  <defs>
+    <linearGradient id="goldText" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%"   stop-color="#FFD95A"/>
+      <stop offset="45%"  stop-color="#C8920A"/>
+      <stop offset="100%" stop-color="#F5C518"/>
+    </linearGradient>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@700&amp;display=swap');
+    </style>
+  </defs>
+  <!-- Planet icon PNG embedded as image -->
+  <image href="/static/logo-icon.png" x="0" y="2" width="48" height="48"/>
+  <!-- ORBYTE text -->
+  <text x="56" y="34"
+        font-family="Orbitron, 'Segoe UI', system-ui, sans-serif"
+        font-weight="700"
+        font-size="22"
+        letter-spacing="2"
+        fill="url(#goldText)">ORBYTE</text>
+</svg>

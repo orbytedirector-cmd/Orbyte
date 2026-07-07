@@ -1,0 +1,234 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="artist-top-nav">
+  <a href="/" class="track-btn ghost">🏠</a>
+  {% if artist.letter %}
+  <a href="/letter/{{ artist.letter }}" class="track-btn ghost">← {{ artist.letter }}</a>
+  {% else %}
+  <a href="javascript:history.back()" class="track-btn ghost">← Volver</a>
+  {% endif %}
+</div>
+
+<div class="artist-header">
+  <h1 class="artist-header-name">
+    {{ artist.name }}
+    {% set flag_html = nationality_flag(artist_nationality) %}
+    {% if flag_html %}
+    <span class="nat-flag" title="{{ artist_nationality }}">{{ flag_html|safe }}</span>
+    {% elif artist_nationality and artist_nationality not in ('', 'Unknown') %}
+    <span class="nat-text" title="{{ artist_nationality }}">{{ artist_nationality }}</span>
+    {% endif %}
+  </h1>
+  <div id="artist-website-link" style="min-height:1.4rem;margin-bottom:0.4rem;"></div>
+
+  <div class="artist-header-meta">
+    <span class="ar-stat"><span class="ar-stat-val">{{ total_tracks }}</span> pistas</span>
+    <span class="ar-sep">·</span>
+    <span class="ar-stat"><span class="ar-stat-val">{{ albums|length }}</span> álbumes</span>
+    {% if artist.lastfm_listeners %}
+    <span class="ar-sep">·</span>
+    <span class="ar-stat">
+      <span class="ar-stat-val" style="color:var(--led-cyan)">{{ '{:,}'.format(artist.lastfm_listeners) }}</span> oyentes
+    </span>
+    {% endif %}
+    {% if artist.lastfm_playcount %}
+    <span class="ar-sep">·</span>
+    <span class="ar-stat">
+      <span class="ar-stat-val">{{ '{:,}'.format(artist.lastfm_playcount) }}</span> scrobbles
+    </span>
+    {% endif %}
+  </div>
+
+  {% if genres %}
+  <div class="artist-genre-pills">
+    {% for g in genres %}
+    <span class="genre-chip" style="font-size:0.73rem;padding:0.2rem 0.65rem">{{ g }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if similar_artists %}
+  <div class="artist-similar">
+    <span class="artist-similar-label">Similares:</span>
+    {% for s in similar_artists %}
+      {% if s.id %}
+      <a href="/artist/{{ s.id }}" class="artist-similar-link">{{ s.name }}</a>
+      {% else %}
+      <span class="artist-similar-name">{{ s.name }}</span>
+      {% endif %}
+      {% if not loop.last %}<span class="ar-sep">·</span>{% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+<div class="album-grid">
+  {% for album in albums %}
+  <div class="album-card">
+    <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }}, this)">
+      <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover"
+           onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+      <div class="play-overlay">▶</div>
+    </div>
+    <div class="album-card-info">
+      <div class="aci-text">
+        <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+      </div>
+      <div class="aci-footer">
+        {% if album.primary_format %}
+        <span class="aci-quality">
+          {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
+          <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
+        </span>
+        {% endif %}
+        <span class="aci-stats">
+          {%- if album.year %}{{ album.year }}{% endif -%}
+          {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
+          {%- if album.total_duration %} · {{ album.total_duration|format_duration }}{% endif -%}
+        </span>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<style>
+.artist-top-nav { display:flex; gap:0.5rem; margin-bottom:1rem; }
+
+.artist-header { text-align:center; margin-bottom:2rem; }
+.artist-header-name {
+  font-family:'Orbitron',system-ui,sans-serif;
+  font-size:2rem; font-weight:700; color:var(--text-gold);
+  margin:0 0 0.5rem; display:flex; align-items:center; justify-content:center; gap:0.5rem;
+}
+.nat-flag img { height:20px; border-radius:3px; }
+.nat-text { font-size:0.8rem; color:rgba(200,146,10,0.5); font-family:inherit; font-weight:400; }
+
+.artist-header-meta { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.4rem; font-size:0.9rem; color:rgba(200,146,10,0.6); margin-bottom:0.75rem; }
+.ar-stat { color:rgba(200,146,10,0.6); }
+.ar-stat-val { color:var(--accent); font-weight:700; }
+.ar-sep { color:rgba(200,146,10,0.25); }
+
+.artist-genre-pills { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.7rem; }
+
+.artist-similar { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.35rem; font-size:0.8rem; margin-top:0.4rem; }
+.artist-similar-label { font-family:'Orbitron',system-ui,sans-serif; font-size:0.65rem; color:rgba(200,146,10,0.45); letter-spacing:0.08em; text-transform:uppercase; }
+.artist-similar-link { color:var(--accent); text-decoration:none; transition:color 0.15s; }
+.artist-similar-link:hover { color:var(--text-gold); }
+.artist-similar-name { color:rgba(200,146,10,0.4); }
+</style><style>
+.artist-header {
+  text-align: center;
+  margin-bottom: 2.5rem;
+}
+.artist-header-name {
+  font-size: 2.4rem;
+  font-weight: 700;
+  margin: 0 0 0.4rem;
+}
+.artist-header-meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+.artist-header-meta .sep { color: var(--text-muted); }
+.artist-back-link {
+  display: inline-block;
+  margin-top: 0.75rem;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+.artist-back-link:hover { text-decoration: underline; }
+
+/* LED dot on cover corner */
+.cover-led-dot {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Format badge row */
+.artist-album-format {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.3rem;
+  flex-wrap: nowrap;
+}
+.artist-album-year {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.artist-album-year-solo {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.25rem;
+}
+
+/* Tracks · Duration info row */
+.artist-album-info {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-top: 0.2rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info-sep { color: var(--border); }
+.artist-web-link {
+  display: inline-flex; align-items: center; gap: 0.35rem;
+  font-size: 0.82rem; color: rgba(200,146,10,0.65); text-decoration: none;
+  border: 1px solid var(--border-gold); border-radius: 20px;
+  padding: 0.2rem 0.75rem; transition: color 0.15s, border-color 0.15s;
+}
+.artist-web-link:hover { color: var(--text-gold); border-color: var(--accent); }
+.artist-web-icon { font-size: 0.85rem; }
+</style>
+
+<script>
+async function playAlbumById(albumId, el) {
+  if (el) { const o = el.querySelector('.play-overlay'); if (o) o.textContent = '…'; }
+  try {
+    const tracks = await fetch(`/api/album/${albumId}/tracks`).then(r => r.json());
+    if (!Array.isArray(tracks) || !tracks.length) return;
+    const valid = tracks.filter(t => t.audio_url || t.file_path);
+    const q = valid.length ? valid : tracks;
+    if (window.prependTracksAndPlay) {
+      window.prependTracksAndPlay(q, 0);
+    } else {
+      loadQueue(q);
+      playTrack(0);
+    }
+  } catch(e) { console.error('Error loading album', e); }
+  if (el) { const o = el.querySelector('.play-overlay'); if (o) o.textContent = '▶'; }
+}
+
+// Async website lookup — fires after page load, cached by server
+(async () => {
+  try {
+    const d = await fetch('/api/artist/{{ artist.id }}/website').then(r => r.json());
+    const el = document.getElementById('artist-website-link');
+    if (!el) return;
+    if (d.url) {
+      const domain = new URL(d.url).hostname.replace(/^www\./, '');
+      el.innerHTML = `<a href="${d.url}" target="_blank" rel="noopener" class="artist-web-link">
+        <span class="artist-web-icon">🌐</span> ${domain}
+      </a>`;
+    }
+  } catch(e) { /* silent — website is optional */ }
+})();
+</script>
+{% endblock %}

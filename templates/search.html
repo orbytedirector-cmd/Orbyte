@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="section-title" style="margin-bottom:1.5rem;">Resultados para "{{ query }}"</h2>
+
+<div class="search-tabs" id="search-tabs">
+  {% if artists %}<button class="stab active" onclick="showTab('artists',this)">Artistas ({{ artists|length }})</button>{% endif %}
+  {% if albums %}<button class="stab {% if not artists %}active{% endif %}" onclick="showTab('albums',this)">Álbumes ({{ albums|length }})</button>{% endif %}
+  {% if tracks %}<button class="stab {% if not artists and not albums %}active{% endif %}" onclick="showTab('tracks',this)">Pistas ({{ tracks|length }})</button>{% endif %}
+</div>
+
+{% if artists %}
+<div class="stab-panel" id="panel-artists">
+  <div class="artist-list">
+    {% for ar in artists %}
+    {% set stars = [(ar.pop_score or 0) // 20, 5] | min %}
+    <a href="/artist/{{ ar.id }}" class="artist-row">
+      <div class="artist-row-main">
+        <div class="artist-name">{{ ar.name }}</div>
+        <div class="artist-row-meta">
+          <span class="ar-meta-pill">{{ ar.album_count }} álbum{{ 's' if ar.album_count != 1 else '' }}</span>
+          {% if ar.most_common_genre %}
+          <span class="ar-meta-sep">·</span>
+          <span class="ar-meta-genre">{{ ar.most_common_genre }}</span>
+          {% endif %}
+        </div>
+      </div>
+      <div class="artist-row-right">
+        <span class="artist-stars" title="{{ (ar.pop_score or 0)|int }} puntos">
+          {%- for i in range(5) -%}
+            <span class="star {{ 'star-on' if i < stars else 'star-off' }}">★</span>
+          {%- endfor -%}
+        </span>
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if albums %}
+<div class="stab-panel" id="panel-albums" {% if artists %}style="display:none"{% endif %}>
+  <div class="album-grid">
+    {% for album in albums %}
+    <div class="album-card">
+      <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }})">
+        <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover" onerror="this.style.background='var(--bg-card)'">
+        <div class="play-overlay">▶</div>
+        {% if album.primary_format %}<div class="format-badge">{{ album.primary_format }}</div>{% endif %}
+      </div>
+      <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+      <div class="album-artist">{{ album.artist_name or '' }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if tracks %}
+<div class="stab-panel" id="panel-tracks" {% if artists or albums %}style="display:none"{% endif %}>
+  <div class="track-search-list">
+    {% for track in tracks %}
+    <div class="track-search-row">
+      <img src="{{ track.cover_path|cover_url }}" class="track-thumb" onerror="this.style.display='none'">
+      <div class="track-search-info">
+        <div class="track-search-title">{{ track.title }}</div>
+        <div class="track-search-meta">{{ track.artist }} · <a href="/album/{{ track.album_id }}" style="color:var(--text-secondary)">{{ track.album_name }}</a></div>
+      </div>
+      <span class="track-duration">{{ track.duration|format_duration }}</span>
+      <span class="track-led" style="background:var(--led-{{ track.led_color or 'white' }});box-shadow:0 0 6px var(--led-{{ track.led_color or 'white' }});width:10px;height:10px;border-radius:50%;flex-shrink:0;"></span>
+      <div class="track-actions">
+        <button class="track-actions-btn" onclick="playTrackById({{ track.id }})">▶</button>
+        <button class="track-actions-btn" onclick="showTrackInfo({{ track.id }})">ℹ</button>
+        <button class="track-actions-btn add-btn" onclick="addToPlaylistById({{ track.id }})">➕</button>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if not artists and not albums and not tracks %}
+<div style="text-align:center;padding:3rem;color:var(--text-secondary)">No se encontraron resultados para "{{ query }}"</div>
+{% endif %}
+
+<script>
+function showTab(panel, btn) {
+  document.querySelectorAll('.stab-panel').forEach(p => p.style.display='none');
+  document.querySelectorAll('.stab').forEach(b => b.classList.remove('active'));
+  const el = document.getElementById('panel-' + panel);
+  if (el) el.style.display = 'block';
+  btn.classList.add('active');
+}
+async function playTrackById(id) {
+  const d = await fetch(`/api/track/${id}`).then(r=>r.json());
+  if (window.prependAndPlay) { window.prependAndPlay(d); }
+  else { loadQueue([d]); playTrack(0); }
+}
+async function addToPlaylistById(id) {
+  const d = await fetch(`/api/track/${id}`).then(r=>r.json());
+  if (window.appendToQueue) { window.appendToQueue(d); }
+  else { addToPlaylist(d); }
+}
+async function playAlbumById(id) {
+  const tracks = await fetch(`/api/album/${id}/tracks`).then(r=>r.json());
+  if (!Array.isArray(tracks) || !tracks.length) return;
+  const valid = tracks.filter(t => t.audio_url || t.file_path);
+  const q = valid.length ? valid : tracks;
+  if (window.prependTracksAndPlay) { window.prependTracksAndPlay(q, 0); }
+  else { loadQueue(q); playTrack(0); }
+}
+</script>
+{% endblock %}

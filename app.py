@@ -1,0 +1,2119 @@
+import os
+import json
+from urllib.parse import quote
+from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
+from flask_cors import CORS
+import sqlite3
+import mimetypes
+import subprocess
+try:
+    import requests as req_lib
+except ImportError:
+    req_lib = None
+
+try:
+    from mpd import MPDClient as _MPDClient
+    _MPD_AVAILABLE = True
+except ImportError:
+    _MPD_AVAILABLE = False
+
+# ── Favorites (persisted in DB favorites table) ────────────────────────────────
+_favorites_set: set = set()   # in-memory cache of track_id ints
+
+def _load_favorites():
+    global _favorites_set
+    try:
+        conn = get_db_connection()
+        rows = conn.execute('SELECT track_id FROM favorites').fetchall()
+        _favorites_set = {r[0] for r in rows}
+        conn.close()
+    except Exception as e:
+        app.logger.warning(f'Could not load favorites: {e}')
+
+# ── Nationality / Language → ISO 3166-1 alpha-2 country code ─────────────────
+# Used to build flagcdn.com image URLs — works on all OS/browser combos,
+# unlike Unicode flag emoji which require Noto Color Emoji on Linux.
+COUNTRY_ISO = {
+    'United States':'us','United Kingdom':'gb','England':'gb','Scotland':'gb',
+    'Wales':'gb','Northern Ireland':'gb','Pontypridd':'gb','Brighton':'gb','London':'gb',
+    'Germany':'de','Saarbrücken':'de','Dortmund':'de',
+    'France':'fr','Italy':'it','Savona':'it',
+    'Spain':'es','Madrid':'es','Asturias':'es',
+    'Sweden':'se','Arvika Municipality':'se',
+    'Norway':'no','Finland':'fi','Denmark':'dk','Copenhagen':'dk',
+    'Netherlands':'nl','Australia':'au','Canada':'ca',
+    'Brazil':'br','Argentina':'ar','Mexico':'mx','Chile':'cl',
+    'Colombia':'co','Venezuela':'ve',
+    'Japan':'jp','South Korea':'kr','Ireland':'ie','Portugal':'pt',
+    'Greece':'gr','Poland':'pl','Switzerland':'ch','Iceland':'is',
+    'New Zealand':'nz','South Africa':'za','Jamaica':'jm','Cuba':'cu',
+    'Dominican Republic':'do','Puerto Rico':'pr','Philippines':'ph',
+    'Kazakhstan':'kz','Bali':'id','Indonesia':'id',
+    'Boston':'us','Miami':'us','New York':'us','San Francisco':'us',
+    'Seattle':'us','Texas':'us','Washington':'us','Raleigh':'us',
+    'Arlington':'us','Volcano':'us',
+}
+
+# Language code → ISO country code (language → representative country)
+LANG_ISO = {
+    'en':'gb','es':'es','de':'de','fr':'fr','pt':'pt','it':'it',
+    'ja':'jp','ko':'kr','nl':'nl','ru':'ru','sv':'se','no':'no',
+    'fi':'fi','da':'dk','pl':'pl','zh':'cn','ar':'sa','tr':'tr',
+    'cs':'cz','hu':'hu','ro':'ro','uk':'ua','el':'gr','he':'il',
+}
+
+def _flag_img(iso, label='', size='20x15'):
+    """Return a flagcdn.com <img> tag. Empty string when iso is unknown."""
+    if not iso:
+        return ''
+    return (f'<img src="https://flagcdn.com/{size}/{iso}.png" '
+            f'width="{size.split("x")[0]}" height="{size.split("x")[1]}" '
+            f'alt="{label}" title="{label}" '
+            f'style="border-radius:2px;vertical-align:middle;object-fit:cover">')
+
+def nationality_flag(nat):
+    """Return an <img> flag tag for a nationality/country name. Empty when not found."""
+    if not nat or nat in ('Unknown', ''):
+        return ''
+    iso = COUNTRY_ISO.get(nat)
+    return _flag_img(iso, nat) if iso else ''
+
+def lang_flag(code):
+    """Return an <img> flag tag for a 2-letter language ISO 639-1 code."""
+    if not code:
+        return ''
+    iso = LANG_ISO.get(code.lower())
+    return _flag_img(iso, code.upper(), '20x15') if iso else ''
+
+app = Flask(__name__)
+CORS(app)
+
+# ── Diamond SVG helper ────────────────────────────────────────────────────────
+_DIAMOND_SVG_TMPL = (
+    '<svg width="{w}" height="{h}" viewBox="0 0 20 22" fill="none" '
+    'stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'
+    '<line x1="10" y1="1" x2="10" y2="3.5"/>'
+    '<line x1="7" y1="1.8" x2="8.5" y2="3.5"/>'
+    '<line x1="13" y1="1.8" x2="11.5" y2="3.5"/>'
+    '<path d="M3 8 L7 4.5 L13 4.5 L17 8"/>'
+    '<line x1="3" y1="8" x2="17" y2="8"/>'
+    '<path d="M3 8 L10 19 L17 8"/>'
+    '<line x1="7" y1="4.5" x2="10" y2="8"/>'
+    '<line x1="13" y1="4.5" x2="10" y2="8"/>'
+    '</svg>'
+)
+_DIAMOND_SIZES = {'sm': ('11','13'), 'md': ('13','15'), 'lg': ('16','18'), 'np': ('18','21')}
+
+def diamond_svg(led_color, size='sm'):
+    """Return a colored SVG diamond indicator for the given led_color tier."""
+    color = (led_color or 'yellow').lower()
+    w, h  = _DIAMOND_SIZES.get(size, ('11', '13'))
+    svg   = _DIAMOND_SVG_TMPL.format(w=w, h=h)
+    return f'<span class="led-diamond-wrap led-d-{color}">{svg}</span>'
+
+# Register helpers in Jinja globals (must be after app is created)
+app.jinja_env.globals['nationality_flag'] = nationality_flag
+app.jinja_env.globals['lang_flag']        = lang_flag
+app.jinja_env.globals['favorites_set']    = lambda: _favorites_set
+app.jinja_env.globals['diamond_svg']      = diamond_svg
+
+# Make MOOD_LABELS available in all templates
+@app.context_processor
+def inject_globals():
+    return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS}
+
+MUSIC_ROOT = "/mnt/musica/"
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music.db")
+
+# ── LED color definitions (iFi Zen DAC V2) ───────────────────────────────────
+# Source of truth: tracks.led_color field in the DB. Never recompute.
+LED_LABELS = {
+    'yellow':  'PCM 44.1/48 kHz',
+    'white':   'PCM 88.2/96/176.4/192/352.8/384 kHz',
+    'cyan':    'DSD 64/128',
+    'red':     'DSD 256',
+    'green':   'MQA',
+    'blue':    'MQA Studio',
+    'magenta': 'Original Sample Rate (MQB)',
+}
+LED_ORDER = ['yellow', 'white', 'cyan', 'red', 'green', 'blue', 'magenta']
+
+# Mood display labels — maps raw DB value → friendly UI label
+MOOD_LABELS = {
+    'Humorístico': 'De Buen Humor',
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def clean_db_path(path):
+    if not path:
+        return path
+    return path.strip("'\"")
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    # Lazy migration: add website_url column if it doesn't exist yet
+    try:
+        conn.execute("ALTER TABLE artists ADD COLUMN website_url TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+    return conn
+
+def _fmt_seconds(seconds):
+    if not seconds or seconds < 0:
+        return "0:00"
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
+
+def _fmt_bitrate(bps):
+    if not bps:
+        return "N/A"
+    kbps = bps / 1000
+    if kbps >= 1000:
+        label = f"{kbps/1000:.2f} Mbps"
+    else:
+        label = f"{int(kbps):,} kbps"
+    if kbps <= 320:
+        tag = "MP3-level"
+    elif kbps <= 1412:
+        tag = "CD Lossless"
+    else:
+        tag = "Hi-Res"
+    return f"{label} · {tag}"
+
+def _dsd_label(track):
+    """Return clean DSD label: DSD64, DSD128, DSD256 etc."""
+    rate = (track.get('dsd_rate') or '').strip()
+    if rate:
+        # Already in correct form: 'DSD64', 'DSD128', 'DSD256'
+        return rate if rate.startswith('DSD') else 'DSD' + rate
+    # Derive from sample_rate_real
+    sr = track.get('sample_rate_real') or 0
+    if   sr >= 11289600: return 'DSD256'
+    elif sr >=  5644800: return 'DSD128'
+    elif sr >=  2822400: return 'DSD64'
+    elif sr >=  1411200: return 'DSD32'
+    return 'DSD'
+
+def _fmt_format(track):
+    """Return (display_label, led_color) using DB led_color as sole truth."""
+    led = (track.get('led_color') or 'yellow').lower()
+    if track.get('is_dsd'):
+        label = _dsd_label(track)
+    elif track.get('is_mqa'):
+        label = 'MQA Studio' if led == 'blue' else ('MQB' if led == 'magenta' else 'MQA')
+    else:
+        codec = (track.get('codec') or 'FLAC').upper()
+        label = f'{codec} · Hi-Res' if led == 'white' else codec
+    return label, led
+
+def _led_for_album_tracks(conn, album_id):
+    """Get dominant (highest-quality) LED color for an album from its tracks."""
+    priority = {c: i for i, c in enumerate(reversed(LED_ORDER))}
+    rows = conn.execute(
+        'SELECT led_color, COUNT(*) as c FROM tracks WHERE album_id=? AND led_color IS NOT NULL GROUP BY led_color',
+        (album_id,)
+    ).fetchall()
+    if not rows:
+        return 'yellow'
+    # Return highest-priority color that exists
+    best = sorted(rows, key=lambda r: priority.get(r['led_color'], -1), reverse=True)
+    return best[0]['led_color']
+
+def track_to_json(t):
+    """Serialize a track Row/dict with all display fields. led_color comes from DB, never recomputed."""
+    d = dict(t)
+    d['file_path']   = clean_db_path(d.get('file_path'))
+    d['cover_path']  = clean_db_path(d.get('cover_path'))
+    d['cover_url']   = cover_url_filter(d['cover_path'])
+    d['audio_url']   = audio_url_filter(d['file_path'])
+    d['duration_fmt'] = _fmt_seconds(d.get('duration'))
+    fmt, led = _fmt_format(d)
+    d['format_display'] = fmt
+    d['format_color']   = led
+    # led_color stays as-is from DB
+    d['bitrate_fmt']     = _fmt_bitrate(d.get('bitrate'))
+    sr = d.get('sample_rate_real')
+    d['sample_rate_fmt'] = f"{sr/1000:.1f} kHz" if sr else "N/A"
+    d['bit_depth_fmt']   = f"{d.get('bit_depth') or 24} bit"
+    return d
+
+# ── Jinja2 filters ────────────────────────────────────────────────────────────
+
+@app.template_filter('format_size')
+def format_size_filter(b):
+    if not b: return "0 B"
+    if b < 1024**2: return f"{b/1024:.1f} KB"
+    if b < 1024**3: return f"{b/1024**2:.2f} MB"
+    return f"{b/1024**3:.2f} GB"
+
+@app.template_filter('format_duration')
+def format_duration_filter(seconds):
+    return _fmt_seconds(seconds)
+
+@app.template_filter('cover_url')
+def cover_url_filter(cover_path):
+    if not cover_path: return ''
+    path = clean_db_path(cover_path).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if path.startswith(root + '/'):
+        path = path[len(root)+1:]
+    elif path.startswith(root):
+        path = path[len(root):]
+    # Encode each segment so special chars like # don't break URLs
+    encoded = '/'.join(quote(seg, safe='') for seg in path.split('/'))
+    return f"/cover/{encoded}"
+
+@app.template_filter('audio_url')
+def audio_url_filter(file_path):
+    if not file_path: return ''
+    path = clean_db_path(file_path).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if path.startswith(root + '/'):
+        path = path[len(root)+1:]
+    elif path.startswith(root):
+        path = path[len(root):]
+    # Encode each segment so special chars like # don't break URLs
+    encoded = '/'.join(quote(seg, safe='') for seg in path.split('/'))
+    # DSD files (DSF/DFF) must be transcoded on the fly — browsers can't play raw DSD
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in ('.dsf', '.dff'):
+        return f"/stream-dsd/{encoded}"
+    return f"/audio/{encoded}"
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.route('/sw.js')
+def service_worker():
+    """Serve SW from root so it controls the entire app scope."""
+    from flask import send_from_directory
+    resp = send_from_directory(app.static_folder, 'sw.js', mimetype='application/javascript')
+    resp.headers['Service-Worker-Allowed'] = '/'
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+@app.route('/')
+def home():
+    conn = get_db_connection()
+    try:
+        total_artists  = conn.execute('SELECT COUNT(*) FROM artists a WHERE EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=a.id)').fetchone()[0]
+        total_albums   = conn.execute('SELECT COUNT(*) FROM albums').fetchone()[0]
+        total_tracks   = conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0]
+        total_duration = conn.execute('SELECT COALESCE(SUM(duration),0) FROM tracks').fetchone()[0]
+        total_size     = conn.execute('SELECT COALESCE(SUM(file_size),0) FROM tracks').fetchone()[0]
+
+        # LED breakdown — direct from DB field, no computation
+        led_rows = conn.execute(
+            'SELECT led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY led_color ORDER BY c DESC'
+        ).fetchall()
+        led_counts = {r['led_color']: r['c'] for r in led_rows}
+
+        # Genre breakdown (top 8)
+        genre_rows = conn.execute(
+            'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" GROUP BY genre ORDER BY c DESC LIMIT 8'
+        ).fetchall()
+        genres = [(r['genre'], r['c']) for r in genre_rows]
+
+        # Recently added albums
+        recent_albums_raw = conn.execute('''
+            SELECT al.id, al.name, al.cover_path, al.year, al.track_count, al.total_duration,
+                   al.artist_id, al.primary_format, ar.name as artist_name
+            FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
+            ORDER BY al.created_at DESC LIMIT 20
+        ''').fetchall()
+        recent_albums = []
+        for a in recent_albums_raw:
+            d = {**dict(a), 'cover_path': clean_db_path(a['cover_path'])}
+            led = conn.execute(
+                """SELECT led_color FROM tracks WHERE album_id=?
+                   ORDER BY CASE led_color
+                     WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                     WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                     ELSE 6 END LIMIT 1""",
+                (a['id'],)
+            ).fetchone()
+            d['album_led'] = led['led_color'] if led else 'yellow'
+            recent_albums.append(d)
+
+        # ── RichMetaPro data ──────────────────────────────────────────────────
+        mood_rows = conn.execute(
+            'SELECT mood, COUNT(*) as c FROM track_meta WHERE mood IS NOT NULL GROUP BY mood ORDER BY c DESC LIMIT 14'
+        ).fetchall()
+        moods = [(r['mood'], r['c']) for r in mood_rows]
+
+        momento_rows = conn.execute(
+            'SELECT momento, COUNT(*) as c FROM track_meta WHERE momento IS NOT NULL GROUP BY momento ORDER BY c DESC'
+        ).fetchall()
+        momentos = [(r['momento'], r['c']) for r in momento_rows]
+
+        era_order = [
+            'early_rock_era', 'british_invasion_era', 'classic_rock_era',
+            'nwobhm_synth_era', 'grunge_alternative_era', 'post_millennial_era',
+            'streaming_era', 'current_era'
+        ]
+        era_raw  = conn.execute('SELECT era, COUNT(*) as c FROM track_meta WHERE era IS NOT NULL GROUP BY era').fetchall()
+        era_dict = {r['era']: r['c'] for r in era_raw}
+        eras = [(e, era_dict[e]) for e in era_order if e in era_dict]
+
+        tema_rows = conn.execute(
+            'SELECT tema_lirico, COUNT(*) as c FROM track_meta WHERE tema_lirico IS NOT NULL GROUP BY tema_lirico ORDER BY c DESC LIMIT 10'
+        ).fetchall()
+        temas = [(r['tema_lirico'], r['c']) for r in tema_rows]
+
+        tier_rows = conn.execute(
+            'SELECT tier, COUNT(*) as c FROM track_meta WHERE tier IS NOT NULL GROUP BY tier ORDER BY c DESC'
+        ).fetchall()
+        tiers = {r['tier']: r['c'] for r in tier_rows}
+
+        lrc = conn.execute('SELECT SUM(has_lyrics) as wl, SUM(has_synced_lrc) as syn FROM track_meta').fetchone()
+        lyrics_stats = {'with_lyrics': lrc['wl'] or 0, 'synced': lrc['syn'] or 0}
+
+        # Language (idioma) breakdown from track_meta
+        lang_rows = conn.execute(
+            'SELECT idioma, COUNT(*) as c FROM track_meta WHERE idioma IS NOT NULL AND idioma!="" GROUP BY idioma ORDER BY c DESC LIMIT 12'
+        ).fetchall()
+        languages = [(r['idioma'], r['c']) for r in lang_rows]
+
+        # Genre primary breakdown from track_meta (enriched metadata)
+        genre_primary_rows = conn.execute(
+            'SELECT genre_primary, COUNT(*) as c FROM track_meta WHERE genre_primary IS NOT NULL AND genre_primary!="" GROUP BY genre_primary ORDER BY c DESC LIMIT 15'
+        ).fetchall()
+        genres_primary = [(r['genre_primary'], r['c']) for r in genre_primary_rows]
+
+        # Max era count for proportional bars
+        max_era_count = max((c for _, c in eras), default=1)
+
+        # All genres for extended selector (sorted by count desc)
+        all_genre_rows = conn.execute(
+            'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" GROUP BY genre ORDER BY c DESC'
+        ).fetchall()
+        all_genres = [(r['genre'], r['c']) for r in all_genre_rows]
+
+        return render_template('home.html',
+            total_artists=total_artists, total_albums=total_albums,
+            total_tracks=total_tracks,
+            duration_hours=total_duration / 3600,
+            size_tb=total_size / (1024**4),
+            led_counts=led_counts,
+            led_order=LED_ORDER, led_labels=LED_LABELS,
+            genres=genres, all_genres=all_genres,
+            genres_primary=genres_primary,
+            languages=languages,
+            recent_albums=recent_albums,
+            moods=moods, momentos=momentos, eras=eras,
+            max_era_count=max_era_count,
+            temas=temas, tiers=tiers, lyrics_stats=lyrics_stats)
+    finally:
+        conn.close()
+
+
+@app.route('/letter/<letter>')
+def letter(letter):
+    conn = get_db_connection()
+    try:
+        artists = conn.execute('''
+            SELECT
+              a.id, a.name, a.nationality,
+              a.lastfm_listeners, a.lastfm_playcount,
+              COUNT(DISTINCT al.id)                        AS album_count,
+              COALESCE(MAX(apc.pop_score), 0)              AS pop_score,
+              (SELECT t.genre
+               FROM tracks t JOIN albums al2 ON t.album_id=al2.id
+               WHERE al2.artist_id=a.id AND t.genre IS NOT NULL AND t.genre != ""
+               GROUP BY t.genre ORDER BY COUNT(*) DESC LIMIT 1)  AS most_common_genre
+            FROM artists a
+            INNER JOIN albums al  ON al.artist_id = a.id
+            LEFT  JOIN album_pop_cache apc ON apc.album_id = al.id
+            WHERE a.letter = ?
+            GROUP BY a.id
+            HAVING album_count > 0
+            ORDER BY a.name
+        ''', (letter,)).fetchall()
+        return render_template('letter.html', artists=[dict(r) for r in artists], letter=letter)
+    finally:
+        conn.close()
+
+
+@app.route('/artist/<int:artist_id>')
+def artist(artist_id):
+    conn = get_db_connection()
+    try:
+        ar = conn.execute('SELECT * FROM artists WHERE id=?', (artist_id,)).fetchone()
+        if not ar: return "Artist not found", 404
+        # albums already have track_count and total_duration pre-computed
+        albums_raw = conn.execute(
+            'SELECT *, artist_id FROM albums WHERE artist_id=? ORDER BY year, name', (artist_id,)
+        ).fetchall()
+        total_tracks = sum(a['track_count'] or 0 for a in albums_raw)
+
+        # Enrich each album with dominant led_color from its tracks
+        albums = []
+        for a in albums_raw:
+            d = dict(a)
+            d['cover_path'] = clean_db_path(d.get('cover_path'))
+            # Dominant led_color: highest-quality color that appears most
+            led_row = conn.execute(
+                '''SELECT led_color FROM tracks
+                   WHERE album_id=? AND led_color IS NOT NULL
+                   GROUP BY led_color
+                   ORDER BY CASE led_color
+                     WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                     WHEN 'red'     THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                     ELSE 6 END
+                   LIMIT 1''',
+                (a['id'],)
+            ).fetchone()
+            d['album_led'] = led_row['led_color'] if led_row else 'yellow'
+            albums.append(d)
+
+        ar_data = dict(ar)
+        ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
+
+        # Dominant genre across artist's tracks
+        genre_row = conn.execute('''
+            SELECT COALESCE(tm.genre_primary, t.genre) as g, COUNT(*) as c
+            FROM tracks t
+            JOIN albums al ON al.id=t.album_id
+            LEFT JOIN track_meta tm ON tm.track_id=t.id
+            WHERE al.artist_id=?
+              AND COALESCE(tm.genre_primary, t.genre) IS NOT NULL
+              AND COALESCE(tm.genre_primary, t.genre) != ''
+            GROUP BY g ORDER BY c DESC LIMIT 5
+        ''', (artist_id,)).fetchall()
+        genres = [r['g'] for r in genre_row]
+
+        # Similar artists from JSON field
+        similar_artists = []
+        if ar_data.get('similar_artists_json'):
+            try:
+                similar_raw = json.loads(ar_data['similar_artists_json'])
+                for s in (similar_raw[:6] if isinstance(similar_raw, list) else []):
+                    name = s.get('name') or s if isinstance(s, str) else ''
+                    if name:
+                        # Check if they exist in our library
+                        existing = conn.execute(
+                            'SELECT id FROM artists WHERE LOWER(name)=LOWER(?)', (name,)
+                        ).fetchone()
+                        similar_artists.append({
+                            'name': name,
+                            'id': existing['id'] if existing else None
+                        })
+            except Exception:
+                pass
+
+        return render_template('artist.html', artist=ar_data, albums=albums,
+                               total_tracks=total_tracks, fav_ids=_favorites_set,
+                               genres=genres, similar_artists=similar_artists,
+                               artist_nationality=ar_data.get('nationality', ''))
+    finally:
+        conn.close()
+
+
+@app.route('/api/artist/<int:artist_id>/website')
+def api_artist_website(artist_id):
+    """Return (and cache) the official website URL for an artist via MusicBrainz."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            'SELECT name, website_url FROM artists WHERE id=?', (artist_id,)
+        ).fetchone()
+        if not row:
+            return jsonify({'url': None})
+
+        # Return cached value if present
+        if row['website_url']:
+            # '-' means "looked up, nothing found" — don't retry
+            return jsonify({'url': None if row['website_url'] == '-' else row['website_url']})
+
+        # MusicBrainz search — no auth required, rate limit is 1 req/s
+        import urllib.request, urllib.parse
+        query = urllib.parse.quote(row['name'])
+        mb_url = (
+            f'https://musicbrainz.org/ws/2/artist/?query=artist:"{query}"'
+            f'&limit=1&fmt=json'
+        )
+        req = urllib.request.Request(mb_url, headers={
+            'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
+        })
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read())
+
+        artists_mb = data.get('artists', [])
+        official_url = None
+        if artists_mb:
+            mbid = artists_mb[0].get('id', '')
+            if mbid:
+                rel_url = f'https://musicbrainz.org/ws/2/artist/{mbid}?inc=url-rels&fmt=json'
+                rel_req = urllib.request.Request(rel_url, headers={
+                    'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
+                })
+                with urllib.request.urlopen(rel_req, timeout=4) as rr:
+                    rdata = json.loads(rr.read())
+                for rel in rdata.get('relations', []):
+                    if rel.get('type') in ('official homepage', 'streaming', 'social network'):
+                        if rel.get('type') == 'official homepage':
+                            official_url = rel.get('url', {}).get('resource')
+                            break
+                        elif not official_url:
+                            official_url = rel.get('url', {}).get('resource')
+
+        # Store sentinel '-' when no URL found, to avoid re-querying MusicBrainz on every visit
+        store_val = official_url if official_url else '-'
+        conn.execute(
+            'UPDATE artists SET website_url=? WHERE id=?', (store_val, artist_id)
+        )
+        conn.commit()
+
+        return jsonify({'url': official_url})
+    except Exception as e:
+        app.logger.debug(f'[website lookup] artist {artist_id}: {e}')
+        return jsonify({'url': None})
+    finally:
+        conn.close()
+
+
+@app.route('/album/<int:album_id>')
+def album(album_id):
+    conn = get_db_connection()
+    try:
+        alb = conn.execute(
+            'SELECT al.*, ar.name as artist_name FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id WHERE al.id=?',
+            (album_id,)
+        ).fetchone()
+        if not alb: return "Album not found", 404
+
+        tracks = conn.execute(
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            (album_id,)
+        ).fetchall()
+
+        alb = dict(alb)
+        alb['cover_path'] = clean_db_path(alb.get('cover_path'))
+
+        fp = conn.execute(
+            'SELECT publisher FROM tracks WHERE album_id=? AND publisher IS NOT NULL AND publisher!="" LIMIT 1',
+            (album_id,)
+        ).fetchone()
+        alb['publisher'] = fp['publisher'] if fp else None
+
+        am = conn.execute('SELECT * FROM album_meta WHERE album_id=?', (album_id,)).fetchone()
+        # Always include all expected keys so Jinja2 "album_meta.field is not none" never raises
+        _AM_DEFAULTS = {
+            'mood_predominante': None, 'momento_predominante': None, 'era': None,
+            'idioma_principal': None, 'avg_energy': None, 'avg_valence': None,
+            'avg_tension': None, 'avg_depth': None, 'avg_bailabilidad': None,
+            'tracks_con_letra': None, 'tracks_sincronizados': None,
+            'genre_primary': None, 'genre_secondary': None,
+            'lastfm_listeners': None, 'lastfm_playcount': None,
+        }
+        album_meta = {**_AM_DEFAULTS, **(dict(am) if am else {})}
+
+        track_list = []
+        for t in tracks:
+            td = {**dict(t),
+                  'file_path':  clean_db_path(dict(t).get('file_path')),
+                  'cover_path': alb['cover_path']}
+            td['audio_url'] = audio_url_filter(td['file_path'])
+            td['cover_url'] = cover_url_filter(td['cover_path'])
+            fmt, led = _fmt_format(td)
+            td['format_display'] = fmt
+            td['format_color']   = led
+            # led_color stays as-is from DB
+            tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (t['id'],)).fetchone()
+            if tm:
+                for k in tm.keys():
+                    if k != 'track_id':
+                        td[f'meta_{k}'] = tm[k]
+            track_list.append(td)
+
+        disc_numbers = set(t['disc_number'] for t in track_list if t['disc_number'])
+        total_discs  = len(disc_numbers) if disc_numbers else 1
+
+        # Issue 10: genre fallback — use most common track genre if album_meta lacks it
+        if not album_meta.get('genre_primary'):
+            row = conn.execute(
+                '''SELECT COALESCE(tm.genre_primary, t.genre) as g, COUNT(*) as c
+                   FROM tracks t LEFT JOIN track_meta tm ON tm.track_id=t.id
+                   WHERE t.album_id=? AND COALESCE(tm.genre_primary, t.genre) IS NOT NULL
+                   GROUP BY g ORDER BY c DESC LIMIT 1''',
+                (album_id,)
+            ).fetchone()
+            if row:
+                album_meta['genre_primary'] = row['g']
+
+        # Issue 11: artist nationality + flag
+        artist_row = conn.execute(
+            'SELECT nationality, similar_artists_json FROM artists WHERE id=?',
+            (alb.get('artist_id'),)
+        ).fetchone()
+        artist_nationality = ''
+        artist_flag        = ''
+        if artist_row and artist_row['nationality']:
+            artist_nationality = artist_row['nationality']
+            artist_flag        = nationality_flag(artist_nationality)
+
+        # Favorites set for this page
+        fav_ids = _favorites_set
+
+        return render_template('album.html', album=alb, tracks=track_list,
+                               primary_format=alb.get('primary_format') or 'Unknown',
+                               total_discs=total_discs, multi_disc=total_discs > 1,
+                               album_meta=album_meta,
+                               artist_nationality=artist_nationality,
+                               artist_flag=artist_flag,
+                               fav_ids=fav_ids)
+    finally:
+        conn.close()
+
+
+@app.route('/track/<int:track_id>')
+def track(track_id):
+    conn = get_db_connection()
+    try:
+        t = conn.execute('''
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            FROM tracks t
+            LEFT JOIN albums a ON t.album_id=a.id
+            LEFT JOIN artists ar ON a.artist_id=ar.id
+            WHERE t.id=?
+        ''', (track_id,)).fetchone()
+        if not t: return "Track not found", 404
+        t = dict(t)
+        t['file_path']  = clean_db_path(t.get('file_path'))
+        t['cover_path'] = clean_db_path(t.get('cover_path'))
+        t['publisher']  = clean_db_path(t.get('publisher'))
+        fmt, led = _fmt_format(t)
+        # led_color already in t from DB
+        sr = t.get('sample_rate_real')
+        tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (track_id,)).fetchone()
+        track_meta = dict(tm) if tm else {}
+        pop_row = conn.execute(
+            'SELECT pop_score FROM track_pop_cache WHERE track_id=?', (track_id,)
+        ).fetchone()
+        track_pop_score = int(pop_row['pop_score']) if pop_row else 0
+        return render_template('track.html', track=t,
+                               format_display=fmt, format_color=led,
+                               sample_rate=f"{sr/1000:.1f} kHz" if sr else "N/A",
+                               bit_depth=f"{t.get('bit_depth') or 24} bit",
+                               bitrate_fmt=_fmt_bitrate(t.get('bitrate')),
+                               track_meta=track_meta,
+                               track_pop_score=track_pop_score,
+                               led_labels=LED_LABELS)
+    finally:
+        conn.close()
+
+
+@app.route('/search')
+def search():
+    query = request.args.get('q', '').strip()
+    if not query: return home()
+    conn = get_db_connection()
+    try:
+        like = f'%{query}%'
+        artists = conn.execute(
+            '''SELECT a.id, a.name, a.nationality, a.letter,
+                      COUNT(DISTINCT al.id)                          AS album_count,
+                      COALESCE(MAX(apc.pop_score), 0)                AS pop_score,
+                      (SELECT t.genre FROM tracks t JOIN albums al2 ON t.album_id=al2.id
+                       WHERE al2.artist_id=a.id AND t.genre IS NOT NULL AND t.genre != ""
+                       GROUP BY t.genre ORDER BY COUNT(*) DESC LIMIT 1) AS most_common_genre
+               FROM artists a
+               LEFT JOIN albums al  ON al.artist_id=a.id
+               LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+               WHERE a.name LIKE ?
+                 AND EXISTS (SELECT 1 FROM albums al2 WHERE al2.artist_id=a.id)
+               GROUP BY a.id
+               ORDER BY a.name LIMIT 10''',
+            (like,)
+        ).fetchall()
+        albums = conn.execute(
+            '''SELECT al.id, al.name, al.cover_path, al.year, al.primary_format, ar.name as artist_name
+               FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
+               WHERE al.name LIKE ? OR ar.name LIKE ? ORDER BY al.name LIMIT 20''',
+            (like, like)
+        ).fetchall()
+        tracks = conn.execute(
+            '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa,
+                      t.codec, t.duration, t.sample_rate_real,
+                      a.id as album_id, a.name as album_name, a.cover_path,
+                      tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
+               FROM tracks t
+               LEFT JOIN albums a ON t.album_id=a.id
+               LEFT JOIN track_meta tm ON tm.track_id=t.id
+               WHERE t.title LIKE ? OR t.artist LIKE ? OR t.genre LIKE ?
+               ORDER BY t.title LIMIT 50''',
+            (like, like, like)
+        ).fetchall()
+
+        albums_out = [{**dict(a), 'cover_path': clean_db_path(a['cover_path'])} for a in albums]
+        tracks_out = []
+        for t in tracks:
+            d = dict(t)
+            d['cover_path'] = clean_db_path(d.get('cover_path'))
+            _, led = _fmt_format(d)
+            d['format_color'] = led
+            tracks_out.append(d)
+
+        return render_template('search.html',
+                               artists=[dict(a) for a in artists],
+                               albums=albums_out, tracks=tracks_out, query=query)
+    finally:
+        conn.close()
+
+# ── Pagination helper ──────────────────────────────────────────────────────────
+
+PAGE_SIZE = 48
+
+# ── album_meta field mapping for api_meta_tracks ───────────────────────────────
+# Maps the 'field' param values to their column names in the album_meta table.
+# Fields NOT listed here are queried at track_meta level instead.
+_ALBUM_META_FIELD = {
+    'mood':    'mood_predominante',
+    'momento': 'momento_predominante',
+    'era':     'era',
+    'idioma':  'idioma_principal',
+}
+
+# ── Sort system ───────────────────────────────────────────────────────────────
+# Whitelisted sort columns for albums and tracks (prevents SQL injection)
+
+ALBUM_SORT_MAP = {
+    'nombre':      'al.name',
+    'artista':     'ar.name',
+    'año':         'al.year',
+    'pistas':      'al.track_count',
+    'popularidad': 'COALESCE(apc.pop_score, 0)',   # pre-computed score: quality + tier + metadata
+    'random':      'RANDOM()',
+}
+TRACK_SORT_MAP = {
+    'artista':      't.artist',
+    'titulo':       't.title',
+    'año':          'a.year',
+    'bpm':          'tm.bpm',
+    'energia':      'tm.energy',
+    'bailabilidad': 'tm.bailabilidad',
+    'tier':         "CASE tm.tier WHEN 'silver' THEN 0 WHEN 'bronze' THEN 1 ELSE 2 END",
+    'popularidad':  'COALESCE(tpc.pop_score, 0)',
+    'random':       'RANDOM()',
+    # 'intercalar' is handled client-side, server sends 'random' for it
+}
+
+def _album_order(sort_key, direction):
+    """Return validated ORDER BY clause for album queries."""
+    col = ALBUM_SORT_MAP.get(sort_key, 'al.track_count')
+    if col == 'RANDOM()':
+        return 'RANDOM()'
+    # Popularidad siempre DESC por defecto (más popular primero)
+    if sort_key == 'popularidad' and direction == 'asc':
+        direction = 'desc'
+    dir_ = 'DESC' if direction == 'desc' else 'ASC'
+    return f'{col} {dir_} NULLS LAST'
+
+def _track_order(sort_key, direction):
+    """Return validated ORDER BY clause for track queries."""
+    col = TRACK_SORT_MAP.get(sort_key, 't.artist')
+    if col == 'RANDOM()':
+        return 'RANDOM()'
+    # Popularidad siempre DESC
+    if sort_key == 'popularidad' and direction == 'asc':
+        direction = 'desc'
+    dir_ = 'DESC' if direction == 'desc' else 'ASC'
+    return f'{col} {dir_} NULLS LAST'
+
+def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
+              order_by='al.name ASC'):
+    """Run paginated query with dynamic ORDER BY."""
+    total  = conn.execute(count_sql, count_params).fetchone()[0]
+    offset = (page - 1) * PAGE_SIZE
+    final_sql = data_sql + f' ORDER BY {order_by} LIMIT ? OFFSET ?'
+    rows  = conn.execute(final_sql, list(data_params) + [PAGE_SIZE, offset]).fetchall()
+    albums = []
+    for a in rows:
+        d = dict(a)
+        d['cover_path'] = clean_db_path(d.get('cover_path'))
+        d['album_led']  = d.get('album_led') or 'yellow'
+        albums.append(d)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    return albums, total, total_pages
+
+# ── Format browse ──────────────────────────────────────────────────────────────
+
+@app.route('/format/<fmt>')
+def browse_format(fmt):
+    page  = max(1, request.args.get('page', 1, type=int))
+    sort  = request.args.get('sort', 'popularidad')
+    dir_  = request.args.get('dir',  'desc')
+    conn  = get_db_connection()
+    try:
+        base = '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                         al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
+                         (SELECT led_color FROM tracks WHERE album_id=al.id
+                          ORDER BY CASE led_color
+                            WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                            WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                            ELSE 6 END LIMIT 1) as album_led
+                  FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id'''
+        if fmt == 'DSD':   where = ' WHERE al.primary_format="DSD"'
+        elif fmt == 'MQA':  where = ' WHERE al.primary_format="MQA"'
+        elif fmt == 'FLAC': where = ' WHERE (al.primary_format="FLAC" OR al.primary_format IS NULL)'
+        else:               where = ''
+        order = _album_order(sort, dir_)
+        count_sql = f'SELECT COUNT(*) FROM albums al{where}'
+        albums, total, total_pages = _paginate(conn, count_sql, [], base + where, [], page, order)
+        return render_template('browse.html', albums=albums, title=f"Formato: {fmt}",
+                               filter_type='format', filter_value=fmt,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+# ── LED browse ─────────────────────────────────────────────────────────────────
+
+@app.route('/led/<color>')
+def browse_led(color):
+    if color not in LED_LABELS:
+        return "Unknown LED color", 404
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        count_sql = '''SELECT COUNT(DISTINCT al.id)
+                       FROM albums al JOIN tracks t ON t.album_id=al.id
+                       WHERE t.led_color=?'''
+        data_sql  = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                              al.track_count, al.total_duration, al.artist_id,
+                              ar.name as artist_name, ? as album_led,
+                              COALESCE(apc.pop_score, 0) as pop_score
+                       FROM albums al
+                       JOIN artists ar ON al.artist_id=ar.id
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                       WHERE t.led_color=?'''
+        order = _album_order(sort, dir_)
+        albums, total, total_pages = _paginate(
+            conn, count_sql, [color], data_sql, [color, color], page, order)
+        # Enrich albums with dominant dsd_rate so badges show DSD64/DSD128 correctly
+        if color in ('cyan', 'red'):
+            for alb in albums:
+                row = conn.execute(
+                    """SELECT dsd_rate, sample_rate_real FROM tracks
+                       WHERE album_id=? AND is_dsd=1
+                       ORDER BY sample_rate_real DESC LIMIT 1""",
+                    (alb['id'],)
+                ).fetchone()
+                if row:
+                    alb['primary_format'] = _dsd_label(dict(row))
+        return render_template('browse.html', albums=albums,
+                               title=f"LED {color.capitalize()} — {LED_LABELS[color]}",
+                               filter_type='led', filter_value=color,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+# ── Genre browse ───────────────────────────────────────────────────────────────
+
+@app.route('/genre/<path:genre>')
+def browse_genre(genre):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        # Match by genre_primary in track_meta OR classic genre field in tracks
+        count_sql = '''SELECT COUNT(DISTINCT al.id) FROM albums al
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       WHERE t.genre=? OR tm.genre_primary=?'''
+        data_sql  = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                              al.track_count, al.total_duration, al.artist_id,
+                              ar.name as artist_name, 'yellow' as album_led,
+                              COALESCE(apc.pop_score, 0) as pop_score
+                       FROM albums al
+                       LEFT JOIN artists ar ON al.artist_id=ar.id
+                       LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       WHERE t.genre=? OR tm.genre_primary=?'''
+        order = _album_order(sort, dir_)
+        albums, total, total_pages = _paginate(conn, count_sql, [genre, genre], data_sql, [genre, genre], page, order)
+        return render_template('browse.html', albums=albums, title=f"Género: {genre}",
+                               filter_type='genre', filter_value=genre,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+# ── RichMetaPro browse ─────────────────────────────────────────────────────────
+
+def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad', dir_='desc'):
+    # Map filter field to album_meta predominant column where available
+    _AM_COL = {
+        'mood':    'mood_predominante',
+        'idioma':  'idioma_principal',
+        'momento': 'momento_predominante',
+        'era':     'era',
+    }
+    am_col = _AM_COL.get(field)
+
+    if am_col:
+        # Album-level predominant value — accurate, fast, no DISTINCT needed
+        count_sql = (
+            "SELECT COUNT(al.id) FROM albums al "
+            "JOIN album_meta am ON am.album_id=al.id "
+            "WHERE am.{col}=?".format(col=am_col)
+        )
+        data_sql = (
+            "SELECT al.id, al.name, al.cover_path, al.primary_format, al.year, "
+            "al.track_count, al.total_duration, al.artist_id, "
+            "ar.name as artist_name, "
+            "(SELECT led_color FROM tracks WHERE album_id=al.id "
+            " ORDER BY CASE led_color "
+            "   WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2 "
+            "   WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5 "
+            "   ELSE 6 END LIMIT 1) as album_led, "
+            "COALESCE(apc.pop_score, 0) as pop_score "
+            "FROM albums al "
+            "LEFT JOIN artists ar ON al.artist_id=ar.id "
+            "LEFT JOIN album_pop_cache apc ON apc.album_id=al.id "
+            "JOIN album_meta am ON am.album_id=al.id "
+            "WHERE am.{col}=?".format(col=am_col)
+        )
+    else:
+        # Fallback for tier/tema_lirico: majority of tracks must match (>50%)
+        count_sql = (
+            "SELECT COUNT(*) FROM ("
+            "  SELECT al.id FROM albums al "
+            "  JOIN tracks t ON t.album_id=al.id "
+            "  JOIN track_meta tm ON tm.track_id=t.id "
+            "  WHERE tm.{f}=? "
+            "  GROUP BY al.id "
+            "  HAVING COUNT(*)*2 > (SELECT COUNT(*) FROM tracks t2 WHERE t2.album_id=al.id)"
+            ")".format(f=field)
+        )
+        data_sql = (
+            "SELECT al.id, al.name, al.cover_path, al.primary_format, al.year, "
+            "al.track_count, al.total_duration, al.artist_id, "
+            "ar.name as artist_name, "
+            "(SELECT led_color FROM tracks WHERE album_id=al.id "
+            " ORDER BY CASE led_color "
+            "   WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2 "
+            "   WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5 "
+            "   ELSE 6 END LIMIT 1) as album_led, "
+            "COALESCE(apc.pop_score, 0) as pop_score "
+            "FROM albums al "
+            "LEFT JOIN artists ar ON al.artist_id=ar.id "
+            "LEFT JOIN album_pop_cache apc ON apc.album_id=al.id "
+            "JOIN tracks t ON t.album_id=al.id "
+            "JOIN track_meta tm ON tm.track_id=t.id "
+            "WHERE tm.{f}=? "
+            "GROUP BY al.id "
+            "HAVING COUNT(*)*2 > (SELECT COUNT(*) FROM tracks t2 WHERE t2.album_id=al.id)".format(f=field)
+        )
+    order = _album_order(sort, dir_)
+    return _paginate(conn, count_sql, [value], data_sql, [value], page, order)
+
+
+@app.route('/mood/<path:mood>')
+def browse_mood(mood):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'mood', mood, page, mood, 'mood', sort, dir_)
+        display = MOOD_LABELS.get(mood, mood)
+        return render_template('browse.html', albums=albums, title=f"Mood: {display}",
+                               filter_type='mood', filter_value=mood,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+
+@app.route('/momento/<path:momento>')
+def browse_momento(momento):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'momento', momento, page, momento, 'momento', sort, dir_)
+        momento_labels = {
+            'morning': 'Mañana ☀️', 'evening': 'Tarde 🌅', 'night': 'Noche 🌙',
+            'sleep': 'Para dormir 😴', 'party': 'Fiesta 🎉', 'workout': 'Ejercicio 💪',
+            'focus': 'Concentración 🎯', 'anytime': 'Cualquier momento 🎵',
+        }
+        label = momento_labels.get(momento, momento.capitalize())
+        return render_template('browse.html', albums=albums, title=f"Momento: {label}",
+                               filter_type='momento', filter_value=momento,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+
+@app.route('/era/<path:era>')
+def browse_era(era):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'era', era, page, era, 'era', sort, dir_)
+        era_labels = {
+            'early_rock_era':         'Early Rock (50s–60s)',
+            'british_invasion_era':   'British Invasion (60s)',
+            'classic_rock_era':       'Classic Rock (70s)',
+            'nwobhm_synth_era':       'NWOBHM / Synth (80s)',
+            'grunge_alternative_era': 'Grunge / Alternative (90s)',
+            'post_millennial_era':    'Post-millennial (2000s)',
+            'streaming_era':          'Streaming Era (2010s)',
+            'current_era':            'Actualidad (2020s+)',
+        }
+        label = era_labels.get(era, era.replace('_', ' ').title())
+        return render_template('browse.html', albums=albums, title=f"Era: {label}",
+                               filter_type='era', filter_value=era,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+
+@app.route('/tema/<path:tema>')
+def browse_tema(tema):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'tema_lirico', tema, page, tema, 'tema', sort, dir_)
+        return render_template('browse.html', albums=albums, title=f"Tema lírico: {tema.capitalize()}",
+                               filter_type='tema', filter_value=tema,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+
+@app.route('/tier/<path:tier>')
+def browse_tier(tier):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'tier', tier, page, tier, 'tier', sort, dir_)
+        tier_labels = {'silver': 'Silver ⭐⭐', 'bronze': 'Bronze ⭐', 'review': 'Por revisar 🔍'}
+        label = tier_labels.get(tier, tier.capitalize())
+        return render_template('browse.html', albums=albums, title=f"Tier: {label}",
+                               filter_type='tier', filter_value=tier,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+
+@app.route('/language/<path:lang>')
+def browse_language(lang):
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir',  'desc')
+    conn = get_db_connection()
+    try:
+        albums, total, total_pages = _meta_browse(conn, 'idioma', lang, page, lang, 'language', sort, dir_)
+        lang_labels = {
+            'en': 'Inglés 🇬🇧', 'es': 'Español 🇪🇸', 'de': 'Alemán 🇩🇪',
+            'fr': 'Francés 🇫🇷', 'pt': 'Portugués 🇵🇹', 'it': 'Italiano 🇮🇹',
+            'ja': 'Japonés 🇯🇵', 'ko': 'Coreano 🇰🇷', 'nl': 'Holandés 🇳🇱',
+        }
+        label = lang_labels.get(lang.lower(), lang.upper())
+        return render_template('browse.html', albums=albums, title=f"Idioma: {label}",
+                               filter_type='language', filter_value=lang,
+                               page=page, total_pages=total_pages, total=total,
+                               sort=sort, sort_dir=dir_)
+    finally:
+        conn.close()
+
+# ── JSON API ──────────────────────────────────────────────────────────────────
+
+@app.route('/api/track/<int:track_id>')
+def api_track(track_id):
+    conn = get_db_connection()
+    try:
+        t = conn.execute('''
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            FROM tracks t
+            LEFT JOIN albums a ON t.album_id=a.id
+            LEFT JOIN artists ar ON a.artist_id=ar.id
+            WHERE t.id=?
+        ''', (track_id,)).fetchone()
+        if not t: return jsonify({'error': 'not found'}), 404
+        result = track_to_json(t)
+        tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (track_id,)).fetchone()
+        if tm:
+            for k in tm.keys():
+                if k != 'track_id':
+                    result[f'meta_{k}'] = tm[k]
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/api/album/<int:album_id>/tracks')
+def api_album_tracks(album_id):
+    conn = get_db_connection()
+    try:
+        alb = conn.execute('SELECT cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        album_cover  = clean_db_path(alb['cover_path']) if alb else None
+        album_artist_id = alb['artist_id'] if alb else None
+        tracks = conn.execute(
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            (album_id,)
+        ).fetchall()
+        result = []
+        for t in tracks:
+            d = dict(t)
+            d['file_path']  = clean_db_path(d.get('file_path'))
+            d['cover_path'] = album_cover
+            d['cover_url']  = cover_url_filter(album_cover)
+            d['audio_url']  = audio_url_filter(d['file_path'])
+            fmt, led = _fmt_format(d)
+            d['format_display'] = fmt
+            d['format_color']   = led
+            d['duration_fmt']   = _fmt_seconds(d.get('duration'))
+            d['artist_id']      = album_artist_id   # needed by player for navigation
+            tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (t['id'],)).fetchone()
+            if tm:
+                for k in tm.keys():
+                    if k != 'track_id':
+                        d[f'meta_{k}'] = tm[k]
+            result.append(d)
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+def _read_embedded_lyrics(file_path):
+    """
+    Read SYNCEDLYRICS and LYRICS from any audio file.
+    Uses manual case-insensitive key iteration — mutagen VComment.get() is NOT
+    reliably case-insensitive across all versions and formats.
+    Returns (synced_lrc: str|None, plain_lyrics: str|None).
+    """
+    import sys
+    if not file_path or not os.path.isfile(file_path):
+        return None, None
+    try:
+        from mutagen import File as MFile
+        audio = MFile(file_path, easy=False)
+        if audio is None:
+            print(f"[lyrics] mutagen could not open: {file_path}", file=sys.stderr, flush=True)
+            return None, None
+
+        tags = audio.tags
+        if tags is None:
+            print(f"[lyrics] no tags block in file: {file_path}", file=sys.stderr, flush=True)
+            return None, None
+
+        # Dump ALL tag keys for diagnostics
+        try:
+            all_keys = list(tags.keys())
+            print(f"[lyrics] tags in file: {all_keys}", file=sys.stderr, flush=True)
+        except Exception as ke:
+            print(f"[lyrics] could not list tag keys: {ke}", file=sys.stderr, flush=True)
+            all_keys = []
+
+        synced_tag = None
+        plain_tag  = None
+
+        # Manual case-insensitive iteration — works for VComment, ID3, MP4, etc.
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.flac', '.ogg', '.opus', '.oga'):
+            # VorbisComment: keys() returns original-case strings
+            # values accessed via tags[key] → list of strings
+            for key in tags.keys():
+                k = key.lower().strip()
+                if k == 'syncedlyrics' and synced_tag is None:
+                    vals = tags[key]
+                    synced_tag = vals[0] if isinstance(vals, list) else str(vals)
+                elif k == 'lyrics' and plain_tag is None:
+                    vals = tags[key]
+                    plain_tag = vals[0] if isinstance(vals, list) else str(vals)
+
+        elif ext in ('.mp3', '.dsf'):
+            # ID3: SYLT = Synchronised Lyrics, USLT = Unsynchronised Lyrics.
+            # DSF (DSD Stream File) embeds the SAME ID3 block as MP3 — mutagen
+            # just opens it via a different container class (DSF vs MP3), but
+            # the tag keys (USLT/SYLT) are identical. DFF (DSDIFF) is excluded:
+            # it has no editable tag standard and never reaches this function.
+            for key in tags.keys():
+                if key.startswith('USLT') and plain_tag is None:
+                    v = tags[key]
+                    plain_tag = getattr(v, 'text', str(v))
+                elif key.startswith('SYLT') and synced_tag is None:
+                    v = tags[key]
+                    pairs = getattr(v, 'text', None)
+                    if pairs:
+                        lines = []
+                        for lyric_text, ms in pairs:
+                            m  = ms // 60000
+                            s  = (ms % 60000) // 1000
+                            cs = (ms % 1000) // 10
+                            lines.append(f"[{m:02}:{s:02}.{cs:02}] {lyric_text}")
+                        synced_tag = "\n".join(lines)
+
+        elif ext in ('.m4a', '.aac', '.mp4', '.alac'):
+            # MP4 atoms: ©lyr = lyrics
+            lyr = tags.get('\xa9lyr')
+            if lyr:
+                plain_tag = lyr[0] if isinstance(lyr, list) else str(lyr)
+
+        else:
+            # Generic fallback for WAV, AIFF, DFF etc. (Vorbis-style comments,
+            # used by formats that don't have a dedicated branch above)
+            for key in tags.keys():
+                k = key.lower().strip()
+                if k == 'syncedlyrics' and synced_tag is None:
+                    vals = tags[key]
+                    synced_tag = vals[0] if isinstance(vals, list) else str(vals)
+                elif k == 'lyrics' and plain_tag is None:
+                    vals = tags[key]
+                    plain_tag = vals[0] if isinstance(vals, list) else str(vals)
+
+        if synced_tag:
+            print(f"[lyrics] SYNCEDLYRICS found ({len(synced_tag)} chars)", file=sys.stderr, flush=True)
+        elif plain_tag:
+            print(f"[lyrics] LYRICS found ({len(plain_tag)} chars)", file=sys.stderr, flush=True)
+        else:
+            print(f"[lyrics] neither SYNCEDLYRICS nor LYRICS found among keys: {all_keys}", file=sys.stderr, flush=True)
+
+        return synced_tag, plain_tag
+
+    except ImportError:
+        import sys
+        print("[lyrics] mutagen not installed — pip install mutagen", file=sys.stderr, flush=True)
+    except Exception as e:
+        import sys
+        print(f"[lyrics] mutagen error ({file_path}): {e}", file=sys.stderr, flush=True)
+    return None, None
+
+
+def _get_file_duration(file_path):
+    """
+    Read actual playback duration from audio stream via mutagen.
+    More reliable than DB metadata for lrclib duration matching.
+    """
+    if not file_path or not os.path.isfile(file_path):
+        return None
+    try:
+        from mutagen import File
+        audio = File(file_path)
+        if audio and hasattr(audio, 'info') and hasattr(audio.info, 'length'):
+            return float(audio.info.length)
+    except Exception:
+        pass
+    return None
+
+
+@app.route('/api/lyrics')
+def api_lyrics():
+    artist   = request.args.get('artist',   '').strip()
+    title    = request.args.get('title',    '').strip()
+    track_id = request.args.get('track_id', None, type=int)
+    version  = request.args.get('version',  None)
+
+    import sys
+
+    def _log(msg):
+        print(f"[lyrics] {msg}", file=sys.stderr, flush=True)
+
+    def _empty(msg=''):
+        return jsonify({'has_lyrics': False, 'has_synced': False,
+                        'lyrics': '', 'synced': '', 'alternatives': [], 'error': msg})
+
+    def _ok_file(synced, plain, source):
+        return jsonify({
+            'has_lyrics': bool(synced or plain),
+            'has_synced': bool(synced),
+            'lyrics':     plain  or '',
+            'synced':     synced or '',
+            'alternatives': [],
+            'source': source,
+        })
+
+    def _fmt_lrc(data):
+        return {
+            'id':         data.get('id'),
+            'title':      data.get('trackName',    title),
+            'artist':     data.get('artistName',   artist),
+            'album':      data.get('albumName',    ''),
+            'duration':   data.get('duration',     0),
+            'lyrics':     data.get('plainLyrics',  '') or '',
+            'synced':     data.get('syncedLyrics', '') or '',
+            'has_lyrics': bool(data.get('plainLyrics')),
+            'has_synced': bool(data.get('syncedLyrics')),
+        }
+
+    # ── Resolve file_path and album early (used across multiple steps) ─────────
+    file_path  = None
+    album_name = ''
+    file_dur   = None
+
+    if track_id:
+        try:
+            conn = get_db_connection()
+            row = conn.execute(
+                '''SELECT t.file_path, t.duration, a.name as album_name
+                   FROM tracks t LEFT JOIN albums a ON t.album_id=a.id
+                   WHERE t.id=?''',
+                (track_id,)
+            ).fetchone()
+            conn.close()
+            if row:
+                file_path  = clean_db_path(row['file_path'])
+                album_name = row['album_name'] or ''
+                file_dur   = row['duration']
+        except Exception as e:
+            _log(f"DB resolve error: {e}")
+
+    # ── 1. Embedded file tags (SYNCEDLYRICS / LYRICS Vorbis comment) ──────────
+    if file_path:
+        synced_tag, plain_tag = _read_embedded_lyrics(file_path)
+        if synced_tag:
+            _log(f"SYNCEDLYRICS found in file tags — track_id={track_id}")
+            return _ok_file(synced_tag, plain_tag, 'embedded_tag')
+        elif plain_tag:
+            _log(f"LYRICS found in file tags — track_id={track_id}")
+            return _ok_file(None, plain_tag, 'embedded_tag')
+        else:
+            _log(f"No embedded lyrics in file — track_id={track_id}, path={file_path}")
+
+    # ── 2. Get actual file duration from audio stream (more reliable) ──────────
+    if file_path and file_dur is None:
+        file_dur = _get_file_duration(file_path)
+    elif file_path and file_dur:
+        actual = _get_file_duration(file_path)
+        if actual: file_dur = actual   # prefer stream duration
+
+    # ── 3. lrclib.net direct fetch by stored lrclib_id ────────────────────────
+    if track_id and req_lib:
+        try:
+            conn = get_db_connection()
+            tm = conn.execute(
+                'SELECT lrclib_id, has_lyrics, has_synced_lrc FROM track_meta WHERE track_id=?',
+                (track_id,)
+            ).fetchone()
+            conn.close()
+            if tm and tm['lrclib_id']:
+                _log(f"lrclib direct fetch — id={tm['lrclib_id']}")
+                r = req_lib.get(f"https://lrclib.net/api/get/{tm['lrclib_id']}", timeout=6)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get('plainLyrics') or data.get('syncedLyrics'):
+                        return jsonify({**_fmt_lrc(data), 'alternatives': [], 'source': 'lrclib_id'})
+            else:
+                _log(f"No lrclib_id in track_meta — track_id={track_id}")
+        except Exception as e:
+            _log(f"lrclib direct fetch error: {e}")
+
+    if not artist or not title:
+        return _empty('artist and title required')
+    if not req_lib:
+        return _empty('requests library not available')
+
+    # ── 4. lrclib.net version override ────────────────────────────────────────
+    try:
+        from urllib.parse import quote
+
+        if version:
+            r = req_lib.get(f"https://lrclib.net/api/get/{version}", timeout=6)
+            if r.status_code == 200:
+                return jsonify({**_fmt_lrc(r.json()), 'alternatives': []})
+
+        # ── 5. lrclib.net search — scored by duration + synced + name match ───
+        # Strategy: try album+artist+title first, then artist+title, then title alone
+        def _search(q):
+            try:
+                r = req_lib.get(
+                    f"https://lrclib.net/api/search?q={quote(q)}",
+                    timeout=6
+                )
+                return r.json() if r.status_code == 200 and isinstance(r.json(), list) else []
+            except Exception:
+                return []
+
+        def _score(item):
+            pts = 0
+            # Synced lyrics are strongly preferred
+            if item.get('syncedLyrics'): pts += 20
+            # Duration match (using actual file duration)
+            if file_dur and item.get('duration'):
+                diff = abs(float(item['duration']) - file_dur)
+                if diff < 2:   pts += 15
+                elif diff < 5: pts += 8
+                elif diff < 15: pts += 2
+            # Title match
+            if title.lower() in (item.get('trackName', '') or '').lower(): pts += 6
+            # Artist match
+            if artist.lower() in (item.get('artistName', '') or '').lower(): pts += 5
+            # Album match
+            if album_name and album_name.lower() in (item.get('albumName', '') or '').lower(): pts += 4
+            return pts
+
+        candidates = []
+
+        # Search 1: album + artist + title (most specific)
+        if album_name:
+            q1 = f"{artist} {album_name} {title}"
+            candidates = _search(q1)
+            _log(f"lrclib search 1 '{q1[:60]}': {len(candidates)} results")
+
+        # Search 2: artist + title (fallback)
+        if not any(_score(c) >= 25 for c in candidates):
+            q2 = f"{artist} {title}"
+            more = _search(q2)
+            _log(f"lrclib search 2 '{q2[:60]}': {len(more)} results")
+            # Merge without duplicates
+            seen_ids = {c.get('id') for c in candidates}
+            candidates += [m for m in more if m.get('id') not in seen_ids]
+
+        if candidates:
+            candidates.sort(key=_score, reverse=True)
+            best = candidates[0]
+            top_score = _score(best)
+            _log(f"lrclib best: '{best.get('trackName')}' score={top_score} synced={bool(best.get('syncedLyrics'))}")
+            alts = [
+                {'id': x.get('id'), 'title': x.get('trackName', ''),
+                 'artist': x.get('artistName', ''), 'album': x.get('albumName', ''),
+                 'has_synced': bool(x.get('syncedLyrics')), 'duration': x.get('duration', 0)}
+                for x in candidates[:8]
+            ]
+            return jsonify({**_fmt_lrc(best), 'alternatives': alts, 'source': 'lrclib_search'})
+
+        _log(f"No lyrics found for artist='{artist}' title='{title}'")
+        return _empty()
+
+    except Exception as e:
+        _log(f"Unexpected error: {e}")
+        return _empty(str(e))
+
+
+@app.route('/api/meta/tracks')
+def api_meta_tracks():
+    field      = request.args.get('field',      '').strip()
+    value      = request.args.get('value',      '').strip()
+    page       = max(1, request.args.get('page', 1, type=int))
+    sort       = request.args.get('sort',       'popularidad')
+    dir_       = request.args.get('dir',        'desc')
+    intercalar = request.args.get('intercalar', '0') == '1'
+
+    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma'}
+    if field not in ALLOWED_FIELDS or not value:
+        return jsonify({'error': 'invalid field or value'}), 400
+
+    conn = get_db_connection()
+    try:
+        # Use album-level filter for mood/era/idioma/momento (same logic as album browse)
+        album_meta_col = _ALBUM_META_FIELD.get(field)
+        if album_meta_col:
+            count = conn.execute(f'''
+                SELECT COUNT(*) FROM tracks t
+                JOIN album_meta am ON am.album_id=t.album_id
+                WHERE am.{album_meta_col}=?
+            ''', (value,)).fetchone()[0]
+        else:
+            count = conn.execute(
+                f'SELECT COUNT(*) FROM track_meta WHERE {field}=?', (value,)
+            ).fetchone()[0]
+
+        # For intercalar mode: fetch a larger batch (up to 500) with random ordering
+        # client will do round-robin by artist
+        if intercalar:
+            limit  = min(500, count)
+            offset = 0
+            order  = 'RANDOM()'
+        else:
+            limit  = PAGE_SIZE
+            offset = (page - 1) * PAGE_SIZE
+            order  = _track_order(sort, dir_)
+
+        # Build the WHERE clause based on album-level or track-level filter
+        if album_meta_col:
+            where_clause = f'am.{album_meta_col}=?'
+            extra_join   = 'JOIN album_meta am ON am.album_id=t.album_id'
+        else:
+            where_clause = f'tm.{field}=?'
+            extra_join   = ''
+
+        rows = conn.execute(f'''
+            SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa, t.codec,
+                   t.duration, t.track_number, t.file_path,
+                   a.id as album_id, a.name as album_name, a.cover_path, a.year as album_year,
+                   ar.name as artist_name,
+                   tm.mood, tm.momento, tm.tier, tm.bpm, tm.tonalidad,
+                   tm.energy, tm.bailabilidad, tm.lrclib_id, tm.has_lyrics, tm.has_synced_lrc,
+                   tm.tema_lirico, tm.idioma, tm.genre_primary,
+                   COALESCE(tpc.pop_score, 0) as pop_score
+            FROM tracks t
+            LEFT JOIN track_meta tm ON tm.track_id=t.id
+            LEFT JOIN albums a ON a.id=t.album_id
+            LEFT JOIN artists ar ON ar.id=a.artist_id
+            LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+            {extra_join}
+            WHERE {where_clause}
+            ORDER BY {order}
+            LIMIT ? OFFSET ?
+        ''', (value, limit, offset)).fetchall()
+
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['cover_path'] = clean_db_path(d.get('cover_path'))
+            d['cover_url']  = cover_url_filter(d['cover_path'])
+            d['file_path']  = clean_db_path(d.get('file_path'))
+            d['audio_url']  = audio_url_filter(d['file_path'])
+            fmt, _ = _fmt_format(d)
+            d['format_display'] = fmt
+            d['duration_fmt']   = _fmt_seconds(d.get('duration'))
+            result.append(d)
+
+        total_pages = 1 if intercalar else max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
+        return jsonify({
+            'tracks':      result,
+            'total':       count,
+            'page':        page,
+            'total_pages': total_pages,
+            'intercalar':  intercalar,
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/debug/tags/<int:track_id>')
+def api_debug_tags(track_id):
+    """Return all mutagen tags for a track — for diagnosing embedded lyrics."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT file_path, title, artist FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'track not found'}), 404
+
+    file_path = clean_db_path(row['file_path'])
+    result = {
+        'track_id':  track_id,
+        'title':     row['title'],
+        'artist':    row['artist'],
+        'file_path': file_path,
+        'file_exists': os.path.isfile(file_path),
+        'tags': {},
+        'has_syncedlyrics': False,
+        'has_lyrics': False,
+        'syncedlyrics_len': 0,
+        'error': None,
+    }
+    if not result['file_exists']:
+        result['error'] = 'File not found on disk'
+        return jsonify(result)
+    try:
+        from mutagen import File as MFile
+        audio = MFile(file_path, easy=False)
+        if audio is None:
+            result['error'] = 'mutagen could not open file'
+            return jsonify(result)
+        if audio.tags is None:
+            result['error'] = 'No tags block in file'
+            return jsonify(result)
+        # Collect all tags (truncate large values for display)
+        for key in audio.tags.keys():
+            try:
+                vals = audio.tags[key]
+                v = vals[0] if isinstance(vals, list) else str(vals)
+                k_lower = key.lower().strip()
+                # Vorbis-style (FLAC/OGG): 'syncedlyrics' / 'lyrics'
+                # ID3-style (MP3/DSF):    'SYLT...'      / 'USLT...'
+                is_synced_key = (k_lower == 'syncedlyrics') or key.startswith('SYLT')
+                is_plain_key  = (k_lower == 'lyrics')       or key.startswith('USLT')
+                if is_synced_key or is_plain_key:
+                    result['tags'][key] = f"[{len(str(v))} chars — first 200: {str(v)[:200]}]"
+                else:
+                    result['tags'][key] = str(v)[:300]
+                if is_synced_key:
+                    result['has_syncedlyrics'] = True
+                    result['syncedlyrics_len'] = len(str(v))
+                if is_plain_key:
+                    result['has_lyrics'] = True
+            except Exception as ke:
+                result['tags'][key] = f'[error reading: {ke}]'
+    except ImportError:
+        result['error'] = 'mutagen not installed'
+    except Exception as e:
+        result['error'] = str(e)
+    return jsonify(result)
+
+
+def api_health():
+    root_ok  = os.path.isdir(MUSIC_ROOT)
+    root_contents = []
+    if root_ok:
+        try: root_contents = sorted(os.listdir(MUSIC_ROOT))[:10]
+        except: pass
+    db_ok = False
+    track_count = 0
+    try:
+        c = get_db_connection()
+        track_count = c.execute('SELECT COUNT(*) FROM tracks').fetchone()[0]
+        c.close()
+        db_ok = True
+    except: pass
+    return jsonify({
+        'music_root':     MUSIC_ROOT,
+        'music_root_ok':  root_ok,
+        'music_root_top': root_contents,
+        'db_ok':          db_ok,
+        'track_count':    track_count,
+    })
+
+@app.route('/api/outputs')
+def api_outputs():
+    try:
+        result = subprocess.run(['mpc', 'outputs'], capture_output=True, text=True, timeout=3)
+        outputs = []
+        for line in result.stdout.strip().split('\n'):
+            if 'Output' in line:
+                parts = line.split()
+                enabled = 'enabled' in line
+                name = ' '.join(parts[1:-2]) if len(parts) > 3 else (parts[1] if len(parts) > 1 else 'Output')
+                try: idx = int(parts[0].replace('Output','').strip())
+                except: idx = 1
+                outputs.append({'id': idx, 'name': name, 'enabled': enabled})
+        return jsonify(outputs)
+    except Exception:
+        return jsonify([{'id': 1, 'name': 'Default Output', 'enabled': True}])
+
+
+@app.route('/api/output/toggle', methods=['POST'])
+def api_output_toggle():
+    data = request.get_json() or {}
+    try:
+        cmd = 'enable' if data.get('enable', True) else 'disable'
+        result = subprocess.run(
+            ['mpc', 'output', cmd, str(data.get('id', 1))],
+            capture_output=True, timeout=3
+        )
+        if result.returncode == 0:
+            return jsonify({'status': 'ok'})
+        err = result.stderr.decode(errors='replace').strip()
+        return jsonify({'status': 'error', 'message': err or 'mpc failed'}), 200
+    except FileNotFoundError:
+        return jsonify({'status': 'error', 'message': 'mpc not installed'}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 200
+
+# ── Files / MPD ───────────────────────────────────────────────────────────────
+
+@app.route('/audio/<path:filepath>')
+def audio_file(filepath):
+    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
+
+    # Try exact path
+    if os.path.isfile(absolute_path):
+        return _serve_audio(absolute_path)
+
+    # Try with different audio extensions (flac → dsf, wav, etc.)
+    base, ext = os.path.splitext(absolute_path)
+    for alt_ext in ('.flac', '.dsf', '.dff', '.wav', '.aiff', '.mp3', '.m4a'):
+        if alt_ext != ext.lower():
+            alt = base + alt_ext
+            if os.path.isfile(alt):
+                return _serve_audio(alt)
+
+    # Log for diagnostics
+    app.logger.warning(f"Audio 404: {absolute_path}")
+    return "File not found", 404
+
+
+def _serve_audio(absolute_path):
+    file_size = os.path.getsize(absolute_path)
+    rh = request.headers.get('Range')
+    if rh:
+        start, end = parse_range_header(rh, file_size)
+        end = end if end is not None else file_size - 1
+        length = end - start + 1
+        with open(absolute_path, 'rb') as f:
+            f.seek(start)
+            data = f.read(length)
+        mime, _ = mimetypes.guess_type(absolute_path)
+        resp = Response(data, status=206, mimetype=mime or 'application/octet-stream')
+        resp.headers['Content-Range']  = f'bytes {start}-{end}/{file_size}'
+        resp.headers['Accept-Ranges']  = 'bytes'
+        resp.headers['Content-Length'] = length
+        return resp
+    return send_file(absolute_path, conditional=True)
+
+def parse_range_header(rh, file_size):
+    if not rh.startswith('bytes='): return (0, None)
+    parts = rh[6:].split('-')
+    start = int(parts[0])
+    end   = int(parts[1]) if len(parts) == 2 and parts[1] else file_size - 1
+    return (start, end)
+
+COVER_NAMES = [
+    'Cover.jpg','cover.jpg','folder.jpg','Folder.jpg',
+    'Front.jpg','front.jpg','AlbumArt.jpg','albumart.jpg',
+    'Artwork.jpg','artwork.jpg','Art.jpg','art.jpg',
+    'Cover.png','cover.png','Cover.webp','cover.webp',
+    'thumb.jpg','Thumb.jpg','back.jpg','Back.jpg',
+]
+
+@app.route('/cover/<path:filepath>')
+def cover_file(filepath):
+    # Try exact path first
+    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
+    if os.path.isfile(absolute_path):
+        mime, _ = mimetypes.guess_type(absolute_path)
+        return send_file(absolute_path, mimetype=mime or 'image/jpeg', max_age=86400)
+
+    # Fallback: try common cover filenames in same directory
+    directory = os.path.dirname(absolute_path)
+    if os.path.isdir(directory):
+        for name in COVER_NAMES:
+            alt = os.path.join(directory, name)
+            if os.path.isfile(alt):
+                mime, _ = mimetypes.guess_type(alt)
+                return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+        # Last resort: first image file found in directory
+        try:
+            for fname in sorted(os.listdir(directory)):
+                if fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
+                    alt = os.path.join(directory, fname)
+                    if os.path.isfile(alt):
+                        mime, _ = mimetypes.guess_type(alt)
+                        return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+        except PermissionError:
+            pass
+
+    # Try parent directory (multi-disc albums store cover one level up)
+    parent = os.path.dirname(directory)
+    if parent != directory and os.path.isdir(parent):
+        for name in COVER_NAMES:
+            alt = os.path.join(parent, name)
+            if os.path.isfile(alt):
+                mime, _ = mimetypes.guess_type(alt)
+                return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+
+    return "Cover not found", 404
+
+# ── MPD helpers ───────────────────────────────────────────────────────────────
+
+MPD_HOST = os.environ.get('MPD_HOST', 'localhost')
+MPD_PORT = int(os.environ.get('MPD_PORT', 6600))
+MPD_PASSWORD = os.environ.get('MPD_PASSWORD', None)
+
+def _mpd_connect():
+    """Return a connected MPDClient or raise ConnectionRefusedError."""
+    client = _MPDClient()
+    client.timeout = 5
+    client.connect(MPD_HOST, MPD_PORT)
+    if MPD_PASSWORD:
+        client.password(MPD_PASSWORD)
+    return client
+
+def _to_mpd_relative(filepath):
+    """Strip MUSIC_ROOT prefix to get the path relative to MPD's music_directory."""
+    p = clean_db_path(filepath or '').strip()
+    if p.startswith(MUSIC_ROOT):
+        return p[len(MUSIC_ROOT):].lstrip('/')
+    p = p.lstrip('/')
+    for prefix in ('mnt/musica/', 'mnt/musica'):
+        if p.startswith(prefix):
+            return p[len(prefix):].lstrip('/')
+    return p
+
+@app.route('/play-mpd', methods=['POST'])
+@app.route('/play-dsd', methods=['POST'])
+def play_mpd():
+    """
+    Send a track to MPD for native hardware DSD playback.
+    Uses python-mpd2 (socket protocol) for reliability.
+    Falls back to mpc CLI if python-mpd2 is unavailable.
+    Returns JSON so the client can decide whether to show/hide the MPD badge.
+    """
+    data     = request.get_json() or {}
+    filepath = clean_db_path(data.get('path', ''))
+    if not filepath:
+        return jsonify({'status': 'error', 'message': 'No path provided'}), 400
+
+    relative = _to_mpd_relative(filepath)
+    app.logger.debug(f"[MPD] relative path: {relative!r}")
+
+    # ── Strategy 1: python-mpd2 via socket ────────────────────────────────────
+    if _MPD_AVAILABLE:
+        try:
+            client = _mpd_connect()
+            try:
+                client.clear()
+                client.add(relative)
+                client.play(0)
+                status = client.status()
+                return jsonify({
+                    'status':  'ok',
+                    'message': 'Playing via MPD (native)',
+                    'path':    relative,
+                    'mpd_state': status.get('state'),
+                })
+            except Exception as e:
+                err = str(e)
+                app.logger.warning(f"[MPD] add failed for {relative!r}: {err}")
+                # Try to update the library then retry once
+                try:
+                    client.update(relative)
+                    client.clear()
+                    client.add(relative)
+                    client.play(0)
+                    return jsonify({'status': 'ok', 'message': 'Playing via MPD (after update)', 'path': relative})
+                except Exception as e2:
+                    return jsonify({'status': 'error', 'message': str(e2), 'path': relative}), 200
+            finally:
+                try: client.disconnect()
+                except: pass
+        except ConnectionRefusedError:
+            return jsonify({'status': 'error', 'message': 'MPD not running', 'path': relative}), 200
+        except Exception as e:
+            return jsonify({'status': 'error', 'message': str(e), 'path': relative}), 200
+
+    # ── Strategy 2: mpc CLI fallback ──────────────────────────────────────────
+    try:
+        subprocess.run(['mpc', 'clear'], capture_output=True, text=True, timeout=5)
+        r_add = subprocess.run(['mpc', 'add', relative], capture_output=True, text=True, timeout=5)
+        if r_add.returncode != 0 or 'error' in r_add.stderr.lower():
+            subprocess.run(['mpc', 'update', '--wait'], capture_output=True, timeout=30)
+            subprocess.run(['mpc', 'clear'], capture_output=True, timeout=5)
+            subprocess.run(['mpc', 'add', relative], capture_output=True, text=True, check=True, timeout=5)
+        subprocess.run(['mpc', 'play'], capture_output=True, check=True, timeout=5)
+        return jsonify({'status': 'ok', 'message': 'Playing via MPD (mpc)', 'path': relative})
+    except FileNotFoundError:
+        return jsonify({'status': 'error', 'message': 'MPD not available', 'path': relative}), 200
+    except subprocess.CalledProcessError as e:
+        return jsonify({'status': 'error', 'message': getattr(e, 'stderr', str(e)), 'path': relative}), 200
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e), 'path': relative}), 200
+
+@app.route('/stream-dsd/<path:filepath>')
+def stream_dsd(filepath):
+    """
+    Transcode a DSD file (DSF/DFF) to FLAC on the fly via ffmpeg and stream it
+    to the browser.  Supports time-based seeking via ?start=<seconds> so the
+    JS player can restart the stream at any position without byte-range tricks.
+    """
+    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
+    if not os.path.isfile(absolute_path):
+        app.logger.warning(f"stream-dsd 404: {absolute_path}")
+        return "File not found", 404
+
+    # Optional time-based seek — the frontend sends ?start=<seconds>
+    start_sec = request.args.get('start', 0.0, type=float)
+
+    # Build ffmpeg command.
+    # -ss BEFORE -i: fast native DSF seek (avoids transcoding the skip portion).
+    # DSD64 (2.82 MHz) → 176.4 kHz PCM (÷16); same ratio for DSD128/DSD256.
+    # -loglevel quiet + stderr=DEVNULL: avoids stderr pipe deadlock under load.
+    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'quiet']
+    if start_sec > 0:
+        cmd += ['-ss', f'{start_sec:.3f}']   # seek before input = fast
+    cmd += [
+        '-i', absolute_path,
+        '-vn',                        # drop embedded cover art (DSF stores album art)
+        '-ar', '176400',              # 176.4 kHz — universal browser FLAC support
+        '-sample_fmt', 's32',         # 32-bit integer, full DSD dynamic range
+        '-c:a', 'flac',
+        '-compression_level', '0',    # fastest encode → lowest latency
+        '-f', 'flac',
+        'pipe:1'
+    ]
+
+    def generate():
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,   # no stderr pipe → no deadlock risk
+        )
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+            proc.wait()
+
+    resp = Response(
+        stream_with_context(generate()),
+        status=200,
+        mimetype='audio/flac',
+    )
+    resp.headers['Accept-Ranges']   = 'none'    # tell browser not to byte-range seek
+    resp.headers['Cache-Control']   = 'no-store'
+    resp.headers['X-DSD-Source']    = os.path.basename(absolute_path)
+    resp.headers['X-DSD-Rate']      = '176400'
+    if start_sec > 0:
+        resp.headers['X-DSD-StartSec'] = f'{start_sec:.3f}'
+    return resp
+
+
+@app.route('/api/favorites', methods=['GET'])
+def api_favorites_list():
+    """Return all favorited tracks with full metadata."""
+    try:
+        conn = get_db_connection()
+        rows = conn.execute('''
+            SELECT t.id, t.title, t.artist, t.duration, t.led_color, t.file_path,
+                   t.codec, t.is_dsd, t.dsd_rate, t.is_mqa, t.sample_rate_real,
+                   al.name as album_name, al.cover_path,
+                   tm.tier, f.added_at
+            FROM favorites f
+            JOIN tracks t ON t.id=f.track_id
+            JOIN albums al ON al.id=t.album_id
+            LEFT JOIN track_meta tm ON tm.track_id=t.id
+            ORDER BY f.added_at DESC
+        ''').fetchall()
+        conn.close()
+        return jsonify([dict(r) for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/favorites/toggle', methods=['POST'])
+def api_favorites_toggle():
+    """Add or remove a track from favorites."""
+    global _favorites_set
+    data = request.get_json() or {}
+    tid  = data.get('track_id')
+    if not tid:
+        return jsonify({'error': 'track_id required'}), 400
+    try:
+        conn = get_db_connection()
+        if tid in _favorites_set:
+            conn.execute('DELETE FROM favorites WHERE track_id=?', (tid,))
+            _favorites_set.discard(tid)
+            action = 'removed'
+        else:
+            conn.execute('INSERT OR IGNORE INTO favorites (track_id) VALUES (?)', (tid,))
+            _favorites_set.add(tid)
+            action = 'added'
+        conn.commit()
+        conn.close()
+        return jsonify({'action': action, 'track_id': tid, 'total': len(_favorites_set)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/favorites/rebuild-cache', methods=['POST'])
+def api_rebuild_pop_cache():
+    """Rebuild popularity cache — call after bulk metadata updates."""
+    try:
+        conn = get_db_connection()
+        conn.execute('DELETE FROM album_pop_cache')
+        conn.execute('''INSERT INTO album_pop_cache (album_id, pop_score)
+            SELECT al.id,
+              COALESCE((SELECT CASE MAX(
+                CASE led_color WHEN "red" THEN 700 WHEN "cyan" THEN 680 WHEN "white" THEN 600
+                  WHEN "blue" THEN 500 WHEN "green" THEN 440 WHEN "magenta" THEN 400 ELSE 200 END)
+                WHEN 700 THEN 40 WHEN 680 THEN 38 WHEN 600 THEN 30 WHEN 500 THEN 25
+                WHEN 440 THEN 22 WHEN 400 THEN 20 ELSE 10 END FROM tracks WHERE album_id=al.id), 10)
+              + COALESCE((SELECT AVG(CASE tm.tier WHEN "silver" THEN 30 WHEN "bronze" THEN 20 ELSE 8 END)
+                FROM tracks t JOIN track_meta tm ON tm.track_id=t.id WHERE t.album_id=al.id), 8)
+              + COALESCE((SELECT 10 + ROUND(10.0 * am.tracks_con_letra / NULLIF(am.tracks_procesados,0))
+                FROM album_meta am WHERE am.album_id=al.id), 0)
+            FROM albums al''')
+        conn.execute('DELETE FROM track_pop_cache')
+        conn.execute('''INSERT INTO track_pop_cache (track_id, pop_score)
+            SELECT t.id,
+              CASE t.led_color WHEN "red" THEN 40 WHEN "cyan" THEN 38 WHEN "white" THEN 30
+                WHEN "blue" THEN 25 WHEN "green" THEN 22 WHEN "magenta" THEN 20 ELSE 10 END
+              + COALESCE(CASE tm.tier WHEN "silver" THEN 30 WHEN "bronze" THEN 20 ELSE 8 END, 8)
+              + COALESCE(CASE WHEN tm.has_synced_lrc=1 THEN 20 WHEN tm.has_lyrics=1 THEN 12 ELSE 0 END, 0)
+              + COALESCE(ROUND(tm.mood_confidence * 10), 0)
+            FROM tracks t LEFT JOIN track_meta tm ON tm.track_id=t.id''')
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/favorites')
+def favorites_page():
+    """Favorites page — shows all bookmarked tracks."""
+    try:
+        conn = get_db_connection()
+        rows = conn.execute('''
+            SELECT t.id, t.title, t.artist, t.duration, t.led_color, t.file_path,
+                   t.codec, t.is_dsd, t.dsd_rate, t.is_mqa, t.sample_rate_real,
+                   al.id as album_id, al.name as album_name, al.cover_path,
+                   al.artist_id,
+                   CASE WHEN t.is_dsd=1 THEN COALESCE(t.dsd_rate,'DSD')
+                        WHEN t.is_mqa=1 THEN 'MQA'
+                        ELSE UPPER(COALESCE(t.codec,'FLAC')) END as format_display,
+                   f.added_at
+            FROM favorites f
+            JOIN tracks t ON t.id=f.track_id
+            JOIN albums al ON al.id=t.album_id
+            ORDER BY f.added_at DESC
+        ''').fetchall()
+        conn.close()
+        tracks = [dict(r) for r in rows]
+        # Build audio_url for each track
+        for t in tracks:
+            t['audio_url'] = audio_url_filter(t['file_path'])
+            t['cover_url'] = cover_url_filter(t['cover_path'] or '')
+        return render_template('favorites.html',
+                               tracks=tracks,
+                               tracks_json=json.dumps(tracks),
+                               fav_ids=_favorites_set)
+    except Exception as e:
+        app.logger.error(f'favorites_page error: {e}')
+        return render_template('favorites.html', tracks=[], tracks_json='[]', fav_ids=set())
+
+
+@app.route('/api/debug-dsd')
+def api_debug_dsd():
+    """Diagnostic endpoint: shows what the server would do for a DSD track."""
+    import shutil
+    conn = get_db_connection()
+    try:
+        sample = conn.execute(
+            "SELECT id, title, file_path, is_dsd, dsd_rate, sample_rate_real FROM tracks WHERE is_dsd=1 LIMIT 1"
+        ).fetchone()
+        result = {
+            'ffmpeg_available':    bool(shutil.which('ffmpeg')),
+            'mpc_available':       bool(shutil.which('mpc')),
+            'python_mpd2':         _MPD_AVAILABLE,
+            'music_root':          MUSIC_ROOT,
+            'music_root_exists':   os.path.isdir(MUSIC_ROOT),
+            'sample_dsd_track':    dict(sample) if sample else None,
+        }
+        if sample:
+            fp = sample['file_path']
+            result['sample_audio_url']  = audio_url_filter(fp)
+            result['sample_file_exists'] = os.path.isfile(fp)
+            result['mpd_relative']       = _to_mpd_relative(fp)
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+if __name__ == '__main__':
+    _load_favorites()
+    app.run(debug=True, host='0.0.0.0', port=5000)

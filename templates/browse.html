@@ -1,0 +1,534 @@
+{% extends "base.html" %}
+{% block content %}
+
+{% set is_meta = filter_type in ['mood', 'momento', 'era', 'tema', 'tier', 'language'] %}
+{% set cur_sort = sort     if sort     is defined else 'popularidad' %}
+{% set cur_dir  = sort_dir if sort_dir is defined else 'desc' %}
+
+<!-- ── Header ─────────────────────────────────────────────────────────────── -->
+<div class="browse-header">
+  <div class="browse-header-left">
+    {% if filter_type == 'mood' %}
+      <h1 class="browse-title">🎭 Mood: {{ MOOD_LABELS.get(filter_value, filter_value) }}</h1>
+    {% elif filter_type == 'tema' %}
+      <h1 class="browse-title">📖 Tema Lírico: {{ filter_value|capitalize }}</h1>
+    {% else %}
+      <h1 class="browse-title">{{ title }}</h1>
+    {% endif %}
+    <span class="browse-count" id="browse-count">{{ total }}
+      {%- if is_meta %} álbumes{% else %} álbumes{% endif %}
+    </span>
+  </div>
+  <div class="browse-header-right">
+    {% if is_meta %}
+    <div class="view-toggle">
+      <button class="vt-btn active" id="btn-albums" onclick="switchView('albums')">⊞ Álbumes</button>
+      <button class="vt-btn"        id="btn-tracks" onclick="switchView('tracks')">♪ Pistas</button>
+    </div>
+    {% endif %}
+    <a href="/" class="track-btn ghost" style="text-decoration:none;padding:0.4rem 0.9rem;">🏠</a>
+    <a href="javascript:history.back()" class="track-btn ghost" style="text-decoration:none;padding:0.4rem 0.9rem;">← Volver</a>
+  </div>
+</div>
+
+<!-- ── Sort bar — Albums ───────────────────────────────────────────────────── -->
+<div class="sort-bar" id="sort-bar-albums">
+  <span class="sort-label">Ordenar:</span>
+  <div class="sort-pills">
+    {% set album_sorts = [
+      ('popularidad','⭐ Popularidad'),
+      ('nombre',  'Nombre'),
+      ('artista', 'Artista'),
+      ('año',     'Año'),
+      ('pistas',  'Pistas'),
+      ('random',  '🎲 Aleatorio'),
+    ] %}
+    {% for sk, sl in album_sorts %}
+    {% set is_active = cur_sort == sk %}
+    {% set new_dir   = 'asc' if (is_active and cur_dir == 'desc') else 'desc' if sk == 'popularidad' else 'asc' %}
+    {% set arrow     = ' ↑' if (is_active and cur_dir == 'asc') else (' ↓' if (is_active and cur_dir == 'desc') else '') %}
+    <a href="?sort={{ sk }}&dir={{ new_dir }}&page=1"
+       class="sort-pill {% if is_active %}sort-pill-active{% endif %}">
+      {{ sl }}{{ arrow }}
+    </a>
+    {% endfor %}
+  </div>
+</div>
+
+<!-- ── Sort bar — Tracks (meta only) ──────────────────────────────────────── -->
+{% if is_meta %}
+<div class="sort-bar" id="sort-bar-tracks" style="display:none">
+  <span class="sort-label">Ordenar:</span>
+  <div class="sort-pills">
+    {% set track_sorts = [
+      ('popularidad',  '⭐ Popularidad'),
+      ('artista',      'Artista'),
+      ('año',          'Año'),
+      ('bpm',          'BPM'),
+      ('energia',      'Energía'),
+      ('bailabilidad', 'Bailabilidad'),
+      ('tier',         'Tier'),
+      ('random',       '🎲 Aleatorio'),
+      ('intercalar',   '🔀 Intercalar'),
+    ] %}
+    {% for sk, sl in track_sorts %}
+    <button class="sort-pill"
+            id="tsort-{{ sk }}"
+            onclick="setTrackSort('{{ sk }}')">{{ sl }}</button>
+    {% endfor %}
+    <button class="sort-dir-btn" id="sort-dir-btn" onclick="toggleTrackDir()" title="Invertir orden">↓</button>
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Action bar — always at top ──────────────────────────────────────────── -->
+<div id="queue-action-bar" style="display:flex;margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap;align-items:center">
+  <button class="track-btn primary" onclick="playAllLoaded()">▶ Reproducir todo</button>
+  <button class="track-btn ghost"   id="enqueue-all-btn" onclick="queueAllLoaded()">➕ Encolar todo</button>
+  <button class="track-btn ghost danger" id="clear-queue-bar-btn" onclick="clearPlaylist()" style="display:none">
+    🗑 Limpiar cola <span class="cq-badge-inline" id="cq-bar-count">0</span>
+  </button>
+</div>
+
+<!-- ── Albums view ────────────────────────────────────────────────────────── -->
+<div id="view-albums">
+  <div class="album-grid">
+    {% for album in albums %}
+    <div class="album-card">
+      <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }}, this)">
+        <img src="{{ album.cover_path|cover_url }}"
+             alt="{{ album.name }}" class="album-cover" loading="lazy"
+             onerror="this.style.visibility='hidden'">
+        <div class="play-overlay">▶</div>
+      </div>
+      <div class="album-card-info">
+        <div class="aci-text">
+          <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+          {% if album.artist_id %}
+          <a href="/artist/{{ album.artist_id }}" class="album-artist-link">{{ album.artist_name or '' }}</a>
+          {% elif album.artist_name %}
+          <span class="album-artist-link">{{ album.artist_name }}</span>
+          {% endif %}
+        </div>
+        <div class="aci-footer">
+          {% if album.primary_format %}
+          <span class="aci-quality">
+            {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
+            <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
+          </span>
+          {% endif %}
+          <span class="aci-stats">
+            {%- if album.year %}{{ album.year }}{% endif -%}
+            {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
+            {%- if album.total_duration %} · {{ album.total_duration|format_duration }}{% endif -%}
+          </span>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if total_pages > 1 %}
+  <div class="pagination">
+    <a href="/" class="page-btn" title="Inicio">🏠</a>
+    {% if page > 1 %}
+    <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page - 1 }}" class="page-btn">‹ Anterior</a>
+    {% endif %}
+    <span class="page-info">Página {{ page }} de {{ total_pages }}</span>
+    {% if page < total_pages %}
+    <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page + 1 }}" class="page-btn">Siguiente ›</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+
+<!-- ── Tracks view (meta only) ───────────────────────────────────────────── -->
+{% if is_meta %}
+<div id="view-tracks" style="display:none">
+  <div id="tracks-loading" class="tracks-loading" style="display:none">Cargando pistas…</div>
+  <div id="tracks-prompt" class="tracks-prompt" style="display:none">
+    Elige un criterio de ordenación para explorar las pistas de este filtro
+  </div>
+  <div id="tracks-intercalar-note" class="intercalar-note" style="display:none">
+    🔀 Modo intercalar — pistas mezcladas de distintos artistas para una playlist armónica
+  </div>
+  <div id="tracks-list" class="meta-track-list"></div>
+  <div id="tracks-pagination" class="pagination" style="display:none">
+    <button class="page-btn" id="tracks-prev" onclick="tracksChangePage(-1)">‹ Anterior</button>
+    <span class="page-info" id="tracks-page-info"></span>
+    <button class="page-btn" id="tracks-next" onclick="tracksChangePage(1)">Siguiente ›</button>
+  </div>
+</div>
+
+{% endif %}
+
+<style>
+/* ── Browse header ── */
+.browse-header { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:0.75rem; flex-wrap:wrap; }
+.browse-header-left { flex:1; min-width:0; }
+.browse-title { font-size:1.7rem; font-weight:700; margin:0 0 0.2rem; color:var(--text-primary); }
+.browse-count { font-size:0.88rem; color:var(--accent); font-weight:500; }
+.browse-header-right { display:flex; align-items:center; gap:0.75rem; flex-shrink:0; }
+
+/* ── View toggle ── */
+.view-toggle { display:flex; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+.vt-btn { padding:0.4rem 0.9rem; background:none; border:none; color:var(--text-secondary); font-size:0.83rem; cursor:pointer; transition:background 0.2s,color 0.2s; white-space:nowrap; }
+.vt-btn.active { background:var(--accent); color:#000; font-weight:600; }
+.vt-btn:not(.active):hover { background:rgba(255,255,255,0.07); color:var(--text-primary); }
+
+/* ── Sort bar ── */
+.sort-bar { display:flex; align-items:center; gap:0.6rem; margin-bottom:1rem; flex-wrap:wrap; }
+.sort-label { font-size:0.78rem; color:var(--accent); font-family:'Orbitron',system-ui,sans-serif; letter-spacing:0.08em; white-space:nowrap; flex-shrink:0; }
+.sort-pills { display:flex; flex-wrap:wrap; gap:0.35rem; }
+.sort-pill {
+  padding:0.25rem 0.7rem; border-radius:20px; font-size:0.78rem; font-weight:500;
+  background:rgba(255,255,255,0.05); border:1px solid var(--border);
+  color:var(--text-secondary); text-decoration:none; cursor:pointer;
+  transition:background 0.15s, border-color 0.15s, color 0.15s; white-space:nowrap;
+}
+.sort-pill:hover { background:rgba(255,255,255,0.1); color:var(--text-primary); border-color:rgba(255,255,255,0.2); }
+.sort-pill-active {
+  background:rgba(0,212,255,0.15); border-color:var(--accent);
+  color:var(--accent); font-weight:600;
+}
+.sort-dir-btn {
+  padding:0.25rem 0.6rem; border-radius:8px; font-size:0.85rem;
+  background:rgba(255,255,255,0.06); border:1px solid var(--border);
+  color:var(--text-secondary); cursor:pointer; transition:background 0.15s, color 0.15s;
+  font-weight:700;
+}
+.sort-dir-btn:hover { background:rgba(255,255,255,0.12); color:var(--text-primary); }
+
+/* ── Album card ── */
+.album-card-title-row { display:flex; align-items:center; gap:0.4rem; flex-wrap:wrap; margin-top:0.4rem; }
+.album-card-title-row .album-title { flex:1; min-width:0; }
+.aci-text { display:flex; flex-direction:column; gap:0.1rem; min-width:0; }
+.aci-footer { display:flex; align-items:center; justify-content:space-between; gap:0.4rem; margin-top:0.35rem; flex-wrap:wrap; }
+.aci-quality { display:flex; align-items:center; gap:0.3rem; flex-shrink:0; }
+.aci-stats { font-size:0.68rem; color:rgba(200,146,10,0.5); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+/* Point 7: artist link */
+.album-artist-link { color:var(--text-secondary); text-decoration:none; font-size:0.74rem; transition:color 0.15s; }
+.album-artist-link:hover { color:var(--accent); text-decoration:underline; }
+
+/* ── Tracks list ── */
+.tracks-loading { color:var(--text-muted); font-size:0.9rem; padding:2rem 0; text-align:center; }
+.tracks-prompt { color:var(--text-muted); font-size:0.88rem; padding:2.5rem 0; text-align:center; border:1px dashed var(--border); border-radius:12px; }
+.intercalar-note { font-size:0.82rem; color:var(--accent); padding:0.5rem 0.75rem; background:rgba(0,212,255,0.07); border:1px solid rgba(0,212,255,0.2); border-radius:8px; margin-bottom:0.75rem; }
+.meta-track-list { display:flex; flex-direction:column; gap:0.3rem; }
+
+.meta-track-row {
+  display:grid; grid-template-columns:44px 1fr auto auto;
+  align-items:center; gap:0.75rem; padding:0.5rem 0.75rem;
+  background:var(--bg-card); border:1px solid var(--border); border-radius:10px;
+  transition:border-color 0.15s, background 0.15s;
+}
+.meta-track-row:hover { border-color:var(--accent); background:rgba(255,255,255,0.03); }
+.mtr-cover { width:44px; height:44px; border-radius:6px; object-fit:cover; background:var(--bg-secondary); flex-shrink:0; }
+.mtr-info { min-width:0; }
+.mtr-title { font-size:0.88rem; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.mtr-sub { font-size:0.74rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:0.08rem; }
+.mtr-sub a { color:var(--accent); text-decoration:none; }
+.mtr-sub a:hover { text-decoration:underline; }
+.mtr-pills { display:flex; flex-wrap:wrap; gap:0.3rem; justify-content:flex-end; }
+.mtr-pill { padding:0.1rem 0.45rem; border-radius:10px; font-size:0.64rem; font-weight:600; white-space:nowrap; }
+.mtr-actions { display:flex; gap:0.35rem; }
+.mtr-btn { padding:0.3rem 0.6rem; border-radius:6px; border:1px solid var(--border); background:none; color:var(--text-secondary); font-size:0.78rem; cursor:pointer; transition:background 0.15s, color 0.15s, border-color 0.15s; }
+.mtr-btn:hover { background:var(--accent); color:#000; border-color:var(--accent); }
+.mtr-btn.add-btn { background:none; color:var(--text-muted); }
+.mtr-btn.add-btn:hover { background:rgba(0,230,118,0.15); color:#4ade80; border-color:#16a34a; }
+.mtr-btn.add-btn.added { background:rgba(0,230,118,0.12); color:#4ade80; border-color:#16a34a; }
+
+/* ── Stat chips on track rows ── */
+.mtr-stat { font-size:0.65rem; color:var(--text-muted); padding:0.1rem 0.4rem; background:rgba(255,255,255,0.05); border-radius:8px; }
+
+/* ── Queue action bar ── */
+#queue-action-bar { display:flex; }
+.track-btn.danger { border-color:rgba(239,68,68,0.4); color:#f87171; }
+.track-btn.danger:hover { background:rgba(239,68,68,0.15); border-color:#f87171; }
+.cq-badge-inline { display:inline-block; padding:0.05rem 0.35rem; background:rgba(239,68,68,0.2); border-radius:8px; font-size:0.7rem; font-weight:700; margin-left:0.3rem; }
+
+/* ── Pagination ── */
+.pagination { display:flex; align-items:center; justify-content:center; gap:1rem; margin:2rem 0 4rem; }
+.page-btn { padding:0.5rem 1.2rem; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); text-decoration:none; font-size:0.9rem; cursor:pointer; transition:border-color 0.2s, color 0.2s; }
+.page-btn:hover { border-color:var(--accent); color:var(--accent); }
+.page-info { color:var(--text-secondary); font-size:0.9rem; }
+.page-btn:disabled { opacity:0.35; pointer-events:none; }
+
+/* Mood vs Tema pill distinction in track rows */
+.mtr-pill-mood { background:rgba(167,139,250,0.12); color:#a78bfa; border:1px solid rgba(167,139,250,0.25); }
+.mtr-pill-tema { background:rgba(52,211,153,0.12); color:#34d399; border:1px solid rgba(52,211,153,0.25); }
+</style>
+
+<script>
+(function() {
+// ── State ─────────────────────────────────────────────────────────────────────
+const FILTER_TYPE  = {{ filter_type|tojson }};
+const FILTER_VALUE = {{ filter_value|tojson }};
+const IS_META      = {{ 'true' if is_meta else 'false' }};
+const MOOD_LABELS_JS = {{ MOOD_LABELS|tojson }};
+
+let metaTracksQueue = [];
+let metaTracksPage  = 1;
+let metaTotalPages  = 1;
+let currentTrackSort     = 'popularidad';
+let currentTrackDir      = 'desc';
+let currentIntercalar    = false;
+let tracksLoaded         = false;
+
+const FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema_lirico', tier:'tier', language:'idioma' };
+
+// ── Album play ─────────────────────────────────────────────────────────────────
+async function playAlbumById(id, el) {
+  const overlay = el ? el.querySelector('.play-overlay') : null;
+  if (overlay) overlay.textContent = '…';
+  try {
+    const tracks   = await fetch(`/api/album/${id}/tracks`).then(r => r.json());
+    if (!Array.isArray(tracks) || !tracks.length) return;
+    const playable = tracks.filter(t => t.audio_url || t.file_path);
+    const q = playable.length ? playable : tracks;
+    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(q, 0); }
+    else { loadQueue(q); playTrack(0); }
+  } catch(e) { console.error('playAlbumById error:', e); }
+  if (overlay) overlay.textContent = '▶';
+}
+// Expose to window so onclick attrs work after SPA navigation
+window.playAlbumById = playAlbumById;
+
+// ── View switch ────────────────────────────────────────────────────────────────
+if (IS_META) {
+  window.switchView = function(view) {
+    const toTracks = view === 'tracks';
+    document.getElementById('view-albums').style.display   = toTracks ? 'none' : '';
+    document.getElementById('view-tracks').style.display   = toTracks ? ''     : 'none';
+    document.getElementById('sort-bar-albums').style.display = toTracks ? 'none' : '';
+    document.getElementById('sort-bar-tracks').style.display = toTracks ? '' : 'none';
+    const queueBar = document.getElementById('queue-action-bar');
+    if (queueBar) queueBar.style.display = toTracks ? 'flex' : 'none';
+    document.getElementById('btn-albums').classList.toggle('active', !toTracks);
+    document.getElementById('btn-tracks').classList.toggle('active',  toTracks);
+    // Auto-load tracks with default sort (popularidad desc) on first switch
+    if (toTracks && !tracksLoaded) {
+      const prompt = document.getElementById('tracks-prompt');
+      if (prompt) prompt.style.display = 'none';
+      // Mark popularidad pill as active
+      document.querySelectorAll('[id^="tsort-"]').forEach(p => p.classList.remove('sort-pill-active'));
+      document.getElementById('tsort-popularidad')?.classList.add('sort-pill-active');
+      document.getElementById('sort-dir-btn').textContent = '↓';
+      tracksLoaded = true;
+      loadMetaTracks(1);
+    }
+    _updateClearQueueBarBtn();
+  };
+
+  // ── Track sort controls ──────────────────────────────────────────────────────
+  window.setTrackSort = function(sk) {
+    if (sk === 'intercalar') {
+      currentIntercalar = !currentIntercalar;
+      document.getElementById('tsort-intercalar').classList.toggle('sort-pill-active', currentIntercalar);
+      if (currentIntercalar) {
+        document.querySelectorAll('[id^="tsort-"]:not(#tsort-intercalar)').forEach(p => p.classList.remove('sort-pill-active'));
+      } else {
+        document.getElementById(`tsort-${currentTrackSort}`)?.classList.add('sort-pill-active');
+      }
+    } else {
+      if (currentTrackSort === sk && !currentIntercalar) {
+        currentTrackDir = currentTrackDir === 'asc' ? 'desc' : 'asc';
+        document.getElementById('sort-dir-btn').textContent = currentTrackDir === 'asc' ? '↑' : '↓';
+      } else {
+        document.querySelectorAll('[id^="tsort-"]').forEach(p => p.classList.remove('sort-pill-active'));
+        currentTrackSort = sk;
+        currentIntercalar = false;
+        document.getElementById(`tsort-${sk}`)?.classList.add('sort-pill-active');
+        document.getElementById('tsort-intercalar')?.classList.remove('sort-pill-active');
+      }
+    }
+    // Hide prompt when user selects a sort
+    const prompt = document.getElementById('tracks-prompt');
+    if (prompt) prompt.style.display = 'none';
+    tracksLoaded = true;
+    loadMetaTracks(1);
+  };
+
+  window.toggleTrackDir = function() {
+    currentTrackDir = currentTrackDir === 'asc' ? 'desc' : 'asc';
+    document.getElementById('sort-dir-btn').textContent = currentTrackDir === 'asc' ? '↑' : '↓';
+    if (!currentIntercalar && tracksLoaded) loadMetaTracks(1);
+  };
+
+  window.tracksChangePage = function(delta) {
+    const next = metaTracksPage + delta;
+    if (next >= 1 && next <= metaTotalPages) loadMetaTracks(next);
+  };
+
+  // ── Load tracks from API ─────────────────────────────────────────────────────
+  async function loadMetaTracks(page) {
+    metaTracksPage = page;
+    const dbField = FIELD_MAP[FILTER_TYPE] || FILTER_TYPE;
+
+    let url = `/api/meta/tracks?field=${encodeURIComponent(dbField)}&value=${encodeURIComponent(FILTER_VALUE)}&page=${page}`;
+    if (currentIntercalar) {
+      url += '&intercalar=1';
+    } else {
+      url += `&sort=${currentTrackSort}&dir=${currentTrackDir}`;
+    }
+
+    const listEl  = document.getElementById('tracks-list');
+    const loadEl  = document.getElementById('tracks-loading');
+    const pagEl   = document.getElementById('tracks-pagination');
+    const noteEl  = document.getElementById('tracks-intercalar-note');
+    const countEl = document.getElementById('browse-count');
+
+    loadEl.style.display = '';
+    listEl.innerHTML = '';
+    if (pagEl) pagEl.style.display = 'none';
+    if (noteEl) noteEl.style.display = 'none';
+
+    try {
+      const data = await fetch(url).then(r => r.json());
+      let tracks = data.tracks || [];
+
+      if (currentIntercalar && tracks.length > 0) {
+        tracks = interleaveByArtist(tracks);
+        if (noteEl) noteEl.style.display = '';
+      }
+
+      metaTracksQueue = tracks;
+      metaTotalPages  = data.total_pages || 1;
+      loadEl.style.display = 'none';
+      if (countEl) countEl.textContent = `${data.total} pistas`;
+
+      listEl.innerHTML = tracks.map((t, i) => {
+        const led       = t.led_color || 'white';
+        const moodRaw   = t.mood || '';
+        const moodLabel = MOOD_LABELS_JS[moodRaw] || moodRaw;
+        // Point 10: Distinguish Mood (🎭) vs Tema (📖) with icon+label prefix
+        const moodPill  = moodLabel
+          ? `<span class="mtr-pill mtr-pill-mood" title="Mood: estado de ánimo">🎭 ${esc(moodLabel)}</span>` : '';
+        const temaPill  = t.tema_lirico
+          ? `<span class="mtr-pill mtr-pill-tema" title="Tema lírico: contenido de la letra">📖 ${esc(t.tema_lirico)}</span>` : '';
+        const tierPill  = t.tier === 'silver'
+          ? `<span class="mtr-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border:1px solid rgba(148,163,184,0.3)">⭐⭐</span>`
+          : t.tier === 'bronze'
+          ? `<span class="mtr-pill" style="background:rgba(217,119,6,0.12);color:#d97706;border:1px solid rgba(217,119,6,0.25)">⭐</span>` : '';
+        const bpmPill   = t.bpm ? `<span class="mtr-stat">${Math.round(t.bpm)} BPM</span>` : '';
+        const enPill    = (t.energy !== null && t.energy !== undefined)
+          ? `<span class="mtr-stat">⚡${Math.round(((t.energy+1)/2)*100)}%</span>` : '';
+        const albumLink = t.album_id ? `<a href="/album/${t.album_id}">${esc(t.album_name||'')}</a>` : esc(t.album_name||'');
+        // Point 7: Artist link to artist page
+        const artistStr = esc(t.artist_name || t.artist || '');
+        const subParts  = [
+          artistStr,
+          albumLink,
+          t.album_year ? String(t.album_year) : '',
+          t.duration_fmt || '',
+        ].filter(Boolean);
+
+        return `<div class="meta-track-row">
+          <img class="mtr-cover" src="${t.cover_url||''}" alt="" onerror="this.style.visibility='hidden'">
+          <div class="mtr-info">
+            <div class="mtr-title">${esc(t.title||'—')}</div>
+            <div class="mtr-sub">${subParts.join(' · ')}</div>
+          </div>
+          <div class="mtr-pills">
+            <span class="mtr-pill track-format-badge format-${led}">${esc(t.format_display||led.toUpperCase())}</span>
+            ${bpmPill}${enPill}${moodPill}${temaPill}${tierPill}
+          </div>
+          <div class="mtr-actions">
+            <button class="mtr-btn" onclick="playMetaTrack(${i})" title="Reproducir desde aquí">▶</button>
+            <button class="mtr-btn add-btn" id="add-btn-${i}" onclick="addMetaTrackWithFeedback(${i}, this)" title="Añadir a cola">➕</button>
+          </div>
+        </div>`;
+      }).join('');
+
+      if (!currentIntercalar && metaTotalPages > 1) {
+        if (pagEl) {
+          pagEl.style.display = 'flex';
+          document.getElementById('tracks-prev').disabled = page <= 1;
+          document.getElementById('tracks-next').disabled = page >= metaTotalPages;
+          document.getElementById('tracks-page-info').textContent = `Página ${page} de ${metaTotalPages}`;
+        }
+      }
+    } catch(e) {
+      loadEl.textContent = 'Error cargando pistas.';
+      loadEl.style.display = '';
+      console.error(e);
+    }
+  }
+
+  // ── Interleave round-robin by artist ─────────────────────────────────────────
+  function interleaveByArtist(tracks) {
+    const byArtist = {};
+    tracks.forEach(t => {
+      const a = t.artist_name || t.artist || '?';
+      if (!byArtist[a]) byArtist[a] = [];
+      byArtist[a].push(t);
+    });
+    const groups = Object.values(byArtist).sort((a, b) => b.length - a.length);
+    const result = [];
+    const maxLen = Math.max(...groups.map(g => g.length));
+    for (let i = 0; i < maxLen; i++) {
+      groups.forEach(g => { if (i < g.length) result.push(g[i]); });
+    }
+    return result;
+  }
+
+  // ── Play/queue helpers ────────────────────────────────────────────────────────
+  // Point 6: playMetaTrack plays from idx to end — does NOT auto-enqueue
+  window.playMetaTrack = function(idx) {
+    if (!metaTracksQueue[idx]) return;
+    if (window.prependAndPlay) { window.prependAndPlay(metaTracksQueue[idx]); }
+    else { loadQueue([metaTracksQueue[idx]]); playTrack(0); }
+  };
+
+  // Point 8: visual feedback when adding to queue
+  window.addMetaTrackWithFeedback = function(idx, btn) {
+    if (!metaTracksQueue[idx]) return;
+    addToPlaylist(metaTracksQueue[idx]);
+    if (btn) {
+      btn.textContent = '✓';
+      btn.classList.add('added');
+      setTimeout(() => { btn.textContent = '➕'; btn.classList.remove('added'); }, 1800);
+    }
+    _updateClearQueueBarBtn();
+  };
+
+  window.addMetaTrack = function(idx) {
+    if (metaTracksQueue[idx]) addToPlaylist(metaTracksQueue[idx]);
+    _updateClearQueueBarBtn();
+  };
+
+  // Point 6: queueAllLoaded is user-triggered only — shows clear button after
+  window.playAllLoaded = function() {
+    if (!metaTracksQueue.length) return;
+    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(metaTracksQueue, 0); }
+    else { loadQueue(metaTracksQueue); playTrack(0); }
+  };
+  window.queueAllLoaded = function() {
+    if (!metaTracksQueue.length) return;
+    metaTracksQueue.forEach(t => addToPlaylist(t));
+    _updateClearQueueBarBtn();
+    const btn = document.getElementById('enqueue-all-btn');
+    if (btn) { btn.textContent = `✓ ${metaTracksQueue.length} encoladas`; setTimeout(()=>{ btn.textContent='➕ Encolar todo'; },2500); }
+  };
+
+  // Clear queue bar button visibility
+  function _updateClearQueueBarBtn() {
+    const btn = document.getElementById('clear-queue-bar-btn');
+    const cntEl = document.getElementById('cq-bar-count');
+    if (!btn) return;
+    const n = (window.userPlaylist||[]).length;
+    btn.style.display = n > 0 ? 'inline-flex' : 'none';
+    if (cntEl) cntEl.textContent = n;
+  }
+  window._updateClearQueueBarBtn = _updateClearQueueBarBtn;
+
+  // Re-check on playlist changes
+  document.addEventListener('playlistUpdated', _updateClearQueueBarBtn);
+
+  function esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+} // end if (IS_META)
+})();
+</script>
+{% endblock %}

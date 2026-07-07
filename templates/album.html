@@ -1,0 +1,404 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-nav-bar" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.9rem">
+  <a href="/" class="track-btn ghost" style="text-decoration:none;padding:0.35rem 0.7rem" title="Inicio">🏠</a>
+  <a href="javascript:history.back()" class="track-btn ghost" style="text-decoration:none;padding:0.35rem 0.7rem">← Volver</a>
+</div>
+<div class="album-page">
+  <div class="album-page-left">
+    <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover-large"
+         onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+
+    <div class="album-info">
+      <div class="album-info-title">{{ album.name }}</div>
+
+      <div class="album-info-row">
+        <span class="album-info-label">Artista</span>
+        <span class="album-info-value">
+          {% if album.artist_id %}
+          <a href="/artist/{{ album.artist_id }}" class="album-artist-page-link">{{ album.artist_name or '—' }}</a>
+          {% else %}
+          {{ album.artist_name or '—' }}
+          {% endif %}
+          {% set flag_html = nationality_flag(artist_nationality) %}
+          {% if flag_html %}<span class="nat-flag" title="{{ artist_nationality }}">{{ flag_html|safe }}</span>
+          {% elif artist_nationality and artist_nationality not in ('','Unknown') %}
+          <span class="nat-text" title="{{ artist_nationality }}">({{ artist_nationality }})</span>
+          {% endif %}
+        </span>
+      </div>
+      {% if album.year %}<div class="album-info-row">
+        <span class="album-info-label">Año</span>
+        <span class="album-info-value">{{ album.year }}</span>
+      </div>{% endif %}
+      {% if album.publisher %}<div class="album-info-row">
+        <span class="album-info-label">Sello</span>
+        <span class="album-info-value">{{ album.publisher }}</span>
+      </div>{% endif %}
+      <div class="album-info-row">
+        <span class="album-info-label">Duración</span>
+        <span class="album-info-value">{{ album.total_duration|format_duration }}</span>
+      </div>
+      <div class="album-info-row">
+        <span class="album-info-label">Pistas</span>
+        <span class="album-info-value">{{ album.track_count or tracks|length }}</span>
+      </div>
+      <div class="album-info-row">
+        <span class="album-info-label">Formato</span>
+        <span class="album-info-value" style="color:var(--accent)">{{ primary_format }}</span>
+      </div>
+      {% if total_discs > 1 %}<div class="album-info-row">
+        <span class="album-info-label">Discos</span>
+        <span class="album-info-value">{{ total_discs }}</span>
+      </div>{% endif %}
+
+      <!-- album_meta info -->
+      {% if album_meta %}
+        {% if album_meta.mood_predominante %}
+        <div class="album-info-row">
+          <span class="album-info-label">Mood</span>
+          <span class="album-info-value">
+            <a href="/mood/{{ album_meta.mood_predominante }}" class="meta-pill mood-pill" style="font-size:0.78rem">{{ MOOD_LABELS.get(album_meta.mood_predominante, album_meta.mood_predominante) }}</a>
+          </span>
+        </div>
+        {% endif %}
+        {% if album_meta.momento_predominante and album_meta.momento_predominante != 'anytime' %}
+        <div class="album-info-row">
+          <span class="album-info-label">Momento</span>
+          <span class="album-info-value">
+            <a href="/momento/{{ album_meta.momento_predominante }}" class="meta-pill momento-pill" style="font-size:0.78rem">{{ album_meta.momento_predominante }}</a>
+          </span>
+        </div>
+        {% endif %}
+        {% if album_meta.era %}
+        <div class="album-info-row">
+          <span class="album-info-label">Era</span>
+          <span class="album-info-value">
+            <a href="/era/{{ album_meta.era }}" class="meta-pill era-pill" style="font-size:0.78rem">{{ album_meta.era|replace('_era','') }}</a>
+          </span>
+        </div>
+        {% endif %}
+        {% if album_meta.idioma_principal %}
+        <div class="album-info-row">
+          <span class="album-info-label">Idioma</span>
+          <span class="album-info-value">{{ album_meta.idioma_principal|upper }}</span>
+        </div>
+        {% endif %}
+        {% if album_meta.genre_primary %}
+        <div class="album-info-row">
+          <span class="album-info-label">Género</span>
+          <span class="album-info-value" style="display:flex;flex-wrap:wrap;gap:0.3rem;align-items:center">
+            <a href="/genre/{{ album_meta.genre_primary }}" class="meta-pill" style="background:rgba(99,102,241,0.1);color:#818cf8;border:1px solid rgba(99,102,241,0.25);font-size:0.7rem">{{ album_meta.genre_primary }}</a>
+            {% if album_meta.genre_secondary %}
+            <span style="font-size:0.67rem;color:var(--text-muted)" id="gen-sec-label"></span>
+            <script>
+            (function(){
+              const raw = {{ album_meta.genre_secondary|tojson }};
+              let items = raw;
+              try { if (typeof raw === 'string') items = JSON.parse(raw); } catch(e) {}
+              const el = document.getElementById('gen-sec-label');
+              if (el) el.textContent = Array.isArray(items) ? items.slice(0,3).join(' · ') : String(items).slice(0,60);
+            })();
+            </script>
+            {% endif %}
+          </span>
+        </div>
+        {% endif %}
+      {% endif %}
+
+      <!-- Last.fm popularity -->
+      <div id="album-popularity" class="drawer-popularity">
+        <div class="dr-pop-row">
+          <span class="artist-stars" style="font-size:1.05rem">
+            <span class="star-off">★</span><span class="star-off">★</span><span class="star-off">★</span><span class="star-off">★</span><span class="star-off">★</span>
+          </span>
+          <span class="dr-pop-score">Cargando…</span>
+        </div>
+      </div>
+
+    </div><!-- /album-info -->
+
+    <!-- Album meta stats -->
+    {% if album_meta and (album_meta.avg_energy is not none or album_meta.avg_valence is not none) %}
+    <div class="album-meta-panel">
+      <div class="amp-title">Estadísticas del álbum</div>
+      <div class="amp-grid">
+        {% if album_meta.avg_energy is not none %}
+        <div class="amp-row">
+          <span class="amp-label">Energía media</span>
+          <div class="amp-bar-wrap"><div class="amp-bar-fill" style="width:{{ ((album_meta.avg_energy + 1) / 2 * 100)|round }}%;background:var(--led-red)"></div></div>
+          <span class="amp-val">{{ ((album_meta.avg_energy + 1) / 2 * 100)|round|int }}%</span>
+        </div>
+        {% endif %}
+        {% if album_meta.avg_valence is not none %}
+        <div class="amp-row">
+          <span class="amp-label">Positividad media</span>
+          <div class="amp-bar-wrap"><div class="amp-bar-fill" style="width:{{ ((album_meta.avg_valence + 1) / 2 * 100)|round }}%;background:var(--led-green)"></div></div>
+          <span class="amp-val">{{ ((album_meta.avg_valence + 1) / 2 * 100)|round|int }}%</span>
+        </div>
+        {% endif %}
+        {% if album_meta.avg_bailabilidad is not none %}
+        <div class="amp-row">
+          <span class="amp-label">Bailabilidad media</span>
+          <div class="amp-bar-wrap"><div class="amp-bar-fill" style="width:{{ [[album_meta.avg_bailabilidad, 0]|max, 100]|min|round }}%;background:var(--led-yellow)"></div></div>
+          <span class="amp-val">{{ [album_meta.avg_bailabilidad, 0]|max|round|int }}/100</span>
+        </div>
+        {% endif %}
+      </div>
+      {% if album_meta.tracks_con_letra %}
+      <div class="amp-lyrics-info">
+        🎵 {{ album_meta.tracks_con_letra }} pistas con letra
+        {% if album_meta.tracks_sincronizados %} · {{ album_meta.tracks_sincronizados }} sincronizadas{% endif %}
+      </div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <button class="album-play-all-btn" onclick="playAllAlbum()">▶ Reproducir álbum</button>
+  </div>
+
+  <div class="album-tracklist">
+    <div class="album-track-header">
+      <span></span><!-- thumb -->
+      <span>#</span>
+      <span>Título</span>
+      <span>Dur.</span>
+      <span>Calidad</span>
+      <span></span><!-- LED dot -->
+      <span></span><!-- actions -->
+    </div>
+
+    {% for track in tracks %}
+    <div class="album-track-row {% if not track.audio_url or not track.duration %}track-ghost{% endif %}">
+      <img src="{{ track.cover_path|cover_url or album.cover_path|cover_url }}" class="track-thumb"
+           onerror="this.style.opacity='0'">
+      <span class="track-number">
+        {% if multi_disc %}{{ track.disc_number or 1 }}-{% endif %}{{ track.track_number or '?' }}
+      </span>
+      <span class="track-title">
+        <button class="track-title-btn" onclick="showTrackInfo({{ track.id }})">{{ track.title }}</button>
+        {% if track.meta_mood %}
+        <span class="tl-mood-chip" title="Mood: estado de ánimo">🎭 {{ MOOD_LABELS.get(track.meta_mood, track.meta_mood) }}</span>
+        {% endif %}
+        {% if track.meta_tema_lirico %}
+        <span class="tl-tema-chip" title="Tema lírico: contenido de la letra">📖 {{ track.meta_tema_lirico }}</span>
+        {% endif %}
+      </span>
+      <span class="track-duration">{{ track.duration|format_duration }}</span>
+      <span class="track-quality">
+        <span class="tq-badge format-{{ track.led_color or 'white' }}">{{ track.format_display or track.codec|upper or 'FLAC' }}</span>
+      </span>
+      <span class="track-led">{{ diamond_svg(track.led_color or 'white', 'sm')|safe }}</span>
+      <span class="track-actions">
+        <button class="track-actions-btn" title="Reproducir" data-track-id="{{ track.id }}" onclick="playTrackFromAlbum({{ track.id }})">▶</button>
+        <button class="track-actions-btn add-btn" title="Añadir a cola" data-track-id="{{ track.id }}" onclick="addToPlaylistByIdWithFeedback({{ track.id }}, this)">➕</button>
+        <button class="fav-btn{% if fav_ids is defined and track.id in fav_ids %} is-fav{% endif %}" data-fav-id="{{ track.id }}" title="{% if fav_ids is defined and track.id in fav_ids %}Quitar de favoritos{% else %}Añadir a favoritos{% endif %}" onclick="toggleFavorite({{ track.id }})">
+          <svg class="heart-svg" viewBox="0 0 24 24"><path {% if fav_ids is defined and track.id in fav_ids %}fill="#f43f5e" stroke="#f43f5e"{% else %}fill="none" stroke="currentColor"{% endif %} stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        </button>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<style>
+.album-track-header,
+.album-track-row {
+  display: grid;
+  grid-template-columns: 36px 40px 1fr 52px auto 10px auto;
+  align-items: center;
+  gap: 0.5rem;
+}
+.track-quality { overflow: hidden; }
+.tq-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.62rem;
+  font-weight: 700;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.track-ghost { opacity: 0.4; pointer-events: none; }
+.tl-mood-chip {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 10px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: rgba(167,139,250,0.12);
+  color: #a78bfa;
+  border: 1px solid rgba(167,139,250,0.2);
+  vertical-align: middle;
+}
+.tl-tema-chip {
+  display: inline-block;
+  margin-left: 0.3rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 10px;
+  font-size: 0.62rem;
+  font-weight: 600;
+  background: rgba(52,211,153,0.12);
+  color: #34d399;
+  border: 1px solid rgba(52,211,153,0.2);
+  vertical-align: middle;
+}
+.album-artist-page-link { color:var(--accent); text-decoration:none; }
+.album-artist-page-link:hover { text-decoration:underline; }
+
+/* Album meta panel */
+.album-meta-panel {
+  margin: 0.75rem 0;
+  padding: 0.9rem 1rem;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.amp-title { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 0.7rem; }
+.amp-grid { display: flex; flex-direction: column; gap: 0.5rem; }
+.amp-row { display: grid; grid-template-columns: 120px 1fr 36px; align-items: center; gap: 0.5rem; }
+.amp-label { font-size: 0.72rem; color: var(--text-secondary); }
+.amp-bar-wrap { height: 5px; background: rgba(255,255,255,0.07); border-radius: 3px; overflow: hidden; }
+.amp-bar-fill { height: 100%; border-radius: 3px; min-width: 2px; }
+.amp-val { font-size: 0.72rem; color: var(--text-muted); text-align: right; }
+.amp-lyrics-info { margin-top: 0.7rem; font-size: 0.75rem; color: var(--text-muted); }
+
+/* Meta pills shared */
+.meta-pill { padding:0.2rem 0.6rem; border-radius:20px; font-size:0.72rem; font-weight:600; text-decoration:none; display:inline-block; }
+.mood-pill { background:rgba(167,139,250,0.15); color:#a78bfa; border:1px solid rgba(167,139,250,0.3); }
+.momento-pill { background:rgba(251,191,36,0.12); color:#fbbf24; border:1px solid rgba(251,191,36,0.25); }
+.era-pill { background:rgba(99,102,241,0.12); color:#818cf8; border:1px solid rgba(99,102,241,0.25); }
+</style>
+
+<script>
+(function() {
+  const ALBUM_TRACKS = {{ tracks|tojson }};
+  const ALBUM_ARTIST = {{ album.artist_name|tojson }};
+  const ALBUM_NAME   = {{ album.name|tojson }};
+
+  // albumQueue cached per page — reset each time the script runs (i.e. each SPA navigation)
+  let albumQueue = null;
+
+  async function ensureAlbumQueue() {
+    if (albumQueue && albumQueue.length) return albumQueue;
+    try {
+      const tracks = await fetch(`/api/album/{{ album.id }}/tracks`).then(r => r.json());
+      if (!Array.isArray(tracks) || !tracks.length) throw new Error('empty');
+      const playable = tracks.filter(t => t.audio_url || t.file_path);
+      albumQueue = playable.length ? playable : tracks;
+    } catch(e) {
+      const playable = ALBUM_TRACKS.filter(t => t.audio_url || t.file_path);
+      albumQueue = playable.length ? playable : ALBUM_TRACKS;
+    }
+    return albumQueue;
+  }
+
+  // Prepend all album tracks above current queue position and start playing from the first
+  async function playAllAlbum() {
+    const q = await ensureAlbumQueue();
+    if (!q || !q.length) { console.warn('playAllAlbum: empty queue'); return; }
+    if (window.prependTracksAndPlay) {
+      window.prependTracksAndPlay(q, 0);
+    } else {
+      loadQueue(q);
+      playTrack(0);
+    }
+  }
+
+  // Play a single track: prepend it to the top of the queue and start it immediately
+  async function playTrackFromAlbum(trackId) {
+    try {
+      const data = await fetch(`/api/track/${trackId}`).then(r => r.json());
+      if (window.prependAndPlay) {
+        window.prependAndPlay(data);
+      } else {
+        loadQueue([data]);
+        playTrack(0);
+      }
+    } catch(e) {
+      console.error('playTrackFromAlbum error:', e);
+    }
+  }
+
+  // Add a single track to the end of the queue without touching playback
+  async function addToPlaylistByIdWithFeedback(trackId, btn) {
+    if (btn) { btn.textContent = '…'; btn.disabled = true; }
+    try {
+      const data = await fetch(`/api/track/${trackId}`).then(r => r.json());
+      if (window.appendToQueue) window.appendToQueue(data);
+      if (btn) {
+        btn.textContent = '✓';
+        btn.style.color = '#4ade80';
+        btn.style.borderColor = '#16a34a';
+        setTimeout(() => {
+          btn.textContent = '➕';
+          btn.style.color = '';
+          btn.style.borderColor = '';
+          btn.disabled = false;
+        }, 1800);
+      }
+    } catch(e) {
+      if (btn) { btn.textContent = '➕'; btn.disabled = false; }
+      console.error('addToPlaylist error:', e);
+    }
+  }
+
+  async function addToPlaylistById(trackId) {
+    const data = await fetch(`/api/track/${trackId}`).then(r => r.json());
+    if (window.appendToQueue) window.appendToQueue(data);
+  }
+
+  // Expose to window so onclick attributes in HTML can reach them across SPA navigations
+  window.playAllAlbum               = playAllAlbum;
+  window.playTrackFromAlbum         = playTrackFromAlbum;
+  window.addToPlaylistByIdWithFeedback = addToPlaylistByIdWithFeedback;
+  window.addToPlaylistById          = addToPlaylistById;
+
+  // Point 9: Last.fm album popularity — improved robustness
+  (async () => {
+    const el = document.getElementById('album-popularity');
+    try {
+      const r = await fetch(
+        `https://ws.audioscrobbler.com/2.0/?method=album.getinfo` +
+        `&api_key=5ae4b43802aade3c7132427e83822282` +
+        `&artist=${encodeURIComponent(ALBUM_ARTIST)}` +
+        `&album=${encodeURIComponent(ALBUM_NAME)}&format=json`
+      );
+      const d = await r.json();
+      const alb = d.album;
+      if (alb && (alb.listeners !== undefined || alb.playcount !== undefined)) {
+        const listeners = parseInt(alb.listeners || 0);
+        const plays     = parseInt(alb.playcount  || 0);
+        let stars = 1;
+        if (listeners >= 50000)   stars = 2;
+        if (listeners >= 300000)  stars = 3;
+        if (listeners >= 1000000) stars = 4;
+        if (listeners >= 5000000) stars = 5;
+        const fillPct  = Math.min(100, Math.round((Math.log10(listeners + 1) / Math.log10(10000001)) * 100));
+        const starsHtml = Array.from({length:5}, (_,i) =>
+          `<span class="${i < stars ? 'star-on' : 'star-off'}" style="font-size:1.05rem">★</span>`
+        ).join('');
+        el.innerHTML = `
+          <div class="dr-pop-row">
+            <span class="artist-stars">${starsHtml}</span>
+            <span class="dr-pop-score">${stars * 20} pts Last.fm</span>
+          </div>
+          <div class="dr-pop-fill-wrap" title="${listeners.toLocaleString()} oyentes">
+            <div class="dr-pop-fill-bar" style="width:${fillPct}%"></div>
+          </div>
+          <div class="dr-pop-listeners">${listeners.toLocaleString()} oyentes · ${plays.toLocaleString()} plays</div>`;
+      } else if (alb && alb.error) {
+        el.innerHTML = '<span class="dr-pop-listeners">Sin datos en Last.fm</span>';
+      } else {
+        el.innerHTML = '<span class="dr-pop-listeners">Sin datos en Last.fm</span>';
+      }
+    } catch(e) {
+      el.innerHTML = '<span class="dr-pop-listeners">Last.fm no disponible</span>';
+    }
+  })();
+})();
+</script>
+{% endblock %}

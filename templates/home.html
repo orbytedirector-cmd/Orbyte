@@ -1,0 +1,375 @@
+{% extends "base.html" %}
+{% block content %}
+
+<!-- Stats bar -->
+<div class="stats-grid">
+  <div class="stat-card"><div class="stat-value">{{ total_artists }}</div><div class="stat-label">Artistas</div></div>
+  <div class="stat-card"><div class="stat-value">{{ total_albums }}</div><div class="stat-label">Álbumes</div></div>
+  <div class="stat-card"><div class="stat-value">{{ total_tracks }}</div><div class="stat-label">Pistas</div></div>
+  <div class="stat-card"><div class="stat-value">{{ "%0.1f"|format(duration_hours) }}</div><div class="stat-label">Horas</div></div>
+  <div class="stat-card"><div class="stat-value">{{ "%0.2f"|format(size_tb) }}</div><div class="stat-label">TB</div></div>
+</div>
+
+<!-- Favorites quick access -->
+<div style="margin-bottom:1.5rem;padding:1rem 1.25rem;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;display:flex;align-items:center;gap:1rem;flex-wrap:wrap">
+  <span style="font-size:1.4rem">❤️</span>
+  <div style="flex:1">
+    <div style="font-weight:700;font-size:1rem;color:var(--text-primary)">Tus Favoritos</div>
+    <div style="font-size:0.8rem;color:var(--text-muted)" id="fav-count-home">Cargando...</div>
+  </div>
+  <a href="/favorites" class="track-btn ghost" style="text-decoration:none">Ver favoritos →</a>
+</div>
+<script>
+  fetch('/api/favorites').then(r=>r.json()).then(d=>{
+    const el = document.getElementById('fav-count-home');
+    if (el) el.textContent = d.length ? `${d.length} pista${d.length!==1?'s':''} guardada${d.length!==1?'s':''}` : 'Sin favoritos aún';
+  }).catch(()=>{});
+</script>
+
+<!-- LED Quality Distribution -->
+<div class="section-block">
+  <h2 class="section-title">Distribución de Calidad — LED iFi Zen DAC V2</h2>
+  <p class="section-sub">
+    Cada color refleja el modo de decodificación del DAC. Haz clic en cualquier categoría para explorar.
+  </p>
+  <div class="quality-grid">
+    {% set led_meta = {
+      'yellow':  {'name': 'PCM CD Quality',    'detail': '44.1 / 48 kHz',                          'codecs': 'FLAC · WAV · AIFF'},
+      'white':   {'name': 'PCM Hi-Res',         'detail': '88.2 · 96 · 176.4 · 192 · 352.8 · 384 kHz', 'codecs': 'FLAC · WAV Hi-Res'},
+      'cyan':    {'name': 'DSD 64 / DSD 128',   'detail': '2.822 / 5.644 MHz',                      'codecs': 'DSF · DFF · ISO'},
+      'red':     {'name': 'DSD 256',            'detail': '11.289 MHz',                             'codecs': 'DSF · DFF'},
+      'green':   {'name': 'MQA',                'detail': 'Master Quality Authenticated',           'codecs': 'FLAC MQA'},
+      'blue':    {'name': 'MQA Studio',         'detail': 'Studio-authenticated MQA',              'codecs': 'FLAC MQA Studio'},
+      'magenta': {'name': 'Original Sample Rate','detail': 'MQB — preserves original sample rate',  'codecs': 'MQB'},
+    } %}
+    {% for color in led_order %}
+      {% set cnt = led_counts.get(color, 0) %}
+      {% if cnt > 0 %}
+      {% set m = led_meta[color] %}
+      <a href="/led/{{ color }}" class="quality-card">
+        {{ diamond_svg(color, 'lg')|safe }}
+        <div class="quality-info">
+          <div class="quality-name">{{ m.name }}</div>
+          <div class="quality-detail">{{ m.detail }}</div>
+          <span class="track-format-badge format-{{ color }}">{{ m.codecs }}</span>
+        </div>
+        <div class="quality-right">
+          <div class="quality-count">{{ cnt }}</div>
+          <div class="quality-pct">{{ "%.1f"|format(cnt / total_tracks * 100 if total_tracks else 0) }}%</div>
+          <div class="quality-bar">
+            <div class="quality-bar-fill" style="width:{{ cnt / total_tracks * 100 if total_tracks else 0 }}%;background:var(--led-{{ color }})"></div>
+          </div>
+        </div>
+      </a>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+
+<!-- Lyrics stats banner (if significant) -->
+{% if lyrics_stats.with_lyrics > 0 %}
+<div class="section-block lyrics-banner">
+  <div class="lyrics-banner-inner">
+    <span class="lyrics-banner-icon">🎵</span>
+    <div class="lyrics-banner-text">
+      <strong>{{ lyrics_stats.with_lyrics|int }}</strong> pistas con letra disponible
+      {% if lyrics_stats.synced > 0 %} · <strong>{{ lyrics_stats.synced|int }}</strong> con letra sincronizada{% endif %}
+    </div>
+    <span class="lyrics-banner-note">vía lrclib.net</span>
+  </div>
+</div>
+{% endif %}
+
+<!-- Mood Explorer -->
+{% if moods %}
+<div class="section-block">
+  <h2 class="section-title">Explorar por Mood</h2>
+  <div class="mood-explorer-grid">
+    {% set max_mood = moods[0][1] if moods else 1 %}
+    {% for mood, count in moods %}
+    <a href="/mood/{{ mood }}" class="mood-explorer-card">
+      <div class="mec-bar" style="width:{{ (count / max_mood * 100)|round }}%"></div>
+      <span class="mec-name">{{ MOOD_LABELS.get(mood, mood) }}</span>
+      <span class="mec-count">{{ count }}</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Momento del día -->
+{% if momentos %}
+<div class="section-block">
+  <h2 class="section-title">Momento del día</h2>
+  <div class="momento-grid">
+    {% set momento_meta = {
+      'morning':  {'icon': '☀️',  'label': 'Mañana',           'color': '#fbbf24'},
+      'evening':  {'icon': '🌅',  'label': 'Tarde',             'color': '#f97316'},
+      'night':    {'icon': '🌙',  'label': 'Noche',             'color': '#818cf8'},
+      'sleep':    {'icon': '😴',  'label': 'Para dormir',       'color': '#6366f1'},
+      'party':    {'icon': '🎉',  'label': 'Fiesta',            'color': '#ec4899'},
+      'workout':  {'icon': '💪',  'label': 'Ejercicio',         'color': '#ef4444'},
+      'focus':    {'icon': '🎯',  'label': 'Concentración',     'color': '#14b8a6'},
+      'anytime':  {'icon': '🎵',  'label': 'Cualquier momento', 'color': '#6b7280'},
+    } %}
+    {% for momento, count in momentos %}
+    {% set m = momento_meta.get(momento, {'icon': '♪', 'label': momento, 'color': '#6b7280'}) %}
+    <a href="/momento/{{ momento }}" class="momento-card" style="border-color:{{ m.color }}33">
+      <div class="mc-icon">{{ m.icon }}</div>
+      <div class="mc-label">{{ m.label }}</div>
+      <div class="mc-count" style="color:{{ m.color }}">{{ count }} pistas</div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Era Musical -->
+{% if eras %}
+<div class="section-block">
+  <h2 class="section-title">Por Era Musical</h2>
+  <div class="era-timeline">
+    {% set era_meta = {
+      'early_rock_era':         {'label': 'Early Rock',           'decade': '50s–60s', 'color': '#f59e0b'},
+      'british_invasion_era':   {'label': 'British Invasion',     'decade': '60s',     'color': '#3b82f6'},
+      'classic_rock_era':       {'label': 'Classic Rock',         'decade': '70s',     'color': '#f97316'},
+      'nwobhm_synth_era':       {'label': 'NWOBHM / Synth',       'decade': '80s',     'color': '#a855f7'},
+      'grunge_alternative_era': {'label': 'Grunge / Alternative', 'decade': '90s',     'color': '#22c55e'},
+      'post_millennial_era':    {'label': 'Post-millennial',      'decade': '2000s',   'color': '#06b6d4'},
+      'streaming_era':          {'label': 'Streaming Era',        'decade': '2010s',   'color': '#ec4899'},
+      'current_era':            {'label': 'Actualidad',           'decade': '2020s+',  'color': '#00e676'},
+    } %}
+    {% for era, count in eras %}
+    {% set e = era_meta.get(era, {'label': era|replace('_',' ')|title, 'decade': '', 'color': 'var(--accent)'}) %}
+    <a href="/era/{{ era }}" class="era-card">
+      <div class="ec-decade" style="color:{{ e.color }}">{{ e.decade }}</div>
+      <div class="ec-label">{{ e.label }}</div>
+      <div class="ec-bar-wrap">
+        <div class="ec-bar-fill" style="width:{{ (count / max_era_count * 100)|round }}%;background:{{ e.color }}"></div>
+      </div>
+      <div class="ec-count" style="color:{{ e.color }}">{{ count }}</div>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Tema lírico -->
+{% if temas %}
+<div class="section-block">
+  <h2 class="section-title">Tema Lírico</h2>
+  <div class="tema-chips">
+    {% for tema, count in temas %}
+    <a href="/tema/{{ tema }}" class="tema-chip">{{ tema }} <span class="tema-count">{{ count }}</span></a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+
+<!-- Géneros -->
+<div class="section-block">
+  <h2 class="section-title">Géneros / Subgéneros</h2>
+  <div class="genre-chips">
+    {% for genre, count in genres_primary %}
+    <a href="/genre/{{ genre }}" class="genre-chip">{{ genre }} <span class="genre-count">{{ count }}</span></a>
+    {% endfor %}
+    {% for genre, count in genres %}
+    <a href="/genre/{{ genre }}" class="genre-chip">{{ genre }} <span class="genre-count">{{ count }}</span></a>
+    {% endfor %}
+  </div>
+  {% if all_genres|length > 8 %}
+  <div class="genre-more-wrap">
+    <button class="genre-more-btn" id="genre-more-btn" onclick="toggleGenreSelector(this)">
+      Ver todos los géneros ({{ all_genres|length }}) ▾
+    </button>
+    <div class="genre-selector-panel" id="genre-selector-panel" style="display:none">
+      <input type="text" class="genre-search-input" id="genre-search-input"
+             placeholder="Buscar género…" oninput="filterGenres(this.value)">
+      <div class="genre-selector-grid" id="genre-selector-grid">
+        {% for genre, count in all_genres %}
+        <a href="/genre/{{ genre }}" class="genre-selector-item" data-genre="{{ genre|lower }}">
+          <span class="gsi-name">{{ genre }}</span>
+          <span class="gsi-count">{{ count }}</span>
+        </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Idioma / Filtro por idioma (Point 2) -->
+{% if languages %}
+<div class="section-block">
+  <h2 class="section-title">Explorar por Idioma</h2>
+  <div class="language-grid">
+    {% set lang_labels = {
+      'en':'Inglés','es':'Español','de':'Alemán','fr':'Francés',
+      'pt':'Portugués','it':'Italiano','ja':'Japonés','ko':'Coreano','nl':'Holandés',
+    } %}
+    {% for lang, count in languages %}
+    <a href="/language/{{ lang }}" class="language-card">
+      <span class="lang-flag">{{ lang_flag(lang)|safe }}</span>
+      <span class="lang-name">{{ lang_labels.get(lang, lang|upper) }}</span>
+      <span class="lang-count">{{ count }} pistas</span>
+    </a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- Últimos agregados -->
+<div class="section-block">
+  <h2 class="section-title">Últimos agregados</h2>
+  <div class="recent-scroll">
+    {% for album in recent_albums %}
+    <div class="album-card">
+      <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }}, this)">
+        <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover" loading="lazy"
+             onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+        <div class="play-overlay">▶</div>
+      </div>
+      <div class="album-card-info">
+        <div class="aci-text">
+          <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+          {% if album.artist_id %}
+          <a href="/artist/{{ album.artist_id }}" class="album-artist-link">{{ album.artist_name }}</a>
+          {% else %}
+          <span class="album-artist-link">{{ album.artist_name }}</span>
+          {% endif %}
+        </div>
+        <div class="aci-footer">
+          {% if album.primary_format %}
+          <span class="aci-quality">
+          {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
+            <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
+          </span>
+          {% endif %}
+          <span class="aci-stats">
+            {%- if album.year %}{{ album.year }}{% endif -%}
+            {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
+          </span>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<style>
+/* Quality grid */
+.quality-grid { display:grid; grid-template-columns:1fr 1fr; gap:0.35rem; }
+.quality-card { display:flex; align-items:center; gap:0.75rem; padding:0.5rem 0.85rem; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; text-decoration:none; color:inherit; transition:border-color 0.2s,background 0.2s; }
+.quality-card:hover { border-color:var(--accent); background:rgba(255,255,255,0.04); }
+.quality-led { width:13px; height:13px; border-radius:50%; flex-shrink:0; }
+.quality-info { flex:1; min-width:0; }
+.quality-name { font-size:0.82rem; font-weight:600; color:var(--text-primary); }
+.quality-detail { font-size:0.68rem; color:var(--text-secondary); margin:0.1rem 0; }
+.quality-right { display:flex; flex-direction:column; align-items:flex-end; gap:0.15rem; min-width:70px; }
+.quality-count { font-size:0.88rem; font-weight:700; color:var(--text-primary); }
+.quality-pct { font-size:0.65rem; color:var(--text-muted); }
+.quality-bar { width:60px; height:3px; background:rgba(255,255,255,0.07); border-radius:2px; overflow:hidden; }
+.quality-bar-fill { height:100%; border-radius:2px; min-width:2px; }
+.section-sub { color:var(--text-secondary); font-size:0.84rem; margin:-0.4rem 0 1rem; }
+/* Lyrics banner */
+.lyrics-banner { padding:0 !important; }
+.lyrics-banner-inner { display:flex; align-items:center; gap:0.75rem; padding:0.75rem 1.1rem; background:rgba(0,230,118,0.07); border:1px solid rgba(0,230,118,0.2); border-radius:12px; }
+.lyrics-banner-icon { font-size:1.2rem; }
+.lyrics-banner-text { flex:1; font-size:0.85rem; color:var(--text-secondary); }
+.lyrics-banner-text strong { color:var(--led-green); }
+.lyrics-banner-note { font-size:0.72rem; color:var(--text-muted); }
+/* Mood explorer */
+.mood-explorer-grid { display:flex; flex-wrap:wrap; gap:0.5rem; }
+.mood-explorer-card { position:relative; display:flex; align-items:center; gap:0.5rem; padding:0.45rem 0.9rem; background:rgba(167,139,250,0.07); border:1px solid rgba(167,139,250,0.2); border-radius:20px; text-decoration:none; overflow:hidden; transition:border-color 0.2s,background 0.2s; }
+.mood-explorer-card:hover { background:rgba(167,139,250,0.15); border-color:rgba(167,139,250,0.45); }
+.mec-bar { position:absolute; left:0; top:0; height:100%; background:rgba(167,139,250,0.08); border-radius:20px; z-index:0; }
+.mec-name { position:relative; z-index:1; font-size:0.84rem; font-weight:600; color:#a78bfa; }
+.mec-count { position:relative; z-index:1; font-size:0.7rem; color:var(--text-muted); padding:0.05rem 0.35rem; background:rgba(0,0,0,0.25); border-radius:10px; }
+/* Momento */
+.momento-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(100px,1fr)); gap:0.5rem; }
+.momento-card { display:flex; flex-direction:column; align-items:center; gap:0.2rem; padding:0.6rem 0.5rem; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; text-decoration:none; text-align:center; transition:border-color 0.2s,background 0.2s; }
+.momento-card:hover { border-color:var(--accent); background:rgba(255,255,255,0.04); }
+.mc-icon { font-size:1.25rem; line-height:1; }
+.mc-label { font-size:0.72rem; font-weight:600; color:var(--text-primary); }
+.mc-count { font-size:0.62rem; }
+/* Era */
+.era-timeline { display:grid; grid-template-columns:1fr 1fr; gap:0.45rem; }
+.era-card { display:grid; grid-template-columns:55px 195px 1fr 58px; align-items:center; gap:0.75rem; padding:0.65rem 1rem; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; text-decoration:none; color:inherit; transition:border-color 0.2s,background 0.2s; }
+.era-card:hover { background:rgba(255,255,255,0.03); }
+.ec-decade { font-size:0.72rem; font-weight:700; }
+.ec-label { font-size:0.85rem; color:var(--text-primary); font-weight:500; }
+.ec-bar-wrap { height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden; }
+.ec-bar-fill { height:100%; border-radius:3px; min-width:3px; transition:width 0.6s ease; }
+.ec-count { font-size:0.8rem; font-weight:600; text-align:right; }
+/* Tema */
+.tema-chips { display:flex; flex-wrap:wrap; gap:0.5rem; }
+.tema-chip { padding:0.3rem 0.8rem; background:rgba(52,211,153,0.08); border:1px solid rgba(52,211,153,0.2); border-radius:20px; text-decoration:none; color:#34d399; font-size:0.82rem; font-weight:500; transition:background 0.2s; }
+.tema-chip:hover { background:rgba(52,211,153,0.16); }
+.tema-count { font-size:0.7rem; color:var(--text-muted); margin-left:0.3rem; }
+/* Tier */
+.tier-row { display:flex; gap:0.75rem; flex-wrap:wrap; }
+.tier-card { display:flex; align-items:center; gap:0.6rem; padding:0.7rem 1.2rem; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; text-decoration:none; color:inherit; transition:border-color 0.2s; }
+.tier-card:hover { border-color:var(--accent); }
+.tier-icon { font-size:1.1rem; }
+.tier-name { font-size:0.9rem; font-weight:600; }
+.tier-count { font-size:0.8rem; color:var(--text-muted); padding:0.1rem 0.45rem; background:rgba(255,255,255,0.06); border-radius:10px; }
+.tier-silver .tier-name { color:#94a3b8; }
+.tier-bronze .tier-name { color:#d97706; }
+.tier-review .tier-name { color:var(--text-muted); }
+/* Genre extended selector */
+.genre-more-wrap { margin-top:0.75rem; }
+.genre-more-btn { background:none; border:1px solid var(--border); border-radius:8px; color:var(--text-secondary); font-size:0.82rem; padding:0.35rem 0.85rem; cursor:pointer; transition:border-color 0.2s,color 0.2s; }
+.genre-more-btn:hover { border-color:var(--accent); color:var(--accent); }
+.genre-selector-panel { margin-top:0.75rem; padding:0.85rem; background:var(--bg-card); border:1px solid var(--border); border-radius:12px; }
+.genre-search-input { width:100%; box-sizing:border-box; padding:0.5rem 0.75rem; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-size:0.85rem; margin-bottom:0.75rem; outline:none; }
+.genre-search-input:focus { border-color:var(--accent); }
+.genre-selector-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:0.3rem; max-height:320px; overflow-y:auto; }
+.genre-selector-item { display:flex; justify-content:space-between; align-items:center; padding:0.35rem 0.6rem; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.04); border-radius:6px; text-decoration:none; color:var(--text-secondary); font-size:0.8rem; transition:background 0.15s,color 0.15s,border-color 0.15s; }
+.genre-selector-item:hover { background:rgba(0,212,255,0.08); color:var(--accent); border-color:rgba(0,212,255,0.25); }
+.genre-selector-item.hidden { display:none; }
+.gsi-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.gsi-count { font-size:0.68rem; color:var(--text-muted); margin-left:0.4rem; flex-shrink:0; }
+/* Language grid */
+.language-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(100px,1fr)); gap:0.5rem; }
+.language-card { display:flex; flex-direction:column; align-items:center; gap:0.2rem; padding:0.55rem 0.5rem; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; text-decoration:none; text-align:center; transition:border-color 0.2s,background 0.2s; }
+.language-card:hover { border-color:var(--accent); background:rgba(255,255,255,0.04); }
+.lang-flag { font-size:1.4rem; line-height:1; }
+.lang-name { font-size:0.72rem; font-weight:600; color:var(--text-primary); }
+.lang-count { font-size:0.62rem; color:var(--text-muted); }
+/* Album card meta row */
+.album-card-meta-row { display:flex; align-items:center; justify-content:center; gap:0.25rem; font-size:0.72rem; color:rgba(200,146,10,0.55); margin-top:0.2rem; flex-wrap:wrap; }
+.album-card-meta-row .meta-year { color:var(--accent); }
+.meta-sep { color:rgba(200,146,10,0.3); }
+</style>
+
+<script>
+function toggleGenreSelector(btn) {
+  const panel = document.getElementById('genre-selector-panel');
+  const open  = panel.style.display !== 'none';
+  panel.style.display = open ? 'none' : '';
+  btn.textContent = open
+    ? 'Ver todos los géneros ({{ all_genres|length }}) ▾'
+    : 'Ocultar géneros ▴';
+  if (!open) document.getElementById('genre-search-input').focus();
+}
+function filterGenres(q) {
+  const term = q.toLowerCase().trim();
+  document.querySelectorAll('.genre-selector-item').forEach(el => {
+    el.classList.toggle('hidden', term !== '' && !el.dataset.genre.includes(term));
+  });
+}
+async function playAlbumById(albumId) {
+  const tracks = await fetch(`/api/album/${albumId}/tracks`).then(r => r.json());
+  if (!Array.isArray(tracks) || !tracks.length) return;
+  const valid = tracks.filter(t => t.audio_url || t.file_path);
+  const q     = valid.length ? valid : tracks;
+  if (window.prependTracksAndPlay) {
+    window.prependTracksAndPlay(q, 0);
+  } else {
+    loadQueue(q);
+    playTrack(0);
+  }
+}
+</script>
+{% endblock %}

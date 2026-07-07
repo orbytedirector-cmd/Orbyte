@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-nav-bar" style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.9rem">
+  <a href="/" class="track-btn ghost" style="text-decoration:none;padding:0.35rem 0.7rem" title="Inicio">🏠</a>
+</div>
+
+<div style="display:flex;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap">
+  <h1 style="font-size:1.7rem;font-weight:700;margin:0">❤️ Tus Favoritos</h1>
+  <span style="color:var(--text-secondary);font-size:0.9rem" id="fav-count">{{ tracks|length }} pistas</span>
+  {% if tracks %}
+  <button class="track-btn primary" onclick="playFavorites()" style="margin-left:auto">▶ Reproducir todo</button>
+  {% endif %}
+</div>
+
+{% if not tracks %}
+<div style="text-align:center;padding:3rem;color:var(--text-muted)">
+  <div style="font-size:3rem;margin-bottom:1rem">♡</div>
+  <p>No tienes favoritos todavía.</p>
+  <p style="font-size:0.85rem">Usa el botón ♡ en cualquier pista para añadirla aquí.</p>
+</div>
+{% else %}
+<div class="favorites-grid">
+  {% for t in tracks %}
+  <div class="fav-track-row" id="fav-row-{{ t.id }}">
+    <img class="fav-cover-sm"
+         src="{{ t.cover_path|cover_url }}"
+         onerror="this.style.display='none'" alt="">
+    <div class="fav-info">
+      <div class="fav-title" title="{{ t.title }}">{{ t.title }}</div>
+      <div class="fav-artist">{{ t.artist or t.album_name or '' }}</div>
+    </div>
+    <span class="track-format-badge format-{{ t.led_color or 'yellow' }}" style="font-size:0.65rem;flex-shrink:0">
+      {{ t.format_display or t.led_color|upper }}
+    </span>
+    <button class="track-actions-btn" title="Reproducir" onclick="playFavTrack({{ loop.index0 }})">▶</button>
+    <button class="fav-btn is-fav" data-fav-id="{{ t.id }}" onclick="removeFav({{ t.id }}, this)" title="Quitar de favoritos">
+      <svg class="heart-svg" viewBox="0 0 24 24"><path fill="#f43f5e" stroke="#f43f5e" stroke-width="1.5" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+    </button>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<script>
+const FAV_TRACKS = {{ tracks_json|safe }};
+
+// Refresh _favIds from server data — covers tracks added in previous sessions
+// that the SPA navigation may not have included in the initial window._favIds
+window._favIds = new Set(FAV_TRACKS.map(t => Number(t.id)));
+
+function playFavorites() {
+  if (!FAV_TRACKS.length) return;
+  if (window.prependTracksAndPlay) { window.prependTracksAndPlay(FAV_TRACKS, 0); }
+  else { loadQueue(FAV_TRACKS); playTrack(0); }
+}
+function playFavTrack(idx) {
+  if (!FAV_TRACKS.length || idx < 0 || idx >= FAV_TRACKS.length) return;
+  // Play only the selected track — use prependAndPlay (single) not prependTracksAndPlay (all)
+  if (window.prependAndPlay) {
+    window.prependAndPlay(FAV_TRACKS[idx]);
+  } else {
+    loadQueue([FAV_TRACKS[idx]]);
+    playTrack(0);
+  }
+}
+async function removeFav(trackId, btn) {
+  const d = await fetch('/api/favorites/toggle', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({track_id: trackId})
+  }).then(r => r.json());
+  if (d.action === 'removed') {
+    const row = document.getElementById('fav-row-' + trackId);
+    if (row) { row.style.opacity='0'; row.style.transition='opacity 0.3s'; setTimeout(()=>row.remove(), 300); }
+    if (window._favIds) window._favIds.delete(trackId);
+    const cnt = document.getElementById('fav-count');
+    if (cnt) { const n = parseInt(cnt.textContent)-1; cnt.textContent = n + ' pistas'; }
+  }
+}
+</script>
+{% endblock %}
