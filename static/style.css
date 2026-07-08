@@ -1065,6 +1065,27 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .fav-title { font-size:0.85rem; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .fav-artist { font-size:0.75rem; color:var(--text-muted); }
 
+/* ── Pagination (reusable — cualquier sección puede usar estas clases) ──────── */
+.pagination {
+  display:flex; align-items:center; justify-content:center; gap:0.4rem;
+  margin:1.1rem 0; flex-wrap:wrap;
+}
+.page-btn {
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:0.35rem 0.85rem; min-height:1.9rem; box-sizing:border-box;
+  background:var(--bg-card); border:1px solid var(--border); border-radius:8px;
+  color:var(--text-primary); text-decoration:none; font-size:0.8rem; font-weight:500;
+  cursor:pointer; transition:border-color 0.15s, color 0.15s, background 0.15s, opacity 0.15s;
+}
+.page-btn:hover { border-color:var(--accent); color:var(--accent); background:rgba(0,212,255,0.06); }
+.page-btn:disabled, .page-btn.is-disabled { opacity:0.3; pointer-events:none; }
+.page-btn-icon { padding:0.35rem 0.6rem; }
+.page-info {
+  padding:0.3rem 0.85rem; border-radius:20px; background:rgba(255,255,255,0.04);
+  border:1px solid var(--border); color:var(--text-secondary); font-size:0.76rem; font-weight:500;
+  white-space:nowrap;
+}
+
 
 
 

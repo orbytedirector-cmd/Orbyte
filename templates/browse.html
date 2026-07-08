@@ -5,6 +5,25 @@
 {% set cur_sort = sort     if sort     is defined else 'popularidad' %}
 {% set cur_dir  = sort_dir if sort_dir is defined else 'desc' %}
 
+{% macro pagination_nav() %}
+{% if total_pages > 1 %}
+<div class="pagination">
+  <a href="/" class="page-btn page-btn-icon" title="Inicio">🏠</a>
+  {% if page > 1 %}
+  <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page - 1 }}" class="page-btn">‹ Anterior</a>
+  {% else %}
+  <span class="page-btn is-disabled">‹ Anterior</span>
+  {% endif %}
+  <span class="page-info">Página {{ page }} de {{ total_pages }}</span>
+  {% if page < total_pages %}
+  <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page + 1 }}" class="page-btn">Siguiente ›</a>
+  {% else %}
+  <span class="page-btn is-disabled">Siguiente ›</span>
+  {% endif %}
+</div>
+{% endif %}
+{% endmacro %}
+
 <!-- ── Header ─────────────────────────────────────────────────────────────── -->
 <div class="browse-header">
   <div class="browse-header-left">
@@ -92,6 +111,7 @@
 
 <!-- ── Albums view ────────────────────────────────────────────────────────── -->
 <div id="view-albums">
+  {{ pagination_nav() }}
   <div class="album-grid">
     {% for album in albums %}
     <div class="album-card">
@@ -128,23 +148,17 @@
     {% endfor %}
   </div>
 
-  {% if total_pages > 1 %}
-  <div class="pagination">
-    <a href="/" class="page-btn" title="Inicio">🏠</a>
-    {% if page > 1 %}
-    <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page - 1 }}" class="page-btn">‹ Anterior</a>
-    {% endif %}
-    <span class="page-info">Página {{ page }} de {{ total_pages }}</span>
-    {% if page < total_pages %}
-    <a href="?sort={{ cur_sort }}&dir={{ cur_dir }}&page={{ page + 1 }}" class="page-btn">Siguiente ›</a>
-    {% endif %}
-  </div>
-  {% endif %}
+  {{ pagination_nav() }}
 </div>
 
 <!-- ── Tracks view (meta only) ───────────────────────────────────────────── -->
 {% if is_meta %}
 <div id="view-tracks" style="display:none">
+  <div id="tracks-pagination-top" class="pagination" style="display:none">
+    <button class="page-btn" id="tracks-prev-top" onclick="tracksChangePage(-1)">‹ Anterior</button>
+    <span class="page-info" id="tracks-page-info-top"></span>
+    <button class="page-btn" id="tracks-next-top" onclick="tracksChangePage(1)">Siguiente ›</button>
+  </div>
   <div id="tracks-loading" class="tracks-loading" style="display:none">Cargando pistas…</div>
   <div id="tracks-prompt" class="tracks-prompt" style="display:none">
     Elige un criterio de ordenación para explorar las pistas de este filtro
@@ -247,13 +261,6 @@
 .track-btn.danger:hover { background:rgba(239,68,68,0.15); border-color:#f87171; }
 .cq-badge-inline { display:inline-block; padding:0.05rem 0.35rem; background:rgba(239,68,68,0.2); border-radius:8px; font-size:0.7rem; font-weight:700; margin-left:0.3rem; }
 
-/* ── Pagination ── */
-.pagination { display:flex; align-items:center; justify-content:center; gap:1rem; margin:2rem 0 4rem; }
-.page-btn { padding:0.5rem 1.2rem; background:var(--bg-card); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); text-decoration:none; font-size:0.9rem; cursor:pointer; transition:border-color 0.2s, color 0.2s; }
-.page-btn:hover { border-color:var(--accent); color:var(--accent); }
-.page-info { color:var(--text-secondary); font-size:0.9rem; }
-.page-btn:disabled { opacity:0.35; pointer-events:none; }
-
 /* Mood vs Tema pill distinction in track rows */
 .mtr-pill-mood { background:rgba(167,139,250,0.12); color:#a78bfa; border:1px solid rgba(167,139,250,0.25); }
 .mtr-pill-tema { background:rgba(52,211,153,0.12); color:#34d399; border:1px solid rgba(52,211,153,0.25); }
@@ -276,6 +283,19 @@ let currentIntercalar    = false;
 let tracksLoaded         = false;
 
 const FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema_lirico', tier:'tier', language:'idioma' };
+const ALBUM_IDS = {{ albums|map(attribute='id')|list|tojson }};
+
+// Fetch tracks for every album currently loaded on this page (Albums view)
+async function collectLoadedAlbumTracks() {
+  const lists = await Promise.all(ALBUM_IDS.map(id =>
+    fetch(`/api/album/${id}/tracks`).then(r => r.json()).catch(() => [])
+  ));
+  return lists.flat().filter(t => t && (t.audio_url || t.file_path));
+}
+function _tracksViewActive() {
+  const el = document.getElementById('view-tracks');
+  return !!(el && el.style.display !== 'none');
+}
 
 // ── Album play ─────────────────────────────────────────────────────────────────
 async function playAlbumById(id, el) {
@@ -294,6 +314,43 @@ async function playAlbumById(id, el) {
 // Expose to window so onclick attrs work after SPA navigation
 window.playAlbumById = playAlbumById;
 
+// ── Play/queue everything currently loaded — funciona en Álbumes y en Pistas ──
+window.playAllLoaded = async function() {
+  if (IS_META && _tracksViewActive() && metaTracksQueue.length) {
+    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(metaTracksQueue, 0); }
+    else { loadQueue(metaTracksQueue); playTrack(0); }
+    return;
+  }
+  const tracks = await collectLoadedAlbumTracks();
+  if (!tracks.length) return;
+  if (window.prependTracksAndPlay) { window.prependTracksAndPlay(tracks, 0); }
+  else { loadQueue(tracks); playTrack(0); }
+};
+
+window.queueAllLoaded = async function() {
+  const tracks = (IS_META && _tracksViewActive() && metaTracksQueue.length)
+    ? metaTracksQueue
+    : await collectLoadedAlbumTracks();
+  if (!tracks.length) return;
+  tracks.forEach(t => addToPlaylist(t));
+  _updateClearQueueBarBtn();
+  const btn = document.getElementById('enqueue-all-btn');
+  if (btn) { btn.textContent = `✓ ${tracks.length} encoladas`; setTimeout(()=>{ btn.textContent='➕ Encolar todo'; },2500); }
+};
+
+// ── Clear-queue bar: visible + con conteo en vivo cada vez que cambia la cola ──
+function _updateClearQueueBarBtn() {
+  const btn = document.getElementById('clear-queue-bar-btn');
+  const cntEl = document.getElementById('cq-bar-count');
+  if (!btn) return;
+  const n = (window.userPlaylist||[]).length;
+  btn.style.display = n > 0 ? 'inline-flex' : 'none';
+  if (cntEl) cntEl.textContent = n;
+}
+window._updateClearQueueBarBtn = _updateClearQueueBarBtn;
+document.addEventListener('queueLoaded', _updateClearQueueBarBtn);
+_updateClearQueueBarBtn();
+
 // ── View switch ────────────────────────────────────────────────────────────────
 if (IS_META) {
   window.switchView = function(view) {
@@ -302,8 +359,6 @@ if (IS_META) {
     document.getElementById('view-tracks').style.display   = toTracks ? ''     : 'none';
     document.getElementById('sort-bar-albums').style.display = toTracks ? 'none' : '';
     document.getElementById('sort-bar-tracks').style.display = toTracks ? '' : 'none';
-    const queueBar = document.getElementById('queue-action-bar');
-    if (queueBar) queueBar.style.display = toTracks ? 'flex' : 'none';
     document.getElementById('btn-albums').classList.toggle('active', !toTracks);
     document.getElementById('btn-tracks').classList.toggle('active',  toTracks);
     // Auto-load tracks with default sort (popularidad desc) on first switch
@@ -375,12 +430,14 @@ if (IS_META) {
     const listEl  = document.getElementById('tracks-list');
     const loadEl  = document.getElementById('tracks-loading');
     const pagEl   = document.getElementById('tracks-pagination');
+    const pagElTop= document.getElementById('tracks-pagination-top');
     const noteEl  = document.getElementById('tracks-intercalar-note');
     const countEl = document.getElementById('browse-count');
 
     loadEl.style.display = '';
     listEl.innerHTML = '';
     if (pagEl) pagEl.style.display = 'none';
+    if (pagElTop) pagElTop.style.display = 'none';
     if (noteEl) noteEl.style.display = 'none';
 
     try {
@@ -447,6 +504,12 @@ if (IS_META) {
           document.getElementById('tracks-next').disabled = page >= metaTotalPages;
           document.getElementById('tracks-page-info').textContent = `Página ${page} de ${metaTotalPages}`;
         }
+        if (pagElTop) {
+          pagElTop.style.display = 'flex';
+          document.getElementById('tracks-prev-top').disabled = page <= 1;
+          document.getElementById('tracks-next-top').disabled = page >= metaTotalPages;
+          document.getElementById('tracks-page-info-top').textContent = `Página ${page} de ${metaTotalPages}`;
+        }
       }
     } catch(e) {
       loadEl.textContent = 'Error cargando pistas.';
@@ -496,34 +559,6 @@ if (IS_META) {
     if (metaTracksQueue[idx]) addToPlaylist(metaTracksQueue[idx]);
     _updateClearQueueBarBtn();
   };
-
-  // Point 6: queueAllLoaded is user-triggered only — shows clear button after
-  window.playAllLoaded = function() {
-    if (!metaTracksQueue.length) return;
-    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(metaTracksQueue, 0); }
-    else { loadQueue(metaTracksQueue); playTrack(0); }
-  };
-  window.queueAllLoaded = function() {
-    if (!metaTracksQueue.length) return;
-    metaTracksQueue.forEach(t => addToPlaylist(t));
-    _updateClearQueueBarBtn();
-    const btn = document.getElementById('enqueue-all-btn');
-    if (btn) { btn.textContent = `✓ ${metaTracksQueue.length} encoladas`; setTimeout(()=>{ btn.textContent='➕ Encolar todo'; },2500); }
-  };
-
-  // Clear queue bar button visibility
-  function _updateClearQueueBarBtn() {
-    const btn = document.getElementById('clear-queue-bar-btn');
-    const cntEl = document.getElementById('cq-bar-count');
-    if (!btn) return;
-    const n = (window.userPlaylist||[]).length;
-    btn.style.display = n > 0 ? 'inline-flex' : 'none';
-    if (cntEl) cntEl.textContent = n;
-  }
-  window._updateClearQueueBarBtn = _updateClearQueueBarBtn;
-
-  // Re-check on playlist changes
-  document.addEventListener('playlistUpdated', _updateClearQueueBarBtn);
 
   function esc(s) {
     return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
