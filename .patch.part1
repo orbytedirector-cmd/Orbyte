@@ -1,0 +1,33 @@
+diff --git a/templates/letter.html b/templates/letter.html
+index 2f5151f..254dd86 100755
+--- a/templates/letter.html
++++ b/templates/letter.html
+@@ -52,6 +52,7 @@
+
+     <!-- RIGHT: stars + score -->
+     <div class="artist-row-right">
++      <span class="ar-pop-label">Popularidad</span>
+       <span class="artist-stars" title="{{ score }} puntos de popularidad">
+         {%- for i in range(5) -%}
+           <span class="star {{ 'star-on' if i < stars else 'star-off' }}">★</span>
+@@ -80,7 +81,7 @@
+                 color:rgba(200,146,10,0.55); font-weight:600; letter-spacing:0.08em; }
+
+ /* ── Artist row ─────────────────────────────────────────────────────── */
+-.artist-list { display:flex; flex-direction:column; gap:0.4rem; max-width:860px; }
++.artist-list { display:grid; grid-template-columns: repeat(2, 1fr); gap:0.5rem 1rem; max-width:1600px; }
+
+ .artist-row {
+   display:flex; align-items:center; justify-content:space-between; gap:1rem;
+@@ -125,6 +126,11 @@
+ .star-off      { color:rgba(200,146,10,0.18); }
+ .ar-pop-score  { font-family:'Orbitron',system-ui,sans-serif; font-size:0.6rem;
+                  color:rgba(200,146,10,0.4); letter-spacing:0.04em; }
++.ar-pop-label  {
++  display:block;
++  font-family:'Orbitron',system-ui,sans-serif; font-size:0.58rem; font-weight:600;
++  letter-spacing:0.06em; text-transform:uppercase; color:rgba(200,146,10,0.45);
++}
+ </style>
+
+ {% endblock %}
