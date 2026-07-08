@@ -24,7 +24,7 @@
   --border-gold:   rgba(200,146,10,0.35);
 
   /* ── Player ── */
-  --player-h:      96px;
+  --player-h:      130px;
 
   /* ── LED indicator colors — never change these ── */
   --led-yellow:  #f5c518;
@@ -133,11 +133,11 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 }
 
 /* Left */
-.player-left { display:flex; align-items:center; gap:0.75rem; min-width:0; padding-top:2px; }
+.player-left { display:flex; align-items:center; gap:0.9rem; min-width:0; padding-top:2px; }
 
 /* Cover: bigger + hover zoom */
 .player-cover-wrap {
-  position:relative; width:52px; height:52px; border-radius:6px;
+  position:relative; width:84px; height:84px; border-radius:10px;
   background:linear-gradient(135deg,#1a1a2e 0%,#16213e 60%,#0f3460 100%);
   border:1px solid var(--border); flex-shrink:0; overflow:hidden;
   cursor:pointer; transition:transform 0.2s, box-shadow 0.2s;
@@ -147,18 +147,18 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 }
 .player-cover-placeholder {
   position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  font-size:2rem; color:rgba(255,255,255,0.18); pointer-events:none;
+  font-size:3rem; color:rgba(255,255,255,0.18); pointer-events:none;
 }
 .player-cover {
-  position:absolute; inset:0; width:100%; height:100%; object-fit:cover; border-radius:8px;
+  position:absolute; inset:0; width:100%; height:100%; object-fit:cover; border-radius:10px;
 }
 .player-info { min-width:0; flex:1; }
-.player-title  { font-size:0.9rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.player-artist { font-size:0.75rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.player-album  { font-size:0.7rem;  color:var(--text-muted);     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.player-tags { display:flex; align-items:center; gap:0.4rem; margin-top:0.2rem; }
+.player-title  { font-size:1.05rem; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.player-artist { font-size:0.85rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.player-album  { font-size:0.8rem;  color:var(--text-muted);     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.player-tags { display:flex; align-items:center; gap:0.5rem; margin-top:0.35rem; }
 
-.player-fmt-badge { padding:0.15rem 0.45rem; border-radius:4px; font-size:0.65rem; font-weight:700; background:rgba(200,146,10,0.20); color:var(--accent); border:1px solid rgba(200,146,10,0.30); }
+.player-fmt-badge { padding:0.22rem 0.55rem; border-radius:4px; font-size:0.72rem; font-weight:700; background:rgba(200,146,10,0.20); color:var(--accent); border:1px solid rgba(200,146,10,0.30); }
 /* All 7 iFi Zen DAC V2 LED modes */
 .fmt-yellow  { background:rgba(245,197,24,0.15);  color:var(--led-yellow);  border-color:rgba(245,197,24,0.3); }
 .fmt-white   { background:rgba(240,240,240,0.10); color:var(--led-white);   border-color:rgba(240,240,240,0.2); }
@@ -171,15 +171,15 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 .player-led { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; color:var(--led-white); transition:color 0.4s, filter 0.4s; }
 
 /* viz row: disc + eq side by side */
-.player-viz-row { display:flex; align-items:center; gap:6px; }
-.player-visualizer { width:34px; height:34px; position:relative; flex-shrink:0; --led-current:var(--led-white); }
+.player-viz-row { display:flex; align-items:center; gap:8px; }
+.player-visualizer { width:44px; height:44px; position:relative; flex-shrink:0; --led-current:var(--led-white); }
 .player-visualizer.spinning .viz-disc { animation:spin 3s linear infinite; animation-play-state:paused; }
 @keyframes spin { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
 .viz-disc { width:100%; height:100%; display:block; overflow:visible; }
 
 /* EQ bars in normal flow beside disc */
-.viz-eq { display:flex; gap:2px; align-items:flex-end; height:22px; padding-bottom:2px; }
-.eq-bar { width:3px; height:5px; background:var(--led-current,var(--accent)); border-radius:1px 1px 0 0; transform-origin:bottom; }
+.viz-eq { display:flex; gap:2px; align-items:flex-end; height:28px; padding-bottom:3px; }
+.eq-bar { width:4px; height:6px; background:var(--led-current,var(--accent)); border-radius:1px 1px 0 0; transform-origin:bottom; }
 .viz-eq.active .eq-bar:nth-child(1) { animation:eq 0.7s ease-in-out infinite alternate; }
 .viz-eq.active .eq-bar:nth-child(2) { animation:eq 0.5s ease-in-out 0.1s infinite alternate; }
 .viz-eq.active .eq-bar:nth-child(3) { animation:eq 0.9s ease-in-out 0.2s infinite alternate; }
@@ -188,7 +188,7 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 @keyframes eq { from{transform:scaleY(0.4)} to{transform:scaleY(3)} }
 
 /* Controls always rendered, always visible */
-.player-controls-wrap { display:flex; flex-direction:column; align-items:center; gap:0.15rem; width:100%; }
+.player-controls-wrap { display:flex; flex-direction:column; align-items:center; gap:0.3rem; width:100%; }
 .player-controls { display:flex; align-items:center; gap:0.5rem; }
 .control-btn { background:none; border:none; color:var(--text-secondary); font-size:1.1rem; cursor:pointer; width:2.3rem; height:2.3rem; display:flex; align-items:center; justify-content:center; border-radius:50%; transition:color 0.15s,background 0.15s; }
 .control-btn:hover { color:var(--text-primary); background:rgba(255,255,255,0.06); }

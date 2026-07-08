@@ -198,7 +198,7 @@ function updatePlayerBar(track) {
     };
     const c = (track.led_color || 'white').toLowerCase();
     if (led) {
-        led.innerHTML  = _makeDiamondSVG(c);
+        led.innerHTML  = _makeDiamondSVG(c, 'np');
         led.className  = 'player-led led-d-' + c;
         led.title      = LED_LABELS[c] || c;
     }
