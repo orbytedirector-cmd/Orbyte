@@ -228,7 +228,7 @@
 .tracks-loading { color:var(--text-muted); font-size:0.9rem; padding:2rem 0; text-align:center; }
 .tracks-prompt { color:var(--text-muted); font-size:0.88rem; padding:2.5rem 0; text-align:center; border:1px dashed var(--border); border-radius:12px; }
 .intercalar-note { font-size:0.82rem; color:var(--accent); padding:0.5rem 0.75rem; background:rgba(0,212,255,0.07); border:1px solid rgba(0,212,255,0.2); border-radius:8px; margin-bottom:0.75rem; }
-.meta-track-list { display:flex; flex-direction:column; gap:0.3rem; }
+.meta-track-list { display:grid; grid-template-columns:repeat(2,1fr); gap:0.5rem 1rem; max-width:1600px; }
 
 .meta-track-row {
   display:grid; grid-template-columns:44px 1fr auto auto;
@@ -264,6 +264,10 @@
 /* Mood vs Tema pill distinction in track rows */
 .mtr-pill-mood { background:rgba(167,139,250,0.12); color:#a78bfa; border:1px solid rgba(167,139,250,0.25); }
 .mtr-pill-tema { background:rgba(52,211,153,0.12); color:#34d399; border:1px solid rgba(52,211,153,0.25); }
+
+/* Popularity stars pill — fill reflects pop_score (star-on/star-off from style.css) */
+.mtr-pill-pop { display:inline-flex; align-items:center; gap:1px; background:rgba(200,146,10,0.10); border:1px solid rgba(200,146,10,0.22); }
+.mtr-pill-pop .star-on, .mtr-pill-pop .star-off { font-size:0.62rem; line-height:1; }
 
 /* ── Pagination redesign — compact + gold accent (overrides shared rule from
    static/style.css just for this page; class stays shared so albums and
@@ -483,10 +487,13 @@ if (IS_META) {
           ? `<span class="mtr-pill mtr-pill-mood" title="Mood: estado de ánimo">🎭 ${esc(moodLabel)}</span>` : '';
         const temaPill  = t.tema_lirico
           ? `<span class="mtr-pill mtr-pill-tema" title="Tema lírico: contenido de la letra">📖 ${esc(t.tema_lirico)}</span>` : '';
-        const tierPill  = t.tier === 'silver'
-          ? `<span class="mtr-pill" style="background:rgba(148,163,184,0.15);color:#94a3b8;border:1px solid rgba(148,163,184,0.3)">⭐⭐</span>`
-          : t.tier === 'bronze'
-          ? `<span class="mtr-pill" style="background:rgba(217,119,6,0.12);color:#d97706;border:1px solid rgba(217,119,6,0.25)">⭐</span>` : '';
+        const ledDiamond = `<span class="track-led led-d-${led}">${_makeDiamondSVG(led, 'sm')}</span>`;
+        const popScore  = Math.round(t.pop_score || 0);
+        const popStars  = Math.min(5, Math.floor(popScore / 20));
+        const popStarsHtml = Array.from({length:5}, (_, s) =>
+          `<span class="${s < popStars ? 'star-on' : 'star-off'}">★</span>`
+        ).join('');
+        const tierPill  = `<span class="mtr-pill mtr-pill-pop" title="Popularidad: ${popScore} pts">${popStarsHtml}</span>`;
         const bpmPill   = t.bpm ? `<span class="mtr-stat">${Math.round(t.bpm)} BPM</span>` : '';
         const enPill    = (t.energy !== null && t.energy !== undefined)
           ? `<span class="mtr-stat">⚡${Math.round(((t.energy+1)/2)*100)}%</span>` : '';
@@ -507,6 +514,7 @@ if (IS_META) {
             <div class="mtr-sub">${subParts.join(' · ')}</div>
           </div>
           <div class="mtr-pills">
+            ${ledDiamond}
             <span class="mtr-pill track-format-badge format-${led}">${esc(t.format_display||led.toUpperCase())}</span>
             ${bpmPill}${enPill}${moodPill}${temaPill}${tierPill}
           </div>
@@ -559,8 +567,9 @@ if (IS_META) {
   // Point 6: playMetaTrack plays from idx to end — does NOT auto-enqueue
   window.playMetaTrack = function(idx) {
     if (!metaTracksQueue[idx]) return;
-    if (window.prependAndPlay) { window.prependAndPlay(metaTracksQueue[idx]); }
-    else { loadQueue([metaTracksQueue[idx]]); playTrack(0); }
+    const rest = metaTracksQueue.slice(idx);
+    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(rest, 0); }
+    else { loadQueue(rest); playTrack(0); }
   };
 
   // Point 8: visual feedback when adding to queue
