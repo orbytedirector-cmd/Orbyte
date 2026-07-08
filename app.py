@@ -735,6 +735,7 @@ def search():
         like = f'%{query}%'
         artists = conn.execute(
             '''SELECT a.id, a.name, a.nationality, a.letter,
+                      a.lastfm_listeners,
                       COUNT(DISTINCT al.id)                          AS album_count,
                       COALESCE(MAX(apc.pop_score), 0)                AS pop_score,
                       (SELECT t.genre FROM tracks t JOIN albums al2 ON t.album_id=al2.id

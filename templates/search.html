@@ -12,24 +12,46 @@
 <div class="stab-panel" id="panel-artists">
   <div class="artist-list">
     {% for ar in artists %}
-    {% set stars = [(ar.pop_score or 0) // 20, 5] | min %}
+    {% set score = (ar.pop_score or 0)|int %}
+    {% set stars = [score // 20, 5] | min %}
+    {% set flag_html = nationality_flag(ar.nationality or '') %}
+    {% set listeners = ar.lastfm_listeners or 0 %}
     <a href="/artist/{{ ar.id }}" class="artist-row">
       <div class="artist-row-main">
-        <div class="artist-name">{{ ar.name }}</div>
+        <div class="artist-name-row">
+          {% if flag_html %}
+          <span class="ar-flag">{{ flag_html|safe }}</span>
+          {% endif %}
+          <span class="artist-name">{{ ar.name }}</span>
+          {% if ar.nationality and not flag_html %}
+          <span class="ar-nat-text">{{ ar.nationality }}</span>
+          {% endif %}
+        </div>
         <div class="artist-row-meta">
           <span class="ar-meta-pill">{{ ar.album_count }} álbum{{ 's' if ar.album_count != 1 else '' }}</span>
           {% if ar.most_common_genre %}
           <span class="ar-meta-sep">·</span>
           <span class="ar-meta-genre">{{ ar.most_common_genre }}</span>
           {% endif %}
+          {% if listeners > 0 %}
+          <span class="ar-meta-sep">·</span>
+          <span class="ar-listeners">
+            {{ '{:,}'.format(listeners).replace(',', '.') }}
+            <span class="ar-listeners-label">oyentes</span>
+          </span>
+          {% endif %}
         </div>
       </div>
       <div class="artist-row-right">
-        <span class="artist-stars" title="{{ (ar.pop_score or 0)|int }} puntos">
+        <span class="ar-pop-label">Popularidad</span>
+        <span class="artist-stars" title="{{ score }} puntos de popularidad">
           {%- for i in range(5) -%}
             <span class="star {{ 'star-on' if i < stars else 'star-off' }}">★</span>
           {%- endfor -%}
         </span>
+        {% if score > 0 %}
+        <span class="ar-pop-score">{{ score }} pts</span>
+        {% endif %}
       </div>
     </a>
     {% endfor %}
@@ -109,4 +131,23 @@ async function playAlbumById(id) {
   else { loadQueue(q); playTrack(0); }
 }
 </script>
+
+<style>
+/* ── Artist row (search) — mismo formato que la vista por letra ────────── */
+.artist-list { display:grid; grid-template-columns: repeat(2, 1fr); gap:0.5rem 1rem; max-width:1600px; }
+
+.artist-name-row { display:flex; align-items:center; gap:0.5rem; min-width:0; }
+.ar-flag { flex-shrink:0; display:flex; align-items:center; }
+.ar-flag img { height:18px; border-radius:2px; }
+.ar-nat-text { font-size:0.72rem; color:rgba(200,146,10,0.4); flex-shrink:0; }
+
+.ar-listeners      { font-size:0.78rem; font-weight:600; color:rgba(0,212,255,0.75); }
+.ar-listeners-label{ font-size:0.7rem; font-weight:400; color:rgba(0,212,255,0.45); margin-left:2px; }
+
+.ar-pop-label {
+  display:block;
+  font-family:'Orbitron',system-ui,sans-serif; font-size:0.58rem; font-weight:600;
+  letter-spacing:0.06em; text-transform:uppercase; color:rgba(200,146,10,0.45);
+}
+</style>
 {% endblock %}
