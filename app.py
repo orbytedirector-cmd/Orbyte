@@ -792,7 +792,7 @@ def search():
 
 # ── Pagination helper ──────────────────────────────────────────────────────────
 
-PAGE_SIZE = 48
+PAGE_SIZE = 30
 
 # ── album_meta field mapping for api_meta_tracks ───────────────────────────────
 # Maps the 'field' param values to their column names in the album_meta table.
