@@ -253,15 +253,6 @@
       <div id="pl-items"></div>
     </div>
 
-    <!-- Drawer Lyrics Modal -->
-    <div id="dlm-overlay" onclick="closeDrawerLyricsModal()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(4px);z-index:9000"></div>
-    <div id="dlm-modal" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:min(700px,92vw);max-height:80vh;background:#0f0f0f;border:1px solid #2a2a2a;border-radius:16px;flex-direction:column;z-index:9001;box-shadow:0 20px 60px rgba(0,0,0,0.8)">
-      <div style="display:flex;align-items:center;justify-content:space-between;padding:1.2rem 1.5rem;border-bottom:1px solid #1e1e1e">
-        <span style="font-size:1.1rem;font-weight:600;color:var(--text-primary)">Letra</span>
-        <button onclick="closeDrawerLyricsModal()" style="background:none;border:none;color:var(--text-secondary);font-size:1.3rem;cursor:pointer;padding:0.2rem 0.5rem;border-radius:6px">✕</button>
-      </div>
-      <div id="dlm-body" style="overflow-y:auto;padding:1.5rem;flex:1"></div>
-    </div>
   </div>
 
   <script src="{{ url_for('static', filename='player.js') }}?v=20260606b"></script>
@@ -349,7 +340,7 @@
       const MOOD_LABELS_JS = {{ MOOD_LABELS|tojson }};
       const moodLabel = m => MOOD_LABELS_JS[m] || m;
       const ledHtml = t.led_color
-        ? `<span class="drawer-led led-d-${t.led_color}">${_makeDiamondSVG(t.led_color, 'sm')}</span>`
+        ? `<span class="drawer-led led-d-${t.led_color}">${_makeDiamondSVG(t.led_color, 'md')}</span>`
         : '';
       const rows = [
         ['Álbum', t.album_name || '—'],
@@ -497,41 +488,14 @@
       }
     }
 
-    // Drawer lyrics modal
+    // Drawer lyrics modal — reutiliza el módulo lyrics-modal-overlay ya existente
     function openDrawerLyricsModal() {
       const t = window._drawerTrack;
       if (!t) return;
-      document.getElementById('dlm-overlay').style.display = 'block';
-      document.getElementById('dlm-modal').style.display   = 'flex';
-      document.body.style.overflow = 'hidden';
-      // Trigger load
-      fetchDrawerLyricsModal(t.artist || t.artist_name || '', t.title || '');
-    }
-
-    function closeDrawerLyricsModal() {
-      document.getElementById('dlm-overlay').style.display = 'none';
-      document.getElementById('dlm-modal').style.display   = 'none';
-      document.body.style.overflow = '';
-      _dlmLoaded = false;
-    }
-
-    let _dlmLoaded = false;
-    async function fetchDrawerLyricsModal(artist, title) {
-      const body = document.getElementById('dlm-body');
-      body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-secondary)">Buscando en lrclib.net…</div>';
-      try {
-        const d = await fetch(`/api/lyrics?artist=${encodeURIComponent(artist)}&title=${encodeURIComponent(title)}`).then(r=>r.json());
-        if (d.has_lyrics) {
-          const txt = d.has_synced && d.synced
-            ? d.synced.replace(/\[\d+:\d+\.\d+\]\s*/g, '')
-            : d.lyrics;
-          body.innerHTML = `<pre class="lyrics-body-text">${txt.replace(/</g,'&lt;')}</pre>`;
-        } else {
-          body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Letra no encontrada</div>';
-        }
-      } catch(e) {
-        body.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--led-red)">Error al conectar con lrclib.net</div>';
-      }
+      const artist = t.artist || t.artist_name || '';
+      const title  = t.title || '';
+      if (!artist || !title) return;
+      openLyricsModal(artist, title, t.id);
     }
 
     function closeDrawer() {
@@ -606,19 +570,20 @@
       }
     }
 
-    function openLyricsModal() {
-      const artist  = document.getElementById('player-artist').textContent.trim();
-      const title   = document.getElementById('player-title').textContent.trim();
+    function openLyricsModal(artistArg, titleArg, trackIdArg) {
+      const artist = artistArg || document.getElementById('player-artist').textContent.trim();
+      const title  = titleArg  || document.getElementById('player-title').textContent.trim();
       if (!artist || !title || title === '—') return;
       document.getElementById('lyrics-modal-overlay').style.display = 'flex';
       document.body.style.overflow = 'hidden';
       const key = _lyricsKey(artist, title);
+      _lyricsCurrentKey = key;
       if (_lyricsCache[key]) {
         _renderLyricsModal(_lyricsCache[key]);
       } else {
         document.getElementById('lyrics-modal-body').innerHTML =
           '<div style="text-align:center;padding:3rem;color:var(--text-secondary)">Buscando letra…</div>';
-        const trackId = window._currentTrack ? window._currentTrack.id : null;
+        const trackId = trackIdArg !== undefined ? trackIdArg : (window._currentTrack ? window._currentTrack.id : null);
         _prefetchLyrics(artist, title, trackId);
       }
     }
