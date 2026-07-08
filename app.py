@@ -62,6 +62,15 @@ LANG_ISO = {
     'cs':'cz','hu':'hu','ro':'ro','uk':'ua','el':'gr','he':'il',
 }
 
+# Language code → full name (Spanish)
+LANG_LABELS = {
+    'en':'Inglés','es':'Español','de':'Alemán','fr':'Francés','pt':'Portugués',
+    'it':'Italiano','ja':'Japonés','ko':'Coreano','nl':'Holandés','ru':'Ruso',
+    'sv':'Sueco','no':'Noruego','fi':'Finlandés','da':'Danés','pl':'Polaco',
+    'zh':'Chino','ar':'Árabe','tr':'Turco','cs':'Checo','hu':'Húngaro',
+    'ro':'Rumano','uk':'Ucraniano','el':'Griego','he':'Hebreo',
+}
+
 def _flag_img(iso, label='', size='20x15'):
     """Return a flagcdn.com <img> tag. Empty string when iso is unknown."""
     if not iso:
@@ -84,6 +93,13 @@ def lang_flag(code):
         return ''
     iso = LANG_ISO.get(code.lower())
     return _flag_img(iso, code.upper(), '20x15') if iso else ''
+
+def lang_label(code):
+    """Return the full Spanish name for a 2-letter language ISO 639-1 code."""
+    if not code:
+        return ''
+    return LANG_LABELS.get(code.lower(), code.upper())
+
 
 app = Flask(__name__)
 CORS(app)
@@ -114,6 +130,7 @@ def diamond_svg(led_color, size='sm'):
 # Register helpers in Jinja globals (must be after app is created)
 app.jinja_env.globals['nationality_flag'] = nationality_flag
 app.jinja_env.globals['lang_flag']        = lang_flag
+app.jinja_env.globals['lang_label']       = lang_label
 app.jinja_env.globals['favorites_set']    = lambda: _favorites_set
 app.jinja_env.globals['diamond_svg']      = diamond_svg
 
