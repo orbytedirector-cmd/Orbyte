@@ -109,11 +109,11 @@
         <div class="track-search-meta">{{ track.artist }} · <a href="/album/{{ track.album_id }}" style="color:var(--text-secondary)">{{ track.album_name }}</a></div>
       </div>
       <span class="track-duration">{{ track.duration|format_duration }}</span>
-      <span class="track-led" style="background:var(--led-{{ track.led_color or 'white' }});box-shadow:0 0 6px var(--led-{{ track.led_color or 'white' }});width:10px;height:10px;border-radius:50%;flex-shrink:0;"></span>
+      <span class="track-led">{{ diamond_svg(track.led_color or 'white', 'sm')|safe }}</span>
       <div class="track-actions">
         <button class="track-actions-btn" onclick="playTrackById({{ track.id }})">▶</button>
         <button class="track-actions-btn" onclick="showTrackInfo({{ track.id }})">ℹ</button>
-        <button class="track-actions-btn add-btn" onclick="addToPlaylistById({{ track.id }})">➕</button>
+        <button class="track-actions-btn add-btn" onclick="addToPlaylistByIdWithFeedback({{ track.id }}, this)">➕</button>
       </div>
     </div>
     {% endfor %}
@@ -138,10 +138,27 @@ async function playTrackById(id) {
   if (window.prependAndPlay) { window.prependAndPlay(d); }
   else { loadQueue([d]); playTrack(0); }
 }
-async function addToPlaylistById(id) {
-  const d = await fetch(`/api/track/${id}`).then(r=>r.json());
-  if (window.appendToQueue) { window.appendToQueue(d); }
-  else { addToPlaylist(d); }
+async function addToPlaylistByIdWithFeedback(id, btn) {
+  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+  try {
+    const d = await fetch(`/api/track/${id}`).then(r=>r.json());
+    if (window.appendToQueue) { window.appendToQueue(d); }
+    else { addToPlaylist(d); }
+    if (btn) {
+      btn.textContent = '✓';
+      btn.style.color = '#4ade80';
+      btn.style.borderColor = '#16a34a';
+      setTimeout(() => {
+        btn.textContent = '➕';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+        btn.disabled = false;
+      }, 1800);
+    }
+  } catch(e) {
+    if (btn) { btn.textContent = '➕'; btn.disabled = false; }
+    console.error('addToPlaylist error:', e);
+  }
 }
 async function playAlbumById(id) {
   const tracks = await fetch(`/api/album/${id}/tracks`).then(r=>r.json());
@@ -170,5 +187,13 @@ async function playAlbumById(id) {
   font-family:'Orbitron',system-ui,sans-serif; font-size:0.58rem; font-weight:600;
   letter-spacing:0.06em; text-transform:uppercase; color:rgba(200,146,10,0.45);
 }
+
+/* ── Track row (search) — 2 columnas, más alto, portada legible ────────── */
+.track-search-list { display:grid; grid-template-columns: repeat(2, 1fr); gap:0.6rem 1rem; max-width:1600px; }
+.track-search-row   { padding:0.9rem 1rem; gap:0.9rem; }
+.track-search-row .track-thumb { width:56px; height:56px; border-radius:6px; }
+.track-search-row .track-search-title { font-size:0.95rem; }
+.track-search-row .track-search-meta  { font-size:0.8rem; }
+.track-search-row .track-led svg { width:13px; height:13px; }
 </style>
 {% endblock %}
