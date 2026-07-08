@@ -751,7 +751,13 @@ def search():
             (like,)
         ).fetchall()
         albums = conn.execute(
-            '''SELECT al.id, al.name, al.cover_path, al.year, al.primary_format, ar.name as artist_name
+            '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                      al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
+                      (SELECT led_color FROM tracks WHERE album_id=al.id
+                       ORDER BY CASE led_color
+                         WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                         WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                         ELSE 6 END LIMIT 1) as album_led
                FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
                WHERE al.name LIKE ? OR ar.name LIKE ? ORDER BY al.name LIMIT 20''',
             (like, like)
