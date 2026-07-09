@@ -238,6 +238,9 @@ function updatePlayerBar(track) {
     }
     // Media Session — CarPlay / lock screen
     updateMediaSession(track, true);
+
+    // Tab title — refleja lo que está sonando ahora (ver sección "Tab title" más abajo)
+    updateTabTitle();
 }
 
 function updateProgress() {
@@ -531,6 +534,9 @@ function resetPlayerBar() {
     // Clear synced lyrics interval
     if (lyricsInterval) { clearInterval(lyricsInterval); lyricsInterval = null; }
 
+    // Tab title — nada sonando, vuelve al título original de la página
+    updateTabTitle();
+
     // Notify listeners that nothing is playing
     document.dispatchEvent(new CustomEvent('playerStateChange', { detail: { playing: false } }));
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: [] } }));
@@ -703,6 +709,65 @@ function toggleMute() {
     if (icon)   icon.textContent     = _muted ? '🔇' : '🔊';
     if (slider) slider.style.opacity = _muted ? '0.4' : '1';
 }
+
+// ── Tab title ("reproducción en curso" en la pestaña del navegador) ───────────
+// Formato: "Orbyte - Artista - Pista". "Orbyte - " queda siempre fijo (es el
+// nombre de la app); solo "Artista - Pista" se desliza tipo marquee en loop
+// cuando no entra completo. El ícono de mute NO se incluye acá — ya vive en
+// su propio control (#vol-icon) y sería redundante repetirlo en el título.
+// Cuando no hay nada sonando, se restaura el <title> original de la página.
+
+const _originalDocTitle = document.title;   // título propio de cada página (home, artist, album, etc.)
+const TAB_TITLE_PREFIX = 'Orbyte - ';       // parte fija, nunca se desliza
+const TAB_TITLE_MAX = 28;                   // caracteres visibles de "Artista - Pista" antes del marquee
+const TAB_TITLE_SEPARATOR = '     •     ';  // separador para que el loop no se corte feo
+const TAB_TITLE_SCROLL_MS = 350;            // velocidad del desplazamiento
+
+let _titleMarqueeTimer = null;
+let _titleLoopText = '';
+let _titleScrollPos = 0;
+
+function _buildTrackText(track) {
+    const artist = track.artist || 'Desconocido';
+    const title  = track.title  || 'Sin título';
+    return `${artist} - ${title}`;
+}
+
+function _stopTitleMarquee() {
+    if (_titleMarqueeTimer) {
+        clearInterval(_titleMarqueeTimer);
+        _titleMarqueeTimer = null;
+    }
+}
+
+function updateTabTitle() {
+    _stopTitleMarquee();
+
+    const track = window._currentTrack;
+    if (!track) {
+        document.title = _originalDocTitle;
+        return;
+    }
+
+    const trackText = _buildTrackText(track);
+
+    if (trackText.length <= TAB_TITLE_MAX) {
+        document.title = TAB_TITLE_PREFIX + trackText;
+        return;
+    }
+
+    // Marquee: "Orbyte - " queda fijo; solo "Artista - Pista" se desliza en loop
+    _titleLoopText  = trackText + TAB_TITLE_SEPARATOR;
+    _titleScrollPos = 0;
+    document.title  = TAB_TITLE_PREFIX + _titleLoopText.slice(0, TAB_TITLE_MAX);
+
+    _titleMarqueeTimer = setInterval(() => {
+        _titleScrollPos = (_titleScrollPos + 1) % _titleLoopText.length;
+        const doubled = _titleLoopText + _titleLoopText;
+        document.title = TAB_TITLE_PREFIX + doubled.slice(_titleScrollPos, _titleScrollPos + TAB_TITLE_MAX);
+    }, TAB_TITLE_SCROLL_MS);
+}
+window.updateTabTitle = updateTabTitle;
 
 // ── Volume normalization — per-track loudness targeting (Web Audio API) ────────
 // Off by default: currentAudio plays natively, with zero Web Audio involvement,
