@@ -363,16 +363,16 @@ window.queueAllLoaded = async function() {
 };
 
 // ── Clear-queue bar: visible + con conteo en vivo cada vez que cambia la cola ──
-function _updateClearQueueBarBtn() {
+function _updateClearQueueBarBtn(tracks) {
   const btn = document.getElementById('clear-queue-bar-btn');
   const cntEl = document.getElementById('cq-bar-count');
   if (!btn) return;
-  const n = (window.userPlaylist||[]).length;
+  const n = tracks ? tracks.length : (window.userPlaylist||[]).length;
   btn.style.display = n > 0 ? 'inline-flex' : 'none';
   if (cntEl) cntEl.textContent = n;
 }
 window._updateClearQueueBarBtn = _updateClearQueueBarBtn;
-document.addEventListener('queueLoaded', _updateClearQueueBarBtn);
+document.addEventListener('queueLoaded', e => _updateClearQueueBarBtn(e.detail && e.detail.tracks));
 _updateClearQueueBarBtn();
 
 // ── View switch ────────────────────────────────────────────────────────────────
@@ -564,12 +564,11 @@ if (IS_META) {
   }
 
   // ── Play/queue helpers ────────────────────────────────────────────────────────
-  // Point 6: playMetaTrack plays from idx to end — does NOT auto-enqueue
+  // playMetaTrack: reproduce y encola SOLO la pista en idx, nada mas
   window.playMetaTrack = function(idx) {
     if (!metaTracksQueue[idx]) return;
-    const rest = metaTracksQueue.slice(idx);
-    if (window.prependTracksAndPlay) { window.prependTracksAndPlay(rest, 0); }
-    else { loadQueue(rest); playTrack(0); }
+    if (window.prependAndPlay) { window.prependAndPlay(metaTracksQueue[idx]); }
+    else { loadQueue([metaTracksQueue[idx]]); playTrack(0); }
   };
 
   // Point 8: visual feedback when adding to queue

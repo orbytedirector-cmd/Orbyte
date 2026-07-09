@@ -633,9 +633,18 @@ function _normalizeTrack(t) {
 // Prepend a track at the current position+1, immediately play it, queue continues after
 function prependAndPlay(track) {
     const t = _normalizeTrack(track);
-    // Insert right after current position (or at 0 if nothing playing)
-    const insertAt = currentAudio ? currentIndex + 1 : 0;
-    queue.splice(insertAt, 0, t);
+    // Insert right after current position only if something is actually
+    // playing right now (same rule as prependTracksAndPlay). Otherwise the
+    // queue is empty/just-cleared, so start fresh with only this track --
+    // never resurrect stale tracks left over from before.
+    const insertAt = (queue.length > 0 && currentAudio && !currentAudio.paused)
+        ? currentIndex + 1
+        : 0;
+    if (insertAt === 0) {
+        queue = [t];
+    } else {
+        queue.splice(insertAt, 0, t);
+    }
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
     playTrack(insertAt);
 }
