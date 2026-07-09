@@ -1539,7 +1539,7 @@ def api_meta_tracks():
     dir_       = request.args.get('dir',        'desc')
     intercalar = request.args.get('intercalar', '0') == '1'
 
-    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma'}
+    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre'}
     if field not in ALLOWED_FIELDS or not value:
         return jsonify({'error': 'invalid field or value'}), 400
 
@@ -1547,7 +1547,14 @@ def api_meta_tracks():
     try:
         # Use album-level filter for mood/era/idioma/momento (same logic as album browse)
         album_meta_col = _ALBUM_META_FIELD.get(field)
-        if album_meta_col:
+        if field == 'genre':
+            # Same match as browse_genre: classic tracks.genre OR track_meta.genre_primary
+            count = conn.execute('''
+                SELECT COUNT(*) FROM tracks t
+                LEFT JOIN track_meta tm ON tm.track_id=t.id
+                WHERE t.genre=? OR tm.genre_primary=?
+            ''', (value, value)).fetchone()[0]
+        elif album_meta_col:
             count = conn.execute(f'''
                 SELECT COUNT(*) FROM tracks t
                 JOIN album_meta am ON am.album_id=t.album_id
@@ -1569,13 +1576,19 @@ def api_meta_tracks():
             offset = (page - 1) * PAGE_SIZE
             order  = _track_order(sort, dir_)
 
-        # Build the WHERE clause based on album-level or track-level filter
-        if album_meta_col:
+        # Build the WHERE clause based on album-level, track-level, or genre filter
+        if field == 'genre':
+            where_clause = '(t.genre=? OR tm.genre_primary=?)'
+            extra_join   = ''
+            where_params = (value, value)
+        elif album_meta_col:
             where_clause = f'am.{album_meta_col}=?'
             extra_join   = 'JOIN album_meta am ON am.album_id=t.album_id'
+            where_params = (value,)
         else:
             where_clause = f'tm.{field}=?'
             extra_join   = ''
+            where_params = (value,)
 
         rows = conn.execute(f'''
             SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa, t.codec,
@@ -1595,7 +1608,7 @@ def api_meta_tracks():
             WHERE {where_clause}
             ORDER BY {order}
             LIMIT ? OFFSET ?
-        ''', (value, limit, offset)).fetchall()
+        ''', (*where_params, limit, offset)).fetchall()
 
         result = []
         for r in rows:

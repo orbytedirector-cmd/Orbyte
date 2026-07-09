@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 
-{% set is_meta = filter_type in ['mood', 'momento', 'era', 'tema', 'tier', 'language'] %}
+{% set is_meta = filter_type in ['mood', 'momento', 'era', 'tema', 'tier', 'language', 'genre'] %}
 {% set cur_sort = sort     if sort     is defined else 'popularidad' %}
 {% set cur_dir  = sort_dir if sort_dir is defined else 'desc' %}
 
@@ -306,7 +306,7 @@ let currentTrackDir      = 'desc';
 let currentIntercalar    = false;
 let tracksLoaded         = false;
 
-const FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema_lirico', tier:'tier', language:'idioma' };
+const FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema_lirico', tier:'tier', language:'idioma', genre:'genre' };
 const ALBUM_IDS = {{ albums|map(attribute='id')|list|tojson }};
 
 // Fetch tracks for every album currently loaded on this page (Albums view)
