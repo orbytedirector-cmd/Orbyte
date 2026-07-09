@@ -32,6 +32,11 @@ function _makeDiamondSVG(ledColor, size) {
         `</svg>`;
 }
 
+// ── Shuffle / Repeat icon SVGs — same inline format as the rest of the player controls ──
+const SHUFFLE_SVG = `<svg class="shuffle-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>`;
+const REPEAT_SVG = `<svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`;
+const REPEAT_ONE_SVG = `<svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>`;
+
 // ── Path helpers ──────────────────────────────────────────────────────────────
 
 function buildCoverUrl(path) {
@@ -341,13 +346,15 @@ window.cycleRepeat = cycleRepeat;
 
 function _updateShuffleRepeatButtons() {
     [document.getElementById('shuffle-btn'), document.getElementById('np-shuffle-btn')].forEach(b => {
-        if (b) b.classList.toggle('is-active', shuffleEnabled);
+        if (!b) return;
+        if (!b.querySelector('.shuffle-svg')) b.innerHTML = SHUFFLE_SVG;
+        b.classList.toggle('is-active', shuffleEnabled);
     });
-    const icon  = repeatMode === 'one' ? '🔂' : '🔁';
+    const iconSvg = repeatMode === 'one' ? REPEAT_ONE_SVG : REPEAT_SVG;
     const label = repeatMode === 'one' ? 'Repetir una pista' : repeatMode === 'all' ? 'Repetir lista' : 'Repetir (desactivado)';
     [document.getElementById('repeat-btn'), document.getElementById('np-repeat-btn')].forEach(b => {
         if (!b) return;
-        b.textContent = icon;
+        b.innerHTML = iconSvg;
         b.title = label;
         b.classList.toggle('is-active', repeatMode !== 'off');
     });

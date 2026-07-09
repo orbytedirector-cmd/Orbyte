@@ -195,6 +195,7 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 .control-btn-sm { width:1.9rem; height:1.9rem; font-size:0.85rem; opacity:0.55; }
 .control-btn-sm:hover { opacity:0.85; }
 .control-btn-sm.is-active { opacity:1; color:var(--text-gold); }
+.shuffle-svg, .repeat-svg { width:16px; height:16px; display:block; overflow:visible; }
 .play-btn { font-size:1.3rem !important; color:var(--text-gold) !important; }
 .play-btn:hover { background:rgba(200,146,10,0.13) !important; box-shadow:0 0 0 1.5px rgba(245,197,24,0.52),0 0 18px rgba(245,197,24,0.2) !important; }
 .play-btn:active { transform:scale(0.91); }
