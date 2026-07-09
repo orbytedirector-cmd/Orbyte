@@ -103,9 +103,11 @@
 
           <!-- Controls -->
           <div class="np-controls">
+            <button class="np-ctrl np-ctrl-sm" id="np-shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">🔀</button>
             <button class="np-ctrl" onclick="prevTrack()" title="Anterior">⏮</button>
             <button class="np-ctrl np-play" id="np-play-btn" onclick="togglePlayPause()" title="Play/Pausa">▶</button>
             <button class="np-ctrl" onclick="nextTrack()" title="Siguiente">⏭</button>
+            <button class="np-ctrl np-ctrl-sm" id="np-repeat-btn" onclick="cycleRepeat()" title="Repetir">🔁</button>
           </div>
 
           <!-- Actions: fav, lyrics, queue toggle -->
@@ -114,7 +116,13 @@
               <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
             </button>
             <button class="np-action" id="np-lyrics-btn" onclick="openLyricsFromNP()" title="Letra">🎵</button>
-            <button class="np-action" id="np-normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen">🎚️</button>
+            <button class="np-action normalize-toggle" id="np-normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen">
+              <svg class="normalize-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="21" x2="5" y2="14"/><line x1="5" y1="10" x2="5" y2="3"/><circle cx="5" cy="12" r="2"/>
+                <line x1="12" y1="21" x2="12" y2="10"/><line x1="12" y1="6" x2="12" y2="3"/><circle cx="12" cy="8" r="2"/>
+                <line x1="19" y1="21" x2="19" y2="16"/><line x1="19" y1="12" x2="19" y2="3"/><circle cx="19" cy="14" r="2"/>
+              </svg>
+            </button>
             <button class="np-action" id="np-queue-toggle" onclick="npToggleQueue()" title="Cola">☰</button>
           </div>
 
@@ -178,9 +186,11 @@
 
         <div class="player-controls-wrap">
           <div class="player-controls">
+            <button class="control-btn control-btn-sm" id="shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">🔀</button>
             <button class="control-btn" id="prev-btn">⏮</button>
             <button class="control-btn play-btn" id="play-btn" data-empty="true">▶</button>
             <button class="control-btn" id="next-btn">⏭</button>
+            <button class="control-btn control-btn-sm" id="repeat-btn" onclick="cycleRepeat()" title="Repetir">🔁</button>
           </div>
           <div class="player-progress">
             <span id="current-time" class="time-label">0:00</span>
@@ -207,7 +217,13 @@
                  oninput="setVolume(this.value)">
         </div>
 
-        <button class="icon-btn" id="normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen — sube pistas DSD/silenciosas sin recodificar">🎚️</button>
+        <button class="icon-btn normalize-toggle" id="normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen — sube pistas DSD/silenciosas sin recodificar">
+          <svg class="normalize-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="5" y1="21" x2="5" y2="14"/><line x1="5" y1="10" x2="5" y2="3"/><circle cx="5" cy="12" r="2"/>
+            <line x1="12" y1="21" x2="12" y2="10"/><line x1="12" y1="6" x2="12" y2="3"/><circle cx="12" cy="8" r="2"/>
+            <line x1="19" y1="21" x2="19" y2="16"/><line x1="19" y1="12" x2="19" y2="3"/><circle cx="19" cy="14" r="2"/>
+          </svg>
+        </button>
 
         <div class="outputs-wrap">
           <button class="outputs-main-btn" id="outputs-btn" onclick="toggleOutputsPanel()" title="Salidas de audio MPD — activa/desactiva outputs del servidor">

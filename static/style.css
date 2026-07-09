@@ -192,6 +192,9 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 .player-controls { display:flex; align-items:center; gap:0.5rem; }
 .control-btn { background:none; border:none; color:var(--text-secondary); font-size:1.1rem; cursor:pointer; width:2.3rem; height:2.3rem; display:flex; align-items:center; justify-content:center; border-radius:50%; transition:color 0.15s,background 0.15s; }
 .control-btn:hover { color:var(--text-primary); background:rgba(255,255,255,0.06); }
+.control-btn-sm { width:1.9rem; height:1.9rem; font-size:0.85rem; opacity:0.55; }
+.control-btn-sm:hover { opacity:0.85; }
+.control-btn-sm.is-active { opacity:1; color:var(--text-gold); }
 .play-btn { font-size:1.3rem !important; color:var(--accent) !important; }
 .play-btn:hover { background:var(--accent-dim) !important; }
 .play-btn:disabled,
@@ -248,6 +251,17 @@ input[type=range].volume-slider { width:70px; accent-color:var(--accent); }
 .icon-btn { background:none; border:1px solid var(--border); color:var(--text-secondary); border-radius:6px; padding:0.35rem 0.6rem; cursor:pointer; font-size:0.8rem; transition:all 0.15s; position:relative; }
 .icon-btn:hover { color:var(--text-primary); border-color:var(--accent); }
 .icon-btn.is-active { border-color:var(--accent); color:var(--text-gold); background:var(--accent-dim); }
+
+/* ── Normalize volume toggle — shared look for both player instances ────────── */
+.normalize-toggle { position:relative; }
+.normalize-svg { width:18px; height:18px; display:block; overflow:visible; transition:transform 0.2s ease; }
+.normalize-toggle:hover .normalize-svg { transform:scale(1.12); }
+@keyframes normalizePulse {
+  0%, 100% { box-shadow:0 0 0 0 rgba(200,146,10,0.35); }
+  50%      { box-shadow:0 0 0 5px rgba(200,146,10,0); }
+}
+.normalize-toggle.is-active,
+.normalize-toggle.np-action-active { animation:normalizePulse 2.4s ease-in-out infinite; }
 .pl-badge { background:var(--accent); color:var(--bg-primary); border-radius:10px; padding:0 4px; font-size:0.65rem; font-weight:700; }
 .volume-wrap { display:flex; align-items:center; gap:0.35rem; }
 .vol-icon { font-size:0.9rem; }
@@ -1261,6 +1275,9 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
               0 0 18px rgba(245,197,24,0.2);
 }
 .np-ctrl.np-play:active { transform: scale(0.91); }
+.np-ctrl-sm { width: 2.2rem; height: 2.2rem; font-size: 0.95rem; opacity: 0.55; }
+.np-ctrl-sm:hover { opacity: 0.85; }
+.np-ctrl-sm.is-active { opacity: 1; color: var(--text-gold); }
 
 /* SVG heart */
 .heart-svg {

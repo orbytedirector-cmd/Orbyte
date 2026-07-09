@@ -5,6 +5,14 @@ let lyricsData = null;
 let lyricsInterval = null;
 let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-stop recovery)
 
+// Playlist options — shuffle / repeat. Persisted like the normalize toggle.
+let shuffleEnabled = false;
+let repeatMode = 'off';   // 'off' | 'all' | 'one'
+try {
+    shuffleEnabled = localStorage.getItem('orbyte_shuffle') === '1';
+    repeatMode = localStorage.getItem('orbyte_repeat') || 'off';
+} catch (e) {}
+
 const MUSIC_ROOT = "/mnt/musica/";
 
 // ── SVG Diamond helper — used wherever a LED color indicator is shown ────────
@@ -275,18 +283,77 @@ function togglePlayPause() {
     }
 }
 
+function _randomIndexExcluding(exclude) {
+    if (queue.length <= 1) return 0;
+    let idx;
+    do { idx = Math.floor(Math.random() * queue.length); } while (idx === exclude);
+    return idx;
+}
+
 function prevTrack() {
-    if (currentIndex > 0) playTrack(currentIndex - 1);
+    if (shuffleEnabled) { playTrack(_randomIndexExcluding(currentIndex)); return; }
+    if (currentIndex > 0) { playTrack(currentIndex - 1); return; }
+    if (repeatMode === 'all' && queue.length) { playTrack(queue.length - 1); return; }
 }
 
 function nextTrack() {
-    if (currentIndex < queue.length - 1) {
-        playTrack(currentIndex + 1);
-    } else {
-        document.getElementById('play-btn').textContent = '▶';
-        dispatchPlayerState(false);
-    }
+    if (shuffleEnabled) { playTrack(_randomIndexExcluding(currentIndex)); return; }
+    if (currentIndex < queue.length - 1) { playTrack(currentIndex + 1); return; }
+    if (repeatMode === 'all') { playTrack(0); return; }
+    // End of the queue, nothing selected — actually stop (was only faking a
+    // stopped UI before while audio kept playing) and rewind to track 0 so
+    // pressing play starts the list over from the beginning.
+    _stopAndRewind();
 }
+
+function _stopAndRewind() {
+    if (!queue.length) return;
+    playTrack(0);
+    if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+    }
+    const playBtn = document.getElementById('play-btn');
+    if (playBtn) playBtn.textContent = '▶';
+    const viz = document.getElementById('player-visualizer');
+    if (viz) viz.classList.remove('spinning');
+    const fill = document.getElementById('progress-fill');
+    if (fill) fill.style.width = '0%';
+    const curT = document.getElementById('current-time');
+    if (curT) curT.textContent = '0:00';
+    dispatchPlayerState(false);
+    if (window._currentTrack) updateMediaSession(window._currentTrack, false);
+}
+
+function toggleShuffle() {
+    shuffleEnabled = !shuffleEnabled;
+    try { localStorage.setItem('orbyte_shuffle', shuffleEnabled ? '1' : '0'); } catch (e) {}
+    _updateShuffleRepeatButtons();
+}
+window.toggleShuffle = toggleShuffle;
+
+function cycleRepeat() {
+    repeatMode = repeatMode === 'off' ? 'all' : (repeatMode === 'all' ? 'one' : 'off');
+    try { localStorage.setItem('orbyte_repeat', repeatMode); } catch (e) {}
+    _updateShuffleRepeatButtons();
+}
+window.cycleRepeat = cycleRepeat;
+
+function _updateShuffleRepeatButtons() {
+    [document.getElementById('shuffle-btn'), document.getElementById('np-shuffle-btn')].forEach(b => {
+        if (b) b.classList.toggle('is-active', shuffleEnabled);
+    });
+    const icon  = repeatMode === 'one' ? '🔂' : '🔁';
+    const label = repeatMode === 'one' ? 'Repetir una pista' : repeatMode === 'all' ? 'Repetir lista' : 'Repetir (desactivado)';
+    [document.getElementById('repeat-btn'), document.getElementById('np-repeat-btn')].forEach(b => {
+        if (!b) return;
+        b.textContent = icon;
+        b.title = label;
+        b.classList.toggle('is-active', repeatMode !== 'off');
+    });
+}
+window._updateShuffleRepeatButtons = _updateShuffleRepeatButtons;
+_updateShuffleRepeatButtons();
 
 function seekTo(percent) {
     if (!currentAudio) return;
@@ -331,6 +398,7 @@ function _handleTrackEnded() {
         handleAudioError({ type: 'premature-end' });
         return;
     }
+    if (repeatMode === 'one') { playTrack(currentIndex); return; }
     nextTrack();
 }
 
@@ -629,54 +697,80 @@ function toggleMute() {
     if (slider) slider.style.opacity = _muted ? '0.4' : '1';
 }
 
-// ── Volume normalization — Web Audio API, post-decode gain only ────────────────
+// ── Volume normalization — per-track loudness targeting (Web Audio API) ────────
 // Off by default: currentAudio plays natively, with zero Web Audio involvement,
-// until the user enables this for the first time. Everything already reaches the
-// browser as PCM/FLAC (see /stream-dsd), so a post-decode gain stage here doesn't
-// touch the source files, the transcode settings, or the bitrate/format at all —
-// it only evens out perceived loudness (DSD tracks in particular play back quiet).
+// until the user enables this. When on, a real-time RMS analyser continuously
+// measures each track's OWN loudness and drives a gain node toward a fixed
+// target level — quiet tracks (DSD in particular) get boosted, already-loud
+// tracks get pulled back, so every track lands at roughly the same perceived
+// volume instead of all receiving the same fixed boost regardless of source.
+// A fast safety limiter sits after the gain stage purely to catch clipping on
+// unexpected transients; it does not add loudness on its own. Nothing here
+// touches the source stream, the transcode, or the bitrate/format.
 let normalizeEnabled = false;
 try { normalizeEnabled = localStorage.getItem('orbyte_normalize') === '1'; } catch (e) {}
 
-let _audioCtx   = null;
-let _normSource = null;
-let _normComp   = null;
-let _normGain   = null;
+const NORM_TARGET_RMS = 0.12;   // ≈ -18.4 dBFS — reference loudness every track is pulled toward
+const NORM_MIN_GAIN   = 0.35;   // don't cut more than ~-9 dB, even on already-loud masters
+const NORM_MAX_GAIN   = 5.0;    // don't boost more than ~+14 dB (avoids amplifying noise floor)
+const NORM_SMOOTH_SEC = 1.0;    // how fast gain follows measured loudness (avoids pumping)
+const NORM_TICK_MS    = 200;
+
+let _audioCtx     = null;
+let _normSource   = null;
+let _normAnalyser = null;
+let _normData     = null;
+let _normGain     = null;
+let _normLimiter  = null;
+let _normTimer    = null;
 
 function _ensureNormalizeGraph() {
     if (!currentAudio || _normSource) return;   // no audio yet, or already wired up
     try {
-        _audioCtx   = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-        _normSource = _audioCtx.createMediaElementSource(currentAudio);
-        _normComp   = _audioCtx.createDynamicsCompressor();
-        _normGain   = _audioCtx.createGain();
-        _normSource.connect(_normComp);
-        _normComp.connect(_normGain);
-        _normGain.connect(_audioCtx.destination);
+        _audioCtx     = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        _normSource   = _audioCtx.createMediaElementSource(currentAudio);
+        _normAnalyser = _audioCtx.createAnalyser();
+        _normAnalyser.fftSize = 1024;
+        _normData     = new Float32Array(_normAnalyser.fftSize);
+        _normGain     = _audioCtx.createGain();
+        _normLimiter  = _audioCtx.createDynamicsCompressor();
+        // Fixed safety limiter — only catches peaks the gain stage pushes past
+        // -1 dBFS, it never shapes or "warms" the sound like a mastering compressor.
+        _normLimiter.threshold.value = -1;
+        _normLimiter.knee.value      = 0;
+        _normLimiter.ratio.value     = 20;
+        _normLimiter.attack.value    = 0.003;
+        _normLimiter.release.value   = 0.15;
+        _normSource.connect(_normAnalyser);
+        _normAnalyser.connect(_normGain);
+        _normGain.connect(_normLimiter);
+        _normLimiter.connect(_audioCtx.destination);
         _applyNormalizeState();
     } catch (e) {
         console.warn('[normalize] audio graph init failed:', e);
     }
 }
 
+function _normTick() {
+    if (!normalizeEnabled || !_normAnalyser || !currentAudio || currentAudio.paused) return;
+    _normAnalyser.getFloatTimeDomainData(_normData);
+    let sum = 0;
+    for (let i = 0; i < _normData.length; i++) { const v = _normData[i]; sum += v * v; }
+    const rms = Math.sqrt(sum / _normData.length);
+    if (rms < 0.002) return;   // silence/near-silence — don't chase the noise floor
+    let target = NORM_TARGET_RMS / rms;
+    target = Math.min(NORM_MAX_GAIN, Math.max(NORM_MIN_GAIN, target));
+    _normGain.gain.setTargetAtTime(target, _audioCtx.currentTime, NORM_SMOOTH_SEC);
+}
+
 function _applyNormalizeState() {
-    if (!_normComp || !_normGain) return;
-    const t = _audioCtx.currentTime;
+    if (!_normGain) return;
     if (normalizeEnabled) {
-        // Gentle leveler + makeup gain — lifts quiet passages (and quiet DSD
-        // masters) toward the rest of the library without clipping loud ones.
-        _normComp.threshold.setValueAtTime(-24, t);
-        _normComp.knee.setValueAtTime(12, t);
-        _normComp.ratio.setValueAtTime(4, t);
-        _normComp.attack.setValueAtTime(0.02, t);
-        _normComp.release.setValueAtTime(0.25, t);
-        _normGain.gain.setValueAtTime(1.8, t);
-    } else {
-        // Pass-through: no compression engaged, unity gain.
-        _normComp.threshold.setValueAtTime(0, t);
-        _normComp.knee.setValueAtTime(0, t);
-        _normComp.ratio.setValueAtTime(1, t);
-        _normGain.gain.setValueAtTime(1.0, t);
+        if (!_normTimer) _normTimer = setInterval(_normTick, NORM_TICK_MS);
+    } else if (_normTimer) {
+        clearInterval(_normTimer);
+        _normTimer = null;
+        _normGain.gain.setTargetAtTime(1.0, _audioCtx.currentTime, 0.3);   // ease back to unity
     }
 }
 
