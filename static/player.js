@@ -3,6 +3,7 @@ let currentIndex = 0;
 let currentAudio = null;
 let lyricsData = null;
 let lyricsInterval = null;
+let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-stop recovery)
 
 const MUSIC_ROOT = "/mnt/musica/";
 
@@ -79,6 +80,7 @@ function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
+    _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
     // Re-enable play button now that there's something to play
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.removeAttribute('data-empty');
@@ -94,8 +96,9 @@ function playTrack(index) {
             currentAudio = new Audio();
             currentAudio.addEventListener('timeupdate', updateProgress);
             currentAudio.addEventListener('error', handleAudioError);
+            _ensureNormalizeGraph();
         }
-        currentAudio.onended = () => nextTrack();
+        currentAudio.onended = _handleTrackEnded;
         currentAudio.src = streamUrl;
         currentAudio._trackDuration = track.duration || 0;
         currentAudio.load();
@@ -116,9 +119,10 @@ function playTrack(index) {
         currentAudio = new Audio();
         currentAudio.addEventListener('timeupdate', updateProgress);
         currentAudio.addEventListener('error', handleAudioError);
+        _ensureNormalizeGraph();
     }
 
-    currentAudio.onended = () => nextTrack();
+    currentAudio.onended = _handleTrackEnded;
     currentAudio.src = track.audio_url || buildAudioUrl(track.file_path);
     currentAudio._trackDuration = track.duration || 0;
     currentAudio.load();
@@ -318,22 +322,45 @@ function seekFromClick(event, bar) {
 
 function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
 
+function _handleTrackEnded() {
+    // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
+    // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
+    const dur = currentAudio ? (currentAudio._trackDuration || 0) : 0;
+    const pos = currentAudio ? (currentAudio.currentTime || 0) : 0;
+    if (dur > 3 && pos < dur - 3 && _reconnectAttempts < 3) {
+        handleAudioError({ type: 'premature-end' });
+        return;
+    }
+    nextTrack();
+}
+
 function handleAudioError(e) {
     const track = queue[currentIndex];
+    if (!track || !currentAudio) { console.error('Audio error:', e); return; }
 
-    // DSD: stream can drop mid-song (network/pipe timeout). Auto-reconnect.
-    if (track && track.is_dsd && currentAudio) {
-        const lastPos = currentAudio.currentTime || 0;
-        const dur     = currentAudio._trackDuration || track.duration || 0;
-        if (dur > 0 && lastPos > 0.5 && lastPos < dur - 2) {
-            console.warn(`[DSD] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting…`);
-            const url = `${buildDsdStreamUrl(track.file_path)}?start=${lastPos.toFixed(2)}`;
-            currentAudio.src = url;
-            currentAudio._trackDuration = dur;
-            currentAudio.load();
-            currentAudio.play().catch(() => {});
-            return;
+    const lastPos = currentAudio.currentTime || 0;
+    const dur     = currentAudio._trackDuration || track.duration || 0;
+    const nearEnd = dur > 0 && lastPos >= dur - 1.5;
+
+    // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
+    // stopping abruptly. Works for DSD (ffmpeg restarts at lastPos) and regular
+    // files (Range-request seek once metadata reloads). Capped to avoid retry loops.
+    if (!nearEnd && _reconnectAttempts < 3) {
+        _reconnectAttempts++;
+        console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
+        if (track.is_dsd) {
+            currentAudio.src = `${buildDsdStreamUrl(track.file_path)}?start=${lastPos.toFixed(2)}`;
+        } else {
+            currentAudio.src = track.audio_url || buildAudioUrl(track.file_path);
+            currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
+                currentAudio.removeEventListener('loadedmetadata', _seekOnce);
+                if (lastPos > 0) currentAudio.currentTime = lastPos;
+            });
         }
+        currentAudio._trackDuration = dur;
+        currentAudio.load();
+        currentAudio.play().catch(() => {});
+        return;
     }
 
     console.error('Audio error:', e);
@@ -601,6 +628,75 @@ function toggleMute() {
     if (icon)   icon.textContent     = _muted ? '🔇' : '🔊';
     if (slider) slider.style.opacity = _muted ? '0.4' : '1';
 }
+
+// ── Volume normalization — Web Audio API, post-decode gain only ────────────────
+// Off by default: currentAudio plays natively, with zero Web Audio involvement,
+// until the user enables this for the first time. Everything already reaches the
+// browser as PCM/FLAC (see /stream-dsd), so a post-decode gain stage here doesn't
+// touch the source files, the transcode settings, or the bitrate/format at all —
+// it only evens out perceived loudness (DSD tracks in particular play back quiet).
+let normalizeEnabled = false;
+try { normalizeEnabled = localStorage.getItem('orbyte_normalize') === '1'; } catch (e) {}
+
+let _audioCtx   = null;
+let _normSource = null;
+let _normComp   = null;
+let _normGain   = null;
+
+function _ensureNormalizeGraph() {
+    if (!currentAudio || _normSource) return;   // no audio yet, or already wired up
+    try {
+        _audioCtx   = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        _normSource = _audioCtx.createMediaElementSource(currentAudio);
+        _normComp   = _audioCtx.createDynamicsCompressor();
+        _normGain   = _audioCtx.createGain();
+        _normSource.connect(_normComp);
+        _normComp.connect(_normGain);
+        _normGain.connect(_audioCtx.destination);
+        _applyNormalizeState();
+    } catch (e) {
+        console.warn('[normalize] audio graph init failed:', e);
+    }
+}
+
+function _applyNormalizeState() {
+    if (!_normComp || !_normGain) return;
+    const t = _audioCtx.currentTime;
+    if (normalizeEnabled) {
+        // Gentle leveler + makeup gain — lifts quiet passages (and quiet DSD
+        // masters) toward the rest of the library without clipping loud ones.
+        _normComp.threshold.setValueAtTime(-24, t);
+        _normComp.knee.setValueAtTime(12, t);
+        _normComp.ratio.setValueAtTime(4, t);
+        _normComp.attack.setValueAtTime(0.02, t);
+        _normComp.release.setValueAtTime(0.25, t);
+        _normGain.gain.setValueAtTime(1.8, t);
+    } else {
+        // Pass-through: no compression engaged, unity gain.
+        _normComp.threshold.setValueAtTime(0, t);
+        _normComp.knee.setValueAtTime(0, t);
+        _normComp.ratio.setValueAtTime(1, t);
+        _normGain.gain.setValueAtTime(1.0, t);
+    }
+}
+
+function _updateNormalizeButtons() {
+    const bar = document.getElementById('normalize-btn');
+    const np  = document.getElementById('np-normalize-btn');
+    if (bar) bar.classList.toggle('is-active', normalizeEnabled);
+    if (np)  np.classList.toggle('np-action-active', normalizeEnabled);
+}
+
+function toggleNormalize() {
+    normalizeEnabled = !normalizeEnabled;
+    try { localStorage.setItem('orbyte_normalize', normalizeEnabled ? '1' : '0'); } catch (e) {}
+    _ensureNormalizeGraph();
+    if (_audioCtx && _audioCtx.state === 'suspended') _audioCtx.resume();
+    _applyNormalizeState();
+    _updateNormalizeButtons();
+}
+window.toggleNormalize = toggleNormalize;
+_updateNormalizeButtons();
 
 // ── Expose globals ─────────────────────────────────────────────────────────────
 

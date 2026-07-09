@@ -114,6 +114,7 @@
               <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
             </button>
             <button class="np-action" id="np-lyrics-btn" onclick="openLyricsFromNP()" title="Letra">🎵</button>
+            <button class="np-action" id="np-normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen">🎚️</button>
             <button class="np-action" id="np-queue-toggle" onclick="npToggleQueue()" title="Cola">☰</button>
           </div>
 
@@ -205,6 +206,8 @@
           <input type="range" class="volume-slider" id="volume-slider" min="0" max="1" step="0.01" value="1"
                  oninput="setVolume(this.value)">
         </div>
+
+        <button class="icon-btn" id="normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen — sube pistas DSD/silenciosas sin recodificar">🎚️</button>
 
         <div class="outputs-wrap">
           <button class="outputs-main-btn" id="outputs-btn" onclick="toggleOutputsPanel()" title="Salidas de audio MPD — activa/desactiva outputs del servidor">

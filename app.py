@@ -1964,7 +1964,7 @@ def stream_dsd(filepath):
     # -ss BEFORE -i: fast native DSF seek (avoids transcoding the skip portion).
     # DSD64 (2.82 MHz) → 176.4 kHz PCM (÷16); same ratio for DSD128/DSD256.
     # -loglevel quiet + stderr=DEVNULL: avoids stderr pipe deadlock under load.
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'quiet']
+    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-nostdin']
     if start_sec > 0:
         cmd += ['-ss', f'{start_sec:.3f}']   # seek before input = fast
     cmd += [
@@ -1983,6 +1983,7 @@ def stream_dsd(filepath):
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,   # no stderr pipe → no deadlock risk
+            stdin=subprocess.DEVNULL,    # avoid stdin-related ffmpeg hangs under Flask's subprocess model
         )
         try:
             while True:
@@ -1995,7 +1996,16 @@ def stream_dsd(filepath):
                 proc.stdout.close()
             except OSError:
                 pass
-            proc.wait()
+            if proc.poll() is None:
+                # Client disconnected (track skipped/stopped) before ffmpeg finished —
+                # don't leave it running, it will otherwise block writing to a dead pipe.
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            else:
+                proc.wait()
 
     resp = Response(
         stream_with_context(generate()),
