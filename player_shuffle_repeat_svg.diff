@@ -1,0 +1,93 @@
+diff --git a/static/player.js b/static/player.js
+index 99112fc..f0d8e05 100755
+--- a/static/player.js
++++ b/static/player.js
+@@ -32,6 +32,10 @@ function _makeDiamondSVG(ledColor, size) {
+         `</svg>`;
+ }
+ 
++// ── Repeat icon SVGs — same inline format as the rest of the player controls ───
++const REPEAT_SVG = `<svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`;
++const REPEAT_ONE_SVG = `<svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/><path d="M11 10h1v4"/></svg>`;
++
+ // ── Path helpers ──────────────────────────────────────────────────────────────
+ 
+ function buildCoverUrl(path) {
+@@ -343,11 +347,11 @@ function _updateShuffleRepeatButtons() {
+     [document.getElementById('shuffle-btn'), document.getElementById('np-shuffle-btn')].forEach(b => {
+         if (b) b.classList.toggle('is-active', shuffleEnabled);
+     });
+-    const icon  = repeatMode === 'one' ? '🔂' : '🔁';
++    const iconSvg = repeatMode === 'one' ? REPEAT_ONE_SVG : REPEAT_SVG;
+     const label = repeatMode === 'one' ? 'Repetir una pista' : repeatMode === 'all' ? 'Repetir lista' : 'Repetir (desactivado)';
+     [document.getElementById('repeat-btn'), document.getElementById('np-repeat-btn')].forEach(b => {
+         if (!b) return;
+-        b.textContent = icon;
++        b.innerHTML = iconSvg;
+         b.title = label;
+         b.classList.toggle('is-active', repeatMode !== 'off');
+     });
+diff --git a/static/style.css b/static/style.css
+index e12bf69..090aadd 100755
+--- a/static/style.css
++++ b/static/style.css
+@@ -195,6 +195,7 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
+ .control-btn-sm { width:1.9rem; height:1.9rem; font-size:0.85rem; opacity:0.55; }
+ .control-btn-sm:hover { opacity:0.85; }
+ .control-btn-sm.is-active { opacity:1; color:var(--text-gold); }
++.shuffle-svg, .repeat-svg { width:16px; height:16px; display:block; overflow:visible; }
+ .play-btn { font-size:1.3rem !important; color:var(--accent) !important; }
+ .play-btn:hover { background:var(--accent-dim) !important; }
+ .play-btn:disabled,
+diff --git a/templates/base.html b/templates/base.html
+index a4d1f74..0602411 100755
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -103,11 +103,21 @@
+ 
+           <!-- Controls -->
+           <div class="np-controls">
+-            <button class="np-ctrl np-ctrl-sm" id="np-shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">🔀</button>
++            <button class="np-ctrl np-ctrl-sm" id="np-shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">
++              <svg class="shuffle-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
++                <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
++                <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>
++              </svg>
++            </button>
+             <button class="np-ctrl" onclick="prevTrack()" title="Anterior">⏮</button>
+             <button class="np-ctrl np-play" id="np-play-btn" onclick="togglePlayPause()" title="Play/Pausa">▶</button>
+             <button class="np-ctrl" onclick="nextTrack()" title="Siguiente">⏭</button>
+-            <button class="np-ctrl np-ctrl-sm" id="np-repeat-btn" onclick="cycleRepeat()" title="Repetir">🔁</button>
++            <button class="np-ctrl np-ctrl-sm" id="np-repeat-btn" onclick="cycleRepeat()" title="Repetir">
++              <svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
++                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/>
++                <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
++              </svg>
++            </button>
+           </div>
+ 
+           <!-- Actions: fav, lyrics, queue toggle -->
+@@ -186,11 +196,21 @@
+ 
+         <div class="player-controls-wrap">
+           <div class="player-controls">
+-            <button class="control-btn control-btn-sm" id="shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">🔀</button>
++            <button class="control-btn control-btn-sm" id="shuffle-btn" onclick="toggleShuffle()" title="Aleatorio">
++              <svg class="shuffle-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
++                <polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/>
++                <polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/>
++              </svg>
++            </button>
+             <button class="control-btn" id="prev-btn">⏮</button>
+             <button class="control-btn play-btn" id="play-btn" data-empty="true">▶</button>
+             <button class="control-btn" id="next-btn">⏭</button>
+-            <button class="control-btn control-btn-sm" id="repeat-btn" onclick="cycleRepeat()" title="Repetir">🔁</button>
++            <button class="control-btn control-btn-sm" id="repeat-btn" onclick="cycleRepeat()" title="Repetir">
++              <svg class="repeat-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
++                <polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/>
++                <polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>
++              </svg>
++            </button>
+           </div>
+           <div class="player-progress">
+             <span id="current-time" class="time-label">0:00</span>

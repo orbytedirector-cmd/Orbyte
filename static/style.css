@@ -190,13 +190,14 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 /* Controls always rendered, always visible */
 .player-controls-wrap { display:flex; flex-direction:column; align-items:center; gap:0.3rem; width:100%; }
 .player-controls { display:flex; align-items:center; gap:0.5rem; }
-.control-btn { background:none; border:none; color:var(--text-secondary); font-size:1.1rem; cursor:pointer; width:2.3rem; height:2.3rem; display:flex; align-items:center; justify-content:center; border-radius:50%; transition:color 0.15s,background 0.15s; }
-.control-btn:hover { color:var(--text-primary); background:rgba(255,255,255,0.06); }
+.control-btn { background:none; border:none; color:rgba(245,197,24,0.55); font-size:1.1rem; cursor:pointer; width:2.3rem; height:2.3rem; display:flex; align-items:center; justify-content:center; border-radius:50%; transition:color 0.18s,background 0.18s,box-shadow 0.2s; }
+.control-btn:hover { color:var(--text-gold); background:rgba(200,146,10,0.09); box-shadow:0 0 0 1px rgba(245,197,24,0.28); }
 .control-btn-sm { width:1.9rem; height:1.9rem; font-size:0.85rem; opacity:0.55; }
 .control-btn-sm:hover { opacity:0.85; }
 .control-btn-sm.is-active { opacity:1; color:var(--text-gold); }
-.play-btn { font-size:1.3rem !important; color:var(--accent) !important; }
-.play-btn:hover { background:var(--accent-dim) !important; }
+.play-btn { font-size:1.3rem !important; color:var(--text-gold) !important; }
+.play-btn:hover { background:rgba(200,146,10,0.13) !important; box-shadow:0 0 0 1.5px rgba(245,197,24,0.52),0 0 18px rgba(245,197,24,0.2) !important; }
+.play-btn:active { transform:scale(0.91); }
 .play-btn:disabled,
 .play-btn[data-empty="true"] {
   color: rgba(255,255,255,0.2) !important;
