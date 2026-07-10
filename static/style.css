@@ -1465,41 +1465,43 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .pwa-fab { bottom: calc(var(--player-h) + 8px); right: 8px; }
 
   /* ═══════════════════════════════════════════════════════════════════
-     PLAYER BAR — 3 rows in 148px
-     Row 1 (48px): [cover 42px] [title/artist/format flex] [fav ♡] [vol] [playlist]
-     Row 2 (42px): [⏮]   [  ⏸  ]   [⏭]  — centered
-     Row 3 (26px): 0:00 ────────── 0:00
-     Remaining ≈ 32px padding (top 8 + bottom 8 + gaps)
+     PLAYER BAR — bugfix estructural
+     El HTML real: .player-row1 envuelve a .player-left, .player-center Y
+     .player-right JUNTOS (no solo al primero). Como .player-row1 era
+     flex-direction:row, el "flex:0 0 40px" pensado para dar 40px de ALTO
+     a .player-center en realidad le daba 40px de ANCHO (eje principal de
+     una fila = horizontal). Los botones de control + la barra de progreso
+     quedaban apretados en una columna de 40px de ancho y se desbordaban
+     encima de los íconos de la derecha — la "maraña" de la captura.
+
+     Fix: mismo truco que ya funciona en landscape (más abajo en este
+     archivo) — .player-row1 pasa a display:contents (desaparece de la
+     caja, sus hijos suben un nivel) y .player-bar se vuelve una grilla de
+     2 filas reales: arriba [left | right] lado a lado (48px), abajo
+     [center] ocupando todo el ancho para controles + progreso.
      ════════════════════════════════════════════════════════════════ */
   .player-bar {
-    display: flex !important;
-    flex-direction: column !important;
+    display: grid !important;
+    grid-template-columns: 1fr auto !important;
+    grid-template-rows: 48px 1fr !important;
+    grid-template-areas: "left right" "center center" !important;
     height: var(--player-h) !important;
     padding: 8px 10px 7px !important;
-    gap: 4px !important;
+    row-gap: 4px !important;
+    column-gap: 8px !important;
     overflow: hidden !important;
     align-items: stretch !important;
   }
 
-  /* ── Row 1: info row ─── */
-  .player-row1 {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    width: 100% !important;
-    height: 48px !important;
-    min-height: 48px !important;
-    max-height: 48px !important;
-    gap: 0 !important;
-    flex: 0 0 48px !important;
-  }
+  /* Desenvuelve el wrapper: sus hijos pasan a ser ítems directos de la grilla */
+  .player-row1 { display: contents !important; }
 
   .player-left {
+    grid-area: left !important;
     display: flex !important;
     flex-direction: row !important;
     align-items: center !important;
     gap: 8px !important;
-    flex: 1 1 0 !important;
     min-width: 0 !important;
     height: 100% !important;
   }
@@ -1529,11 +1531,11 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .player-led { width: 6px !important; height: 6px !important; }
 
   .player-right {
+    grid-area: right !important;
     display: flex !important;
     flex-direction: row !important;
     align-items: center !important;
     gap: 2px !important;
-    flex-shrink: 0 !important;
     height: 100% !important;
   }
   .player-right .icon-btn {
@@ -1553,25 +1555,25 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .player-right .normalize-toggle { display: none !important; }
   #lyrics-toggle-btn { display: flex !important; }
 
-  /* ── Row 2: controls ─── */
+  /* ── Fila inferior: controles + progreso, ahora con TODO el ancho ─── */
   .player-viz-row { display: none !important; }
   .player-center {
+    grid-area: center !important;
     display: flex !important;
     flex-direction: column !important;
     align-items: center !important;
     justify-content: center !important;
-    flex: 0 0 40px !important;
-    min-height: 40px !important;
-    max-height: 40px !important;
     width: 100% !important;
+    min-height: 0 !important;
     gap: 0 !important;
+    overflow: hidden !important;
   }
   .player-controls-wrap {
     display: flex !important;
     flex-direction: column !important;
     align-items: center !important;
     width: 100% !important;
-    gap: 0 !important;
+    gap: 4px !important;
   }
   .player-controls {
     display: flex !important;
@@ -1580,6 +1582,7 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
     gap: 20px !important;
     height: 40px !important;
     width: 100% !important;
+    flex-shrink: 0 !important;
   }
   .control-btn {
     background: none !important; border: none !important;
@@ -1591,7 +1594,6 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   }
   .play-btn { font-size: 1.25rem !important; }
 
-  /* ── Row 3: progress ─── */
   .player-progress {
     display: flex !important;
     align-items: center !important;
