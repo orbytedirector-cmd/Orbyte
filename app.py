@@ -1225,6 +1225,51 @@ def api_album_tracks(album_id):
         conn.close()
 
 
+@app.route('/api/tracks/resolve', methods=['POST'])
+def api_tracks_resolve():
+    """
+    Resolve a list of file_path values (as recovered from an imported M3U
+    playlist, which only carries title/artist/duration/path) back into full
+    track records from the DB — same shape as /api/track/<id> and
+    /api/album/<id>/tracks — so the player can restore cover, LED quality
+    indicator, format badge, artist/album links and (via the real track id)
+    lyrics, exactly as it does for tracks loaded from any other page.
+    Paths not found in the library are simply omitted from the response;
+    the caller keeps the minimal M3U-only object for those.
+    """
+    data  = request.get_json(silent=True) or {}
+    paths = data.get('file_paths')
+    if not isinstance(paths, list) or not paths:
+        return jsonify([])
+
+    # Defensive cap — this endpoint is meant for playlist-sized batches
+    cleaned = [clean_db_path(p) for p in paths[:2000] if p]
+    if not cleaned:
+        return jsonify([])
+
+    conn = get_db_connection()
+    try:
+        placeholders = ','.join('?' * len(cleaned))
+        rows = conn.execute(f'''
+            SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
+                   al.artist_id, ar.name as artist_name
+            FROM tracks t
+            LEFT JOIN albums al ON t.album_id=al.id
+            LEFT JOIN artists ar ON al.artist_id=ar.id
+            WHERE t.file_path IN ({placeholders})
+        ''', cleaned).fetchall()
+
+        by_path = {}
+        for r in rows:
+            d = track_to_json(r)
+            by_path[d['file_path']] = d
+        # Return in the same order as the request, one entry per matched path
+        result = [by_path[p] for p in cleaned if p in by_path]
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
 def _read_embedded_lyrics(file_path):
     """
     Read SYNCEDLYRICS and LYRICS from any audio file.

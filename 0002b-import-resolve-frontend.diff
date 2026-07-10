@@ -1,0 +1,38 @@
+diff --git a/templates/base.html b/templates/base.html
+index 812dcf0..e99fb98 100644
+--- a/templates/base.html
++++ b/templates/base.html
+@@ -950,13 +950,30 @@
+       const file  = input.files && input.files[0];
+       if (!file) return;
+       const reader = new FileReader();
+-      reader.onload = () => {
++      reader.onload = async () => {
+         input.value = ''; // permite volver a importar el mismo archivo
+-        const tracks = parseM3U(String(reader.result || ''));
+-        if (!tracks.length) {
++        const parsed = parseM3U(String(reader.result || ''));
++        if (!parsed.length) {
+           alert('El archivo M3U no contiene pistas válidas.');
+           return;
+         }
++        // Intenta recuperar el registro completo de cada pista (cover, LED,
++        // calidad, id real — necesario para favoritos y para que las lyrics
++        // se precarguen solas) buscando por ruta en la biblioteca. Si el
++        // backend falla o una ruta no está en la DB, esa pista se reproduce
++        // igual con los datos mínimos leídos del M3U (título/artista/duración).
++        let resolved = {};
++        try {
++          const full = await fetch('/api/tracks/resolve', {
++            method:  'POST',
++            headers: {'Content-Type': 'application/json'},
++            body:    JSON.stringify({file_paths: parsed.map(t => t.file_path)}),
++          }).then(r => r.ok ? r.json() : []);
++          full.forEach(t => { resolved[t.file_path] = t; });
++        } catch (e) {
++          console.warn('No se pudo resolver la playlist importada contra la biblioteca:', e);
++        }
++        const tracks = parsed.map(t => resolved[t.file_path] || t);
+         // Sustituye cualquier playlist actual de la sesión por la importada
+         // (loadQueue reemplaza la cola por completo y dispara 'queueLoaded',
+         // que ya mantiene sincronizados userPlaylist y el panel).
