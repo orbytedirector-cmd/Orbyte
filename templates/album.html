@@ -313,6 +313,7 @@
 
   // Prepend all album tracks above current queue position and start playing from the first
   async function playAllAlbum() {
+    if (window.primeAudioForGesture) window.primeAudioForGesture();
     const q = await ensureAlbumQueue();
     if (!q || !q.length) { console.warn('playAllAlbum: empty queue'); return; }
     if (window.prependTracksAndPlay) {
@@ -325,6 +326,7 @@
 
   // Play a single track: prepend it to the top of the queue and start it immediately
   async function playTrackFromAlbum(trackId) {
+    if (window.primeAudioForGesture) window.primeAudioForGesture();
     try {
       const data = await fetch(`/api/track/${trackId}`).then(r => r.json());
       if (window.prependAndPlay) {

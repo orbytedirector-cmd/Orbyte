@@ -134,6 +134,7 @@ function showTab(panel, btn) {
   btn.classList.add('active');
 }
 async function playTrackById(id) {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
   const d = await fetch(`/api/track/${id}`).then(r=>r.json());
   if (window.prependAndPlay) { window.prependAndPlay(d); }
   else { loadQueue([d]); playTrack(0); }
@@ -161,6 +162,7 @@ async function addToPlaylistByIdWithFeedback(id, btn) {
   }
 }
 async function playAlbumById(id) {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
   const tracks = await fetch(`/api/album/${id}/tracks`).then(r=>r.json());
   if (!Array.isArray(tracks) || !tracks.length) return;
   const valid = tracks.filter(t => t.audio_url || t.file_path);

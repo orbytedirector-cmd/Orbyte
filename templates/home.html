@@ -406,6 +406,7 @@ function filterGenres(q) {
   });
 }
 async function playAlbumById(albumId) {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
   const tracks = await fetch(`/api/album/${albumId}/tracks`).then(r => r.json());
   if (!Array.isArray(tracks) || !tracks.length) return;
   const valid = tracks.filter(t => t.audio_url || t.file_path);

@@ -1,0 +1,139 @@
+diff --git a/static/style.css b/static/style.css
+index b801599..db71657 100755
+--- a/static/style.css
++++ b/static/style.css
+@@ -1390,10 +1390,11 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
+ /* ═══════════════════════════════════════════════════════════════════════════════
+    MOBILE PORTRAIT  ≤768px
+    iPhone 13 Pro Max: 390px wide, Safari/Chrome
+-   Player layout: fixed 148px tall, 3 rows, all controls visible
++   Player layout: 180px, 3 filas — carátula/título | toggles (fav, lyrics,
++   volumen, normalizar, salida, playlist) | transporte + progreso
+    ══════════════════════════════════════════════════════════════════════════════ */
+ @media (max-width: 768px) and (orientation: portrait) {
+-  :root { --player-h: 148px; }
++  :root { --player-h: 180px; }
+ 
+   /* ─── General layout ──────────────────────────────────────────────── */
+   /* Red de seguridad: varias grillas del home (era-card, quality-grid, etc.)
+@@ -1465,30 +1466,22 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
+   .pwa-fab { bottom: calc(var(--player-h) + 8px); right: 8px; }
+ 
+   /* ═══════════════════════════════════════════════════════════════════
+-     PLAYER BAR — bugfix estructural
+-     El HTML real: .player-row1 envuelve a .player-left, .player-center Y
+-     .player-right JUNTOS (no solo al primero). Como .player-row1 era
+-     flex-direction:row, el "flex:0 0 40px" pensado para dar 40px de ALTO
+-     a .player-center en realidad le daba 40px de ANCHO (eje principal de
+-     una fila = horizontal). Los botones de control + la barra de progreso
+-     quedaban apretados en una columna de 40px de ancho y se desbordaban
+-     encima de los íconos de la derecha — la "maraña" de la captura.
+-
+-     Fix: mismo truco que ya funciona en landscape (más abajo en este
+-     archivo) — .player-row1 pasa a display:contents (desaparece de la
+-     caja, sus hijos suben un nivel) y .player-bar se vuelve una grilla de
+-     2 filas reales: arriba [left | right] lado a lado (48px), abajo
+-     [center] ocupando todo el ancho para controles + progreso.
++     PLAYER BAR — 3 filas reales
++     Sigue usando el mismo desenvuelve-wrapper (display:contents en
++     .player-row1) del fix anterior, pero ahora .player-right es su PROPIA
++     fila de ancho completo en vez de compartir la fila 1 con la carátula.
++     Antes achicaba/escondía Salida y Normalizar para que entraran al lado
++     de la carátula — con una fila propia entran los 6 controles sin
++     comprimirse: favoritos, lyrics, volumen, normalizar, salida, playlist.
+      ════════════════════════════════════════════════════════════════ */
+   .player-bar {
+     display: grid !important;
+-    grid-template-columns: 1fr auto !important;
+-    grid-template-rows: 48px 1fr !important;
+-    grid-template-areas: "left right" "center center" !important;
++    grid-template-columns: 1fr !important;
++    grid-template-rows: 48px 40px 1fr !important;
++    grid-template-areas: "left" "right" "center" !important;
+     height: var(--player-h) !important;
+-    padding: 8px 10px 7px !important;
+-    row-gap: 4px !important;
+-    column-gap: 8px !important;
++    padding: 7px 10px 7px !important;
++    row-gap: 3px !important;
+     overflow: hidden !important;
+     align-items: stretch !important;
+   }
+@@ -1530,32 +1523,48 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
+   .player-fmt-badge { font-size: 0.55rem !important; padding: 0.05rem 0.22rem !important; }
+   .player-led { width: 6px !important; height: 6px !important; }
+ 
++  /* ── Fila 2: TODOS los toggles, ancho completo, nada oculto ────────── */
+   .player-right {
+     grid-area: right !important;
+     display: flex !important;
+     flex-direction: row !important;
+     align-items: center !important;
+-    gap: 2px !important;
++    justify-content: space-between !important;
++    gap: 4px !important;
+     height: 100% !important;
++    width: 100% !important;
+   }
+   .player-right .icon-btn {
+-    width: 30px !important; height: 30px !important;
+-    font-size: 0.88rem !important; padding: 0 !important;
++    width: 34px !important; height: 34px !important;
++    font-size: 0.95rem !important; padding: 0 !important;
+     display: flex !important; align-items: center !important;
+     justify-content: center !important; border-radius: 50% !important;
+     flex-shrink: 0 !important;
+   }
+-  .icon-btn.fav-btn { width: 30px !important; height: 30px !important; font-size: 1rem !important; }
+-  .volume-wrap  { gap: 2px !important; }
+-  .vol-icon     { font-size: 0.75rem !important; }
+-  .volume-slider { width: 28px !important; }
+-  .outputs-wrap { display: none !important; }
+-  /* Ya accesible en el reproductor de pantalla completa (#np-normalize-btn);
+-     en la barra angosta solo suma un ícono más sin espacio real para tocarlo. */
+-  .player-right .normalize-toggle { display: none !important; }
++  .icon-btn.fav-btn { width: 34px !important; height: 34px !important; font-size: 1.05rem !important; }
+   #lyrics-toggle-btn { display: flex !important; }
+ 
+-  /* ── Fila inferior: controles + progreso, ahora con TODO el ancho ─── */
++  .volume-wrap   { gap: 4px !important; flex-shrink: 0 !important; }
++  .vol-icon      { font-size: 0.85rem !important; }
++  .volume-slider { width: 56px !important; }
++
++  /* Normalizar: visible (antes escondido) — el estado activo ya trae su
++     propio anillo dorado pulsante (.is-active, ver reglas base), así que
++     con solo mostrarlo se vuelve "distinguible" sin inventar nada nuevo. */
++  .player-right .normalize-toggle { display: flex !important; }
++
++  /* Salida: visible (antes escondido). Ícono + nombre del dispositivo
++     recortado — con fila propia entra sin apretar el resto. */
++  .outputs-wrap    { display: block !important; flex-shrink: 0 !important; }
++  .outputs-main-btn {
++    padding: 0 !important; width: 34px !important; height: 34px !important;
++    border-radius: 50% !important; justify-content: center !important;
++    gap: 0 !important;
++  }
++  .outputs-btn-label { display: none !important; } /* el ícono ya distingue la función; el nombre del DAC se ve al abrir el panel */
++  .outputs-btn-icon  { font-size: 0.95rem !important; }
++
++  /* ── Fila 3: controles + progreso, ancho completo ───────────────────── */
+   .player-viz-row { display: none !important; }
+   .player-center {
+     grid-area: center !important;
+@@ -1610,11 +1619,14 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
+ }
+ 
+ @media (max-width: 430px) and (orientation: portrait) {
+-  :root { --player-h: 145px; }
++  :root { --player-h: 180px; }
+   .album-grid         { grid-template-columns: repeat(auto-fill, minmax(125px,1fr)); gap: 8px; }
+   .artist-albums-grid { grid-template-columns: repeat(auto-fill, minmax(125px,1fr)); }
+-  .volume-slider      { width: 30px !important; }
+   .player-controls    { gap: 16px !important; }
++  /* Un poco más de margen en pantallas muy chicas (iPhone SE, 375px) */
++  .player-right .icon-btn, .icon-btn.fav-btn,
++  .player-right .normalize-toggle, .outputs-main-btn { width: 32px !important; height: 32px !important; }
++  .volume-slider { width: 46px !important; }
+ }
+ 
+ /* ═══════════════════════════════════════════════════════════════════════════════

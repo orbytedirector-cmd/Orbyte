@@ -200,6 +200,7 @@
 
 <script>
 async function playAlbumById(albumId, el) {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
   if (el) { const o = el.querySelector('.play-overlay'); if (o) o.textContent = '…'; }
   try {
     const tracks = await fetch(`/api/album/${albumId}/tracks`).then(r => r.json());
