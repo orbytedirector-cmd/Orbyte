@@ -61,12 +61,6 @@
 
     <main class="main-content">{% block content %}{% endblock %}</main>
 
-    <!-- ─── PWA Install FAB ──────────────────────────────────────────────── -->
-    <div class="pwa-fab" id="pwa-fab">
-      <button class="pwa-fab-btn" onclick="pwaTriggerInstall()" title="Instalar app">⬇</button>
-      <span class="pwa-fab-label">Instalar</span>
-    </div>
-
     <!-- ─── Full-Screen Now Playing ──────────────────────────────────────── -->
     <div class="np-overlay" id="np-overlay" onclick="if(event.target===this)closeNowPlaying()">
       <div class="np-card" id="np-card">
@@ -1073,72 +1067,6 @@
 
     // Push initial state
     history.replaceState({url: window.location.pathname + window.location.search}, '', window.location.href);
-
-    // ── PWA Service Worker + Install prompt ─────────────────────────────────
-    // ── PWA Install FAB ──────────────────────────────────────────────────────
-    let _pwaInstallEvent = null;
-
-    // Show FAB immediately on mobile if not running in standalone PWA mode
-    (function() {
-      const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-      const isStandalone = window.navigator.standalone === true ||
-                           window.matchMedia('(display-mode: standalone)').matches;
-      if (isMobile && !isStandalone) {
-        const fab = document.getElementById('pwa-fab');
-        if (fab) fab.style.display = 'flex';
-      }
-    })();
-
-    window.addEventListener('beforeinstallprompt', e => {
-      e.preventDefault();
-      _pwaInstallEvent = e;
-      const fab = document.getElementById('pwa-fab');
-      if (fab) fab.style.display = 'flex';
-    });
-
-    window.addEventListener('appinstalled', () => {
-      const fab = document.getElementById('pwa-fab');
-      if (fab) fab.style.display = 'none';
-      _pwaInstallEvent = null;
-    });
-
-    window.pwaTriggerInstall = async function() {
-      if (_pwaInstallEvent) {
-        // Chrome/Android: native install prompt
-        _pwaInstallEvent.prompt();
-        const { outcome } = await _pwaInstallEvent.userChoice;
-        _pwaInstallEvent = null;
-        if (outcome === 'accepted') {
-          const fab = document.getElementById('pwa-fab');
-          if (fab) fab.style.display = 'none';
-        }
-      } else {
-        // iOS Safari: show instruction toast
-        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-        const msg = isIOS
-          ? '📲 En Safari: toca el botón Compartir (□↑) y luego "Añadir a pantalla de inicio"'
-          : '📲 Abre el menú del navegador (⋮) y selecciona "Instalar app" o "Añadir a pantalla de inicio"';
-        // Show a simple toast
-        let toast = document.getElementById('pwa-toast');
-        if (!toast) {
-          toast = document.createElement('div');
-          toast.id = 'pwa-toast';
-          toast.style.cssText = [
-            'position:fixed','bottom:calc(var(--player-h) + 70px)','right:10px',
-            'left:10px','z-index:900','background:rgba(20,20,20,0.97)',
-            'color:#fff','border:1px solid rgba(255,255,255,0.12)',
-            'border-radius:12px','padding:14px 16px','font-size:0.88rem',
-            'line-height:1.5','box-shadow:0 8px 32px rgba(0,0,0,0.6)',
-            'backdrop-filter:blur(12px)','transition:opacity 0.3s'
-          ].join(';');
-          document.body.appendChild(toast);
-        }
-        toast.textContent = msg;
-        toast.style.opacity = '1';
-        toast.style.display = 'block';
-        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => { toast.style.display='none'; }, 300); }, 5000);
-      }
-    };
 
     // ── Full-Screen Now Playing ───────────────────────────────────────────────
     let _npOpen = false;

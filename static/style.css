@@ -1345,48 +1345,6 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 /* ═══════════════════════════════════════════════════════════════════════════════
    PWA INSTALL FAB — floating bottom-right, subtle but visible
    ══════════════════════════════════════════════════════════════════════════════ */
-.pwa-fab {
-  display: none;  /* shown by JS */
-  position: fixed;
-  bottom: calc(var(--player-h) + 0.8rem);
-  right: 0.8rem;
-  z-index: 600;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.2rem;
-}
-.pwa-fab-btn {
-  width: 46px; height: 46px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #b8860b 0%, #d4a017 60%, #f5c518 100%);
-  border: 2px solid rgba(255,255,255,0.15);
-  color: #0a0a0a;
-  font-size: 1.2rem;
-  cursor: pointer;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 20px rgba(212,160,23,0.5), 0 0 0 0 rgba(212,160,23,0.4);
-  animation: fabPulse 2.5s ease-in-out infinite;
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-.pwa-fab-btn:hover {
-  transform: scale(1.1);
-  box-shadow: 0 6px 28px rgba(212,160,23,0.65);
-  animation: none;
-}
-@keyframes fabPulse {
-  0%, 100% { box-shadow: 0 4px 20px rgba(212,160,23,0.5), 0 0 0 0 rgba(212,160,23,0.4); }
-  50%       { box-shadow: 0 4px 20px rgba(212,160,23,0.5), 0 0 0 8px rgba(212,160,23,0); }
-}
-.pwa-fab-label {
-  font-size: 0.6rem; font-weight: 700;
-  color: rgba(255,255,255,0.7);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  background: rgba(0,0,0,0.6);
-  padding: 0.15rem 0.35rem;
-  border-radius: 4px;
-}
-
 /* ═══════════════════════════════════════════════════════════════════════════════
    MOBILE PORTRAIT  ≤768px
    iPhone 13 Pro Max: 390px wide, Safari/Chrome
@@ -1411,7 +1369,7 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   /* ─── Header: auto-height, logo left + search/alphabet stacked right ── */
   .header { padding: 0 10px; height: auto; }
   .header-top { padding: 6px 0 0; gap: 8px; flex-wrap: nowrap; height: auto; align-items: center; }
-  .logo-icon-img { height: 30px; }
+  .logo-icon-img { height: 34.5px; } /* +15% sobre los 30px anteriores, según ticket */
   .logo-wordmark { font-size: 0.82rem; letter-spacing: 0.1em; }
   .logo-img { height: 30px; }
   .logo-text { display: none; }
@@ -1461,9 +1419,6 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   }
   .playlist-panel.open { right: 0 !important; }
   .lyrics-panel { bottom: var(--player-h); left: 0; right: 0; }
-
-  /* ─── FAB ────────────────────────────────────────────────────────── */
-  .pwa-fab { bottom: calc(var(--player-h) + 8px); right: 8px; }
 
   /* ═══════════════════════════════════════════════════════════════════
      PLAYER BAR — 3 filas reales
@@ -1661,12 +1616,6 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .outputs-wrap { display: none; }
   .icon-btn { padding: 0.2rem 0.4rem; font-size: 0.75rem; }
   .volume-slider { width: 50px; }
-
-  /* FAB position in landscape */
-  .pwa-fab {
-    bottom: calc(var(--player-h) + 0.5rem);
-    right: 0.5rem;
-  }
 
   /* Full-screen player in landscape: side by side */
   .np-card {
