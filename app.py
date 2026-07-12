@@ -2,6 +2,7 @@ import os
 import json
 import struct
 import threading
+import time
 from urllib.parse import quote
 from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
 from flask_cors import CORS
@@ -2062,6 +2063,7 @@ def stream_dsd(filepath):
 
     ua = request.headers.get('User-Agent', '')
     is_ios = _is_ios_client()
+    t_req_start = time.monotonic()
     app.logger.info(f"[stream-dsd] path={absolute_path!r} start={start_sec} "
                      f"is_ios={is_ios} UA={ua!r}")
 
@@ -2073,7 +2075,9 @@ def stream_dsd(filepath):
     # Desktop/Android no se tocan: siguen con el FLAC de siempre.
     if is_ios:
         total_duration, channels = _probe_dsd(absolute_path)
-        app.logger.info(f"[stream-dsd:ios] probe -> duration={total_duration} channels={channels}")
+        t_probe_done = time.monotonic()
+        app.logger.info(f"[stream-dsd:ios] probe -> duration={total_duration} channels={channels} "
+                         f"(tardó {(t_probe_done - t_req_start)*1000:.0f}ms)")
         if total_duration is not None:
             remaining = max(0.0, total_duration - start_sec)
             # Margen de seguridad: en la práctica ffprobe y lo que ffmpeg
@@ -2104,12 +2108,16 @@ def stream_dsd(filepath):
             app.logger.info(f"[stream-dsd:ios] data_size={data_size} cmd={ios_cmd}")
 
             def generate_wav():
+                t_spawn = time.monotonic()
                 proc = subprocess.Popen(
                     ios_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     stdin=subprocess.DEVNULL,
                 )
+                app.logger.info(
+                    f"[stream-dsd:ios] ffmpeg arrancó (+{(t_spawn - t_req_start)*1000:.0f}ms "
+                    f"desde el request)")
                 # Drena stderr en un hilo aparte -- si no lo leemos, ffmpeg puede
                 # bloquearse al llenar el buffer del pipe y colgar todo el stream.
                 stderr_chunks = []
@@ -2123,6 +2131,7 @@ def stream_dsd(filepath):
                 t.start()
 
                 sent = 0
+                first_chunk_logged = False
                 try:
                     yield _wav_header(data_size, sample_rate, channels, bits)
                     while sent < data_size:
@@ -2144,6 +2153,11 @@ def stream_dsd(filepath):
                             yield b'\x00' * padding
                             sent = data_size
                             break
+                        if not first_chunk_logged:
+                            first_chunk_logged = True
+                            app.logger.info(
+                                f"[stream-dsd:ios] primer byte de audio real "
+                                f"(+{(time.monotonic() - t_req_start)*1000:.0f}ms desde el request)")
                         room = data_size - sent
                         if len(chunk) > room:
                             chunk = chunk[:room]
@@ -2165,7 +2179,8 @@ def stream_dsd(filepath):
                     t.join(timeout=1)
                     err_txt = b''.join(stderr_chunks).decode('utf-8', 'replace').strip()
                     app.logger.info(
-                        f"[stream-dsd:ios] terminado: {sent}/{data_size} bytes enviados"
+                        f"[stream-dsd:ios] terminado: {sent}/{data_size} bytes enviados "
+                        f"(+{(time.monotonic() - t_req_start)*1000:.0f}ms desde el request)"
                         + (f" | ffmpeg stderr: {err_txt}" if err_txt else " | sin stderr"))
 
             resp = Response(
