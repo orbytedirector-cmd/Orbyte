@@ -2076,10 +2076,13 @@ def stream_dsd(filepath):
         app.logger.info(f"[stream-dsd:ios] probe -> duration={total_duration} channels={channels}")
         if total_duration is not None:
             remaining = max(0.0, total_duration - start_sec)
-            # Pequeño margen de seguridad: si ffprobe/ffmpeg difieren en
-            # una fracción de muestra, preferimos cortar 150ms antes
-            # (imperceptible) a arriesgar un Content-Length inconsistente.
-            safe_remaining = max(0.0, remaining - 0.15)
+            # Margen de seguridad: en la práctica ffprobe y lo que ffmpeg
+            # realmente decodifica a PCM no coinciden exacto (filtro de
+            # resampleo DSD→PCM) — medido en logs reales: ~0.31s de faltante
+            # incluso con 0.15s de margen. Se sube a 0.8s. El relleno de
+            # silencio más abajo es la red de seguridad real: garantiza
+            # Content-Length exacto pase lo que pase con esta estimación.
+            safe_remaining = max(0.0, remaining - 0.8)
             sample_rate = 176400
             bits = 32
             block_align = channels * (bits // 8)
@@ -2125,8 +2128,21 @@ def stream_dsd(filepath):
                     while sent < data_size:
                         chunk = proc.stdout.read(65536)
                         if not chunk:
+                            # ffmpeg terminó antes de completar data_size. Mandar
+                            # menos bytes de los prometidos en Content-Length es
+                            # justo lo que rompía la reproducción en iOS (medido
+                            # en logs reales: Safari trata la respuesta como
+                            # corrupta/incompleta y aborta). Se rellena con
+                            # silencio digital hasta el tamaño exacto declarado
+                            # — unos pocos ms/cientos de ms de silencio al final
+                            # son inofensivos; un Content-Length incumplido no.
+                            padding = data_size - sent
                             app.logger.warning(
-                                f"[stream-dsd:ios] ffmpeg sin más datos en {sent}/{data_size} bytes")
+                                f"[stream-dsd:ios] ffmpeg terminó corto en "
+                                f"{sent}/{data_size} bytes — relleno con "
+                                f"{padding} bytes de silencio")
+                            yield b'\x00' * padding
+                            sent = data_size
                             break
                         room = data_size - sent
                         if len(chunk) > room:
