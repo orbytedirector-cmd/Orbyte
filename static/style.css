@@ -1391,7 +1391,8 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   /* ─── Header: auto-height, logo left + search/alphabet stacked right ── */
   .header { padding: 0 10px; height: auto; }
   .header-top { padding: 6px 0 0; gap: 8px; flex-wrap: nowrap; height: auto; align-items: center; }
-  .logo-icon-img { height: 34.5px; } /* +15% sobre los 30px anteriores, según ticket */
+  .logo-icon-img { height: 44px; } /* antes 34.5px — muy chico como touch-target siendo el botón de volver al home; 44px es el mínimo recomendado por Apple HIG */
+  .logo-link { padding: 4px 0; } /* un poco de aire extra alrededor para agrandar el área táctil sin agrandar más la imagen */
   .logo-wordmark { font-size: 0.82rem; letter-spacing: 0.1em; }
   .logo-img { height: 30px; }
   .logo-text { display: none; }
@@ -1707,5 +1708,19 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 @supports (padding-bottom: env(safe-area-inset-bottom)) {
   @media (max-width: 768px) {
     .player-bar { padding-bottom: max(7px, calc(7px + env(safe-area-inset-bottom) * 0.5)) !important; }
+  }
+}
+
+/* ── iOS safe area (arriba) ───────────────────────────────────────────────── */
+/* apple-mobile-web-app-status-bar-style es "black-translucent": el status bar
+   (reloj, notch/Dynamic Island) queda superpuesto sobre el contenido en vez de
+   empujarlo hacia abajo. Sin este padding, en modo standalone el reloj pelea
+   visualmente con el logo. El fondo del header (position:sticky, top:0) sigue
+   llegando hasta arriba de todo — solo se empuja el contenido interno hacia
+   abajo. En Safari normal (pestaña, no instalada) env() resuelve a 0 y no
+   cambia nada. */
+@supports (padding-top: env(safe-area-inset-top)) {
+  @media (max-width: 768px) {
+    .header { padding-top: max(0.4rem, env(safe-area-inset-top)) !important; }
   }
 }
