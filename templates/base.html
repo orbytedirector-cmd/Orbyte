@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>Orbyte</title>
 
   <!-- PWA -->
@@ -1214,6 +1214,25 @@
           .then(reg => console.log('[SW] registered, scope:', reg.scope))
           .catch(err => console.warn('[SW] registration failed:', err));
       });
+    }
+
+    // ── Lock zoom/resize (PWA / iOS standalone) ──────────────────────────────
+    // iOS Safari puede seguir permitiendo pinch-zoom y double-tap-zoom aunque
+    // el viewport meta tenga user-scalable=no. Una vez que hace zoom, el header
+    // fijo (logo/inicio) puede quedar fuera de pantalla. Esto bloquea ambos
+    // gestos para que el layout de la webapp instalada no se mueva de sitio.
+    // Acotado a mobile por user-agent — 'gesturestart' también dispara con el
+    // pinch de trackpad en macOS Safari, así que no debe correr sin esta guarda.
+    if (/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {
+      document.addEventListener('gesturestart',  e => e.preventDefault());
+      document.addEventListener('gesturechange', e => e.preventDefault());
+      document.addEventListener('gestureend',    e => e.preventDefault());
+      let _lastTouchEndTime = 0;
+      document.addEventListener('touchend', e => {
+        const now = Date.now();
+        if (now - _lastTouchEndTime <= 300) e.preventDefault();
+        _lastTouchEndTime = now;
+      }, { passive: false });
     }
   </script>
   {% block scripts %}{% endblock %}

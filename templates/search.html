@@ -197,5 +197,21 @@ async function playAlbumById(id) {
 .track-search-row .track-search-title { font-size:0.95rem; }
 .track-search-row .track-search-meta  { font-size:0.8rem; }
 .track-search-row .track-led svg { width:13px; height:13px; }
+
+/* ── Mobile: listas a 1 columna + tabs con scroll horizontal ────────────
+   Mismo caso que letter.html: artist-row y track-search-row usan flex, no
+   grid, así que con 1 columna cada fila usa el ancho completo y no hace
+   falta tocar su contenido. No se oculta ninguna información. */
+@media (max-width: 768px) {
+  .search-tabs {
+    overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch;
+    padding-bottom: 2px;
+  }
+  .search-tabs::-webkit-scrollbar { display: none; }
+  .stab { flex-shrink: 0; white-space: nowrap; }
+
+  .artist-list        { grid-template-columns: 1fr; }
+  .track-search-list  { grid-template-columns: 1fr; }
+}
 </style>
 {% endblock %}

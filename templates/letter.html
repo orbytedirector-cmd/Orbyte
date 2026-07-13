@@ -131,6 +131,16 @@
   font-family:'Orbitron',system-ui,sans-serif; font-size:0.58rem; font-weight:600;
   letter-spacing:0.06em; text-transform:uppercase; color:rgba(200,146,10,0.45);
 }
+
+/* ── Mobile: una sola columna, misma idea que el resto de listados ────────
+   .artist-row usa flex (no grid), así que no hace falta tocar nada más de
+   su contenido: al pasar la lista a 1 columna, cada fila usa el ancho
+   completo y flex/ellipsis se acomodan solos. No se oculta ninguna
+   información. */
+@media (max-width: 768px) {
+  .artist-list { grid-template-columns: 1fr; }
+  .artist-row  { padding: 0.7rem 1rem; }
+}
 </style>
 
 {% endblock %}

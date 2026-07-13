@@ -196,6 +196,15 @@
 }
 .artist-web-link:hover { color: var(--text-gold); border-color: var(--accent); }
 .artist-web-icon { font-size: 0.85rem; }
+
+/* ── Mobile: cabecera más compacta (el grid de álbumes ya lo cubre el
+   breakpoint global de .album-grid) ── */
+@media (max-width: 768px) {
+  .artist-header-name { font-size: 1.5rem; gap: 0.4rem; }
+  .artist-header-meta { font-size: 0.78rem; gap: 0.35rem; }
+  .artist-similar { font-size: 0.75rem; }
+  .artist-genre-pills { gap: 0.3rem; }
+}
 </style>
 
 <script>

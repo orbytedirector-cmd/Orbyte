@@ -288,6 +288,31 @@
   border:1px solid var(--border-gold); color:var(--accent-bright); font-size:0.74rem; font-weight:700;
   white-space:nowrap; letter-spacing:0.02em;
 }
+
+/* ── Mobile: navegación amigable igual que Home/Player ──────────────────
+   - meta-track-list pasa a 1 columna (eran 2 fijas, apretaban cada fila).
+   - meta-track-row pasa a 2 filas via grid-template-areas: cover+info+
+     acciones arriba, pills (formato/mood/tema/estrellas) abajo con todo
+     el ancho, para que no se corten ni fuercen scroll horizontal. No se
+     oculta ningún dato, solo se reordena. */
+@media (max-width: 768px) {
+  .browse-title { font-size: 1.3rem; }
+  .browse-header-right { gap: 0.5rem; }
+  .sort-pills { gap: 0.28rem; }
+  .sort-pill  { font-size: 0.72rem; padding: 0.22rem 0.6rem; }
+
+  .meta-track-list { grid-template-columns: 1fr; gap: 0.5rem; }
+  .meta-track-row {
+    grid-template-columns: 40px 1fr auto;
+    grid-template-areas: "cover info actions" "pills pills pills";
+    row-gap: 0.4rem;
+    padding: 0.55rem 0.65rem;
+  }
+  .mtr-cover   { grid-area: cover; width: 40px; height: 40px; }
+  .mtr-info    { grid-area: info; }
+  .mtr-actions { grid-area: actions; }
+  .mtr-pills   { grid-area: pills; justify-content: flex-start; }
+}
 </style>
 
 <script>

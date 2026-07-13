@@ -1354,6 +1354,28 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 @media (max-width: 768px) and (orientation: portrait) {
   :root { --player-h: 180px; }
 
+  /* ─── Bloqueo de zoom/redimensión al usar Orbyte como app instalada ──
+     El viewport meta tag (maximum-scale/user-scalable) ya no alcanza solo
+     en Safari moderno para pellizco-zoom — se ignora fuera de modo
+     standalone (el bloqueo real de gestos vive en base.html, por JS).
+     touch-action:manipulation es el refuerzo CSS: permite scroll normal
+     pero bloquea pellizco-zoom y doble-tap-zoom. text-size-adjust evita
+     que iOS reescale el texto automáticamente. Esto es lo que evita que,
+     tras "manipular" la pantalla, el layout quede desplazado/ampliado y
+     el logo deje de ser alcanzable. */
+  html, body {
+    touch-action: manipulation;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+  }
+
+  /* iOS hace zoom automático al enfocar cualquier input/select con texto
+     por debajo de 16px — otra causa de "las dimensiones cambian solas" al
+     usar el buscador del header (presente en todas las páginas). Se sube
+     a 16px solo en mobile. */
+  .search-input, .genre-search-input { font-size: 16px !important; }
+  #lyrics-version-select { font-size: 16px !important; }
+
   /* ─── General layout ──────────────────────────────────────────────── */
   /* Red de seguridad: varias grillas del home (era-card, quality-grid, etc.)
      usaban anchos fijos que no cabían en pantallas angostas y forzaban
@@ -1400,6 +1422,30 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .album-page-left  { width: 100%; align-items: center; }
   .album-cover-large{ max-width: 200px; margin: 0 auto 10px; }
   .album-tracklist  { width: 100%; min-width: 0; }
+
+  /* ─── Track page: la carátula fija de 300px no entraba junto al resto ──
+     de la info en pantallas angostas. Se apila igual que el resto de las
+     secciones. No se oculta ningún dato. */
+  .track-hero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .track-hero-cover { width: min(220px, 60vw); height: min(220px, 60vw); }
+  .track-hero-info  { width: 100%; padding-top: 0; }
+  .track-disc-label { text-align: center; }
+  .track-hero-title  { font-size: 1.5rem; }
+  .track-hero-artist { font-size: 1rem; }
+  .track-hero-album  { display: block; }
+  .track-hero-badges,
+  .track-hero-actions,
+  .track-meta-pills { justify-content: center; }
+  .track-lastfm-row { text-align: left; }
+
+  /* ─── Favoritos: 1 columna en mobile ──────────────────────────────── */
+  .favorites-grid { grid-template-columns: 1fr; gap: 0.5rem; padding: 0.75rem 0; }
 
   /* ─── Drawer ─────────────────────────────────────────────────────── */
   .track-drawer {
@@ -1589,6 +1635,9 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
    ══════════════════════════════════════════════════════════════════════════════ */
 @media (max-height: 500px) and (orientation: landscape) {
   :root { --player-h: 72px; }
+  html, body { touch-action: manipulation; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  .search-input, .genre-search-input { font-size: 16px !important; }
+  #lyrics-version-select { font-size: 16px !important; }
 
   .player-bar {
     display: grid !important;
