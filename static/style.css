@@ -71,7 +71,7 @@ html { font-size: clamp(13px, 0.9vw, 16px); }
 .logo-link { display:flex; align-items:center; gap:0.5rem; text-decoration:none; flex-shrink:0; }
 .logo-icon { font-size:1.4rem; color:var(--accent); }
 .logo-icon-img {
-  height: 56px; width: auto;
+  height: 84px; width: auto; /* antes 56px — más protagonismo y detalle visible del logo */
   object-fit: contain; flex-shrink: 0;
   image-rendering: auto;
 }
@@ -1407,7 +1407,7 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
     justify-content: center; /* centra el logo dentro de su fila de ancho completo */
     padding: 2px 0;
   }
-  .logo-icon-img { height: 64px; } /* antes 44px (compartía fila con el buscador) — con fila propia puede destacar más */
+  .logo-icon-img { height: 96px; } /* antes 64px — misma idea que en desktop: más protagonismo y detalle visible */
   .logo-wordmark { font-size: 0.82rem; letter-spacing: 0.1em; }
   .logo-img { height: 30px; }
   .logo-text { display: none; }
