@@ -1388,15 +1388,30 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .base-container { padding-bottom: var(--player-h); overflow-x: hidden; }
   .main-content   { padding: 8px 8px 0; }
 
-  /* ─── Header: auto-height, logo left + search/alphabet stacked right ── */
+  /* ─── Header: 2 filas — logo centrado y grande arriba, buscador +
+     alfabeto abajo en su propia fila a ancho completo. Antes logo y
+     buscador iban lado a lado y el logo se quedaba chico (44px) para no
+     chocar con el buscador. Con cada uno en su fila el logo puede crecer
+     sin apretar nada más. Esto agrega ~55px de alto al header (más
+     scroll en el contenido), sin ocultar ni recortar ningún elemento. */
   .header { padding: 0 10px; height: auto; }
-  .header-top { padding: 6px 0 0; gap: 8px; flex-wrap: nowrap; height: auto; align-items: center; }
-  .logo-icon-img { height: 44px; } /* antes 34.5px — muy chico como touch-target siendo el botón de volver al home; 44px es el mínimo recomendado por Apple HIG */
-  .logo-link { padding: 4px 0; } /* un poco de aire extra alrededor para agrandar el área táctil sin agrandar más la imagen */
+  .header-top {
+    flex-direction: column;
+    align-items: stretch; /* logo-link y header-search-wrap ocupan el ancho completo, cada uno en su propia fila */
+    padding: 8px 0 4px;
+    gap: 6px;
+    flex-wrap: nowrap;
+    height: auto;
+  }
+  .logo-link {
+    justify-content: center; /* centra el logo dentro de su fila de ancho completo */
+    padding: 2px 0;
+  }
+  .logo-icon-img { height: 64px; } /* antes 44px (compartía fila con el buscador) — con fila propia puede destacar más */
   .logo-wordmark { font-size: 0.82rem; letter-spacing: 0.1em; }
   .logo-img { height: 30px; }
   .logo-text { display: none; }
-  .header-search-wrap { flex: 1; gap: 0.2rem; min-width: 0; }
+  .header-search-wrap { flex: none; gap: 0.2rem; min-width: 0; } /* ya no reparte ancho con el logo (flex:1 solo aplicaba en fila) */
   .search-container { max-width: 100%; }
   .alphabet-bar {
     overflow-x: auto; flex-wrap: nowrap; padding: 2px 0 5px;
@@ -1486,6 +1501,18 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
     row-gap: 3px !important;
     overflow: hidden !important;
     align-items: stretch !important;
+    /* Por qué "desaparece" el player en iOS Safari: es un bug conocido de
+       WebKit — un elemento position:fixed que además usa backdrop-filter
+       (como este) puede quedar fuera de la capa de composición durante el
+       scroll con inercia, y el navegador lo deja de pintar hasta que el
+       scroll termina del todo (parpadea o se hace invisible unos instantes).
+       Forzar su propia capa con translateZ(0) es el workaround estándar:
+       mantiene el player compuesto de forma independiente del contenido
+       que se desplaza por debajo. No cambia nada visualmente. */
+    transform: translateZ(0) !important;
+    -webkit-transform: translateZ(0) !important;
+    backface-visibility: hidden !important;
+    -webkit-backface-visibility: hidden !important;
   }
 
   /* Desenvuelve el wrapper: sus hijos pasan a ser ítems directos de la grilla */
@@ -1647,6 +1674,13 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
     padding: 0 1rem;
     height: var(--player-h);
     gap: 0.75rem;
+    /* Mismo workaround que en el bloque portrait: evita que iOS Safari
+       deje de pintar este position:fixed + backdrop-filter durante el
+       scroll con inercia (ver comentario detallado más arriba). */
+    transform: translateZ(0) !important;
+    -webkit-transform: translateZ(0) !important;
+    backface-visibility: hidden !important;
+    -webkit-backface-visibility: hidden !important;
   }
 
   /* restore desktop-like 3-column layout */
