@@ -1,0 +1,228 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="adv-results-header">
+  <div class="adv-results-title-row">
+    <h2 class="section-title" style="margin:0">🔎 Búsqueda Avanzada</h2>
+    <button type="button" class="adv-search-btn ghost" onclick="AdvancedSearch.open()">✎ Modificar filtros</button>
+  </div>
+  <div id="adv-active-chips" class="adv-active-chips"></div>
+</div>
+
+{% include '_advanced_search_modal.html' %}
+
+<div class="adv-results-toolbar">
+  <div class="adv-view-tabs">
+    <button type="button" class="adv-view-tab is-active" id="adv-tab-albums" onclick="AdvResults.switchView('albums')">
+      Álbumes <span id="adv-count-albums" class="adv-tab-count"></span>
+    </button>
+    <button type="button" class="adv-view-tab" id="adv-tab-tracks" onclick="AdvResults.switchView('tracks')">
+      Pistas <span id="adv-count-tracks" class="adv-tab-count"></span>
+    </button>
+  </div>
+  <select id="adv-sort-select" class="adv-sort-select" onchange="AdvResults.changeSort(this.value)">
+    <option value="popularidad">Más populares</option>
+    <option value="nombre">Nombre A-Z</option>
+    <option value="año">Año</option>
+    <option value="random">Aleatorio</option>
+  </select>
+</div>
+
+<div id="adv-results-albums" class="album-grid"></div>
+<div id="adv-results-tracks" class="adv-track-list" style="display:none"></div>
+<div id="adv-empty-state" class="adv-empty-state" style="display:none">
+  Ningún resultado coincide con esta combinación de filtros. Prueba a quitar alguno.
+</div>
+<div id="adv-pagination" class="adv-pagination"></div>
+
+<style>
+.adv-results-header { margin-bottom:1rem; }
+.adv-results-title-row { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; margin-bottom:0.6rem; }
+.adv-active-chips { display:flex; flex-wrap:wrap; gap:0.4rem; }
+.adv-chip { display:inline-flex; align-items:center; gap:0.35rem; padding:0.25rem 0.7rem; background:rgba(0,212,255,0.08); border:1px solid rgba(0,212,255,0.25); border-radius:14px; font-size:0.74rem; color:var(--accent); }
+.adv-chip button { background:none; border:none; color:var(--accent); cursor:pointer; font-size:0.85rem; line-height:1; padding:0; }
+.adv-results-toolbar { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; margin-bottom:1rem; }
+.adv-view-tabs { display:flex; gap:0.4rem; }
+.adv-view-tab { padding:0.4rem 1rem; border-radius:9px; border:1px solid var(--border); background:transparent; color:var(--text-secondary); font-size:0.85rem; font-weight:600; cursor:pointer; }
+.adv-view-tab.is-active { background:var(--accent); border-color:var(--accent); color:#04141a; }
+.adv-tab-count { opacity:0.75; font-weight:500; }
+.adv-sort-select { padding:0.4rem 0.7rem; border-radius:9px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-primary); font-size:0.82rem; }
+.adv-track-list { display:flex; flex-direction:column; gap:0.3rem; }
+.adv-track-row { display:grid; grid-template-columns:34px 1fr auto auto; align-items:center; gap:0.75rem; padding:0.5rem 0.8rem; background:var(--bg-card); border:1px solid var(--border); border-radius:10px; cursor:pointer; transition:border-color 0.15s,background 0.15s; }
+.adv-track-row:hover { border-color:var(--accent); background:rgba(255,255,255,0.03); }
+.atr-cover { width:34px; height:34px; border-radius:5px; object-fit:cover; background:linear-gradient(135deg,var(--accent),#0099cc); }
+.atr-info { min-width:0; }
+.atr-title { font-size:0.85rem; font-weight:600; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.atr-sub { font-size:0.72rem; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.atr-meta { display:flex; align-items:center; gap:0.4rem; font-size:0.7rem; color:var(--text-secondary); }
+.atr-duration { font-size:0.76rem; color:var(--text-muted); min-width:38px; text-align:right; }
+.adv-empty-state { padding:3rem 1rem; text-align:center; color:var(--text-muted); font-size:0.9rem; }
+.adv-pagination { display:flex; align-items:center; justify-content:center; gap:0.6rem; margin-top:1.5rem; }
+.adv-page-btn { padding:0.4rem 0.9rem; border-radius:8px; border:1px solid var(--border); background:var(--bg-card); color:var(--text-secondary); font-size:0.82rem; cursor:pointer; }
+.adv-page-btn:disabled { opacity:0.4; cursor:default; }
+.adv-page-info { font-size:0.8rem; color:var(--text-muted); }
+</style>
+
+<script>
+window.AdvResults = (function () {
+    let view = 'albums';
+    let page = 1;
+    let sort = 'popularidad';
+    const loaded = { albums: false, tracks: false };
+
+    function queryString(extra) {
+        const params = new URLSearchParams(window.location.search);
+        params.set('view', extra.view || view);
+        params.set('page', extra.page || page);
+        params.set('sort', extra.sort || sort);
+        params.set('dir', 'desc');
+        return params.toString();
+    }
+
+    function renderChips() {
+        const wrap = document.getElementById('adv-active-chips');
+        const params = new URLSearchParams(window.location.search);
+        const labels = { calidad:'Calidad', mood:'Mood', momento:'Momento', era:'Década/Era',
+                          anio:'Año', tema:'Categoría Letra', genero:'Género', idioma:'Idioma',
+                          pais:'País', popularidad:'Popularidad', energia:'Energía', bailabilidad:'Bailabilidad' };
+        wrap.innerHTML = '';
+        params.forEach((value, key) => {
+            if (!(key in labels)) return;
+            const chip = document.createElement('span');
+            chip.className = 'adv-chip';
+            chip.innerHTML = `${labels[key]}: <strong>${value}</strong> `;
+            const rm = document.createElement('button');
+            rm.textContent = '✕';
+            rm.onclick = () => {
+                const p = new URLSearchParams(window.location.search);
+                p.delete(key);
+                window.location.search = p.toString();
+            };
+            chip.appendChild(rm);
+            wrap.appendChild(chip);
+        });
+        if (!wrap.children.length) {
+            wrap.innerHTML = '<span style="font-size:0.78rem;color:var(--text-muted)">Sin filtros activos — mostrando todo el catálogo.</span>';
+        }
+    }
+
+    function albumCardHtml(a) {
+        const artistLink = a.artist_id
+            ? `<a href="/artist/${a.artist_id}" class="album-artist-link">${a.artist_name || ''}</a>`
+            : `<span class="album-artist-link">${a.artist_name || ''}</span>`;
+        return `
+        <div class="album-card">
+          <div class="album-card-cover-wrap" onclick="AdvResults.playAlbum(${a.id})">
+            <img src="${a.cover_url || a.cover_path || ''}" alt="${a.name}" class="album-cover" loading="lazy"
+                 onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+            <div class="play-overlay">▶</div>
+          </div>
+          <div class="album-card-info">
+            <div class="aci-text">
+              <a href="/album/${a.id}" class="album-title">${a.name}</a>
+              ${artistLink}
+            </div>
+            <div class="aci-footer">
+              ${a.primary_format ? `<span class="aci-quality"><span class="track-format-badge format-${a.album_led || 'yellow'}">${a.primary_format}</span></span>` : ''}
+              <span class="aci-stats">${a.year || ''}${a.year && a.track_count ? ' · ' : ''}${a.track_count ? a.track_count + ' pistas' : ''}</span>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function trackRowHtml(t, index) {
+        const dur = t.duration_fmt || '';
+        return `
+        <div class="adv-track-row" onclick="AdvResults.playTrackAt(${index})">
+          <img src="${t.cover_url || ''}" class="atr-cover" alt="">
+          <div class="atr-info">
+            <div class="atr-title">${t.title || ''}</div>
+            <div class="atr-sub">${t.artist_name || t.artist || ''} — ${t.album_name || ''}</div>
+          </div>
+          <div class="atr-meta">
+            <span class="track-format-badge format-${t.format_color || 'yellow'}">${t.format_display || ''}</span>
+          </div>
+          <div class="atr-duration">${dur}</div>
+        </div>`;
+    }
+
+    let currentTracks = [];
+
+    async function load() {
+        const container = document.getElementById(view === 'albums' ? 'adv-results-albums' : 'adv-results-tracks');
+        container.innerHTML = '<div style="padding:2rem;text-align:center;color:var(--text-muted)">Buscando…</div>';
+        const res = await fetch('/api/search/advanced?' + queryString({}));
+        const data = await res.json();
+
+        document.getElementById('adv-empty-state').style.display = 'none';
+
+        if (view === 'albums') {
+            document.getElementById('adv-count-albums').textContent = data.total ? `(${data.total})` : '';
+            if (!data.albums || !data.albums.length) {
+                container.innerHTML = '';
+                document.getElementById('adv-empty-state').style.display = 'block';
+            } else {
+                container.innerHTML = data.albums.map(albumCardHtml).join('');
+            }
+            renderPagination(data.total_pages || 1);
+        } else {
+            currentTracks = data.tracks || [];
+            document.getElementById('adv-count-tracks').textContent = data.total ? `(${data.total})` : '';
+            if (!currentTracks.length) {
+                container.innerHTML = '';
+                document.getElementById('adv-empty-state').style.display = 'block';
+            } else {
+                container.innerHTML = currentTracks.map(trackRowHtml).join('');
+            }
+            renderPagination(data.total_pages || 1);
+        }
+    }
+
+    function renderPagination(totalPages) {
+        const el = document.getElementById('adv-pagination');
+        if (totalPages <= 1) { el.innerHTML = ''; return; }
+        el.innerHTML = `
+          <button class="adv-page-btn" ${page <= 1 ? 'disabled' : ''} onclick="AdvResults.goPage(${page - 1})">← Anterior</button>
+          <span class="adv-page-info">Página ${page} de ${totalPages}</span>
+          <button class="adv-page-btn" ${page >= totalPages ? 'disabled' : ''} onclick="AdvResults.goPage(${page + 1})">Siguiente →</button>`;
+    }
+
+    function goPage(p) { page = p; load(); }
+
+    function switchView(v) {
+        view = v;
+        page = 1;
+        document.getElementById('adv-tab-albums').classList.toggle('is-active', v === 'albums');
+        document.getElementById('adv-tab-tracks').classList.toggle('is-active', v === 'tracks');
+        document.getElementById('adv-results-albums').style.display = v === 'albums' ? '' : 'none';
+        document.getElementById('adv-results-tracks').style.display = v === 'tracks' ? '' : 'none';
+        load();
+    }
+
+    function changeSort(s) { sort = s; page = 1; load(); }
+
+    async function playAlbum(albumId) {
+        const tracks = await fetch(`/api/album/${albumId}/tracks`).then(r => r.json());
+        if (!Array.isArray(tracks) || !tracks.length) return;
+        if (window.prependTracksAndPlay) window.prependTracksAndPlay(tracks, 0);
+        else { loadQueue(tracks); playTrack(0); }
+    }
+
+    function playTrackAt(index) {
+        if (!currentTracks.length) return;
+        if (window.prependTracksAndPlay) window.prependTracksAndPlay(currentTracks, index);
+        else { loadQueue(currentTracks); playTrack(index); }
+    }
+
+    function init() {
+        renderChips();
+        AdvancedSearch.hydrateFromLocation();
+        load();
+    }
+
+    return { switchView, changeSort, goPage, playAlbum, playTrackAt, init };
+})();
+
+document.addEventListener('DOMContentLoaded', AdvResults.init);
+</script>
+{% endblock %}

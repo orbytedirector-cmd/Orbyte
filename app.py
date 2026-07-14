@@ -140,7 +140,16 @@ app.jinja_env.globals['diamond_svg']      = diamond_svg
 # Make MOOD_LABELS available in all templates
 @app.context_processor
 def inject_globals():
-    return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS}
+    # ADV_* keys power the "Búsqueda Avanzada" filter capsules (see the
+    # QUALITY_OPTIONS / *_BUCKETS constants defined near the advanced-search
+    # routes below). Referencing them here is safe even though they are
+    # defined later in the file: Flask only calls this function per-request,
+    # long after the whole module has finished loading.
+    return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS,
+            'ADV_QUALITY_OPTIONS': QUALITY_OPTIONS,
+            'ADV_POP_BUCKETS': POP_BUCKETS,
+            'ADV_ENERGY_BUCKETS': ENERGY_BUCKETS,
+            'ADV_BAIL_BUCKETS': BAIL_BUCKETS}
 
 MUSIC_ROOT = "/mnt/musica/"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music.db")
@@ -415,6 +424,22 @@ def home():
         ).fetchall()
         all_genres = [(r['genre'], r['c']) for r in all_genre_rows]
 
+        # ── Búsqueda Avanzada support data ──────────────────────────────────
+        # Distinct release years (for the "Año" filter) and artist
+        # nationalities (for "País Origen"), both driven directly by existing
+        # columns (albums.year, artists.nationality) — no new DB fields.
+        year_rows = conn.execute(
+            'SELECT DISTINCT year FROM albums WHERE year IS NOT NULL ORDER BY year DESC'
+        ).fetchall()
+        available_years = [r['year'] for r in year_rows]
+
+        nat_rows = conn.execute(
+            'SELECT nationality, COUNT(*) as c FROM artists '
+            'WHERE nationality IS NOT NULL AND nationality!="" '
+            'GROUP BY nationality ORDER BY c DESC'
+        ).fetchall()
+        nationalities = [(r['nationality'], r['c']) for r in nat_rows]
+
         return render_template('home.html',
             total_artists=total_artists, total_albums=total_albums,
             total_tracks=total_tracks,
@@ -428,7 +453,8 @@ def home():
             recent_albums=recent_albums,
             moods=moods, momentos=momentos, eras=eras,
             max_era_count=max_era_count,
-            temas=temas, tiers=tiers, lyrics_stats=lyrics_stats)
+            temas=temas, tiers=tiers, lyrics_stats=lyrics_stats,
+            available_years=available_years, nationalities=nationalities)
     finally:
         conn.close()
 
@@ -868,6 +894,296 @@ def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
         albums.append(d)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     return albums, total, total_pages
+
+# ── Búsqueda Avanzada (multi-filter search) ─────────────────────────────────────
+# One page + one API that combine ANY subset of the filters already used
+# individually by /mood, /genre, /led, /language, etc. Reuses the exact same
+# conventions as the routes above (PAGE_SIZE, _paginate, _album_order,
+# _track_order, track_to_json, get_db_connection) instead of introducing new
+# ones — see AGENTE.md rule 2.
+
+# Calidad values requested by the ticket. NOTE: 'DSD512' is intentionally left
+# out — the DB only distinguishes DSD tiers up to DSD256 (see _dsd_label()
+# above: sample_rate_real thresholds top out at 11289600 Hz = DSD256, and no
+# track in the schema is tagged higher). Selecting a "DSD512" value would
+# either silently relabel DSD256 files or match nothing; instead of inventing
+# that convention, this is called out for a product decision — see chat reply.
+QUALITY_OPTIONS = ['CD', 'HI-RES', 'DSD64', 'DSD128', 'DSD256', 'MQA', 'MQA Studio', 'OSR']
+
+# Popularidad buckets mirror the 5-star scale already rendered in browse.html
+# (Math.floor(pop_score / 20)), so a filter labelled "★★★★★" matches exactly
+# what the user already sees as 5 stars elsewhere in the app.
+POP_BUCKETS = {'1': (0, 19), '2': (20, 39), '3': (40, 59), '4': (60, 79), '5': (80, 100)}
+
+# Energía is stored as a -1..1 float (see the (energy+1)/2*100 display math in
+# browse.html / base.html's drawer bars). Bailabilidad is already 0..100 (see
+# the bailBar width calc in browse.html). Bucket edges below are a first pass
+# at "Baja / Media / Alta" — flagged in the chat reply as worth confirming.
+ENERGY_BUCKETS = {'baja': (-1.0, -0.34), 'media': (-0.34, 0.34), 'alta': (0.34, 1.0)}
+BAIL_BUCKETS   = {'baja': (0, 33), 'media': (34, 66), 'alta': (67, 100)}
+
+def _quality_condition(value):
+    """SQL boolean fragment (references alias t.) for a Calidad filter value."""
+    v = (value or '').strip()
+    if v == 'CD':         return "t.led_color = 'yellow'"
+    if v == 'HI-RES':     return "t.led_color = 'white'"
+    if v == 'DSD64':      return ("t.is_dsd=1 AND (UPPER(COALESCE(t.dsd_rate,'')) LIKE 'DSD64%' "
+                                   "OR (COALESCE(t.dsd_rate,'')='' AND t.sample_rate_real>=2822400 "
+                                   "AND t.sample_rate_real<5644800))")
+    if v == 'DSD128':     return ("t.is_dsd=1 AND (UPPER(COALESCE(t.dsd_rate,'')) LIKE 'DSD128%' "
+                                   "OR (COALESCE(t.dsd_rate,'')='' AND t.sample_rate_real>=5644800 "
+                                   "AND t.sample_rate_real<11289600))")
+    if v == 'DSD256':     return ("t.is_dsd=1 AND (UPPER(COALESCE(t.dsd_rate,'')) LIKE 'DSD256%' "
+                                   "OR (COALESCE(t.dsd_rate,'')='' AND t.sample_rate_real>=11289600))")
+    if v == 'MQA':        return "t.is_mqa=1 AND t.led_color = 'green'"
+    if v == 'MQA Studio': return "t.is_mqa=1 AND t.led_color = 'blue'"
+    if v == 'OSR':        return "t.led_color = 'magenta'"  # "Original Sample Rate" (MQB)
+    return '0'  # unknown value → explicitly no matches, never silently ignored
+
+def _range_condition(col, bucket_key, bucket_map):
+    """Generic BETWEEN condition builder for popularidad / energia / bailabilidad."""
+    bounds = bucket_map.get(bucket_key)
+    if not bounds:
+        return None, []
+    return f'{col} BETWEEN ? AND ?', [bounds[0], bounds[1]]
+
+def _build_adv_filters(args, pop_alias):
+    """
+    Build (where_clauses, params) from every active Búsqueda Avanzada filter in
+    request.args. Both the albums query and the tracks query alias tracks as
+    't', track_meta as 'tm', albums as 'al' and artists as 'ar' — only the
+    popularity-cache alias differs (apc for albums, tpc for tracks), hence the
+    pop_alias parameter.
+    """
+    clauses, params = [], []
+
+    calidad = args.get('calidad')
+    if calidad:
+        clauses.append(_quality_condition(calidad))
+
+    for field, col in (('mood', 'mood'), ('momento', 'momento'), ('era', 'era'),
+                        ('idioma', 'idioma')):
+        val = args.get(field)
+        if val:
+            clauses.append(f'tm.{col} = ?')
+            params.append(val)
+
+    tema = args.get('tema')  # Categoría Letra
+    if tema:
+        clauses.append('tm.tema_lirico = ?')
+        params.append(tema)
+
+    genero = args.get('genero')
+    if genero:
+        clauses.append('(t.genre = ? OR tm.genre_primary = ? OR tm.genre_secondary = ?)')
+        params += [genero, genero, genero]
+
+    pais = args.get('pais')  # País Origen (artists.nationality)
+    if pais:
+        clauses.append('ar.nationality = ?')
+        params.append(pais)
+
+    anio = args.get('anio')  # Año específico de lanzamiento (albums.year)
+    if anio:
+        try:
+            clauses.append('al.year = ?')
+            params.append(int(anio))
+        except ValueError:
+            pass
+
+    pop = args.get('popularidad')
+    if pop:
+        cond, p = _range_condition(f'COALESCE({pop_alias}.pop_score,0)', pop, POP_BUCKETS)
+        if cond:
+            clauses.append(cond)
+            params += p
+
+    energia = args.get('energia')
+    if energia:
+        cond, p = _range_condition('tm.energy', energia, ENERGY_BUCKETS)
+        if cond:
+            clauses.append(cond)
+            params += p
+
+    bail = args.get('bailabilidad')
+    if bail:
+        cond, p = _range_condition('tm.bailabilidad', bail, BAIL_BUCKETS)
+        if cond:
+            clauses.append(cond)
+            params += p
+
+    return clauses, params
+
+def _advanced_search_options(conn):
+    """
+    Gather the same filter-option lists home() already computes for its own
+    sections (moods, momentos, eras, temas, genres, languages) plus the two
+    new ones added there (available_years, nationalities). Kept as its own
+    function — rather than reusing home()'s inline queries — so this route
+    can supply exactly what _advanced_search_modal.html needs without
+    depending on (or risking a merge conflict with) the rest of home()'s
+    unrelated stats/recent-albums queries.
+    NOTE: this duplicates a handful of SELECTs that already exist in home().
+    Once app.py is fully reviewed it would be worth factoring both into one
+    shared helper — left as-is here to keep this diff minimal and safe.
+    """
+    moods = [(r['mood'], r['c']) for r in conn.execute(
+        'SELECT mood, COUNT(*) as c FROM track_meta WHERE mood IS NOT NULL '
+        'GROUP BY mood ORDER BY c DESC LIMIT 14').fetchall()]
+
+    momentos = [(r['momento'], r['c']) for r in conn.execute(
+        'SELECT momento, COUNT(*) as c FROM track_meta WHERE momento IS NOT NULL '
+        'GROUP BY momento ORDER BY c DESC').fetchall()]
+
+    era_order = ['early_rock_era', 'british_invasion_era', 'classic_rock_era',
+                 'nwobhm_synth_era', 'grunge_alternative_era', 'post_millennial_era',
+                 'streaming_era', 'current_era']
+    era_dict = {r['era']: r['c'] for r in conn.execute(
+        'SELECT era, COUNT(*) as c FROM track_meta WHERE era IS NOT NULL GROUP BY era').fetchall()}
+    eras = [(e, era_dict[e]) for e in era_order if e in era_dict]
+
+    temas = [(r['tema_lirico'], r['c']) for r in conn.execute(
+        'SELECT tema_lirico, COUNT(*) as c FROM track_meta WHERE tema_lirico IS NOT NULL '
+        'GROUP BY tema_lirico ORDER BY c DESC LIMIT 10').fetchall()]
+
+    genres_primary = [(r['genre_primary'], r['c']) for r in conn.execute(
+        'SELECT genre_primary, COUNT(*) as c FROM track_meta '
+        'WHERE genre_primary IS NOT NULL AND genre_primary!="" '
+        'GROUP BY genre_primary ORDER BY c DESC LIMIT 15').fetchall()]
+
+    genres = [(r['genre'], r['c']) for r in conn.execute(
+        'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" '
+        'GROUP BY genre ORDER BY c DESC LIMIT 8').fetchall()]
+
+    languages = [(r['idioma'], r['c']) for r in conn.execute(
+        'SELECT idioma, COUNT(*) as c FROM track_meta WHERE idioma IS NOT NULL AND idioma!="" '
+        'GROUP BY idioma ORDER BY c DESC LIMIT 12').fetchall()]
+
+    available_years = [r['year'] for r in conn.execute(
+        'SELECT DISTINCT year FROM albums WHERE year IS NOT NULL ORDER BY year DESC').fetchall()]
+
+    nationalities = [(r['nationality'], r['c']) for r in conn.execute(
+        'SELECT nationality, COUNT(*) as c FROM artists '
+        'WHERE nationality IS NOT NULL AND nationality!="" '
+        'GROUP BY nationality ORDER BY c DESC').fetchall()]
+
+    return dict(moods=moods, momentos=momentos, eras=eras, temas=temas,
+                genres_primary=genres_primary, genres=genres, languages=languages,
+                available_years=available_years, nationalities=nationalities)
+
+@app.route('/busqueda-avanzada')
+def advanced_search_page():
+    """
+    Búsqueda Avanzada results shell. The album/track RESULTS come from
+    /api/search/advanced client-side (so the same view works no matter which
+    combination of filters was used) — this route only supplies the filter
+    OPTION lists so the modal can be reopened ("Modificar filtros") without
+    a round-trip back to home.
+    """
+    conn = get_db_connection()
+    try:
+        opts = _advanced_search_options(conn)
+    finally:
+        conn.close()
+    return render_template('advanced_search.html', **opts)
+
+@app.route('/api/search/advanced')
+def api_search_advanced():
+    """
+    Multi-filter search across every RichMetaPro + technical field at once.
+    ?view=albums (default) or ?view=tracks selects which result set to return;
+    the front end calls this twice (lazily, only when the user switches tabs)
+    rather than computing both server-side on every request.
+    """
+    page = max(1, request.args.get('page', 1, type=int))
+    sort = request.args.get('sort', 'popularidad')
+    dir_ = request.args.get('dir', 'desc')
+    view = request.args.get('view', 'albums')
+
+    conn = get_db_connection()
+    try:
+        if view == 'tracks':
+            clauses, params = _build_adv_filters(request.args, pop_alias='tpc')
+            where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
+
+            count_sql = f'''SELECT COUNT(*) FROM tracks t
+                             JOIN albums al ON al.id=t.album_id
+                             LEFT JOIN artists ar ON ar.id=al.artist_id
+                             LEFT JOIN track_meta tm ON tm.track_id=t.id
+                             LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                             WHERE 1=1{where}'''
+            total = conn.execute(count_sql, params).fetchone()[0]
+
+            order = _track_order(sort, dir_)
+            offset = (page - 1) * PAGE_SIZE
+            data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
+                                  al.year as album_year, al.cover_path as album_cover_path,
+                                  ar.name as artist_name,
+                                  tm.mood, tm.momento, tm.era, tm.tema_lirico, tm.idioma,
+                                  tm.genre_primary, tm.genre_secondary, tm.bpm, tm.energy,
+                                  tm.bailabilidad, tm.tier, COALESCE(tpc.pop_score,0) as pop_score
+                           FROM tracks t
+                           JOIN albums al ON al.id=t.album_id
+                           LEFT JOIN artists ar ON ar.id=al.artist_id
+                           LEFT JOIN track_meta tm ON tm.track_id=t.id
+                           LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                           WHERE 1=1{where}
+                           ORDER BY {order} LIMIT ? OFFSET ?'''
+            rows = conn.execute(data_sql, params + [PAGE_SIZE, offset]).fetchall()
+
+            tracks = []
+            for r in rows:
+                d = track_to_json(dict(r))
+                d['album_id']      = r['album_id']
+                d['album_name']    = r['album_name']
+                d['album_year']    = r['album_year']
+                d['artist_name']   = r['artist_name']
+                d['mood']          = r['mood']
+                d['momento']       = r['momento']
+                d['era']           = r['era']
+                d['tema_lirico']   = r['tema_lirico']
+                d['idioma']        = r['idioma']
+                d['genre_primary'] = r['genre_primary']
+                d['bpm']           = r['bpm']
+                d['energy']        = r['energy']
+                d['bailabilidad']  = r['bailabilidad']
+                d['tier']          = r['tier']
+                d['pop_score']     = r['pop_score']
+                tracks.append(d)
+
+            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            return jsonify({'tracks': tracks, 'total': total, 'total_pages': total_pages, 'page': page})
+
+        # view == 'albums'
+        clauses, params = _build_adv_filters(request.args, pop_alias='apc')
+        where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
+
+        count_sql = f'''SELECT COUNT(DISTINCT al.id) FROM albums al
+                         JOIN tracks t ON t.album_id=al.id
+                         LEFT JOIN artists ar ON ar.id=al.artist_id
+                         LEFT JOIN track_meta tm ON tm.track_id=t.id
+                         LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                         WHERE 1=1{where}'''
+        data_sql = f'''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                              al.track_count, al.total_duration, al.artist_id,
+                              ar.name as artist_name,
+                              (SELECT led_color FROM tracks WHERE album_id=al.id
+                               ORDER BY CASE led_color
+                                   WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                                   WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                                   ELSE 6 END LIMIT 1) as album_led,
+                              COALESCE(apc.pop_score, 0) as pop_score
+                       FROM albums al
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN artists ar ON ar.id=al.artist_id
+                       LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                       WHERE 1=1{where}'''
+        order = _album_order(sort, dir_)
+        albums, total, total_pages = _paginate(conn, count_sql, params, data_sql, params, page, order)
+        return jsonify({'albums': albums, 'total': total, 'total_pages': total_pages, 'page': page})
+    finally:
+        conn.close()
 
 # ── Format browse ──────────────────────────────────────────────────────────────
 

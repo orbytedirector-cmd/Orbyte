@@ -26,6 +26,21 @@
   }).catch(()=>{});
 </script>
 
+<!-- Búsqueda Avanzada trigger — the modal itself lives in a standalone partial
+     (_advanced_search_modal.html) so it can be included from any other view
+     later without duplicating markup/JS (ticket point 1). -->
+<div class="section-block adv-search-trigger-block">
+  <button type="button" class="adv-search-open-btn" onclick="AdvancedSearch.open()">
+    <span class="asob-icon">🔎</span>
+    <span class="asob-text">
+      <span class="asob-title">Búsqueda Avanzada</span>
+      <span class="asob-sub">Combina Calidad, Mood, Género, Año, Popularidad y más filtros a la vez</span>
+    </span>
+    <span class="asob-arrow">→</span>
+  </button>
+</div>
+{% include '_advanced_search_modal.html' %}
+
 <!-- LED Quality Distribution -->
 <div class="section-block">
   <h2 class="section-title">Distribución de Calidad — LED iFi Zen DAC V2</h2>
@@ -387,6 +402,15 @@
   .era-card .ec-count    { grid-area: count; }
   .era-card .ec-bar-wrap { grid-area: bar; }
 }
+/* Búsqueda Avanzada trigger */
+.adv-search-trigger-block { padding:0 !important; }
+.adv-search-open-btn { width:100%; display:flex; align-items:center; gap:0.85rem; padding:0.9rem 1.25rem; background:linear-gradient(135deg,rgba(0,212,255,0.09),rgba(0,212,255,0.03)); border:1px solid rgba(0,212,255,0.25); border-radius:12px; cursor:pointer; text-align:left; transition:border-color 0.2s,background 0.2s; }
+.adv-search-open-btn:hover { border-color:var(--accent); background:rgba(0,212,255,0.14); }
+.asob-icon { font-size:1.3rem; flex-shrink:0; }
+.asob-text { flex:1; display:flex; flex-direction:column; gap:0.1rem; }
+.asob-title { font-size:1rem; font-weight:700; color:var(--text-primary); }
+.asob-sub { font-size:0.76rem; color:var(--text-secondary); }
+.asob-arrow { font-size:1.1rem; color:var(--accent); flex-shrink:0; }
 </style>
 
 <script>

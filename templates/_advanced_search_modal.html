@@ -1,0 +1,311 @@
+<!-- ═══════════════════════════════════════════════════════════════════════
+     Búsqueda Avanzada — modular filter modal (partial).
+
+     Reusable by design (ticket point 1): any template can include this
+     partial by name and call AdvancedSearch.open() — or
+     AdvancedSearch.openWithPreset(field, value) to launch straight into one
+     pre-activated capsule from an existing filter view. Wiring it into
+     other views is out of scope for this ticket (point 9); this partial is
+     just built so that reuse later is a one-line include rather than a
+     rewrite.
+
+     Expects (all optional — each section only renders if its list is
+     non-empty): moods, momentos, eras, temas, genres_primary, genres,
+     languages, available_years, nationalities — the same shape home() and
+     advanced_search_page() both pass in. Calidad / Popularidad / Energía /
+     Bailabilidad use the ADV_QUALITY_OPTIONS / ADV_POP_BUCKETS /
+     ADV_ENERGY_BUCKETS / ADV_BAIL_BUCKETS constants injected into every
+     template via inject_globals(), so no extra plumbing is needed for them.
+     ═══════════════════════════════════════════════════════════════════════ -->
+<div id="adv-search-modal" class="adv-search-overlay" style="display:none"
+     onclick="if(event.target===this) AdvancedSearch.close()">
+  <div class="adv-search-panel">
+    <div class="adv-search-header">
+      <h3>🔎 Búsqueda Avanzada</h3>
+      <button type="button" class="adv-search-close" onclick="AdvancedSearch.close()" aria-label="Cerrar">✕</button>
+    </div>
+    <p class="adv-search-hint">Activa las cápsulas que quieras combinar y elige un valor para cada una.</p>
+
+    <div class="adv-search-capsules">
+
+      <!-- Calidad -->
+      <div class="asc-filter" data-field="calidad">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Calidad</button>
+        <div class="asc-values">
+          {% for q in ADV_QUALITY_OPTIONS %}
+          <button type="button" class="asc-value" data-value="{{ q }}" onclick="AdvancedSearch.pick(this)">{{ q }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Mood -->
+      {% if moods %}
+      <div class="asc-filter" data-field="mood">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Mood</button>
+        <div class="asc-values asc-values-scroll">
+          {% for mood, count in moods %}
+          <button type="button" class="asc-value" data-value="{{ mood }}" onclick="AdvancedSearch.pick(this)">{{ MOOD_LABELS.get(mood, mood) }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Momento del día -->
+      {% if momentos %}
+      <div class="asc-filter" data-field="momento">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Momento del día</button>
+        <div class="asc-values">
+          {% set momento_labels = {'morning':'Mañana','evening':'Tarde','night':'Noche','sleep':'Para dormir','party':'Fiesta','workout':'Ejercicio','focus':'Concentración','anytime':'Cualquier momento'} %}
+          {% for momento, count in momentos %}
+          <button type="button" class="asc-value" data-value="{{ momento }}" onclick="AdvancedSearch.pick(this)">{{ momento_labels.get(momento, momento) }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Década / Era -->
+      {% if eras %}
+      <div class="asc-filter" data-field="era">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Década / Era</button>
+        <div class="asc-values">
+          {% set era_labels = {'early_rock_era':'Early Rock (50s–60s)','british_invasion_era':'British Invasion (60s)','classic_rock_era':'Classic Rock (70s)','nwobhm_synth_era':'NWOBHM / Synth (80s)','grunge_alternative_era':'Grunge / Alternative (90s)','post_millennial_era':'Post-millennial (2000s)','streaming_era':'Streaming Era (2010s)','current_era':'Actualidad (2020s+)'} %}
+          {% for era, count in eras %}
+          <button type="button" class="asc-value" data-value="{{ era }}" onclick="AdvancedSearch.pick(this)">{{ era_labels.get(era, era) }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Año -->
+      {% if available_years %}
+      <div class="asc-filter" data-field="anio">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Año</button>
+        <div class="asc-values asc-values-scroll">
+          {% for y in available_years %}
+          <button type="button" class="asc-value" data-value="{{ y }}" onclick="AdvancedSearch.pick(this)">{{ y }}</button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Categoría Letra -->
+      {% if temas %}
+      <div class="asc-filter" data-field="tema">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Categoría Letra</button>
+        <div class="asc-values">
+          {% for tema, count in temas %}
+          <button type="button" class="asc-value" data-value="{{ tema }}" onclick="AdvancedSearch.pick(this)">{{ tema }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Género -->
+      <div class="asc-filter" data-field="genero">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Género</button>
+        <div class="asc-values asc-values-scroll">
+          {% set seen_genres = [] %}
+          {% for genre, count in genres_primary %}
+            {% if genre not in seen_genres %}
+              {% set _ = seen_genres.append(genre) %}
+              <button type="button" class="asc-value" data-value="{{ genre }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
+            {% endif %}
+          {% endfor %}
+          {% for genre, count in genres %}
+            {% if genre not in seen_genres %}
+              {% set _ = seen_genres.append(genre) %}
+              <button type="button" class="asc-value" data-value="{{ genre }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
+            {% endif %}
+          {% endfor %}
+        </div>
+      </div>
+
+      <!-- Idioma -->
+      {% if languages %}
+      <div class="asc-filter" data-field="idioma">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Idioma</button>
+        <div class="asc-values">
+          {% for lang, count in languages %}
+          <button type="button" class="asc-value" data-value="{{ lang }}" onclick="AdvancedSearch.pick(this)">{{ lang_label(lang) }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- País Origen -->
+      {% if nationalities %}
+      <div class="asc-filter" data-field="pais">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">País Origen</button>
+        <div class="asc-values asc-values-scroll">
+          {% for pais, count in nationalities %}
+          <button type="button" class="asc-value" data-value="{{ pais }}" onclick="AdvancedSearch.pick(this)">{{ nationality_flag(pais)|safe }} {{ pais }} <small>{{ count }}</small></button>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+
+      <!-- Popularidad -->
+      <div class="asc-filter" data-field="popularidad">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Popularidad</button>
+        <div class="asc-values">
+          <button type="button" class="asc-value" data-value="1" onclick="AdvancedSearch.pick(this)">★☆☆☆☆</button>
+          <button type="button" class="asc-value" data-value="2" onclick="AdvancedSearch.pick(this)">★★☆☆☆</button>
+          <button type="button" class="asc-value" data-value="3" onclick="AdvancedSearch.pick(this)">★★★☆☆</button>
+          <button type="button" class="asc-value" data-value="4" onclick="AdvancedSearch.pick(this)">★★★★☆</button>
+          <button type="button" class="asc-value" data-value="5" onclick="AdvancedSearch.pick(this)">★★★★★</button>
+        </div>
+      </div>
+
+      <!-- Energía -->
+      <div class="asc-filter" data-field="energia">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Energía</button>
+        <div class="asc-values">
+          <button type="button" class="asc-value" data-value="baja" onclick="AdvancedSearch.pick(this)">Baja</button>
+          <button type="button" class="asc-value" data-value="media" onclick="AdvancedSearch.pick(this)">Media</button>
+          <button type="button" class="asc-value" data-value="alta" onclick="AdvancedSearch.pick(this)">Alta</button>
+        </div>
+      </div>
+
+      <!-- Bailabilidad -->
+      <div class="asc-filter" data-field="bailabilidad">
+        <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Bailabilidad</button>
+        <div class="asc-values">
+          <button type="button" class="asc-value" data-value="baja" onclick="AdvancedSearch.pick(this)">Baja</button>
+          <button type="button" class="asc-value" data-value="media" onclick="AdvancedSearch.pick(this)">Media</button>
+          <button type="button" class="asc-value" data-value="alta" onclick="AdvancedSearch.pick(this)">Alta</button>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="adv-search-footer">
+      <span id="adv-search-summary" class="adv-search-summary">Ningún filtro activo</span>
+      <div class="adv-search-actions">
+        <button type="button" class="adv-search-btn ghost" onclick="AdvancedSearch.reset()">Limpiar</button>
+        <button type="button" class="adv-search-btn primary" onclick="AdvancedSearch.run()">Buscar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.adv-search-overlay { position:fixed; inset:0; z-index:1000; background:rgba(6,10,14,0.72); backdrop-filter:blur(3px); display:flex; align-items:center; justify-content:center; padding:1.25rem; }
+.adv-search-panel { width:100%; max-width:760px; max-height:88vh; overflow-y:auto; background:var(--bg-card); border:1px solid var(--border); border-radius:16px; padding:1.4rem 1.5rem; box-shadow:0 20px 60px rgba(0,0,0,0.5); }
+.adv-search-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:0.35rem; }
+.adv-search-header h3 { margin:0; font-size:1.15rem; color:var(--text-primary); }
+.adv-search-close { background:none; border:1px solid var(--border); color:var(--text-secondary); border-radius:8px; width:30px; height:30px; cursor:pointer; font-size:0.9rem; line-height:1; }
+.adv-search-close:hover { border-color:var(--accent); color:var(--accent); }
+.adv-search-hint { margin:0 0 1rem; font-size:0.8rem; color:var(--text-muted); }
+.adv-search-capsules { display:flex; flex-direction:column; gap:0.55rem; }
+.asc-filter { border:1px solid var(--border); border-radius:12px; padding:0.55rem 0.75rem; transition:border-color 0.2s,background 0.2s; }
+.asc-filter.is-active { border-color:var(--accent); background:rgba(0,212,255,0.06); }
+.asc-capsule { display:inline-flex; align-items:center; gap:0.4rem; padding:0.3rem 0.9rem; background:rgba(255,255,255,0.04); border:1px solid var(--border); border-radius:20px; color:var(--text-secondary); font-size:0.82rem; font-weight:600; cursor:pointer; transition:all 0.15s; }
+.asc-filter.is-active .asc-capsule { background:var(--accent); border-color:var(--accent); color:#04141a; }
+.asc-values { display:none; flex-wrap:wrap; gap:0.4rem; margin-top:0.6rem; }
+.asc-values-scroll { max-height:150px; overflow-y:auto; }
+.asc-filter.is-active .asc-values { display:flex; }
+.asc-value { padding:0.28rem 0.7rem; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:14px; color:var(--text-secondary); font-size:0.74rem; cursor:pointer; transition:all 0.15s; }
+.asc-value:hover { border-color:var(--accent); color:var(--accent); }
+.asc-value.is-selected { background:var(--accent); border-color:var(--accent); color:#04141a; font-weight:700; }
+.asc-value small { opacity:0.7; margin-left:0.25rem; }
+.adv-search-footer { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-top:1.2rem; padding-top:1rem; border-top:1px solid var(--border); flex-wrap:wrap; }
+.adv-search-summary { font-size:0.82rem; color:var(--text-muted); }
+.adv-search-actions { display:flex; gap:0.6rem; }
+.adv-search-btn { padding:0.5rem 1.1rem; border-radius:9px; font-size:0.85rem; font-weight:600; cursor:pointer; border:1px solid var(--border); background:transparent; color:var(--text-secondary); }
+.adv-search-btn.ghost:hover { border-color:var(--accent); color:var(--accent); }
+.adv-search-btn.primary { background:var(--accent); border-color:var(--accent); color:#04141a; }
+.adv-search-btn.primary:hover { filter:brightness(1.1); }
+@media (max-width:640px) {
+  .adv-search-panel { padding:1.1rem; max-height:92vh; }
+}
+</style>
+
+<script>
+window.AdvancedSearch = (function () {
+    const state = {};  // field -> value, e.g. {calidad: 'DSD64', mood: 'Energético'}
+
+    function open() {
+        const m = document.getElementById('adv-search-modal');
+        if (m) { m.style.display = 'flex'; document.body.style.overflow = 'hidden'; }
+    }
+    function close() {
+        const m = document.getElementById('adv-search-modal');
+        if (m) { m.style.display = 'none'; document.body.style.overflow = ''; }
+    }
+    function toggle(capsuleBtn) {
+        const filterEl = capsuleBtn.closest('.asc-filter');
+        const field = filterEl.dataset.field;
+        if (filterEl.classList.contains('is-active')) {
+            filterEl.classList.remove('is-active');
+            delete state[field];
+            filterEl.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+        } else {
+            filterEl.classList.add('is-active');
+        }
+        updateSummary();
+    }
+    function pick(valueBtn) {
+        const filterEl = valueBtn.closest('.asc-filter');
+        const field = filterEl.dataset.field;
+        filterEl.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+        valueBtn.classList.add('is-selected');
+        state[field] = valueBtn.dataset.value;
+        filterEl.classList.add('is-active');
+        updateSummary();
+    }
+    function updateSummary() {
+        const n = Object.keys(state).length;
+        const el = document.getElementById('adv-search-summary');
+        if (!el) return;
+        el.textContent = n === 0 ? 'Ningún filtro activo'
+            : `${n} filtro${n !== 1 ? 's' : ''} activo${n !== 1 ? 's' : ''}`;
+    }
+    function reset() {
+        Object.keys(state).forEach(k => delete state[k]);
+        document.querySelectorAll('.asc-filter').forEach(f => {
+            f.classList.remove('is-active');
+            f.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+        });
+        updateSummary();
+    }
+    function run() {
+        if (!Object.keys(state).length) return;
+        const params = new URLSearchParams(state);
+        window.location.href = '/busqueda-avanzada?' + params.toString();
+    }
+    // Pre-fill from the current URL — used on the results page so reopening
+    // the modal ("Modificar filtros") shows what's already active.
+    function hydrateFromLocation() {
+        const params = new URLSearchParams(window.location.search);
+        params.forEach((value, field) => {
+            const filterEl = document.querySelector(`.asc-filter[data-field="${field}"]`);
+            if (!filterEl) return;
+            const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
+                .find(v => v.dataset.value === value);
+            if (valBtn) {
+                filterEl.classList.add('is-active');
+                valBtn.classList.add('is-selected');
+                state[field] = value;
+            }
+        });
+        updateSummary();
+    }
+    // Reusable entry point for other views later (ticket point 1): activates
+    // one capsule with a given value and opens the modal so the person can
+    // keep combining filters from there.
+    function openWithPreset(field, value) {
+        reset();
+        const filterEl = document.querySelector(`.asc-filter[data-field="${field}"]`);
+        if (filterEl) {
+            const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
+                .find(v => v.dataset.value === String(value));
+            filterEl.classList.add('is-active');
+            if (valBtn) { valBtn.classList.add('is-selected'); state[field] = String(value); }
+        }
+        updateSummary();
+        open();
+    }
+
+    return { open, close, toggle, pick, reset, run, hydrateFromLocation, openWithPreset, state };
+})();
+</script>
