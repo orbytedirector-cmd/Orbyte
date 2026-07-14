@@ -534,28 +534,71 @@ def artist(artist_id):
         ''', (artist_id,)).fetchall()
         genres = [r['g'] for r in genre_row]
 
-        # Similar artists from JSON field
+        # Similar artists from JSON field — enriched with a cover image (best
+        # album of that artist, if they exist in our library) for the carousel
         similar_artists = []
         if ar_data.get('similar_artists_json'):
             try:
                 similar_raw = json.loads(ar_data['similar_artists_json'])
-                for s in (similar_raw[:6] if isinstance(similar_raw, list) else []):
-                    name = s.get('name') or s if isinstance(s, str) else ''
+                for s in (similar_raw[:12] if isinstance(similar_raw, list) else []):
+                    name = s.get('name', '') if isinstance(s, dict) else (s if isinstance(s, str) else '')
                     if name:
                         # Check if they exist in our library
                         existing = conn.execute(
                             'SELECT id FROM artists WHERE LOWER(name)=LOWER(?)', (name,)
                         ).fetchone()
+                        cover_url = ''
+                        if existing:
+                            cov = conn.execute(
+                                '''SELECT al.cover_path FROM albums al
+                                   LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                                   WHERE al.artist_id=?
+                                   ORDER BY COALESCE(apc.pop_score,0) DESC, al.year DESC
+                                   LIMIT 1''',
+                                (existing['id'],)
+                            ).fetchone()
+                            if cov and cov['cover_path']:
+                                cover_url = cover_url_filter(clean_db_path(cov['cover_path']))
                         similar_artists.append({
                             'name': name,
-                            'id': existing['id'] if existing else None
+                            'id': existing['id'] if existing else None,
+                            'cover_url': cover_url
                         })
             except Exception:
                 pass
 
+        # Top / most popular tracks for this artist — powers the "Populares" tab
+        top_tracks_raw = conn.execute(
+            '''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
+                      COALESCE(tpc.pop_score, 0) as pop_score,
+                      COALESCE(tpc.stars, 0) as pop_stars
+               FROM tracks t
+               JOIN albums al ON al.id = t.album_id
+               LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
+               WHERE al.artist_id = ?
+               ORDER BY pop_score DESC, t.title
+               LIMIT 10''',
+            (artist_id,)
+        ).fetchall()
+        top_tracks = []
+        for t in top_tracks_raw:
+            d = dict(t)
+            d['file_path'] = clean_db_path(d.get('file_path'))
+            cover = clean_db_path(d.get('album_cover'))
+            d['cover_path'] = cover
+            d['cover_url'] = cover_url_filter(cover)
+            d['audio_url'] = audio_url_filter(d['file_path'])
+            fmt, led = _fmt_format(d)
+            d['format_display'] = fmt
+            d['format_color'] = led
+            d['duration_fmt'] = _fmt_seconds(d.get('duration'))
+            d['artist_id'] = artist_id
+            top_tracks.append(d)
+
         return render_template('artist.html', artist=ar_data, albums=albums,
                                total_tracks=total_tracks, fav_ids=_favorites_set,
                                genres=genres, similar_artists=similar_artists,
+                               top_tracks=top_tracks,
                                artist_nationality=ar_data.get('nationality', ''))
     finally:
         conn.close()

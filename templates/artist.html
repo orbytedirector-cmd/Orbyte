@@ -47,51 +47,116 @@
     {% endfor %}
   </div>
   {% endif %}
+</div>
 
+<!-- ── Tabs: General / Populares / Similares ─────────────────────────────── -->
+<div class="artist-tabs" id="artist-tabs">
+  <button class="artist-tab-btn active" onclick="showArtistTab('general', this)">General</button>
+  {% if top_tracks %}
+  <button class="artist-tab-btn" onclick="showArtistTab('popular', this)">🔥 Populares</button>
+  {% endif %}
   {% if similar_artists %}
-  <div class="artist-similar">
-    <span class="artist-similar-label">Similares:</span>
-    {% for s in similar_artists %}
-      {% if s.id %}
-      <a href="/artist/{{ s.id }}" class="artist-similar-link">{{ s.name }}</a>
-      {% else %}
-      <span class="artist-similar-name">{{ s.name }}</span>
-      {% endif %}
-      {% if not loop.last %}<span class="ar-sep">·</span>{% endif %}
-    {% endfor %}
-  </div>
+  <button class="artist-tab-btn" onclick="showArtistTab('similar', this)">Similares</button>
   {% endif %}
 </div>
 
-<div class="album-grid">
-  {% for album in albums %}
-  <div class="album-card">
-    <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }}, this)">
-      <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover"
-           onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
-      <div class="play-overlay">▶</div>
-    </div>
-    <div class="album-card-info">
-      <div class="aci-text">
-        <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+<!-- ── Tab: General ───────────────────────────────────────────────────────── -->
+<div class="artist-tab-panel" id="artist-panel-general">
+  <div class="album-grid">
+    {% for album in albums %}
+    <div class="album-card">
+      <div class="album-card-cover-wrap" onclick="playAlbumById({{ album.id }}, this)">
+        <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover"
+             onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+        <div class="play-overlay">▶</div>
       </div>
-      <div class="aci-footer">
-        {% if album.primary_format %}
-        <span class="aci-quality">
-          {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
-          <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
-        </span>
-        {% endif %}
-        <span class="aci-stats">
-          {%- if album.year %}{{ album.year }}{% endif -%}
-          {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
-          {%- if album.total_duration %} · {{ album.total_duration|format_duration }}{% endif -%}
-        </span>
+      <div class="album-card-info">
+        <div class="aci-text">
+          <a href="/album/{{ album.id }}" class="album-title">{{ album.name }}</a>
+        </div>
+        <div class="aci-footer">
+          {% if album.primary_format %}
+          <span class="aci-quality">
+            {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
+            <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
+          </span>
+          {% endif %}
+          <span class="aci-stats">
+            {%- if album.year %}{{ album.year }}{% endif -%}
+            {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
+            {%- if album.total_duration %} · {{ album.total_duration|format_duration }}{% endif -%}
+          </span>
+        </div>
       </div>
     </div>
+    {% endfor %}
   </div>
-  {% endfor %}
 </div>
+
+<!-- ── Tab: Populares — top tracks del artista, reproducibles ──────────────── -->
+{% if top_tracks %}
+<div class="artist-tab-panel" id="artist-panel-popular" style="display:none">
+  <div class="att-header">
+    <button class="album-play-all-btn" onclick="playAllTopTracks()">▶ Reproducir Top {{ top_tracks|length }}</button>
+  </div>
+  <div class="artist-top-tracks-list">
+    {% for track in top_tracks %}
+    <div class="album-track-row">
+      <span class="track-number att-rank{% if loop.index <= 3 %} att-rank-top{% endif %}">{{ loop.index }}</span>
+      <img src="{{ track.cover_url }}" class="track-thumb" alt=""
+           onerror="this.style.opacity='0'">
+      <span class="att-title-wrap">
+        <button class="track-title-btn" onclick="showTrackInfo({{ track.id }})">{{ track.title }}</button>
+        <span class="att-pop-bar-wrap" title="{{ track.pop_score|round(1) }} pts de popularidad">
+          <span class="att-pop-bar-fill" style="width:{{ [track.pop_score|round|int, 100]|min }}%"></span>
+        </span>
+      </span>
+      <span class="track-duration">{{ track.duration|format_duration }}</span>
+      <span class="track-quality">
+        <span class="tq-badge format-{{ track.format_color or 'white' }}">{{ track.format_display }}</span>
+      </span>
+      <span class="track-led">{{ diamond_svg(track.format_color or 'white', 'sm')|safe }}</span>
+      <span class="track-actions">
+        <button class="track-actions-btn" title="Reproducir" data-track-id="{{ track.id }}" onclick="playTopTrack({{ track.id }})">▶</button>
+        <button class="track-actions-btn add-btn" title="Añadir a cola" data-track-id="{{ track.id }}" onclick="addTopTrackToQueue({{ track.id }}, this)">➕</button>
+        <button class="fav-btn{% if fav_ids is defined and track.id in fav_ids %} is-fav{% endif %}" data-fav-id="{{ track.id }}" title="{% if fav_ids is defined and track.id in fav_ids %}Quitar de favoritos{% else %}Añadir a favoritos{% endif %}" onclick="toggleFavorite({{ track.id }})">
+          <svg class="heart-svg" viewBox="0 0 24 24"><path {% if fav_ids is defined and track.id in fav_ids %}fill="#f43f5e" stroke="#f43f5e"{% else %}fill="none" stroke="currentColor"{% endif %} stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
+        </button>
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+<!-- ── Tab: Similares — carrusel de artistas relacionados ───────────────────── -->
+{% if similar_artists %}
+<div class="artist-tab-panel" id="artist-panel-similar" style="display:none">
+  <div class="similar-artist-scroll">
+    {% for s in similar_artists %}
+    {% if s.id %}
+    <a href="/artist/{{ s.id }}" class="similar-artist-card">
+    {% else %}
+    <div class="similar-artist-card is-unavailable" title="No disponible en tu biblioteca">
+    {% endif %}
+      <div class="sac-cover-wrap">
+        {% if s.cover_url %}
+        <img src="{{ s.cover_url }}" alt="{{ s.name }}" class="sac-cover"
+             onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
+        {% else %}
+        <div class="sac-cover sac-cover-placeholder">♪</div>
+        {% endif %}
+      </div>
+      <span class="sac-name">{{ s.name }}</span>
+    {% if s.id %}
+    </a>
+    {% else %}
+    </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 
 <style>
 .artist-top-nav { display:flex; gap:0.5rem; margin-bottom:1rem; }
@@ -112,11 +177,46 @@
 
 .artist-genre-pills { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.7rem; }
 
-.artist-similar { display:flex; align-items:center; justify-content:center; flex-wrap:wrap; gap:0.35rem; font-size:0.8rem; margin-top:0.4rem; }
-.artist-similar-label { font-family:'Orbitron',system-ui,sans-serif; font-size:0.65rem; color:rgba(200,146,10,0.45); letter-spacing:0.08em; text-transform:uppercase; }
-.artist-similar-link { color:var(--accent); text-decoration:none; transition:color 0.15s; }
-.artist-similar-link:hover { color:var(--text-gold); }
-.artist-similar-name { color:rgba(200,146,10,0.4); }
+/* ── Tabs: General / Populares / Similares ──────────────────────────────── */
+.artist-tabs { display:flex; align-items:center; justify-content:center; gap:0.5rem; margin-bottom:1.5rem; }
+.artist-tab-btn {
+  background:var(--bg-card); border:1px solid var(--border-gold); color:rgba(200,146,10,0.6);
+  border-radius:20px; padding:0.4rem 1.1rem; cursor:pointer; font-size:0.85rem; font-weight:600;
+  transition:all 0.15s;
+}
+.artist-tab-btn:hover:not(.active) { border-color:var(--accent); color:var(--text-gold); }
+.artist-tab-btn.active { background:var(--accent); color:var(--bg-primary); border-color:var(--accent); }
+
+/* ── Populares tab ───────────────────────────────────────────────────────── */
+.att-header { display:flex; justify-content:center; margin-bottom:1.25rem; }
+.artist-top-tracks-list { max-width:900px; margin:0 auto; }
+.artist-top-tracks-list .album-track-row { grid-template-columns:30px 40px 1fr 52px auto 10px auto; }
+.att-rank { text-align:center; font-weight:700; font-size:0.85rem; }
+.att-rank-top { color:var(--text-gold); font-size:0.95rem; }
+.att-title-wrap { display:flex; flex-direction:column; gap:0.25rem; min-width:0; }
+.att-title-wrap .track-title-btn { width:100%; }
+.att-pop-bar-wrap { height:3px; border-radius:2px; background:rgba(255,255,255,0.07); overflow:hidden; max-width:220px; }
+.att-pop-bar-fill { height:100%; border-radius:2px; background:linear-gradient(90deg,var(--accent),var(--text-gold)); }
+
+/* ── Similares tab: carrusel horizontal ─────────────────────────────────── */
+.similar-artist-scroll {
+  display:flex; gap:1rem; overflow-x:auto; padding:0.25rem 0.5rem 0.75rem;
+  scrollbar-width:thin; scrollbar-color:var(--border) transparent;
+}
+.similar-artist-card {
+  flex-shrink:0; width:130px; display:flex; flex-direction:column; align-items:center; gap:0.5rem;
+  text-decoration:none; text-align:center; transition:transform 0.15s;
+}
+.similar-artist-card:hover { transform:translateY(-3px); }
+.similar-artist-card.is-unavailable { opacity:0.45; cursor:default; }
+.sac-cover-wrap { width:110px; height:110px; border-radius:50%; overflow:hidden; border:2px solid var(--border-gold); }
+.similar-artist-card:hover .sac-cover-wrap { border-color:var(--accent); }
+.sac-cover { width:100%; height:100%; object-fit:cover; display:block; }
+.sac-cover-placeholder {
+  display:flex; align-items:center; justify-content:center; width:100%; height:100%;
+  background:linear-gradient(135deg,var(--accent),#0099cc); color:var(--bg-primary); font-size:1.8rem;
+}
+.sac-name { font-size:0.8rem; color:var(--text-primary); line-height:1.2; }
 </style><style>
 .artist-header {
   text-align: center;
@@ -202,8 +302,28 @@
 @media (max-width: 768px) {
   .artist-header-name { font-size: 1.5rem; gap: 0.4rem; }
   .artist-header-meta { font-size: 0.78rem; gap: 0.35rem; }
-  .artist-similar { font-size: 0.75rem; }
   .artist-genre-pills { gap: 0.3rem; }
+
+  /* Tabs: scroll horizontal en vez de wrap para no ocupar varias líneas */
+  .artist-tabs {
+    justify-content: flex-start; overflow-x: auto; flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch; padding-bottom: 2px;
+  }
+  .artist-tabs::-webkit-scrollbar { display: none; }
+  .artist-tab-btn { flex-shrink: 0; white-space: nowrap; font-size: 0.8rem; padding: 0.35rem 0.9rem; }
+
+  /* Populares: mismo criterio que album-track-row — se oculta la duración,
+     el resto de la información se mantiene visible */
+  .artist-top-tracks-list .album-track-row {
+    grid-template-columns: 24px 34px 1fr auto 10px auto;
+    column-gap: 0.4rem;
+  }
+  .artist-top-tracks-list .track-duration { display: none; }
+  .att-pop-bar-wrap { max-width: 140px; }
+
+  /* Similares: cards un poco más chicas para que quepan más en pantalla */
+  .similar-artist-card { width: 100px; }
+  .sac-cover-wrap { width: 88px; height: 88px; }
 }
 </style>
 
@@ -224,6 +344,61 @@ async function playAlbumById(albumId, el) {
     }
   } catch(e) { console.error('Error loading album', e); }
   if (el) { const o = el.querySelector('.play-overlay'); if (o) o.textContent = '▶'; }
+}
+
+// ── Tabs: General / Populares / Similares ────────────────────────────────
+function showArtistTab(tab, btn) {
+  document.querySelectorAll('.artist-tab-panel').forEach(p => p.style.display = 'none');
+  document.querySelectorAll('.artist-tab-btn').forEach(b => b.classList.remove('active'));
+  const el = document.getElementById('artist-panel-' + tab);
+  if (el) el.style.display = 'block';
+  if (btn) btn.classList.add('active');
+}
+
+// ── Populares: reproducción de las pistas más relevantes del artista ────────
+// Los datos ya vienen embebidos desde el servidor — no hace falta otra llamada.
+const TOP_TRACKS = {{ top_tracks|tojson }};
+
+async function playAllTopTracks() {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
+  const q = (TOP_TRACKS || []).filter(t => t.audio_url || t.file_path);
+  if (!q.length) return;
+  if (window.prependTracksAndPlay) {
+    window.prependTracksAndPlay(q, 0);
+  } else {
+    loadQueue(q);
+    playTrack(0);
+  }
+}
+
+async function playTopTrack(trackId) {
+  if (window.primeAudioForGesture) window.primeAudioForGesture();
+  const t = (TOP_TRACKS || []).find(x => x.id === trackId);
+  if (!t) return;
+  if (window.prependAndPlay) {
+    window.prependAndPlay(t);
+  } else {
+    loadQueue([t]);
+    playTrack(0);
+  }
+}
+
+async function addTopTrackToQueue(trackId, btn) {
+  const t = (TOP_TRACKS || []).find(x => x.id === trackId);
+  if (!t) return;
+  if (btn) { btn.textContent = '…'; btn.disabled = true; }
+  if (window.appendToQueue) window.appendToQueue(t);
+  if (btn) {
+    btn.textContent = '✓';
+    btn.style.color = '#4ade80';
+    btn.style.borderColor = '#16a34a';
+    setTimeout(() => {
+      btn.textContent = '➕';
+      btn.style.color = '';
+      btn.style.borderColor = '';
+      btn.disabled = false;
+    }, 1800);
+  }
 }
 
 // Async website lookup — fires after page load, cached by server
