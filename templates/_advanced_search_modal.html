@@ -318,13 +318,22 @@ window.AdvancedSearch = (function () {
         Object.entries(state).forEach(([field, values]) => {
             values.forEach(v => params.append(field, v));
         });
-        window.location.href = '/busqueda-avanzada?' + params.toString();
+        // navigateTo() (base.html) swaps main-content via fetch instead of a
+        // hard reload. A hard reload here was wiping window.userPlaylist and
+        // stopping playback — including tracks that had nothing to do with
+        // this search — because the queue only ever lives in JS memory.
+        navigateTo('/busqueda-avanzada?' + params.toString());
     }
     // Pre-fill from the current URL — used on the results page so reopening
     // the modal ("Modificar filtros") shows what's already active. Groups
     // repeated query params (?mood=A&mood=B) back into arrays per field.
-    function hydrateFromLocation() {
-        const params = new URLSearchParams(window.location.search);
+    function hydrateFromLocation(queryString) {
+        // Callers that already know the true query string (advanced_search.html,
+        // which gets it from the server to sidestep the navigateTo() pushState
+        // race — see that template) should pass it in explicitly. Falling back
+        // to window.location.search keeps this working as before for any other
+        // page that includes this partial without that server-side value.
+        const params = new URLSearchParams(queryString !== undefined ? queryString : window.location.search);
         const grouped = {};
         params.forEach((value, field) => {
             if (!grouped[field]) grouped[field] = [];

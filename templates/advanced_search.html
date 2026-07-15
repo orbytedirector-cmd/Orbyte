@@ -55,9 +55,12 @@
 </div>
 
 <!-- ── Action bar ─────────────────────────────────────────────────────────── -->
-<div style="display:flex;margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap;align-items:center">
+<div id="queue-action-bar" style="display:flex;margin-bottom:0.75rem;gap:0.5rem;flex-wrap:wrap;align-items:center">
   <button class="track-btn primary" onclick="AdvResults.playAllLoaded()">▶ Reproducir todo</button>
-  <button class="track-btn ghost" onclick="AdvResults.queueAllLoaded()">➕ Encolar todo</button>
+  <button class="track-btn ghost" id="enqueue-all-btn" onclick="AdvResults.queueAllLoaded()">➕ Encolar todo</button>
+  <button class="track-btn ghost danger" id="clear-queue-bar-btn" onclick="clearPlaylist()" style="display:none">
+    🗑 Limpiar cola <span class="cq-badge-inline" id="cq-bar-count">0</span>
+  </button>
 </div>
 
 <!-- ── Albums view ────────────────────────────────────────────────────────── -->
@@ -141,10 +144,23 @@
 .page-btn:disabled, .page-btn.is-disabled { opacity:0.28; pointer-events:none; }
 .page-btn-icon { padding:0.3rem 0.55rem; font-size:0.85rem; }
 .page-info { padding:0.3rem 0.9rem; border-radius:20px; background:var(--accent-dim); border:1px solid var(--border-gold); color:var(--accent-bright); font-size:0.74rem; font-weight:700; white-space:nowrap; letter-spacing:0.02em; }
+
+/* ── Queue action bar ── */
+#queue-action-bar { display:flex; }
+.track-btn.danger { border-color:rgba(239,68,68,0.4); color:#f87171; }
+.track-btn.danger:hover { background:rgba(239,68,68,0.15); border-color:#f87171; }
+.cq-badge-inline { display:inline-flex; align-items:center; justify-content:center; min-width:1.3em; padding:0.05rem 0.4rem; line-height:1; background:rgba(239,68,68,0.2); border-radius:8px; font-size:0.7rem; font-weight:700; margin-left:0.3rem; }
 </style>
 
 <script>
 window.AdvResults = (function () {
+    // Server-supplied — see the comment on the Flask route. Using this
+    // instead of window.location.search for the initial render avoids the
+    // navigateTo() pushState race: the server always knows the real query
+    // string for the URL that was actually fetched, independent of when the
+    // browser's address bar gets updated on the client.
+    const ADV_QUERY_STRING = {{ initial_query|tojson }};
+
     let view = 'albums';
     let albumPage = 1, albumTotalPages = 1;
     let trackPage = 1, trackTotalPages = 1;
@@ -167,7 +183,7 @@ window.AdvResults = (function () {
     // ── Active-filter chips (read straight from the URL) ──────────────────────
     function renderChips() {
         const wrap = document.getElementById('adv-active-chips');
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(ADV_QUERY_STRING);
         const labels = { calidad:'Calidad', mood:'Mood', momento:'Momento', era:'Década/Era',
                           anio:'Año', tema:'Categoría Letra', genero:'Género', idioma:'Idioma',
                           pais:'País', popularidad:'Popularidad', energia:'Energía', bailabilidad:'Bailabilidad' };
@@ -185,9 +201,15 @@ window.AdvResults = (function () {
             const rm = document.createElement('button');
             rm.textContent = '✕';
             rm.onclick = () => {
-                const p = new URLSearchParams(window.location.search);
+                const p = new URLSearchParams(ADV_QUERY_STRING);
                 p.delete(key);
-                window.location.search = p.toString();
+                const qs = p.toString();
+                // navigateTo() (defined in base.html) does an SPA content swap
+                // instead of a hard reload — a real navigation here would wipe
+                // window.userPlaylist (in-memory only) and stop whatever is
+                // currently playing, even if it has nothing to do with this
+                // search.
+                navigateTo(window.location.pathname + (qs ? '?' + qs : ''));
             };
             chip.appendChild(rm);
             wrap.appendChild(chip);
@@ -282,7 +304,7 @@ window.AdvResults = (function () {
 
     // ── Load ───────────────────────────────────────────────────────────────
     async function loadAlbums() {
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(ADV_QUERY_STRING);
         params.set('view', 'albums'); params.set('page', albumPage);
         params.set('sort', albumSort); params.set('dir', 'desc');
         const container = document.getElementById('adv-results-albums');
@@ -302,7 +324,7 @@ window.AdvResults = (function () {
     }
 
     async function loadTracks() {
-        const params = new URLSearchParams(window.location.search);
+        const params = new URLSearchParams(ADV_QUERY_STRING);
         params.set('view', 'tracks'); params.set('page', trackPage);
         params.set('sort', trackSort); params.set('dir', trackDir);
         const container = document.getElementById('adv-results-tracks');
@@ -383,6 +405,7 @@ window.AdvResults = (function () {
             btn.textContent = '✓'; btn.classList.add('added');
             setTimeout(() => { btn.textContent = '➕'; btn.classList.remove('added'); }, 1800);
         }
+        _updateClearQueueBarBtn();
     }
     async function collectLoadedAlbumTracks() {
         const lists = await Promise.all(currentAlbumIds.map(id =>
@@ -401,13 +424,29 @@ window.AdvResults = (function () {
         const tracks = (view === 'tracks' && currentTracks.length) ? currentTracks : await collectLoadedAlbumTracks();
         if (!tracks.length) return;
         tracks.forEach(t => addToPlaylist(t));
+        _updateClearQueueBarBtn();
+        const btn = document.getElementById('enqueue-all-btn');
+        if (btn) { btn.textContent = `✓ ${tracks.length} encoladas`; setTimeout(() => { btn.textContent = '➕ Encolar todo'; }, 2500); }
     }
+
+    // ── Clear-queue bar — same pattern as browse.html: visible + live count
+    // any time the shared queue changes, from anywhere (not just this page).
+    function _updateClearQueueBarBtn(tracks) {
+        const btn = document.getElementById('clear-queue-bar-btn');
+        const cntEl = document.getElementById('cq-bar-count');
+        if (!btn) return;
+        const n = tracks ? tracks.length : (window.userPlaylist || []).length;
+        btn.style.display = n > 0 ? 'inline-flex' : 'none';
+        if (cntEl) cntEl.textContent = n;
+    }
+    document.addEventListener('queueLoaded', e => _updateClearQueueBarBtn(e.detail && e.detail.tracks));
 
     function init() {
         renderChips();
-        AdvancedSearch.hydrateFromLocation();
+        AdvancedSearch.hydrateFromLocation(ADV_QUERY_STRING);
         document.getElementById('asort-popularidad')?.classList.add('sort-pill-active');
         document.getElementById('tsort-popularidad')?.classList.add('sort-pill-active');
+        _updateClearQueueBarBtn();
         loadAlbums();
     }
 
@@ -418,6 +457,10 @@ window.AdvResults = (function () {
     };
 })();
 
-document.addEventListener('DOMContentLoaded', AdvResults.init);
+// Run immediately — DOMContentLoaded only fires once per real page load, but
+// navigateTo() (base.html) re-executes this script on every SPA navigation
+// into /busqueda-avanzada. A DOMContentLoaded listener registered here would
+// simply never fire on those soft navigations. Same pattern as browse.html.
+AdvResults.init();
 </script>
 {% endblock %}

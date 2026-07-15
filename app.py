@@ -1155,7 +1155,14 @@ def advanced_search_page():
         opts = _advanced_search_options(conn)
     finally:
         conn.close()
-    return render_template('advanced_search.html', **opts)
+    # Pass the query string down instead of making the client read
+    # window.location.search: navigateTo() (base.html) runs this page's
+    # <script> BEFORE it calls history.pushState(), so a client-side read of
+    # window.location.search on an SPA navigation would still see the
+    # PREVIOUS page's URL. Baking the real filters in here — same approach
+    # browse.html uses for its single filter_type/filter_value — sidesteps
+    # that race entirely.
+    return render_template('advanced_search.html', initial_query=request.query_string.decode('utf-8'), **opts)
 
 @app.route('/api/search/advanced')
 def api_search_advanced():
