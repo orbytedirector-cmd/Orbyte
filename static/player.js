@@ -5,6 +5,13 @@ let lyricsData = null;
 let lyricsInterval = null;
 let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-stop recovery)
 
+// Intención del usuario: true mientras "debería estar sonando" (se puso en
+// true al arrancar/reanudar, false solo cuando el usuario pausa/detiene a
+// propósito). Sirve para distinguir una pausa nuestra de una pausa que nos
+// impuso el sistema (interrupción de audio de otra app, llamada, etc.) —
+// ver _handleUnexpectedPause() y el watchdog más abajo.
+let _shouldBePlaying = false;
+
 // Playlist options — shuffle / repeat. Persisted like the normalize toggle.
 let shuffleEnabled = false;
 let repeatMode = 'off';   // 'off' | 'all' | 'one'
@@ -101,6 +108,7 @@ function primeAudioForGesture() {
         currentAudio = new Audio();
         currentAudio.addEventListener('timeupdate', updateProgress);
         currentAudio.addEventListener('error', handleAudioError);
+        currentAudio.addEventListener('pause', _handleUnexpectedPause);
         if (normalizeEnabled) _ensureNormalizeGraph();
         window.currentAudio = currentAudio;
     }
@@ -114,6 +122,7 @@ function playTrack(index) {
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
+    _shouldBePlaying = true;
     // Re-enable play button now that there's something to play
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.removeAttribute('data-empty');
@@ -129,6 +138,7 @@ function playTrack(index) {
             currentAudio = new Audio();
             currentAudio.addEventListener('timeupdate', updateProgress);
             currentAudio.addEventListener('error', handleAudioError);
+            currentAudio.addEventListener('pause', _handleUnexpectedPause);
             // Solo se conecta al Web Audio graph si Normalizar ya está activo.
             // Conectar siempre acá (aunque el usuario nunca use Normalizar) deja
             // TODA la reproducción dependiendo de un AudioContext, que iOS
@@ -165,6 +175,7 @@ function playTrack(index) {
         currentAudio = new Audio();
         currentAudio.addEventListener('timeupdate', updateProgress);
         currentAudio.addEventListener('error', handleAudioError);
+        currentAudio.addEventListener('pause', _handleUnexpectedPause);
         if (normalizeEnabled) _ensureNormalizeGraph();
     }
 
@@ -309,6 +320,18 @@ function updateProgress() {
     syncLyrics(currentAudio.currentTime);
 }
 
+// El audio se puede pausar sin que nosotros lo hayamos pedido: una llamada
+// entra, Siri interrumpe, otra app (Instagram, etc.) toma el foco de audio.
+// iOS dispara un 'pause' nativo en esos casos igual que si el usuario hubiera
+// tocado pausa — sin distinguir uno de otro, esa interrupción quedaba
+// "pegada" hasta que el usuario volvía a abrir la app y tocaba play a mano.
+// Si todavía deberíamos estar sonando (_shouldBePlaying), reintentamos solos.
+function _handleUnexpectedPause() {
+    if (!_shouldBePlaying || !currentAudio || currentAudio.ended) return;
+    _resumeAudioCtxIfNeeded();
+    currentAudio.play().catch(() => {});
+}
+
 function togglePlayPause() {
     // Hard guard: nothing loaded and queue empty → do nothing
     if (!queue.length && !window._currentTrack) return;
@@ -319,12 +342,14 @@ function togglePlayPause() {
         return;
     }
     if (currentAudio.paused) {
+        _shouldBePlaying = true;
         _resumeAudioCtxIfNeeded();
         currentAudio.play();
         document.getElementById('play-btn').textContent = '⏸';
         dispatchPlayerState(true);
         if (window._currentTrack) updateMediaSession(window._currentTrack, true);
     } else {
+        _shouldBePlaying = false;
         currentAudio.pause();
         document.getElementById('play-btn').textContent = '▶';
         dispatchPlayerState(false);
@@ -358,6 +383,10 @@ function nextTrack() {
 function _stopAndRewind() {
     if (!queue.length) return;
     playTrack(0);
+    // playTrack() de arriba marca _shouldBePlaying = true — esto es una
+    // parada real (fin de cola), no una interrupción, así que se anula acá
+    // para que el listener de 'pause' no intente reanudar solo.
+    _shouldBePlaying = false;
     if (currentAudio) {
         currentAudio.pause();
         currentAudio.currentTime = 0;
@@ -508,8 +537,8 @@ function updateMediaSession(track, playing) {
     // por el bloqueo de pantalla, sin esto los botones del lock screen
     // "no hacen nada" (audio internamente sigue mudo aunque currentAudio
     // reporte estar reproduciendo).
-    navigator.mediaSession.setActionHandler('play',         () => { _resumeAudioCtxIfNeeded(); currentAudio && currentAudio.play(); dispatchPlayerState(true);  });
-    navigator.mediaSession.setActionHandler('pause',        () => { currentAudio && currentAudio.pause(); dispatchPlayerState(false); });
+    navigator.mediaSession.setActionHandler('play',         () => { _shouldBePlaying = true;  _resumeAudioCtxIfNeeded(); currentAudio && currentAudio.play(); dispatchPlayerState(true);  });
+    navigator.mediaSession.setActionHandler('pause',        () => { _shouldBePlaying = false; currentAudio && currentAudio.pause(); dispatchPlayerState(false); });
     navigator.mediaSession.setActionHandler('previoustrack',() => { _resumeAudioCtxIfNeeded(); prevTrack(); });
     navigator.mediaSession.setActionHandler('nexttrack',    () => { _resumeAudioCtxIfNeeded(); nextTrack(); });
     navigator.mediaSession.setActionHandler('seekto', details => {
@@ -535,6 +564,7 @@ function updateVisualizer(ledColor) {
 }
 
 function resetPlayerBar() {
+    _shouldBePlaying = false;
     // Stop audio completely
     if (currentAudio) {
         currentAudio.pause();
@@ -881,9 +911,45 @@ function _resumeAudioCtxIfNeeded() {
 }
 
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) _resumeAudioCtxIfNeeded();
+    if (!document.hidden) _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
 });
 
+// ── Watchdog de reproducción en 2do plano ───────────────────────────────────
+// Última red de seguridad: aunque el listener de 'pause' y el resume de
+// AudioContext cubren la mayoría de las interrupciones, un evento 'ended' o
+// 'pause' se puede perder del todo si el navegador frena el hilo de JS
+// mientras la app está en 2do plano (pasa en Android/Chrome-Brave tras un
+// rato largo). Cada pocos segundos se revisa si "debería estar sonando" y
+// realmente lo está, y si no, se intenta recuperar sin esperar a que el
+// usuario reabra la app.
+let _watchdogLastTime   = -1;
+let _watchdogStallTicks = 0;
+
+setInterval(() => {
+    if (!_shouldBePlaying || !currentAudio) { _watchdogStallTicks = 0; return; }
+
+    // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
+    if (currentAudio.ended) { _handleTrackEnded(); return; }
+
+    // Quedó pausado por el sistema y el listener de 'pause' no lo recuperó
+    // (p.ej. se perdió el evento) — reintentar.
+    if (currentAudio.paused) { _handleUnexpectedPause(); return; }
+
+    // Reporta estar reproduciendo pero currentTime no avanza — pipe/decoder
+    // trabado. Se le dan ~8s (2 ticks) antes de forzar una reconexión,
+    // reutilizando el mismo mecanismo que ya existe para caídas de red.
+    const t = currentAudio.currentTime;
+    if (t === _watchdogLastTime) {
+        _watchdogStallTicks++;
+        if (_watchdogStallTicks >= 2) {
+            _watchdogStallTicks = 0;
+            handleAudioError({ type: 'watchdog-stall' });
+        }
+    } else {
+        _watchdogStallTicks = 0;
+    }
+    _watchdogLastTime = t;
+}, 4000);
 
 function _normTick() {
     if (!normalizeEnabled || !_normAnalyser || !currentAudio || currentAudio.paused) return;
