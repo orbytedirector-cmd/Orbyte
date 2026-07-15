@@ -1588,6 +1588,53 @@ def api_track(track_id):
         conn.close()
 
 
+@app.route('/api/track/<int:track_id>/similar')
+def api_track_similar(track_id):
+    """Pistas similares a la indicada — alimenta el modal 'Similares' del
+       Now Playing. Usa track_meta.similar_tracks_json (ya rankeado por score)
+       y las serializa con track_to_json para que sean reproducibles/encolables
+       directamente, igual que /api/album/<id>/tracks."""
+    conn = get_db_connection()
+    try:
+        tm = conn.execute(
+            'SELECT similar_tracks_json FROM track_meta WHERE track_id=?', (track_id,)
+        ).fetchone()
+        if not tm or not tm['similar_tracks_json']:
+            return jsonify([])
+        try:
+            similar_raw = json.loads(tm['similar_tracks_json'])
+        except Exception:
+            return jsonify([])
+        if not isinstance(similar_raw, list):
+            return jsonify([])
+        ids = [s.get('track_id') for s in similar_raw[:10] if isinstance(s, dict) and s.get('track_id')]
+        if not ids:
+            return jsonify([])
+        placeholders = ','.join('?' * len(ids))
+        rows = conn.execute(
+            f'''SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year,
+                       ar.id as artist_id, ar.name as artist_name
+                FROM tracks t
+                LEFT JOIN albums a ON t.album_id=a.id
+                LEFT JOIN artists ar ON a.artist_id=ar.id
+                WHERE t.id IN ({placeholders})''',
+            ids
+        ).fetchall()
+        by_id = {r['id']: r for r in rows}
+        result = []
+        for s in similar_raw[:10]:
+            row = by_id.get(s.get('track_id'))
+            if not row:
+                continue
+            d = track_to_json(row)
+            d['same_artist'] = bool(s.get('same_artist'))
+            d['sim_score']   = s.get('score')
+            result.append(d)
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
 @app.route('/api/album/<int:album_id>/tracks')
 def api_album_tracks(album_id):
     conn = get_db_connection()
