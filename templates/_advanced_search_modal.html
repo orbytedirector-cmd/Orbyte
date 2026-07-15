@@ -318,6 +318,12 @@ window.AdvancedSearch = (function () {
         Object.entries(state).forEach(([field, values]) => {
             values.forEach(v => params.append(field, v));
         });
+        // close() resets document.body.style.overflow (set to 'hidden' by
+        // open()). Without this, the page-level scroll lock survives the
+        // navigation below forever: navigateTo() only swaps main-content,
+        // it never touches <body>, so the modal's "no background scroll"
+        // trick was permanently freezing scroll on the results page.
+        close();
         // navigateTo() (base.html) swaps main-content via fetch instead of a
         // hard reload. A hard reload here was wiping window.userPlaylist and
         // stopping playback — including tracks that had nothing to do with
