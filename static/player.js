@@ -109,6 +109,8 @@ function primeAudioForGesture() {
         currentAudio.addEventListener('timeupdate', updateProgress);
         currentAudio.addEventListener('error', handleAudioError);
         currentAudio.addEventListener('pause', _handleUnexpectedPause);
+        currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
+        currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
         if (normalizeEnabled) _ensureNormalizeGraph();
         window.currentAudio = currentAudio;
     }
@@ -139,6 +141,8 @@ function playTrack(index) {
             currentAudio.addEventListener('timeupdate', updateProgress);
             currentAudio.addEventListener('error', handleAudioError);
             currentAudio.addEventListener('pause', _handleUnexpectedPause);
+            currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
+            currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
             // Solo se conecta al Web Audio graph si Normalizar ya está activo.
             // Conectar siempre acá (aunque el usuario nunca use Normalizar) deja
             // TODA la reproducción dependiendo de un AudioContext, que iOS
@@ -176,6 +180,8 @@ function playTrack(index) {
         currentAudio.addEventListener('timeupdate', updateProgress);
         currentAudio.addEventListener('error', handleAudioError);
         currentAudio.addEventListener('pause', _handleUnexpectedPause);
+        currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
+        currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
         if (normalizeEnabled) _ensureNormalizeGraph();
     }
 
@@ -338,6 +344,20 @@ function _handleUnexpectedPause() {
     if (document.hidden) return;
     _resumeAudioCtxIfNeeded();
     currentAudio.play().catch(() => {});
+}
+
+// El sistema (lock screen / Centro de Control) necesita que playbackState
+// refleje SIEMPRE el estado real del audio, no solo cuando nosotros llamamos
+// a togglePlayPause/playTrack. Si se nos pausa por una interrupción y nunca
+// avisamos, iOS sigue pensando que "seguimos reproduciendo" — lo que rompe el
+// botón de▶ del lock screen y hace que, al terminar la interrupción, el
+// sistema le devuelva el widget de Now Playing a otra sesión (la última que
+// sí estaba en un estado consistente) en vez de a nosotros. Patrón oficial:
+// https://web.dev/articles/media-session
+function _syncMediaSessionState(playing) {
+    if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+    }
 }
 
 function togglePlayPause() {
