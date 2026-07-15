@@ -203,6 +203,11 @@
 .adv-search-hint-rule { margin:0 0 1rem; font-size:0.74rem; }
 .adv-search-hint-rule strong { color:var(--text-secondary); }
 .asc-or-badge { display:inline-block; margin-left:0.5rem; font-size:0.66rem; font-weight:600; color:var(--accent); background:rgba(0,212,255,0.1); border:1px solid rgba(0,212,255,0.25); border-radius:10px; padding:0.12rem 0.55rem; vertical-align:middle; }
+.asc-bulk-actions { display:none; margin-left:0.6rem; vertical-align:middle; }
+.asc-filter.is-active .asc-bulk-actions { display:inline-flex; align-items:center; gap:0.3rem; }
+.asc-bulk-btn { background:none; border:none; color:var(--text-muted); text-decoration:underline; cursor:pointer; font-size:0.7rem; padding:0; }
+.asc-bulk-btn:hover { color:var(--accent); }
+.asc-bulk-sep { color:var(--text-muted); font-size:0.7rem; }
 .adv-search-capsules { display:flex; flex-direction:column; gap:0.55rem; }
 .asc-filter { border:1px solid var(--border); border-radius:12px; padding:0.55rem 0.75rem; transition:border-color 0.2s,background 0.2s; }
 .asc-filter.is-active { border-color:var(--accent); background:rgba(0,212,255,0.06); }
@@ -294,6 +299,47 @@ window.AdvancedSearch = (function () {
             badge.remove();
         }
     }
+    // "Todo" / "Ninguno" — select or clear every value currently shown for
+    // one category in a single click, instead of clicking each chip by hand.
+    function selectAll(btn) {
+        const filterEl = btn.closest('.asc-filter');
+        const field = filterEl.dataset.field;
+        state[field] = [];
+        filterEl.querySelectorAll('.asc-value').forEach(v => {
+            v.classList.add('is-selected');
+            state[field].push(v.dataset.value);
+        });
+        filterEl.classList.add('is-active');
+        _updateOrBadge(filterEl, field);
+        updateSummary();
+    }
+    function selectNone(btn) {
+        const filterEl = btn.closest('.asc-filter');
+        const field = filterEl.dataset.field;
+        filterEl.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+        delete state[field];
+        filterEl.classList.remove('is-active');
+        _updateOrBadge(filterEl, field);
+        updateSummary();
+    }
+    // Inject the "Todo · Ninguno" control into every category once, right
+    // after its capsule button. Done in JS (not in the Jinja markup) so it
+    // applies uniformly to all ~12 filter blocks without repeating the same
+    // two-button snippet in every one of them.
+    function _injectBulkControls() {
+        document.querySelectorAll('.asc-filter').forEach(filterEl => {
+            if (filterEl.querySelector('.asc-bulk-actions')) return;
+            const capsule = filterEl.querySelector('.asc-capsule');
+            if (!capsule) return;
+            const bulk = document.createElement('span');
+            bulk.className = 'asc-bulk-actions';
+            bulk.innerHTML =
+                '<button type="button" class="asc-bulk-btn" onclick="AdvancedSearch.selectAll(this)">Todo</button>' +
+                '<span class="asc-bulk-sep">·</span>' +
+                '<button type="button" class="asc-bulk-btn" onclick="AdvancedSearch.selectNone(this)">Ninguno</button>';
+            capsule.insertAdjacentElement('afterend', bulk);
+        });
+    }
     function updateSummary() {
         const fields = Object.keys(state);
         const totalValues = fields.reduce((n, f) => n + state[f].length, 0);
@@ -378,6 +424,8 @@ window.AdvancedSearch = (function () {
         open();
     }
 
-    return { open, close, toggle, pick, reset, run, hydrateFromLocation, openWithPreset, state };
+    _injectBulkControls();
+
+    return { open, close, toggle, pick, selectAll, selectNone, reset, run, hydrateFromLocation, openWithPreset, state };
 })();
 </script>

@@ -990,7 +990,7 @@ def _range_condition(col, bucket_key, bucket_map):
         return None, []
     return f'{col} BETWEEN ? AND ?', [bounds[0], bounds[1]]
 
-def _build_adv_filters(args, pop_alias):
+def _build_adv_filters(args, pop_alias, for_albums):
     """
     Build (where_clauses, params) from every active Búsqueda Avanzada filter in
     request.args. Both the albums query and the tracks query alias tracks as
@@ -1004,6 +1004,14 @@ def _build_adv_filters(args, pop_alias):
     combining them with AND would always return zero rows; OR ("cualquiera
     de estos") is the only combination that makes sense there. Different
     fields are still combined with AND, same as before.
+
+    for_albums controls which table mood/momento/era/idioma are matched
+    against — this is the exact same distinction _ALBUM_META_FIELD already
+    makes for the single-filter /mood, /momento, /era, /language routes:
+    a single mismatched or mistagged track's track_meta value shouldn't be
+    enough to pull an otherwise-unrelated album into the Albums view, so
+    that view matches against album_meta's predominant field instead. The
+    Tracks view keeps matching per-track (tm.*), which is correct there.
     """
     clauses, params = [], []
 
@@ -1012,12 +1020,13 @@ def _build_adv_filters(args, pop_alias):
         sub = [_quality_condition(v) for v in calidad_vals]
         clauses.append('(' + ' OR '.join(sub) + ')')
 
-    for field, col in (('mood', 'mood'), ('momento', 'momento'), ('era', 'era'),
-                        ('idioma', 'idioma')):
+    for field, tm_col in (('mood', 'mood'), ('momento', 'momento'), ('era', 'era'),
+                           ('idioma', 'idioma')):
         vals = args.getlist(field)
         if vals:
             placeholders = ','.join('?' * len(vals))
-            clauses.append(f'tm.{col} IN ({placeholders})')
+            col = f'am.{_ALBUM_META_FIELD[field]}' if for_albums else f'tm.{tm_col}'
+            clauses.append(f'{col} IN ({placeholders})')
             params += vals
 
     tema_vals = args.getlist('tema')  # Categoría Letra
@@ -1180,7 +1189,7 @@ def api_search_advanced():
     conn = get_db_connection()
     try:
         if view == 'tracks':
-            clauses, params = _build_adv_filters(request.args, pop_alias='tpc')
+            clauses, params = _build_adv_filters(request.args, pop_alias='tpc', for_albums=False)
             where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
             count_sql = f'''SELECT COUNT(*) FROM tracks t
@@ -1232,13 +1241,14 @@ def api_search_advanced():
             return jsonify({'tracks': tracks, 'total': total, 'total_pages': total_pages, 'page': page})
 
         # view == 'albums'
-        clauses, params = _build_adv_filters(request.args, pop_alias='apc')
+        clauses, params = _build_adv_filters(request.args, pop_alias='apc', for_albums=True)
         where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
         count_sql = f'''SELECT COUNT(DISTINCT al.id) FROM albums al
                          JOIN tracks t ON t.album_id=al.id
                          LEFT JOIN artists ar ON ar.id=al.artist_id
                          LEFT JOIN track_meta tm ON tm.track_id=t.id
+                         LEFT JOIN album_meta am ON am.album_id=al.id
                          LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
                          WHERE 1=1{where}'''
         data_sql = f'''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
@@ -1254,6 +1264,7 @@ def api_search_advanced():
                        JOIN tracks t ON t.album_id=al.id
                        LEFT JOIN artists ar ON ar.id=al.artist_id
                        LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       LEFT JOIN album_meta am ON am.album_id=al.id
                        LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
                        WHERE 1=1{where}'''
         order = _album_order(sort, dir_)
