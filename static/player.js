@@ -325,9 +325,17 @@ function updateProgress() {
 // iOS dispara un 'pause' nativo en esos casos igual que si el usuario hubiera
 // tocado pausa — sin distinguir uno de otro, esa interrupción quedaba
 // "pegada" hasta que el usuario volvía a abrir la app y tocaba play a mano.
-// Si todavía deberíamos estar sonando (_shouldBePlaying), reintentamos solos.
+//
+// OJO: si esa "otra app" sigue en primer plano usando el audio (p.ej. un reel
+// de Instagram), reintentar acá le pelea el foco de audio y silencia/corta lo
+// que el usuario está viendo en la app que sí tiene el foco — exactamente al
+// revés de lo que queremos. Por eso solo se reintenta cuando Orbyte mismo
+// vuelve a estar visible/en primer plano (ver visibilitychange más abajo);
+// mientras estamos en 2do plano, una pausa impuesta se respeta y se deja
+// pausada hasta que el usuario vuelva a nuestra app.
 function _handleUnexpectedPause() {
     if (!_shouldBePlaying || !currentAudio || currentAudio.ended) return;
+    if (document.hidden) return;
     _resumeAudioCtxIfNeeded();
     currentAudio.play().catch(() => {});
 }
@@ -904,8 +912,10 @@ function _ensureNormalizeGraph() {
 // el sonido en silencio (currentAudio sigue "reproduciendo" pero mudo).
 // Se llama antes de cualquier play/prev/next, y también apenas la pestaña
 // vuelve a estar visible (desbloqueo de pantalla).
+// iOS/Safari usa el estado 'interrupted' (no 'suspended') específicamente
+// para este caso — resume() saca al contexto de cualquiera de los dos.
 function _resumeAudioCtxIfNeeded() {
-    if (_audioCtx && _audioCtx.state === 'suspended') {
+    if (_audioCtx && (_audioCtx.state === 'suspended' || _audioCtx.state === 'interrupted')) {
         _audioCtx.resume().catch(() => {});
     }
 }
