@@ -997,62 +997,89 @@ def _build_adv_filters(args, pop_alias):
     't', track_meta as 'tm', albums as 'al' and artists as 'ar' — only the
     popularity-cache alias differs (apc for albums, tpc for tracks), hence the
     pop_alias parameter.
+
+    Every field accepts ONE OR MORE values (repeat the query param, e.g.
+    ?mood=Feliz&mood=Triste). Multiple values within the SAME field are
+    combined with OR — a track only has a single mood/momento/era/etc, so
+    combining them with AND would always return zero rows; OR ("cualquiera
+    de estos") is the only combination that makes sense there. Different
+    fields are still combined with AND, same as before.
     """
     clauses, params = [], []
 
-    calidad = args.get('calidad')
-    if calidad:
-        clauses.append(_quality_condition(calidad))
+    calidad_vals = args.getlist('calidad')
+    if calidad_vals:
+        sub = [_quality_condition(v) for v in calidad_vals]
+        clauses.append('(' + ' OR '.join(sub) + ')')
 
     for field, col in (('mood', 'mood'), ('momento', 'momento'), ('era', 'era'),
                         ('idioma', 'idioma')):
-        val = args.get(field)
-        if val:
-            clauses.append(f'tm.{col} = ?')
-            params.append(val)
+        vals = args.getlist(field)
+        if vals:
+            placeholders = ','.join('?' * len(vals))
+            clauses.append(f'tm.{col} IN ({placeholders})')
+            params += vals
 
-    tema = args.get('tema')  # Categoría Letra
-    if tema:
-        clauses.append('tm.tema_lirico = ?')
-        params.append(tema)
+    tema_vals = args.getlist('tema')  # Categoría Letra
+    if tema_vals:
+        placeholders = ','.join('?' * len(tema_vals))
+        clauses.append(f'tm.tema_lirico IN ({placeholders})')
+        params += tema_vals
 
-    genero = args.get('genero')
-    if genero:
-        clauses.append('(t.genre = ? OR tm.genre_primary = ? OR tm.genre_secondary = ?)')
-        params += [genero, genero, genero]
+    genero_vals = args.getlist('genero')
+    if genero_vals:
+        sub = []
+        for g in genero_vals:
+            sub.append('(t.genre = ? OR tm.genre_primary = ? OR tm.genre_secondary = ?)')
+            params += [g, g, g]
+        clauses.append('(' + ' OR '.join(sub) + ')')
 
-    pais = args.get('pais')  # País Origen (artists.nationality)
-    if pais:
-        clauses.append('ar.nationality = ?')
-        params.append(pais)
+    pais_vals = args.getlist('pais')  # País Origen (artists.nationality)
+    if pais_vals:
+        placeholders = ','.join('?' * len(pais_vals))
+        clauses.append(f'ar.nationality IN ({placeholders})')
+        params += pais_vals
 
-    anio = args.get('anio')  # Año específico de lanzamiento (albums.year)
-    if anio:
-        try:
-            clauses.append('al.year = ?')
-            params.append(int(anio))
-        except ValueError:
-            pass
+    anio_vals = [v for v in args.getlist('anio') if v.lstrip('-').isdigit()]  # Año(s) de lanzamiento
+    if anio_vals:
+        placeholders = ','.join('?' * len(anio_vals))
+        clauses.append(f'al.year IN ({placeholders})')
+        params += [int(v) for v in anio_vals]
 
-    pop = args.get('popularidad')
-    if pop:
-        cond, p = _range_condition(f'COALESCE({pop_alias}.pop_score,0)', pop, POP_BUCKETS)
-        if cond:
-            clauses.append(cond)
+    pop_vals = args.getlist('popularidad')
+    if pop_vals:
+        sub, p = [], []
+        for v in pop_vals:
+            cond, cp = _range_condition(f'COALESCE({pop_alias}.pop_score,0)', v, POP_BUCKETS)
+            if cond:
+                sub.append(cond)
+                p += cp
+        if sub:
+            clauses.append('(' + ' OR '.join(sub) + ')')
             params += p
 
-    energia = args.get('energia')
-    if energia:
-        cond, p = _range_condition('tm.energy', energia, ENERGY_BUCKETS)
-        if cond:
-            clauses.append(cond)
+    energia_vals = args.getlist('energia')
+    if energia_vals:
+        sub, p = [], []
+        for v in energia_vals:
+            cond, cp = _range_condition('tm.energy', v, ENERGY_BUCKETS)
+            if cond:
+                sub.append(cond)
+                p += cp
+        if sub:
+            clauses.append('(' + ' OR '.join(sub) + ')')
             params += p
 
-    bail = args.get('bailabilidad')
-    if bail:
-        cond, p = _range_condition('tm.bailabilidad', bail, BAIL_BUCKETS)
-        if cond:
-            clauses.append(cond)
+    bail_vals = args.getlist('bailabilidad')
+    if bail_vals:
+        sub, p = [], []
+        for v in bail_vals:
+            cond, cp = _range_condition('tm.bailabilidad', v, BAIL_BUCKETS)
+            if cond:
+                sub.append(cond)
+                p += cp
+        if sub:
+            clauses.append('(' + ' OR '.join(sub) + ')')
             params += p
 
     return clauses, params
@@ -1224,6 +1251,14 @@ def api_search_advanced():
                        WHERE 1=1{where}'''
         order = _album_order(sort, dir_)
         albums, total, total_pages = _paginate(conn, count_sql, params, data_sql, params, page, order)
+        # _paginate() only cleans cover_path — it never had to add cover_url
+        # because every other caller renders albums through Jinja (which
+        # applies the |cover_url filter at template time). This is a plain
+        # JSON API, so the URL has to be computed here or the <img src>
+        # ends up pointing at a raw filesystem path the browser can't load.
+        for a in albums:
+            a['cover_url'] = cover_url_filter(a.get('cover_path'))
+            a['duration_fmt'] = _fmt_seconds(a.get('total_duration'))
         return jsonify({'albums': albums, 'total': total, 'total_pages': total_pages, 'page': page})
     finally:
         conn.close()

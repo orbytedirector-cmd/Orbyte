@@ -24,7 +24,11 @@
       <h3>🔎 Búsqueda Avanzada</h3>
       <button type="button" class="adv-search-close" onclick="AdvancedSearch.close()" aria-label="Cerrar">✕</button>
     </div>
-    <p class="adv-search-hint">Activa las cápsulas que quieras combinar y elige un valor para cada una.</p>
+    <p class="adv-search-hint">Activa las cápsulas que quieras combinar. Podés elegir más de un valor por categoría.</p>
+    <p class="adv-search-hint adv-search-hint-rule">
+      Varios valores en la <strong>misma</strong> categoría = <strong>cualquiera de ellos</strong> (O).
+      Categorías <strong>distintas</strong> combinadas = <strong>todas a la vez</strong> (Y).
+    </p>
 
     <div class="adv-search-capsules">
 
@@ -195,7 +199,10 @@
 .adv-search-header h3 { margin:0; font-size:1.15rem; color:var(--text-primary); }
 .adv-search-close { background:none; border:1px solid var(--border); color:var(--text-secondary); border-radius:8px; width:30px; height:30px; cursor:pointer; font-size:0.9rem; line-height:1; }
 .adv-search-close:hover { border-color:var(--accent); color:var(--accent); }
-.adv-search-hint { margin:0 0 1rem; font-size:0.8rem; color:var(--text-muted); }
+.adv-search-hint { margin:0 0 0.4rem; font-size:0.8rem; color:var(--text-muted); }
+.adv-search-hint-rule { margin:0 0 1rem; font-size:0.74rem; }
+.adv-search-hint-rule strong { color:var(--text-secondary); }
+.asc-or-badge { display:inline-block; margin-left:0.5rem; font-size:0.66rem; font-weight:600; color:var(--accent); background:rgba(0,212,255,0.1); border:1px solid rgba(0,212,255,0.25); border-radius:10px; padding:0.12rem 0.55rem; vertical-align:middle; }
 .adv-search-capsules { display:flex; flex-direction:column; gap:0.55rem; }
 .asc-filter { border:1px solid var(--border); border-radius:12px; padding:0.55rem 0.75rem; transition:border-color 0.2s,background 0.2s; }
 .asc-filter.is-active { border-color:var(--accent); background:rgba(0,212,255,0.06); }
@@ -222,7 +229,7 @@
 
 <script>
 window.AdvancedSearch = (function () {
-    const state = {};  // field -> value, e.g. {calidad: 'DSD64', mood: 'Energético'}
+    const state = {};  // field -> ARRAY of values, e.g. {calidad: ['DSD64','MQA'], mood: ['Feliz']}
 
     function open() {
         const m = document.getElementById('adv-search-modal');
@@ -239,54 +246,104 @@ window.AdvancedSearch = (function () {
             filterEl.classList.remove('is-active');
             delete state[field];
             filterEl.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+            _updateOrBadge(filterEl, field);
         } else {
             filterEl.classList.add('is-active');
         }
         updateSummary();
     }
+    // Multi-select: clicking a value toggles it on/off within its category
+    // instead of replacing whatever was selected before.
     function pick(valueBtn) {
         const filterEl = valueBtn.closest('.asc-filter');
         const field = filterEl.dataset.field;
-        filterEl.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
-        valueBtn.classList.add('is-selected');
-        state[field] = valueBtn.dataset.value;
-        filterEl.classList.add('is-active');
+        const value = valueBtn.dataset.value;
+        if (!state[field]) state[field] = [];
+        const idx = state[field].indexOf(value);
+        if (idx >= 0) {
+            state[field].splice(idx, 1);
+            valueBtn.classList.remove('is-selected');
+        } else {
+            state[field].push(value);
+            valueBtn.classList.add('is-selected');
+        }
+        if (state[field].length === 0) {
+            delete state[field];
+            filterEl.classList.remove('is-active');
+        } else {
+            filterEl.classList.add('is-active');
+        }
+        _updateOrBadge(filterEl, field);
         updateSummary();
     }
+    // Shows a small "cualquiera de estos (O)" badge next to the capsule the
+    // moment a second value gets picked in that same category — makes the
+    // OR combination visible right where it happens, no separate toggle to
+    // get wrong since AND within one category would always mean 0 results.
+    function _updateOrBadge(filterEl, field) {
+        let badge = filterEl.querySelector('.asc-or-badge');
+        const count = (state[field] || []).length;
+        if (count > 1) {
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'asc-or-badge';
+                badge.textContent = 'cualquiera de estos (O)';
+                filterEl.querySelector('.asc-capsule').insertAdjacentElement('afterend', badge);
+            }
+        } else if (badge) {
+            badge.remove();
+        }
+    }
     function updateSummary() {
-        const n = Object.keys(state).length;
+        const fields = Object.keys(state);
+        const totalValues = fields.reduce((n, f) => n + state[f].length, 0);
         const el = document.getElementById('adv-search-summary');
         if (!el) return;
-        el.textContent = n === 0 ? 'Ningún filtro activo'
-            : `${n} filtro${n !== 1 ? 's' : ''} activo${n !== 1 ? 's' : ''}`;
+        el.textContent = fields.length === 0 ? 'Ningún filtro activo'
+            : `${fields.length} categoría${fields.length !== 1 ? 's' : ''} activa${fields.length !== 1 ? 's' : ''} · ${totalValues} valor${totalValues !== 1 ? 'es' : ''} en total`;
     }
     function reset() {
         Object.keys(state).forEach(k => delete state[k]);
         document.querySelectorAll('.asc-filter').forEach(f => {
             f.classList.remove('is-active');
             f.querySelectorAll('.asc-value').forEach(v => v.classList.remove('is-selected'));
+            const badge = f.querySelector('.asc-or-badge');
+            if (badge) badge.remove();
         });
         updateSummary();
     }
     function run() {
         if (!Object.keys(state).length) return;
-        const params = new URLSearchParams(state);
+        const params = new URLSearchParams();
+        Object.entries(state).forEach(([field, values]) => {
+            values.forEach(v => params.append(field, v));
+        });
         window.location.href = '/busqueda-avanzada?' + params.toString();
     }
     // Pre-fill from the current URL — used on the results page so reopening
-    // the modal ("Modificar filtros") shows what's already active.
+    // the modal ("Modificar filtros") shows what's already active. Groups
+    // repeated query params (?mood=A&mood=B) back into arrays per field.
     function hydrateFromLocation() {
         const params = new URLSearchParams(window.location.search);
+        const grouped = {};
         params.forEach((value, field) => {
+            if (!grouped[field]) grouped[field] = [];
+            grouped[field].push(value);
+        });
+        Object.entries(grouped).forEach(([field, values]) => {
             const filterEl = document.querySelector(`.asc-filter[data-field="${field}"]`);
             if (!filterEl) return;
-            const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
-                .find(v => v.dataset.value === value);
-            if (valBtn) {
-                filterEl.classList.add('is-active');
-                valBtn.classList.add('is-selected');
-                state[field] = value;
-            }
+            values.forEach(value => {
+                const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
+                    .find(v => v.dataset.value === value);
+                if (valBtn) {
+                    filterEl.classList.add('is-active');
+                    valBtn.classList.add('is-selected');
+                    if (!state[field]) state[field] = [];
+                    state[field].push(value);
+                }
+            });
+            _updateOrBadge(filterEl, field);
         });
         updateSummary();
     }
@@ -300,7 +357,7 @@ window.AdvancedSearch = (function () {
             const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
                 .find(v => v.dataset.value === String(value));
             filterEl.classList.add('is-active');
-            if (valBtn) { valBtn.classList.add('is-selected'); state[field] = String(value); }
+            if (valBtn) { valBtn.classList.add('is-selected'); state[field] = [String(value)]; }
         }
         updateSummary();
         open();
