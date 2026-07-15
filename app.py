@@ -1015,13 +1015,27 @@ def _build_adv_filters(args, pop_alias, for_albums):
     de estos") is the only combination that makes sense there. Different
     fields are still combined with AND, same as before.
 
-    for_albums controls which table mood/momento/era/idioma are matched
-    against — this is the exact same distinction _ALBUM_META_FIELD already
-    makes for the single-filter /mood, /momento, /era, /language routes:
-    a single mismatched or mistagged track's track_meta value shouldn't be
-    enough to pull an otherwise-unrelated album into the Albums view, so
-    that view matches against album_meta's predominant field instead. The
-    Tracks view keeps matching per-track (tm.*), which is correct there.
+    for_albums controls which table mood/momento/era/idioma/genero/energia/
+    bailabilidad are matched against — this is the exact same distinction
+    _ALBUM_META_FIELD already makes for the single-filter /mood, /momento,
+    /era, /language routes: a single mismatched or outlier track's
+    track_meta value shouldn't be enough to pull an otherwise-unrelated
+    album into the Albums view, so that view matches against album_meta's
+    predominant/average field instead. The Tracks view keeps matching
+    per-track (tm.*/t.*), which is correct there.
+
+    Fields intentionally NOT split this way:
+    - tema (Categoría Letra): album_meta has no equivalent column — stays
+      track_meta-only for both views.
+    - pais, anio: already single-level (artists.nationality, albums.year),
+      no track/album ambiguity to begin with.
+    - popularidad: already correctly split via the pop_alias param (apc for
+      albums, tpc for tracks) — both are pre-computed scores, not raw
+      per-track values, so no change was needed here.
+    - calidad: albums has a `primary_format` column, but its value domain
+      hasn't been confirmed to line up with QUALITY_OPTIONS (CD/HI-RES/
+      DSD64.../OSR), so it's left per-track for both views rather than
+      guessing at the mapping.
     """
     clauses, params = [], []
 
@@ -1048,9 +1062,14 @@ def _build_adv_filters(args, pop_alias, for_albums):
     genero_vals = args.getlist('genero')
     if genero_vals:
         sub = []
-        for g in genero_vals:
-            sub.append('(t.genre = ? OR tm.genre_primary = ? OR tm.genre_secondary = ?)')
-            params += [g, g, g]
+        if for_albums:
+            for g in genero_vals:
+                sub.append('(am.genre_primary = ? OR am.genre_secondary = ?)')
+                params += [g, g]
+        else:
+            for g in genero_vals:
+                sub.append('(t.genre = ? OR tm.genre_primary = ? OR tm.genre_secondary = ?)')
+                params += [g, g, g]
         clauses.append('(' + ' OR '.join(sub) + ')')
 
     pais_vals = args.getlist('pais')  # País Origen (artists.nationality)
@@ -1080,8 +1099,9 @@ def _build_adv_filters(args, pop_alias, for_albums):
     energia_vals = args.getlist('energia')
     if energia_vals:
         sub, p = [], []
+        energia_col = 'am.avg_energy' if for_albums else 'tm.energy'
         for v in energia_vals:
-            cond, cp = _range_condition('tm.energy', v, ENERGY_BUCKETS)
+            cond, cp = _range_condition(energia_col, v, ENERGY_BUCKETS)
             if cond:
                 sub.append(cond)
                 p += cp
@@ -1092,8 +1112,9 @@ def _build_adv_filters(args, pop_alias, for_albums):
     bail_vals = args.getlist('bailabilidad')
     if bail_vals:
         sub, p = [], []
+        bail_col = 'am.avg_bailabilidad' if for_albums else 'tm.bailabilidad'
         for v in bail_vals:
-            cond, cp = _range_condition('tm.bailabilidad', v, BAIL_BUCKETS)
+            cond, cp = _range_condition(bail_col, v, BAIL_BUCKETS)
             if cond:
                 sub.append(cond)
                 p += cp
