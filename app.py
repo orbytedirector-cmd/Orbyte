@@ -315,6 +315,46 @@ def audio_url_filter(file_path):
         return f"/stream-dsd/{encoded}"
     return f"/audio/{encoded}"
 
+def build_similar_artists(conn, similar_artists_json, limit=12):
+    """Parsea artists.similar_artists_json y arma la lista enriquecida con
+       cover_url (portada del álbum más popular de cada artista, si existe
+       en la biblioteca). Usado por /artist/<id> (tab Similares) y por
+       /api/track/<id>/similar-artists (NP overlay)."""
+    similar_artists = []
+    if not similar_artists_json:
+        return similar_artists
+    try:
+        similar_raw = json.loads(similar_artists_json)
+    except Exception:
+        return similar_artists
+    if not isinstance(similar_raw, list):
+        return similar_artists
+    for s in similar_raw[:limit]:
+        name = s.get('name', '') if isinstance(s, dict) else (s if isinstance(s, str) else '')
+        if not name:
+            continue
+        existing = conn.execute(
+            'SELECT id FROM artists WHERE LOWER(name)=LOWER(?)', (name,)
+        ).fetchone()
+        cover_url = ''
+        if existing:
+            cov = conn.execute(
+                '''SELECT al.cover_path FROM albums al
+                   LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                   WHERE al.artist_id=?
+                   ORDER BY COALESCE(apc.pop_score,0) DESC, al.year DESC
+                   LIMIT 1''',
+                (existing['id'],)
+            ).fetchone()
+            if cov and cov['cover_path']:
+                cover_url = cover_url_filter(clean_db_path(cov['cover_path']))
+        similar_artists.append({
+            'name': name,
+            'id': existing['id'] if existing else None,
+            'cover_url': cover_url
+        })
+    return similar_artists
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/sw.js')
@@ -534,38 +574,8 @@ def artist(artist_id):
         ''', (artist_id,)).fetchall()
         genres = [r['g'] for r in genre_row]
 
-        # Similar artists from JSON field — enriched with a cover image (best
-        # album of that artist, if they exist in our library) for the carousel
-        similar_artists = []
-        if ar_data.get('similar_artists_json'):
-            try:
-                similar_raw = json.loads(ar_data['similar_artists_json'])
-                for s in (similar_raw[:12] if isinstance(similar_raw, list) else []):
-                    name = s.get('name', '') if isinstance(s, dict) else (s if isinstance(s, str) else '')
-                    if name:
-                        # Check if they exist in our library
-                        existing = conn.execute(
-                            'SELECT id FROM artists WHERE LOWER(name)=LOWER(?)', (name,)
-                        ).fetchone()
-                        cover_url = ''
-                        if existing:
-                            cov = conn.execute(
-                                '''SELECT al.cover_path FROM albums al
-                                   LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
-                                   WHERE al.artist_id=?
-                                   ORDER BY COALESCE(apc.pop_score,0) DESC, al.year DESC
-                                   LIMIT 1''',
-                                (existing['id'],)
-                            ).fetchone()
-                            if cov and cov['cover_path']:
-                                cover_url = cover_url_filter(clean_db_path(cov['cover_path']))
-                        similar_artists.append({
-                            'name': name,
-                            'id': existing['id'] if existing else None,
-                            'cover_url': cover_url
-                        })
-            except Exception:
-                pass
+        # Similar artists — enriquecidos con cover_url para el carrusel (tab Similares)
+        similar_artists = build_similar_artists(conn, ar_data.get('similar_artists_json'), limit=12)
 
         # Top / most popular tracks for this artist — powers the "Populares" tab
         top_tracks_raw = conn.execute(
@@ -1649,6 +1659,28 @@ def api_track_similar(track_id):
             d['sim_score']   = s.get('score')
             result.append(d)
         return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/api/track/<int:track_id>/similar-artists')
+def api_track_similar_artists(track_id):
+    """Artistas similares al artista de la pista en reproducción — alimenta
+       el botón 'banda' del Now Playing. Resuelve track -> álbum -> artista y
+       reusa build_similar_artists(), la misma lógica que la tab Similares
+       de /artist/<id>."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            '''SELECT ar.similar_artists_json
+               FROM tracks t
+               JOIN albums al ON al.id = t.album_id
+               JOIN artists ar ON ar.id = al.artist_id
+               WHERE t.id = ?''', (track_id,)
+        ).fetchone()
+        if not row:
+            return jsonify([])
+        return jsonify(build_similar_artists(conn, row['similar_artists_json'], limit=12))
     finally:
         conn.close()
 

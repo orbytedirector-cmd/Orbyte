@@ -260,6 +260,8 @@ input[type=range].volume-slider { width:70px; accent-color:var(--accent); }
 .normalize-toggle:hover .normalize-svg { transform:scale(1.12); }
 .similar-svg { width:18px; height:18px; display:block; overflow:visible; transition:transform 0.2s ease; }
 #np-similar-btn:hover .similar-svg { transform:scale(1.12); }
+.similar-artists-svg { width:18px; height:18px; display:block; overflow:visible; transition:transform 0.2s ease; }
+#np-similar-artists-btn:hover .similar-artists-svg { transform:scale(1.12); }
 @keyframes normalizePulse {
   0%, 100% { box-shadow:0 0 0 0 rgba(200,146,10,0.35); }
   50%      { box-shadow:0 0 0 5px rgba(200,146,10,0); }
@@ -1184,6 +1186,25 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   z-index: 1;
 }
 .np-close:hover { background: rgba(200,146,10,0.18); color: var(--text-gold); }
+
+/* Corner action stack — "oído" (pistas similares) y "banda" (artistas
+   similares), apilados debajo del botón de cerrar */
+.np-corner-btn {
+  position: absolute;
+  right: 0.9rem;
+  background: rgba(200,146,10,0.08);
+  border: 1px solid var(--border-gold);
+  color: var(--accent);
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  z-index: 1;
+}
+.np-corner-btn:hover { background: rgba(200,146,10,0.18); color: var(--text-gold); }
+#np-similar-btn         { top: calc(0.75rem + 30px + 0.5rem); }
+#np-similar-artists-btn { top: calc(0.75rem + (30px + 0.5rem) * 2); }
 .np-cover-wrap img {
   width: 100%; height: 100%;
   object-fit: cover;
