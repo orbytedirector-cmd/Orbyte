@@ -1379,6 +1379,11 @@ def browse_led(color):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        # Feeds the "Filtrar" button's preloaded Búsqueda Avanzada modal
+        # (same helper /busqueda-avanzada uses) — without this, the modal
+        # only has Calidad/Popularidad/Energía/Bailabilidad to show, since
+        # those don't depend on any data from the route.
+        opts = _advanced_search_options(conn)
         count_sql = '''SELECT COUNT(DISTINCT al.id)
                        FROM albums al JOIN tracks t ON t.album_id=al.id
                        WHERE t.led_color=?'''
@@ -1409,7 +1414,7 @@ def browse_led(color):
                                title=f"LED {color.capitalize()} — {LED_LABELS[color]}",
                                filter_type='led', filter_value=color,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1422,6 +1427,7 @@ def browse_genre(genre):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         # Match by genre_primary in track_meta OR classic genre field in tracks
         count_sql = '''SELECT COUNT(DISTINCT al.id) FROM albums al
                        JOIN tracks t ON t.album_id=al.id
@@ -1442,7 +1448,7 @@ def browse_genre(genre):
         return render_template('browse.html', albums=albums, title=f"Género: {genre}",
                                filter_type='genre', filter_value=genre,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1523,12 +1529,13 @@ def browse_mood(mood):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         albums, total, total_pages = _meta_browse(conn, 'mood', mood, page, mood, 'mood', sort, dir_)
         display = MOOD_LABELS.get(mood, mood)
         return render_template('browse.html', albums=albums, title=f"Mood: {display}",
                                filter_type='mood', filter_value=mood,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1540,6 +1547,7 @@ def browse_momento(momento):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         albums, total, total_pages = _meta_browse(conn, 'momento', momento, page, momento, 'momento', sort, dir_)
         momento_labels = {
             'morning': 'Mañana ☀️', 'evening': 'Tarde 🌅', 'night': 'Noche 🌙',
@@ -1550,7 +1558,7 @@ def browse_momento(momento):
         return render_template('browse.html', albums=albums, title=f"Momento: {label}",
                                filter_type='momento', filter_value=momento,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1562,6 +1570,7 @@ def browse_era(era):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         albums, total, total_pages = _meta_browse(conn, 'era', era, page, era, 'era', sort, dir_)
         era_labels = {
             'early_rock_era':         'Early Rock (50s–60s)',
@@ -1577,7 +1586,7 @@ def browse_era(era):
         return render_template('browse.html', albums=albums, title=f"Era: {label}",
                                filter_type='era', filter_value=era,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1589,11 +1598,12 @@ def browse_tema(tema):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         albums, total, total_pages = _meta_browse(conn, 'tema_lirico', tema, page, tema, 'tema', sort, dir_)
         return render_template('browse.html', albums=albums, title=f"Tema lírico: {tema.capitalize()}",
                                filter_type='tema', filter_value=tema,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
@@ -1623,6 +1633,7 @@ def browse_language(lang):
     dir_ = request.args.get('dir',  'desc')
     conn = get_db_connection()
     try:
+        opts = _advanced_search_options(conn)
         albums, total, total_pages = _meta_browse(conn, 'idioma', lang, page, lang, 'language', sort, dir_)
         lang_labels = {
             'en': 'Inglés 🇬🇧', 'es': 'Español 🇪🇸', 'de': 'Alemán 🇩🇪',
@@ -1633,7 +1644,7 @@ def browse_language(lang):
         return render_template('browse.html', albums=albums, title=f"Idioma: {label}",
                                filter_type='language', filter_value=lang,
                                page=page, total_pages=total_pages, total=total,
-                               sort=sort, sort_dir=dir_)
+                               sort=sort, sort_dir=dir_, **opts)
     finally:
         conn.close()
 
