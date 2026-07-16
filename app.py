@@ -2141,8 +2141,14 @@ def api_meta_tracks():
 
     conn = get_db_connection()
     try:
-        # Use album-level filter for mood/era/idioma/momento (same logic as album browse)
-        album_meta_col = _ALBUM_META_FIELD.get(field)
+        # This endpoint lists INDIVIDUAL tracks (the Pistas tab) — always
+        # match each track's own tag. album_meta's predominant-field logic
+        # belongs to _meta_browse() (the Álbumes tab) only; applying it here
+        # too was pulling in every track from a mostly-matching album even
+        # when that specific track didn't carry the tag itself (e.g. a
+        # French-tagged track on an English-dominant album wouldn't count
+        # here, while home.html's per-track total — and the "cualquiera de
+        # estos" Búsqueda Avanzada Pistas view — both already counted it).
         if field == 'genre':
             # Same match as browse_genre: classic tracks.genre OR track_meta.genre_primary
             count = conn.execute('''
@@ -2150,12 +2156,6 @@ def api_meta_tracks():
                 LEFT JOIN track_meta tm ON tm.track_id=t.id
                 WHERE t.genre=? OR tm.genre_primary=?
             ''', (value, value)).fetchone()[0]
-        elif album_meta_col:
-            count = conn.execute(f'''
-                SELECT COUNT(*) FROM tracks t
-                JOIN album_meta am ON am.album_id=t.album_id
-                WHERE am.{album_meta_col}=?
-            ''', (value,)).fetchone()[0]
         else:
             count = conn.execute(
                 f'SELECT COUNT(*) FROM track_meta WHERE {field}=?', (value,)
@@ -2172,15 +2172,11 @@ def api_meta_tracks():
             offset = (page - 1) * PAGE_SIZE
             order  = _track_order(sort, dir_)
 
-        # Build the WHERE clause based on album-level, track-level, or genre filter
+        # Build the WHERE clause — per-track always (see comment above)
         if field == 'genre':
             where_clause = '(t.genre=? OR tm.genre_primary=?)'
             extra_join   = ''
             where_params = (value, value)
-        elif album_meta_col:
-            where_clause = f'am.{album_meta_col}=?'
-            extra_join   = 'JOIN album_meta am ON am.album_id=t.album_id'
-            where_params = (value,)
         else:
             where_clause = f'tm.{field}=?'
             extra_join   = ''
