@@ -45,10 +45,16 @@
       <button class="vt-btn"        id="btn-tracks" onclick="switchView('tracks')">♪ Pistas</button>
     </div>
     {% endif %}
+    <button type="button" class="track-btn ghost" onclick="openAdvancedSearchWithPreset()"
+            style="padding:0.4rem 0.9rem;" title="Seguir filtrando desde acá con Búsqueda Avanzada">
+      🔎 Filtrar
+    </button>
     <a href="/" class="track-btn ghost" style="text-decoration:none;padding:0.4rem 0.9rem;">🏠</a>
     <a href="javascript:history.back()" class="track-btn ghost" style="text-decoration:none;padding:0.4rem 0.9rem;">← Volver</a>
   </div>
 </div>
+
+{% include '_advanced_search_modal.html' %}
 
 <!-- ── Sort bar — Albums ───────────────────────────────────────────────────── -->
 <div class="sort-bar" id="sort-bar-albums">
@@ -333,6 +339,26 @@ let tracksLoaded         = false;
 
 const FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema_lirico', tier:'tier', language:'idioma', genre:'genre' };
 const ALBUM_IDS = {{ albums|map(attribute='id')|list|tojson }};
+
+// ── "Filtrar" button — opens Búsqueda Avanzada preloaded with this page's
+// filter (ticket "Vista de filtros"). FILTER_TYPE here uses this page's own
+// English/legacy naming (mood/momento/era/tema/language/genre/led); the
+// modal's capsules use the Spanish field names from the original Búsqueda
+// Avanzada ticket — ADV_FIELD_MAP translates between the two.
+const ADV_FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema',
+                         language:'idioma', genre:'genero', led:'calidad', tier:'tier' };
+// A single LED color can correspond to more than one Calidad option (cyan
+// covers both DSD64 and DSD128 — see LED_LABELS in app.py) — preload every
+// matching value at once rather than guessing a single one.
+const LED_TO_CALIDAD = {
+  yellow: ['CD'], white: ['HI-RES'], cyan: ['DSD64', 'DSD128'],
+  red: ['DSD256'], green: ['MQA'], blue: ['MQA Studio'], magenta: ['OSR'],
+};
+window.openAdvancedSearchWithPreset = function() {
+  const advField = ADV_FIELD_MAP[FILTER_TYPE] || FILTER_TYPE;
+  const advValue = FILTER_TYPE === 'led' ? (LED_TO_CALIDAD[FILTER_VALUE] || [FILTER_VALUE]) : FILTER_VALUE;
+  if (window.AdvancedSearch) AdvancedSearch.openWithPreset(advField, advValue);
+};
 
 // Fetch tracks for every album currently loaded on this page (Albums view)
 async function collectLoadedAlbumTracks() {

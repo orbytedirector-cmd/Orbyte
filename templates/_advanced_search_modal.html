@@ -104,25 +104,39 @@
       </div>
       {% endif %}
 
-      <!-- Género -->
+      <!-- Género — unlimited list (point 2: the capped top-15/top-8 lists
+           were hiding real options) + a live search box so a long list
+           doesn't have to be scanned by eye. Guarded with a conditional
+           (unlike the old version) so pages that don't supply genre data —
+           like browse.html, which only needs this partial for the
+           "Filtrar" preload — degrade to simply not rendering this capsule
+           instead of crashing on an undefined loop. -->
+      {% set _adv_genres_primary = adv_genres_primary|default([]) %}
+      {% set _adv_all_genres = all_genres|default([]) %}
+      {% if _adv_genres_primary or _adv_all_genres %}
       <div class="asc-filter" data-field="genero">
         <button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">Género</button>
-        <div class="asc-values asc-values-scroll">
-          {% set seen_genres = [] %}
-          {% for genre, count in genres_primary %}
-            {% if genre not in seen_genres %}
-              {% set _ = seen_genres.append(genre) %}
-              <button type="button" class="asc-value" data-value="{{ genre }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
-            {% endif %}
-          {% endfor %}
-          {% for genre, count in genres %}
-            {% if genre not in seen_genres %}
-              {% set _ = seen_genres.append(genre) %}
-              <button type="button" class="asc-value" data-value="{{ genre }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
-            {% endif %}
-          {% endfor %}
+        <div class="asc-values-wrap">
+          <input type="text" class="asc-genre-search" placeholder="Buscar género…"
+                 oninput="AdvancedSearch.filterGenres(this.value)">
+          <div class="asc-values asc-values-scroll" id="asc-genre-values">
+            {% set seen_genres = [] %}
+            {% for genre, count in _adv_genres_primary %}
+              {% if genre not in seen_genres %}
+                {% set _ = seen_genres.append(genre) %}
+                <button type="button" class="asc-value" data-value="{{ genre }}" data-genre-search="{{ genre|lower }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
+              {% endif %}
+            {% endfor %}
+            {% for genre, count in _adv_all_genres %}
+              {% if genre not in seen_genres %}
+                {% set _ = seen_genres.append(genre) %}
+                <button type="button" class="asc-value" data-value="{{ genre }}" data-genre-search="{{ genre|lower }}" onclick="AdvancedSearch.pick(this)">{{ genre }} <small>{{ count }}</small></button>
+              {% endif %}
+            {% endfor %}
+          </div>
         </div>
       </div>
+      {% endif %}
 
       <!-- Idioma -->
       {% if languages %}
@@ -208,6 +222,11 @@
 .asc-bulk-btn { background:none; border:none; color:var(--text-muted); text-decoration:underline; cursor:pointer; font-size:0.7rem; padding:0; }
 .asc-bulk-btn:hover { color:var(--accent); }
 .asc-bulk-sep { color:var(--text-muted); font-size:0.7rem; }
+.asc-values-wrap { display:none; margin-top:0.6rem; }
+.asc-filter.is-active .asc-values-wrap { display:block; }
+.asc-values-wrap .asc-values { display:flex; margin-top:0.5rem; }
+.asc-genre-search { width:100%; box-sizing:border-box; padding:0.4rem 0.65rem; background:rgba(255,255,255,0.05); border:1px solid var(--border); border-radius:8px; color:var(--text-primary); font-size:0.8rem; outline:none; }
+.asc-genre-search:focus { border-color:var(--accent); }
 .adv-search-capsules { display:flex; flex-direction:column; gap:0.55rem; }
 .asc-filter { border:1px solid var(--border); border-radius:12px; padding:0.55rem 0.75rem; transition:border-color 0.2s,background 0.2s; }
 .asc-filter.is-active { border-color:var(--accent); background:rgba(0,212,255,0.06); }
@@ -340,6 +359,16 @@ window.AdvancedSearch = (function () {
             capsule.insertAdjacentElement('afterend', bulk);
         });
     }
+    // Live-filters the Género chip list as the person types — same behavior
+    // as the "Ver todos los géneros" search box on home.html, just scoped to
+    // this capsule instead of the whole page.
+    function filterGenres(query) {
+        const term = query.toLowerCase().trim();
+        document.querySelectorAll('#asc-genre-values .asc-value').forEach(btn => {
+            const matches = term === '' || (btn.dataset.genreSearch || '').includes(term);
+            btn.style.display = matches ? '' : 'none';
+        });
+    }
     function updateSummary() {
         const fields = Object.keys(state);
         const totalValues = fields.reduce((n, f) => n + state[f].length, 0);
@@ -408,17 +437,64 @@ window.AdvancedSearch = (function () {
         });
         updateSummary();
     }
-    // Reusable entry point for other views later (ticket point 1): activates
-    // one capsule with a given value and opens the modal so the person can
-    // keep combining filters from there.
+    // Capsule titles — used only when dynamically creating a category that
+    // wasn't rendered server-side (see openWithPreset below).
+    const FIELD_LABELS = {
+        calidad: 'Calidad', mood: 'Mood', momento: 'Momento del día',
+        era: 'Década / Era', tema: 'Categoría Letra', genero: 'Género',
+        idioma: 'Idioma', pais: 'País Origen', anio: 'Año',
+        popularidad: 'Popularidad', energia: 'Energía', bailabilidad: 'Bailabilidad',
+    };
+    function _ensureFilterBlock(field) {
+        let filterEl = document.querySelector(`.asc-filter[data-field="${field}"]`);
+        if (filterEl) return filterEl;
+        const capsulesWrap = document.querySelector('.adv-search-capsules');
+        if (!capsulesWrap) return null;
+        filterEl = document.createElement('div');
+        filterEl.className = 'asc-filter';
+        filterEl.dataset.field = field;
+        filterEl.innerHTML =
+            `<button type="button" class="asc-capsule" onclick="AdvancedSearch.toggle(this)">${FIELD_LABELS[field] || field}</button>` +
+            `<div class="asc-values"></div>`;
+        capsulesWrap.appendChild(filterEl);
+        _injectBulkControls();
+        return filterEl;
+    }
+    function _ensureValueBtn(filterEl, value) {
+        let valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
+            .find(v => v.dataset.value === String(value));
+        if (valBtn) return valBtn;
+        const valuesEl = filterEl.querySelector('.asc-values');
+        if (!valuesEl) return null;
+        valBtn = document.createElement('button');
+        valBtn.type = 'button';
+        valBtn.className = 'asc-value';
+        valBtn.dataset.value = String(value);
+        valBtn.textContent = String(value);
+        valBtn.onclick = () => AdvancedSearch.pick(valBtn);
+        valuesEl.appendChild(valBtn);
+        return valBtn;
+    }
+    // Reusable entry point for other filter views (ticket point 1, wired up
+    // for real in the "Vista de filtros" ticket): activates one capsule with
+    // a given value (or several — pass an array, e.g. when one LED color
+    // maps to more than one Calidad option) and opens the modal so the
+    // person can keep combining filters from there. Works even on pages
+    // that only pass filter_type/filter_value (browse.html) and none of the
+    // option lists this partial normally expects — the capsule and its
+    // value chip get created on the fly if they don't already exist.
     function openWithPreset(field, value) {
         reset();
-        const filterEl = document.querySelector(`.asc-filter[data-field="${field}"]`);
+        const values = (Array.isArray(value) ? value : [value]).map(String);
+        const filterEl = _ensureFilterBlock(field);
         if (filterEl) {
-            const valBtn = Array.from(filterEl.querySelectorAll('.asc-value'))
-                .find(v => v.dataset.value === String(value));
             filterEl.classList.add('is-active');
-            if (valBtn) { valBtn.classList.add('is-selected'); state[field] = [String(value)]; }
+            state[field] = [];
+            values.forEach(v => {
+                const valBtn = _ensureValueBtn(filterEl, v);
+                if (valBtn) { valBtn.classList.add('is-selected'); state[field].push(v); }
+            });
+            _updateOrBadge(filterEl, field);
         }
         updateSummary();
         open();
@@ -426,6 +502,6 @@ window.AdvancedSearch = (function () {
 
     _injectBulkControls();
 
-    return { open, close, toggle, pick, selectAll, selectNone, reset, run, hydrateFromLocation, openWithPreset, state };
+    return { open, close, toggle, pick, selectAll, selectNone, filterGenres, reset, run, hydrateFromLocation, openWithPreset, state };
 })();
 </script>

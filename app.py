@@ -455,6 +455,16 @@ def home():
         ).fetchall()
         genres_primary = [(r['genre_primary'], r['c']) for r in genre_primary_rows]
 
+        # Unlimited version of genres_primary, dedicated to the Búsqueda
+        # Avanzada Género capsule (see _advanced_search_options() for the
+        # matching copy used on /busqueda-avanzada itself). Kept separate
+        # from genres_primary above so this compact section's LIMIT 15 is
+        # untouched.
+        adv_genre_primary_rows = conn.execute(
+            'SELECT genre_primary, COUNT(*) as c FROM track_meta WHERE genre_primary IS NOT NULL AND genre_primary!="" GROUP BY genre_primary ORDER BY c DESC'
+        ).fetchall()
+        adv_genres_primary = [(r['genre_primary'], r['c']) for r in adv_genre_primary_rows]
+
         # Max era count for proportional bars
         max_era_count = max((c for _, c in eras), default=1)
 
@@ -488,7 +498,7 @@ def home():
             led_counts=led_counts,
             led_order=LED_ORDER, led_labels=LED_LABELS,
             genres=genres, all_genres=all_genres,
-            genres_primary=genres_primary,
+            genres_primary=genres_primary, adv_genres_primary=adv_genres_primary,
             languages=languages,
             recent_albums=recent_albums,
             moods=moods, momentos=momentos, eras=eras,
@@ -1169,6 +1179,20 @@ def _advanced_search_options(conn):
         'SELECT idioma, COUNT(*) as c FROM track_meta WHERE idioma IS NOT NULL AND idioma!="" '
         'GROUP BY idioma ORDER BY c DESC LIMIT 12').fetchall()]
 
+    # Unlimited genre lists — dedicated to the Búsqueda Avanzada Género capsule.
+    # genres_primary/genres above are capped (15/8) for home.html's own compact
+    # "Géneros / Subgéneros" section; the modal needs every option so it isn't
+    # missing anything, per the ticket's point 2. Separate variables so fixing
+    # this never risks changing that unrelated home.html section.
+    adv_genres_primary = [(r['genre_primary'], r['c']) for r in conn.execute(
+        'SELECT genre_primary, COUNT(*) as c FROM track_meta '
+        'WHERE genre_primary IS NOT NULL AND genre_primary!="" '
+        'GROUP BY genre_primary ORDER BY c DESC').fetchall()]
+
+    all_genres = [(r['genre'], r['c']) for r in conn.execute(
+        'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" '
+        'GROUP BY genre ORDER BY c DESC').fetchall()]
+
     available_years = [r['year'] for r in conn.execute(
         'SELECT DISTINCT year FROM albums WHERE year IS NOT NULL ORDER BY year DESC').fetchall()]
 
@@ -1179,6 +1203,7 @@ def _advanced_search_options(conn):
 
     return dict(moods=moods, momentos=momentos, eras=eras, temas=temas,
                 genres_primary=genres_primary, genres=genres, languages=languages,
+                adv_genres_primary=adv_genres_primary, all_genres=all_genres,
                 available_years=available_years, nationalities=nationalities)
 
 @app.route('/busqueda-avanzada')
