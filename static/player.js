@@ -1014,6 +1014,18 @@ function _updateNormalizeButtons() {
 function toggleNormalize() {
     normalizeEnabled = !normalizeEnabled;
     try { localStorage.setItem('orbyte_normalize', normalizeEnabled ? '1' : '0'); } catch (e) {}
+    // iOS trata el audio que pasa por Web Audio API (AudioContext) como
+    // "ambiental" y lo silencia apenas la app deja de estar en primer plano
+    // — es una restricción del sistema operativo, no algo que podamos
+    // evitar desde acá. Se avisa una sola vez, la primera vez que se activa.
+    if (normalizeEnabled) {
+        let warned = false;
+        try { warned = localStorage.getItem('orbyte_normalize_warned') === '1'; } catch (e) {}
+        if (!warned) {
+            alert('Con Normalizar activo, la reproducción se silencia si bloqueás la pantalla o cambiás de app (restricción de iOS/Android para audio procesado, no un error de Orbyte). Dejá la app en primer plano mientras la uses.');
+            try { localStorage.setItem('orbyte_normalize_warned', '1'); } catch (e) {}
+        }
+    }
     _ensureNormalizeGraph();
     _resumeAudioCtxIfNeeded();
     _applyNormalizeState();

@@ -3,7 +3,7 @@
   "short_name": "Orbyte",
   "description": "Navegador de música Hi-Fi personal. DSD, FLAC, MQA.",
   "start_url": "/",
-  "display": "standalone",
+  "display": "browser",
   "orientation": "portrait-primary",
   "background_color": "#000000",
   "theme_color": "#000000",
