@@ -312,8 +312,8 @@
       <div class="playlist-header">
         <span>Playlist (<span id="pl-count">0</span>)</span>
         <button onclick="clearPlaylist()">🗑</button>
-        <button onclick="downloadM3U()">⬇ M3U</button>
-        <button onclick="document.getElementById('m3u-import-input').click()" title="Importar playlist M3U">⬆ M3U</button>
+        <button id="pl-export-btn" onclick="downloadM3U()">⬇ M3U</button>
+        <button id="pl-import-btn" onclick="document.getElementById('m3u-import-input').click()" title="Importar playlist M3U">⬆ M3U</button>
         <button onclick="togglePlaylist()">✕</button>
       </div>
       <input type="file" id="m3u-import-input" accept=".m3u,.m3u8,audio/x-mpegurl" style="display:none" onchange="importM3U(event)">
@@ -1434,6 +1434,7 @@
       }, { passive: false });
     }
   </script>
+  <script src="{{ url_for('static', filename='tutorial.js') }}?v=20260717"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

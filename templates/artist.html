@@ -357,7 +357,14 @@ function showArtistTab(tab, btn) {
 
 // ── Populares: reproducción de las pistas más relevantes del artista ────────
 // Los datos ya vienen embebidos desde el servidor — no hace falta otra llamada.
-const TOP_TRACKS = {{ top_tracks|tojson }};
+// window.TOP_TRACKS (no "const"): esta vista se re-renderiza vía SPA
+// (navigateTo() en base.html reinyecta y re-ejecuta este <script> cada vez
+// que se navega a una página de artista sin recarga completa). Un segundo
+// "const TOP_TRACKS" en el mismo scope global tira SyntaxError y aborta
+// todo el bloque en silencio — los botones de Reproducir/Añadir a cola de
+// "Populares" quedaban con la TOP_TRACKS del artista anterior (o directamente
+// sin redefinir nada) y por eso no hacían nada al pincharlos.
+window.TOP_TRACKS = {{ top_tracks|tojson }};
 
 async function playAllTopTracks() {
   if (window.primeAudioForGesture) window.primeAudioForGesture();
