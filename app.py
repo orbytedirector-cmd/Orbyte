@@ -1261,7 +1261,7 @@ def api_search_advanced():
             order = _track_order(sort, dir_)
             offset = (page - 1) * PAGE_SIZE
             data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
-                                  al.year as album_year, al.cover_path as album_cover_path,
+                                  al.year as album_year, al.cover_path,
                                   ar.name as artist_name,
                                   tm.mood, tm.momento, tm.era, tm.tema_lirico, tm.idioma,
                                   tm.genre_primary, tm.genre_secondary, tm.bpm, tm.energy,
