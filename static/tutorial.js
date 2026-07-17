@@ -43,15 +43,56 @@
   // ── Steps ──────────────────────────────────────────────────────────────────
   // Home-only targets (quality-grid, genre-chips, fav-banner, adv-search-open-btn)
   // are safe because the tour always starts from Home (see start()).
-  function ensureNPOpenIfPlaying() {
-    if (window._currentTrack && typeof window.openNowPlaying === 'function') {
-      window.openNowPlaying();
+
+  // openNowPlaying() (la función real de la app) no hace nada si todavía no
+  // hay window._currentTrack — el caso más común para alguien viendo el tour
+  // por primera vez, antes de haber tocado play. Sin este fallback, los pasos
+  // de "reproductor en primer plano" / "pistas similares" / "artistas
+  // similares" nunca llegaban a mostrar la UI real (se iban directo al texto
+  // de respaldo). Cuando no hay nada sonando, se inyecta una pista de
+  // demostración descartable (sin id/audio_url, así que nada puede llegar a
+  // reproducirse) solo para que el panel se dibuje de verdad; se restaura el
+  // estado anterior en cuanto se sale de estos pasos.
+  var _demoTrackActive = false;
+  var _savedCurrentTrack;
+
+  function openFullscreenPlayer() {
+    if (window._currentTrack) {
+      if (typeof window.openNowPlaying === 'function') window.openNowPlaying();
+      return;
     }
-  }
-  function closeNPIfOpen() {
+    if (!_demoTrackActive) {
+      _demoTrackActive = true;
+      _savedCurrentTrack = window._currentTrack;
+      window._currentTrack = {
+        id: null,
+        title: 'Pista de ejemplo',
+        artist: 'Artista de ejemplo',
+        album: 'Álbum de ejemplo',
+        led_color: 'white',
+        format_display: 'FLAC · 96kHz/24bit',
+        duration: 210
+      };
+    }
     var ov = document.getElementById('np-overlay');
-    if (ov && ov.classList.contains('open') && typeof window.closeNowPlaying === 'function') {
+    if (ov && !ov.classList.contains('open')) {
+      ov.classList.add('open');
+      document.body.style.overflow = 'hidden';
+    }
+    if (typeof window._npSyncState === 'function') window._npSyncState();
+  }
+
+  function closeFullscreenPlayer() {
+    if (typeof window.closeNowPlaying === 'function') {
       window.closeNowPlaying();
+    } else {
+      var ov = document.getElementById('np-overlay');
+      if (ov) ov.classList.remove('open');
+      document.body.style.overflow = '';
+    }
+    if (_demoTrackActive) {
+      window._currentTrack = _savedCurrentTrack;
+      _demoTrackActive = false;
     }
   }
   function openPlaylistIfClosed() {
@@ -129,23 +170,29 @@
       body: 'Toca la carátula para abrir el reproductor a pantalla completa, con la portada en grande, el progreso y todos los controles.'
     },
     {
+      id: 'fullscreen-open', target: '#np-cover-wrap',
+      enter: function () { openFullscreenPlayer(); },
+      title: '✨ Así se ve',
+      body: 'Portada en grande, progreso, aleatorio/repetir, favorito, letra y normalizador — todo a mano en una sola pantalla.'
+    },
+    {
       id: 'similar-tracks', target: '#np-similar-btn',
-      enter: function () { ensureNPOpenIfPlaying(); },
+      enter: function () { openFullscreenPlayer(); },
       title: '🎧 Pistas similares',
-      body: 'Desde el reproductor a pantalla completa, este botón te sugiere pistas parecidas a la que estás escuchando.',
+      body: 'Este botón (arriba a la izquierda) te sugiere pistas parecidas a la que estás escuchando.',
       fallbackBody: 'Cuando reproduzcas una pista y abras el reproductor a pantalla completa, este botón (arriba a la izquierda) te sugiere pistas parecidas a la que suena.'
     },
     {
       id: 'similar-artists', target: '#np-similar-artists-btn',
-      enter: function () { ensureNPOpenIfPlaying(); },
+      enter: function () { openFullscreenPlayer(); },
       title: '🎤 Artistas similares',
-      body: 'Este otro botón del reproductor a pantalla completa te muestra artistas con un estilo parecido al que suena.',
+      body: 'Este otro botón (arriba a la derecha) te muestra artistas con un estilo parecido al que suena.',
       fallbackBody: 'Cuando haya una pista sonando, este botón (arriba a la derecha del reproductor a pantalla completa) te muestra artistas con un estilo parecido.',
-      exit: function () { closeNPIfOpen(); }
+      exit: function () { closeFullscreenPlayer(); }
     },
     {
       id: 'playlist-open', target: '.playlist-icon-btn',
-      enter: function () { closeNPIfOpen(); openPlaylistIfClosed(); },
+      enter: function () { closeFullscreenPlayer(); openPlaylistIfClosed(); },
       title: '📃 Tu Playlist',
       body: 'Aquí se acumulan las pistas que vayas encolando. Tócalo para abrir o cerrar el panel de tu cola de reproducción.'
     },
@@ -174,6 +221,15 @@
   var active = false;
   var backdropEl, highlightEl, tooltipEl, welcomeEl, fabEl;
   var HIGHLIGHT_PAD = 8;
+  // showStep() is async (scrollIntoView + waits). If the user clicks
+  // Siguiente/Anterior faster than a step's chain resolves, several chains
+  // end up in flight at once and can settle out of order — whichever
+  // resolves LAST wins and overwrites the correct one, so the spotlight can
+  // end up highlighting a stale target from an earlier click while the
+  // tooltip already shows the new step number. renderToken makes every
+  // showStep() call check, right before it paints, whether a newer call has
+  // started since — if so it bails out instead of rendering stale content.
+  var renderToken = 0;
 
   function ensureDom() {
     if (backdropEl) return;
@@ -308,6 +364,7 @@
 
     currentIndex = Math.max(0, Math.min(index, STEPS.length - 1));
     var step = STEPS[currentIndex];
+    var myToken = ++renderToken;
 
     tooltipEl.classList.remove('tour-visible');
 
@@ -321,6 +378,9 @@
       }
       return el;
     }).then(function (el) {
+      // A newer showStep() call started while we were waiting/scrolling, or
+      // the tour was closed entirely — either way this stale chain must not paint.
+      if (!active || myToken !== renderToken) return;
       renderVisual(el, step);
     });
   }
@@ -334,7 +394,7 @@
   }
 
   function cleanupOpenedUI() {
-    try { closeNPIfOpen(); } catch (e) { /* noop */ }
+    try { closeFullscreenPlayer(); } catch (e) { /* noop */ }
     try { closePlaylistIfOpen(); } catch (e) { /* noop */ }
     var op = document.getElementById('outputs-panel');
     if (op && op.style.display !== 'none' && typeof window.toggleOutputsPanel === 'function') {
@@ -349,6 +409,7 @@
     cleanupOpenedUI();
 
     active = false;
+    renderToken++; // invalidate any showStep() chain still in flight
     document.removeEventListener('keydown', onKeydown);
     window.removeEventListener('resize', onResize);
     tooltipEl.classList.remove('tour-visible');
