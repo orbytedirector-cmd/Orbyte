@@ -94,8 +94,8 @@
           <!-- Info -->
           <div class="np-info">
             <div class="np-title"  id="np-title">—</div>
-            <div class="np-artist" id="np-artist"></div>
-            <div class="np-album"  id="np-album"></div>
+            <a class="np-artist" id="np-artist" href="#" style="cursor:pointer;text-decoration:none;display:block"></a>
+            <a class="np-album"  id="np-album"  href="#" style="cursor:pointer;text-decoration:none;display:block"></a>
             <div class="np-tags">
               <span class="player-fmt-badge" id="np-badge"></span>
               <div class="player-led"  id="np-led"></div>
@@ -1136,6 +1136,16 @@
     window.openNowPlaying  = openNowPlaying;
     window.closeNowPlaying = closeNowPlaying;
 
+    // Al pinchar Artista/Álbum dentro del player en primer plano, minimizamos
+    // el overlay para que la vista de destino (artist.html / album.html)
+    // quede visible tras la navegación SPA — si no, quedaría oculta detrás.
+    ['np-artist', 'np-album'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', () => {
+        if (el.getAttribute('href') && el.getAttribute('href') !== '#') closeNowPlaying();
+      });
+    });
+
     function _npSyncState() {
       const t = window._currentTrack;
       if (!t) return;
@@ -1149,8 +1159,12 @@
       }
       // Info
       document.getElementById('np-title').textContent  = t.title  || '—';
-      document.getElementById('np-artist').textContent = t.artist || '';
-      document.getElementById('np-album').textContent  = t.album  || '';
+      const npArtist = document.getElementById('np-artist');
+      npArtist.textContent = t.artist || '';
+      npArtist.href = t.artist_id ? `/artist/${t.artist_id}` : '#';
+      const npAlbum = document.getElementById('np-album');
+      npAlbum.textContent = t.album || '';
+      npAlbum.href = t.album_id ? `/album/${t.album_id}` : '#';
       // Badge + LED
       const c = (t.led_color || 'white').toLowerCase();
       const badge = document.getElementById('np-badge');

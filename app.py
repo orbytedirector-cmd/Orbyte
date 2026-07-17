@@ -727,7 +727,9 @@ def album(album_id):
         for t in tracks:
             td = {**dict(t),
                   'file_path':  clean_db_path(dict(t).get('file_path')),
-                  'cover_path': alb['cover_path']}
+                  'cover_path': alb['cover_path'],
+                  'album_name': alb.get('name'),
+                  'artist_id':  alb.get('artist_id')}
             td['audio_url'] = audio_url_filter(td['file_path'])
             td['cover_url'] = cover_url_filter(td['cover_path'])
             fmt, led = _fmt_format(td)
@@ -1746,9 +1748,10 @@ def api_track_similar_artists(track_id):
 def api_album_tracks(album_id):
     conn = get_db_connection()
     try:
-        alb = conn.execute('SELECT cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
-        album_cover  = clean_db_path(alb['cover_path']) if alb else None
-        album_artist_id = alb['artist_id'] if alb else None
+        alb = conn.execute('SELECT name, cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        album_cover      = clean_db_path(alb['cover_path']) if alb else None
+        album_artist_id  = alb['artist_id'] if alb else None
+        album_name       = alb['name'] if alb else None
         tracks = conn.execute(
             'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
             (album_id,)
@@ -1765,6 +1768,7 @@ def api_album_tracks(album_id):
             d['format_color']   = led
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
             d['artist_id']      = album_artist_id   # needed by player for navigation
+            d['album_name']     = album_name        # needed by player for display/navigation
             tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (t['id'],)).fetchone()
             if tm:
                 for k in tm.keys():
