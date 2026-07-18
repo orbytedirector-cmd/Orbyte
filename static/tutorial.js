@@ -39,6 +39,33 @@
     var r = el.getBoundingClientRect();
     return r.width > 0 && r.height > 0 && !!el.offsetParent;
   }
+  // scrollIntoView({behavior:'smooth'}) has no fixed duration — on a long,
+  // image-heavy page like Home it can easily run past a guessed timeout, so
+  // measuring the target's rect too early was landing the spotlight on
+  // wherever the page happened to be mid-scroll (reported as the highlight
+  // "jumping" to unrelated sections). This instead polls the target's rect
+  // every frame and resolves once it's stopped moving for a few frames in a
+  // row, with a hard cap so a step can never hang if something goes wrong.
+  function waitForScrollSettle(selector, maxWaitMs) {
+    return new Promise(function (resolve) {
+      var start = performance.now();
+      var lastTop = null, lastLeft = null, stableFrames = 0;
+      function tick() {
+        var el = document.querySelector(selector);
+        if (!el) { resolve(el); return; }
+        var r = el.getBoundingClientRect();
+        var moved = lastTop === null || Math.abs(r.top - lastTop) > 0.5 || Math.abs(r.left - lastLeft) > 0.5;
+        lastTop = r.top; lastLeft = r.left;
+        if (moved) stableFrames = 0; else stableFrames++;
+        if (stableFrames >= 3 || (performance.now() - start) > maxWaitMs) {
+          resolve(el);
+        } else {
+          requestAnimationFrame(tick);
+        }
+      }
+      requestAnimationFrame(tick);
+    });
+  }
 
   // ── Steps ──────────────────────────────────────────────────────────────────
   // Home-only targets (quality-grid, genre-chips, fav-banner, adv-search-open-btn)
@@ -135,9 +162,17 @@
       body: 'Cada color coincide con el LED de tu iFi Zen DAC V2: amarillo (PCM estándar), blanco (Hi-Res), cian/rojo (DSD) y verde/azul (MQA). Toca una categoría para explorar solo esa calidad.'
     },
     {
-      id: 'genres', target: '.genre-chips',
-      title: '🎭 Mood, era, idioma y género',
-      body: 'Más abajo en Inicio encontrarás secciones para navegar tu música por estado de ánimo, década, idioma y género musical.'
+      id: 'filters',
+      title: '🎛️ Secciones de filtro',
+      body: 'Más abajo en Inicio podés filtrar tu biblioteca por Mood (estado de ánimo), Momento del día ideal, Era musical (década), Tema lírico, Género y subgéneros, e Idioma de la interpretación.',
+      targets: [
+        { selector: '.mood-explorer-grid', label: 'Mood (estado de ánimo)' },
+        { selector: '.momento-grid', label: 'Momento del día ideal' },
+        { selector: '.era-timeline', label: 'Era musical (década)' },
+        { selector: '.tema-chips', label: 'Tema lírico' },
+        { selector: '.genre-chips', label: 'Género y subgéneros' },
+        { selector: '.language-grid', label: 'Idioma de la interpretación' }
+      ]
     },
     {
       id: 'favorites', target: '.fav-banner',
@@ -249,6 +284,7 @@
       '<span class="tour-count"></span>' +
       '<h3 class="tour-title"></h3>' +
       '<p class="tour-body"></p>' +
+      '<p class="tour-cycle-label" style="display:none"></p>' +
       '<div class="tour-actions">' +
         '<button type="button" class="tour-btn tour-btn-skip">Saltar tutorial</button>' +
         '<div class="tour-actions-nav">' +
@@ -287,8 +323,15 @@
     if (currentIndex > 0) showStep(currentIndex - 1);
   }
 
-  function positionTooltip(el) {
+  function positionTooltip(el, forceCenter) {
     tooltipEl.classList.remove('placement-top', 'placement-bottom', 'placement-center');
+
+    if (forceCenter) {
+      tooltipEl.classList.add('placement-center');
+      tooltipEl.style.top = '';
+      tooltipEl.style.left = '';
+      return;
+    }
 
     if (isMobileViewport()) {
       tooltipEl.classList.add(el ? 'placement-bottom' : 'placement-center');
@@ -327,7 +370,8 @@
     tooltipEl.style.left = left + 'px';
   }
 
-  function renderVisual(el, step) {
+  function renderVisual(el, step, opts) {
+    opts = opts || {};
     var visible = isElementVisible(el);
 
     backdropEl.classList.toggle('tour-no-target', !visible);
@@ -348,19 +392,65 @@
     tooltipEl.querySelector('.tour-body').textContent =
       (visible || !step.fallbackBody) ? step.body : step.fallbackBody;
 
+    var cycleLabelEl = tooltipEl.querySelector('.tour-cycle-label');
+    if (opts.cycleLabel) {
+      cycleLabelEl.textContent = '→ ' + opts.cycleLabel;
+      cycleLabelEl.style.display = 'block';
+    } else {
+      cycleLabelEl.style.display = 'none';
+    }
+
     var prevBtn = tooltipEl.querySelector('.tour-btn-prev');
     var nextBtn = tooltipEl.querySelector('.tour-btn-next');
     prevBtn.disabled = currentIndex === 0;
     nextBtn.textContent = currentIndex === STEPS.length - 1 ? 'Finalizar ✓' : 'Siguiente ›';
 
-    positionTooltip(visible ? el : null);
-    requestAnimationFrame(function () { positionTooltip(visible ? el : null); });
+    var forceCenter = !!opts.forceCenterTooltip;
+    positionTooltip(visible ? el : null, forceCenter);
+    requestAnimationFrame(function () { positionTooltip(visible ? el : null, forceCenter); });
     tooltipEl.classList.add('tour-visible');
+  }
+
+  // ── Multi-target cycling (para el paso "Secciones de filtro") ──────────────
+  // En vez de avanzar de paso en paso, este tipo de paso recorre solo — cada
+  // ~2.2s — varios elementos reales de la interfaz mientras el tooltip se
+  // queda fijo en el centro, siempre como parte de un único paso del tour.
+  var cycleTimer = null;
+
+  function stopCycle() {
+    if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; }
+  }
+
+  function startCycle(step, myToken) {
+    var items = step.targets.filter(function (t) {
+      return isElementVisible(document.querySelector(t.selector));
+    });
+    if (!items.length) {
+      // La biblioteca no tiene metadata para ninguna de estas secciones —
+      // igual mostramos el paso, solo que sin spotlight sobre nada.
+      renderVisual(null, step, { forceCenterTooltip: true });
+      return;
+    }
+    var i = 0;
+    function tick() {
+      if (!active || myToken !== renderToken) { stopCycle(); return; }
+      var item = items[i % items.length];
+      i++;
+      var el = document.querySelector(item.selector);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      waitForScrollSettle(item.selector, 900).then(function (settledEl) {
+        if (!active || myToken !== renderToken) return;
+        renderVisual(settledEl, step, { cycleLabel: item.label, forceCenterTooltip: true });
+      });
+    }
+    tick();
+    cycleTimer = setInterval(tick, 2200);
   }
 
   function showStep(index) {
     var prevDef = STEPS[currentIndex];
     if (prevDef) safeCall(prevDef.exit);
+    stopCycle();
 
     currentIndex = Math.max(0, Math.min(index, STEPS.length - 1));
     var step = STEPS[currentIndex];
@@ -368,13 +458,21 @@
 
     tooltipEl.classList.remove('tour-visible');
 
+    if (step.targets) {
+      Promise.resolve(safeCall(step.enter)).then(function () {
+        if (!active || myToken !== renderToken) return;
+        startCycle(step, myToken);
+      });
+      return;
+    }
+
     Promise.resolve(safeCall(step.enter)).then(function () {
-      return wait(step.target ? 80 : 0);
+      return wait(step.target ? 60 : 0);
     }).then(function () {
       var el = step.target ? document.querySelector(step.target) : null;
       if (el && isElementVisible(el)) {
         el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return wait(380).then(function () { return document.querySelector(step.target); });
+        return waitForScrollSettle(step.target, 900);
       }
       return el;
     }).then(function (el) {
@@ -388,7 +486,7 @@
   function onResize() {
     if (!active) return;
     var step = STEPS[currentIndex];
-    if (!step) return;
+    if (!step || step.targets) return; // el ciclo se refresca solo en su próximo tick
     var el = step.target ? document.querySelector(step.target) : null;
     renderVisual(el, step);
   }
@@ -406,6 +504,7 @@
     if (!active) return;
     var lastDef = STEPS[currentIndex];
     if (lastDef) safeCall(lastDef.exit);
+    stopCycle();
     cleanupOpenedUI();
 
     active = false;

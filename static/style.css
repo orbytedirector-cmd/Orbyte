@@ -1896,6 +1896,12 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 }
 .tour-title { font-size: 1rem; font-weight: 700; color: var(--text-primary); margin: 0 0 0.4rem; }
 .tour-body { font-size: 0.84rem; line-height: 1.5; color: var(--text-secondary); margin: 0 0 1rem; }
+.tour-cycle-label {
+  font-size: 0.78rem; font-weight: 700; color: var(--accent);
+  background: rgba(200,146,10,0.1); border: 1px solid rgba(200,146,10,0.3);
+  border-radius: 7px; padding: 0.35rem 0.6rem; margin: -0.4rem 0 0.9rem;
+  transition: opacity 0.15s ease;
+}
 .tour-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
 .tour-actions-nav { display: flex; gap: 0.4rem; margin-left: auto; }
 .tour-btn {
