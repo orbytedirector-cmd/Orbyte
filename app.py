@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import struct
 import threading
@@ -944,6 +945,97 @@ def _track_order(sort_key, direction):
     dir_ = 'DESC' if direction == 'desc' else 'ASC'
     return f'{col} {dir_} NULLS LAST'
 
+# ── Deduplicación de pistas repetidas (misma canción, distinto álbum) ──────────
+# Issue: en la vista de pistas (Búsqueda Avanzada y las pestañas Pistas de
+# mood/momento/era/tema/tier/idioma/género) una misma canción puede aparecer
+# varias veces si vive en más de un álbum (ediciones deluxe, remasters,
+# compilados...). Además de ensuciar el listado, esto rompe el botón
+# "➕ Añadir a cola": trackRowHtml()/addTrackWithFeedback() (advanced_search.html)
+# y su equivalente en browse.html indexan por posición dentro del array de
+# resultados, así que cada copia agrega la pista correcta — el problema real
+# es mostrar N copias visualmente indistinguibles (mismo título) donde el
+# usuario esperaba una sola.
+#
+# Solución: colapsar a UNA fila por (Título, Artista), quedándonos con la de
+# mejor score = 70% Calidad + 30% Popularidad (ambos normalizados 0-100).
+# La Calidad reutiliza el mismo ranking LED que ya se usa en todo este
+# archivo para elegir la versión "mejor" de un álbum (ver los "ORDER BY CASE
+# led_color ... LIMIT 1" repetidos arriba y _led_for_album_tracks) en vez de
+# inventar una escala nueva: magenta es la mejor calidad, amarillo/otros la
+# peor. La Popularidad es el pop_score (0-100) ya precalculado en
+# track_pop_cache, igual que en todos los sorts de "popularidad" existentes.
+#
+# Importante: el ticket pide filtrar duplicados "de los resultados obtenidos"
+# — es decir, la comparación debe quedar acotada a los mismos filtros que ya
+# está aplicando la vista, no a la biblioteca completa. Si no fuera así, un
+# filtro "Calidad: CD" podría hacer desaparecer una canción entera de los
+# resultados solo porque existe una copia DSD256 de mejor score en otro
+# álbum que ni siquiera cumple ese filtro — justo lo opuesto de lo que el
+# usuario pidió al filtrar. Por eso _track_dedupe_condition recibe el WHERE
+# ya construido por la vista (extra_where) y lo reaplica, con los mismos
+# alias re-prefijados con "dup_", a la copia candidata antes de compararla.
+#
+# Si el usuario quiere la otra versión, puede seguir encontrándola buscándola
+# manualmente (álbum, vista de álbumes, etc.) — este filtro solo afecta la
+# vista de pistas, tal como pide el ticket.
+_TRACK_QUALITY_RANK_SQL = """(CASE {alias}.led_color
+        WHEN 'magenta' THEN 100.0
+        WHEN 'blue'    THEN 83.3333333333
+        WHEN 'green'   THEN 66.6666666667
+        WHEN 'red'     THEN 50.0
+        WHEN 'cyan'    THEN 33.3333333333
+        WHEN 'white'   THEN 16.6666666667
+        ELSE 0.0
+    END)"""
+
+# Alias usados por las dos consultas que llaman a _track_dedupe_condition —
+# se re-prefijan con "dup_" para poder unir una segunda copia de tracks/
+# albums/artists/track_meta/track_pop_cache dentro de la subconsulta
+# correlacionada sin chocar con los alias de la fila "exterior".
+_DEDUPE_ALIASES = ('t', 'tm', 'al', 'ar', 'tpc')
+
+def _track_dedupe_condition(extra_where='', track_alias='t', pop_alias='tpc'):
+    """
+    Fragmento SQL (sin el 'AND' inicial, mismo estilo que _build_adv_filters)
+    para insertar en el WHERE de una consulta de pistas ya unida (JOIN) con
+    albums/artists/track_meta/track_pop_cache. Excluye una pista si existe
+    otra CON LOS MISMOS FILTROS ACTIVOS (mismo Título + Artista, comparación
+    case/espacios-insensible) y mejor score; en empate de score se conserva
+    el id menor, para un resultado estable entre requests.
+
+    extra_where: el WHERE que la vista ya aplica (usando los alias t/al/ar/
+    tm/tpc), para que la pista candidata deba cumplir EXACTAMENTE los mismos
+    filtros que la fila que reemplaza — no cualquier copia de la canción en
+    toda la biblioteca. Pasar '' cuando no hay filtros activos. Los mismos
+    valores de `extra_where` deben añadirse DOS VECES a la lista de params
+    de la consulta que llama a esta función (una para el WHERE exterior, una
+    para la copia re-prefijada de aquí adentro) — ver comentarios en los
+    call sites.
+    """
+    def _reprefix(sql):
+        for alias in _DEDUPE_ALIASES:
+            sql = re.sub(rf'\b{alias}\.', f'dup_{alias}.', sql)
+        return sql
+
+    dup_extra = f' AND {_reprefix(extra_where)}' if extra_where else ''
+    score_self  = f"({_TRACK_QUALITY_RANK_SQL.format(alias=track_alias)} * 0.7 " \
+                  f"+ COALESCE({pop_alias}.pop_score, 0) * 0.3)"
+    score_other = f"({_TRACK_QUALITY_RANK_SQL.format(alias='dup_t')} * 0.7 " \
+                  f"+ COALESCE(dup_tpc.pop_score, 0) * 0.3)"
+    return f"""NOT EXISTS (
+        SELECT 1 FROM tracks dup_t
+        JOIN albums dup_al ON dup_al.id = dup_t.album_id
+        LEFT JOIN artists dup_ar ON dup_ar.id = dup_al.artist_id
+        LEFT JOIN track_meta dup_tm ON dup_tm.track_id = dup_t.id
+        LEFT JOIN track_pop_cache dup_tpc ON dup_tpc.track_id = dup_t.id
+        WHERE LOWER(TRIM(dup_t.title))  = LOWER(TRIM({track_alias}.title))
+          AND LOWER(TRIM(dup_t.artist)) = LOWER(TRIM({track_alias}.artist))
+          AND dup_t.id != {track_alias}.id
+          {dup_extra}
+          AND ({score_other} > {score_self}
+               OR ({score_other} = {score_self} AND dup_t.id < {track_alias}.id))
+    )"""
+
 def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
               order_by='al.name ASC'):
     """Run paginated query with dynamic ORDER BY."""
@@ -1248,6 +1340,20 @@ def api_search_advanced():
     try:
         if view == 'tracks':
             clauses, params = _build_adv_filters(request.args, pop_alias='tpc', for_albums=False)
+            # Colapsa duplicados (misma canción en distintos álbumes) — ver
+            # _track_dedupe_condition. Se le pasan los filtros YA activos
+            # (extra_where) para que la comparación quede acotada a "otras
+            # copias que también cumplirían este mismo filtro/búsqueda", tal
+            # como pide el ticket ("filtre de los resultados obtenidos") —
+            # así un filtro de Calidad, por ejemplo, no hace desaparecer una
+            # canción solo porque existe una copia mejor fuera de ese filtro.
+            extra_where = ' AND '.join(clauses)
+            dedupe_clause = _track_dedupe_condition(extra_where=extra_where, track_alias='t', pop_alias='tpc')
+            clauses = clauses + [dedupe_clause]
+            # dedupe_clause reincorpora una copia (re-prefijada dup_*) de los
+            # mismos filtros — cada uno de sus '?' necesita su valor de
+            # nuevo, en el mismo orden, así que los params se duplican.
+            params = params + params
             where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
             count_sql = f'''SELECT COUNT(*) FROM tracks t
@@ -2153,16 +2259,42 @@ def api_meta_tracks():
         # French-tagged track on an English-dominant album wouldn't count
         # here, while home.html's per-track total — and the "cualquiera de
         # estos" Búsqueda Avanzada Pistas view — both already counted it).
+        #
+        # Colapsa duplicados (misma canción en distintos álbumes) — ver
+        # _track_dedupe_condition. Le pasamos el filtro que esta vista YA
+        # aplica (base_where) para que la comparación de duplicados quede
+        # acotada a "otras copias que también cumplirían este mismo
+        # filtro" — así, por ejemplo, filtrar por tier no hace desaparecer
+        # una canción solo porque existe una copia de otro tier en otro
+        # álbum. count y rows deben compartir exactamente la misma
+        # condición (mismo base_where + mismo dedupe) o la paginación
+        # queda desalineada con el total.
+        if field == 'genre':
+            base_where  = '(t.genre=? OR tm.genre_primary=?)'
+            base_params = (value, value)
+        else:
+            base_where  = f'tm.{field}=?'
+            base_params = (value,)
+
+        dedupe = _track_dedupe_condition(extra_where=base_where, track_alias='t', pop_alias='tpc')
+        # dedupe reincorpora una copia (re-prefijada dup_*) de base_where —
+        # sus '?' necesitan su valor otra vez, en el mismo orden.
+        full_params = base_params + base_params
+
         if field == 'genre':
             # Same match as browse_genre: classic tracks.genre OR track_meta.genre_primary
-            count = conn.execute('''
+            count = conn.execute(f'''
                 SELECT COUNT(*) FROM tracks t
                 LEFT JOIN track_meta tm ON tm.track_id=t.id
-                WHERE t.genre=? OR tm.genre_primary=?
-            ''', (value, value)).fetchone()[0]
+                LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                WHERE {base_where} AND {dedupe}
+            ''', full_params).fetchone()[0]
         else:
             count = conn.execute(
-                f'SELECT COUNT(*) FROM track_meta WHERE {field}=?', (value,)
+                f'''SELECT COUNT(*) FROM track_meta tm
+                    JOIN tracks t ON t.id=tm.track_id
+                    LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                    WHERE {base_where} AND {dedupe}''', full_params
             ).fetchone()[0]
 
         # For intercalar mode: fetch a larger batch (up to 500) with random ordering
@@ -2177,14 +2309,9 @@ def api_meta_tracks():
             order  = _track_order(sort, dir_)
 
         # Build the WHERE clause — per-track always (see comment above)
-        if field == 'genre':
-            where_clause = '(t.genre=? OR tm.genre_primary=?)'
-            extra_join   = ''
-            where_params = (value, value)
-        else:
-            where_clause = f'tm.{field}=?'
-            extra_join   = ''
-            where_params = (value,)
+        where_clause = f'{base_where} AND {dedupe}'
+        extra_join   = ''
+        where_params = full_params
 
         rows = conn.execute(f'''
             SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa, t.codec,
