@@ -189,6 +189,20 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass  # Column already exists
+    # Lazy migration: expression index for the "vista de pistas" de-dupe
+    # (_track_dedupe_condition, ver más abajo). Sin este índice, el
+    # NOT EXISTS correlacionado que colapsa duplicados hace un scan
+    # completo de tracks por cada fila candidata (porque LOWER(TRIM(...))
+    # no puede usar un índice normal) — con una biblioteca grande esto
+    # tarda minutos. Con el índice, SQLite resuelve el match Título+Artista
+    # con una búsqueda indexada en vez de una comparación fila por fila.
+    # CREATE INDEX IF NOT EXISTS es prácticamente gratis una vez creado
+    # (solo una consulta al catálogo), así que es seguro dejarlo acá.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_dedupe_norm "
+        "ON tracks (LOWER(TRIM(title)), LOWER(TRIM(artist)))"
+    )
+    conn.commit()
     return conn
 
 def _fmt_seconds(seconds):
