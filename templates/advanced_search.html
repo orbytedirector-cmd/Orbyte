@@ -394,9 +394,14 @@ window.AdvResults = (function () {
         else { loadQueue(q); playTrack(0); }
     }
     function playTrackAt(index) {
-        if (!currentTracks.length) return;
-        if (window.prependTracksAndPlay) window.prependTracksAndPlay(currentTracks, index);
-        else { loadQueue(currentTracks); playTrack(index); }
+        // Reproduce y encola SOLO la pista en index — mismo patrón que
+        // window.playMetaTrack en browse.html. prependTracksAndPlay() está
+        // pensado para "reproducir todo desde acá" (playAlbum, playAllLoaded);
+        // usarlo aquí insertaba las currentTracks completas (toda la página
+        // de resultados) en la cola en vez de solo la pista elegida.
+        if (!currentTracks[index]) return;
+        if (window.prependAndPlay) window.prependAndPlay(currentTracks[index]);
+        else { loadQueue([currentTracks[index]]); playTrack(0); }
     }
     function addTrackWithFeedback(idx, btn) {
         if (!currentTracks[idx]) return;
