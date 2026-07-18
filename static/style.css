@@ -1873,7 +1873,9 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   position: fixed; z-index: 9991; pointer-events: none;
   border: 2px solid var(--accent); border-radius: 10px;
   box-shadow: 0 0 0 9999px rgba(0,0,0,0.78), 0 0 24px rgba(200,146,10,0.35);
-  transition: top 0.25s ease, left 0.25s ease, width 0.25s ease, height 0.25s ease, opacity 0.2s ease;
+  transition: top 0.5s cubic-bezier(0.4,0,0.2,1), left 0.5s cubic-bezier(0.4,0,0.2,1),
+              width 0.5s cubic-bezier(0.4,0,0.2,1), height 0.5s cubic-bezier(0.4,0,0.2,1),
+              opacity 0.3s ease;
   display: none;
 }
 
@@ -1900,7 +1902,7 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   font-size: 0.78rem; font-weight: 700; color: var(--accent);
   background: rgba(200,146,10,0.1); border: 1px solid rgba(200,146,10,0.3);
   border-radius: 7px; padding: 0.35rem 0.6rem; margin: -0.4rem 0 0.9rem;
-  transition: opacity 0.15s ease;
+  transition: opacity 0.22s ease;
 }
 .tour-actions { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
 .tour-actions-nav { display: flex; gap: 0.4rem; margin-left: auto; }

@@ -394,10 +394,23 @@
 
     var cycleLabelEl = tooltipEl.querySelector('.tour-cycle-label');
     if (opts.cycleLabel) {
-      cycleLabelEl.textContent = '→ ' + opts.cycleLabel;
-      cycleLabelEl.style.display = 'block';
+      var newLabelText = '→ ' + opts.cycleLabel;
+      if (cycleLabelEl.style.display === 'none' || cycleLabelEl.textContent === '') {
+        // Primera aparición del chip: no hay texto previo que cruzar, solo aparece.
+        cycleLabelEl.style.display = 'block';
+        cycleLabelEl.style.opacity = '0';
+        cycleLabelEl.textContent = newLabelText;
+        requestAnimationFrame(function () { cycleLabelEl.style.opacity = '1'; });
+      } else if (cycleLabelEl.textContent !== newLabelText) {
+        cycleLabelEl.style.opacity = '0';
+        setTimeout(function () {
+          cycleLabelEl.textContent = newLabelText;
+          cycleLabelEl.style.opacity = '1';
+        }, 220);
+      }
     } else {
       cycleLabelEl.style.display = 'none';
+      cycleLabelEl.style.opacity = '1';
     }
 
     var prevBtn = tooltipEl.querySelector('.tour-btn-prev');
@@ -413,8 +426,9 @@
 
   // ── Multi-target cycling (para el paso "Secciones de filtro") ──────────────
   // En vez de avanzar de paso en paso, este tipo de paso recorre solo — cada
-  // ~2.2s — varios elementos reales de la interfaz mientras el tooltip se
+  // ~3.6s — varios elementos reales de la interfaz mientras el tooltip se
   // queda fijo en el centro, siempre como parte de un único paso del tour.
+  var CYCLE_INTERVAL_MS = 3600;
   var cycleTimer = null;
 
   function stopCycle() {
@@ -438,13 +452,13 @@
       i++;
       var el = document.querySelector(item.selector);
       if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      waitForScrollSettle(item.selector, 900).then(function (settledEl) {
+      waitForScrollSettle(item.selector, 1000).then(function (settledEl) {
         if (!active || myToken !== renderToken) return;
         renderVisual(settledEl, step, { cycleLabel: item.label, forceCenterTooltip: true });
       });
     }
     tick();
-    cycleTimer = setInterval(tick, 2200);
+    cycleTimer = setInterval(tick, CYCLE_INTERVAL_MS);
   }
 
   function showStep(index) {
