@@ -1,8 +1,8 @@
 import os
 import re
 import json
-import struct
-import threading
+import tempfile
+import hashlib
 import time
 from urllib.parse import quote
 from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
@@ -14,6 +14,10 @@ try:
     import requests as req_lib
 except ImportError:
     req_lib = None
+
+# Some systems' mimetypes DB doesn't know .flac — register it explicitly so
+# /stream-dsd's cached output always gets served with the right Content-Type.
+mimetypes.add_type('audio/flac', '.flac')
 
 try:
     from mpd import MPDClient as _MPDClient
@@ -2682,271 +2686,109 @@ def play_mpd():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e), 'path': relative}), 200
 
-def _is_ios_client():
-    """iPhone/iPad/iPod — Apple obliga a todo navegador en iOS a usar WebKit
-    por debajo (Chrome/Firefox para iOS incluidos), así que basta detectar
-    el sistema operativo, no el navegador."""
-    ua = request.headers.get('User-Agent', '')
-    return ('iPhone' in ua) or ('iPad' in ua) or ('iPod' in ua)
+# ── DSD transcode cache ───────────────────────────────────────────────────────
+# The previous version of this endpoint computed an exact Content-Length for
+# a synthetic WAV and padded it with silence if ffmpeg came up short — that
+# solved "browser doesn't know the length" but NOT "browser can't
+# resume/seek", because the response still declared Accept-Ranges: none. To
+# iOS's background media pipeline that's still indistinguishable from a
+# live/infinite stream: it periodically aborts and reconnects the request
+# (visible in server logs as repeated restarts from start=0 every few
+# seconds), and each reconnect threw away all progress on the track. The
+# player's retry budget ran out long before a multi-minute track could get
+# through like that, so playback on a DSD track reached mid-playlist would
+# just stop.
+#
+# Regular (non-DSD) files never had this problem because they're already
+# served through _serve_audio() with real Content-Length + byte-range
+# support — exactly like every other progressively downloadable audio file
+# iOS expects.
+#
+# Fix: transcode the whole track to a cached .flac file on disk first, then
+# serve that file through the same _serve_audio() path used for everything
+# else. First playback of a given DSD track pays the one-time transcode cost
+# (ffmpeg at -compression_level 0 is much faster than realtime); every
+# repeat request — including the reconnect-from-lastPos calls the player
+# already makes on a network hiccup, and the watchdog's stall recovery —
+# hits the cache and is served instantly.
+_DSD_CACHE_DIR      = os.path.join(tempfile.gettempdir(), 'orbyte_dsd_cache')
+_DSD_CACHE_MAX_AGE  = 4 * 3600   # seconds — long enough for a listening session
 
-
-_dsd_probe_cache = {}  # absolute_path -> (duration_seconds, channels)
-
-def _probe_dsd(absolute_path):
-    """Duración exacta + canales vía ffprobe — necesarios para declarar un
-    Content-Length real en el WAV. Se cachea en memoria por ruta: el player
-    re-pide el mismo archivo en cada seek (?start=...) y no tiene sentido
-    re-probar el mismo DSF una y otra vez."""
-    if absolute_path in _dsd_probe_cache:
-        return _dsd_probe_cache[absolute_path]
+def _dsd_cache_path(absolute_path):
+    """Deterministic cache filename for a DSD source: hash of path + mtime."""
+    os.makedirs(_DSD_CACHE_DIR, exist_ok=True)
     try:
-        out = subprocess.run(
-            ['ffprobe', '-v', 'quiet', '-print_format', 'json',
-             '-show_format', '-show_streams', absolute_path],
-            capture_output=True, text=True, timeout=10
-        )
-        data = json.loads(out.stdout)
-        duration = float(data['format']['duration'])
-        channels = 2
-        for stream in data.get('streams', []):
-            if stream.get('codec_type') == 'audio':
-                channels = int(stream.get('channels', 2))
-                break
-        result = (duration, channels)
-        _dsd_probe_cache[absolute_path] = result
-        return result
-    except Exception as e:
-        app.logger.warning(f"[stream-dsd] ffprobe falló para {absolute_path}: {e}")
-        return (None, 2)
+        mtime = os.path.getmtime(absolute_path)
+    except OSError:
+        mtime = 0
+    key = hashlib.sha1(f'{absolute_path}:{mtime}'.encode('utf-8')).hexdigest()
+    return os.path.join(_DSD_CACHE_DIR, f'{key}.flac')
 
-
-def _wav_header(data_size, sample_rate, channels, bits=32):
-    """Cabecera WAV/PCM estándar de 44 bytes con el tamaño REAL de los
-    datos que van a seguir — es justo lo que Safari/iOS necesita para
-    tratarlo como una descarga progresiva normal en vez de un stream en
-    vivo (que no soporta)."""
-    byte_rate   = sample_rate * channels * (bits // 8)
-    block_align = channels * (bits // 8)
-    return struct.pack(
-        '<4sI4s4sIHHIIHH4sI',
-        b'RIFF', 36 + data_size, b'WAVE',
-        b'fmt ', 16, 1, channels, sample_rate, byte_rate, block_align, bits,
-        b'data', data_size
-    )
-
+def _dsd_cache_cleanup():
+    """Best-effort removal of stale cache entries. Cheap enough to run per-request
+    at personal-library scale; swap for a cron job if the library gets huge."""
+    try:
+        now = time.time()
+        for name in os.listdir(_DSD_CACHE_DIR):
+            fp = os.path.join(_DSD_CACHE_DIR, name)
+            try:
+                if now - os.path.getmtime(fp) > _DSD_CACHE_MAX_AGE:
+                    os.remove(fp)
+            except OSError:
+                pass
+    except FileNotFoundError:
+        pass
 
 @app.route('/stream-dsd/<path:filepath>')
 def stream_dsd(filepath):
     """
-    Transcode a DSD file (DSF/DFF) to FLAC on the fly via ffmpeg and stream it
-    to the browser.  Supports time-based seeking via ?start=<seconds> so the
-    JS player can restart the stream at any position without byte-range tricks.
+    Transcode a DSD file (DSF/DFF) to FLAC and serve it exactly like a normal
+    audio file (Content-Length + Accept-Ranges: bytes via _serve_audio), so
+    iOS Safari can buffer/seek/resume it in the background the same way it
+    already does for every non-DSD track. See _DSD_CACHE_DIR comment above.
     """
     absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
     if not os.path.isfile(absolute_path):
         app.logger.warning(f"stream-dsd 404: {absolute_path}")
         return "File not found", 404
 
-    # Optional time-based seek — the frontend sends ?start=<seconds>
-    start_sec = request.args.get('start', 0.0, type=float)
+    _dsd_cache_cleanup()
+    cache_path = _dsd_cache_path(absolute_path)
+    cache_hit  = os.path.isfile(cache_path)
 
-    ua = request.headers.get('User-Agent', '')
-    is_ios = _is_ios_client()
-    t_req_start = time.monotonic()
-    app.logger.info(f"[stream-dsd] path={absolute_path!r} start={start_sec} "
-                     f"is_ios={is_ios} UA={ua!r}")
-
-    # ── Rama iOS: WAV con Content-Length exacto ─────────────────────────
-    # Safari en iOS solo reproduce FLAC como "descarga progresiva" (tamaño
-    # conocido + soporte de rangos), no como stream en vivo — que es
-    # justo lo que el bloque de abajo sirve (sin Content-Length, Accept-
-    # Ranges:none). Por eso graba en PC (Chrome) pero no en el iPhone.
-    # Desktop/Android no se tocan: siguen con el FLAC de siempre.
-    if is_ios:
-        total_duration, channels = _probe_dsd(absolute_path)
-        t_probe_done = time.monotonic()
-        app.logger.info(f"[stream-dsd:ios] probe -> duration={total_duration} channels={channels} "
-                         f"(tardó {(t_probe_done - t_req_start)*1000:.0f}ms)")
-        if total_duration is not None:
-            remaining = max(0.0, total_duration - start_sec)
-            # Margen de seguridad: en la práctica ffprobe y lo que ffmpeg
-            # realmente decodifica a PCM no coinciden exacto (filtro de
-            # resampleo DSD→PCM) — medido en logs reales: ~0.31s de faltante
-            # incluso con 0.15s de margen. Se sube a 0.8s. El relleno de
-            # silencio más abajo es la red de seguridad real: garantiza
-            # Content-Length exacto pase lo que pase con esta estimación.
-            safe_remaining = max(0.0, remaining - 0.8)
-            sample_rate = 176400
-            bits = 32
-            block_align = channels * (bits // 8)
-            raw_size = int(safe_remaining * sample_rate * block_align)
-            data_size = (raw_size // block_align) * block_align  # alinear al frame completo
-
-            ios_cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin']
-            if start_sec > 0:
-                ios_cmd += ['-ss', f'{start_sec:.3f}']
-            ios_cmd += [
-                '-i', absolute_path,
-                '-vn',
-                '-ar', str(sample_rate),
-                '-ac', str(channels),
-                '-acodec', 'pcm_s32le',
-                '-f', 's32le',
-                'pipe:1'
-            ]
-            app.logger.info(f"[stream-dsd:ios] data_size={data_size} cmd={ios_cmd}")
-
-            def generate_wav():
-                t_spawn = time.monotonic()
-                proc = subprocess.Popen(
-                    ios_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                )
-                app.logger.info(
-                    f"[stream-dsd:ios] ffmpeg arrancó (+{(t_spawn - t_req_start)*1000:.0f}ms "
-                    f"desde el request)")
-                # Drena stderr en un hilo aparte -- si no lo leemos, ffmpeg puede
-                # bloquearse al llenar el buffer del pipe y colgar todo el stream.
-                stderr_chunks = []
-                def _drain_stderr(pipe):
-                    try:
-                        for line in iter(pipe.readline, b''):
-                            stderr_chunks.append(line)
-                    except Exception:
-                        pass
-                t = threading.Thread(target=_drain_stderr, args=(proc.stderr,), daemon=True)
-                t.start()
-
-                sent = 0
-                first_chunk_logged = False
-                try:
-                    yield _wav_header(data_size, sample_rate, channels, bits)
-                    while sent < data_size:
-                        chunk = proc.stdout.read(65536)
-                        if not chunk:
-                            # ffmpeg terminó antes de completar data_size. Mandar
-                            # menos bytes de los prometidos en Content-Length es
-                            # justo lo que rompía la reproducción en iOS (medido
-                            # en logs reales: Safari trata la respuesta como
-                            # corrupta/incompleta y aborta). Se rellena con
-                            # silencio digital hasta el tamaño exacto declarado
-                            # — unos pocos ms/cientos de ms de silencio al final
-                            # son inofensivos; un Content-Length incumplido no.
-                            padding = data_size - sent
-                            app.logger.warning(
-                                f"[stream-dsd:ios] ffmpeg terminó corto en "
-                                f"{sent}/{data_size} bytes — relleno con "
-                                f"{padding} bytes de silencio")
-                            yield b'\x00' * padding
-                            sent = data_size
-                            break
-                        if not first_chunk_logged:
-                            first_chunk_logged = True
-                            app.logger.info(
-                                f"[stream-dsd:ios] primer byte de audio real "
-                                f"(+{(time.monotonic() - t_req_start)*1000:.0f}ms desde el request)")
-                        room = data_size - sent
-                        if len(chunk) > room:
-                            chunk = chunk[:room]
-                        sent += len(chunk)
-                        yield chunk
-                finally:
-                    try:
-                        proc.stdout.close()
-                    except OSError:
-                        pass
-                    if proc.poll() is None:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                    else:
-                        proc.wait()
-                    t.join(timeout=1)
-                    err_txt = b''.join(stderr_chunks).decode('utf-8', 'replace').strip()
-                    app.logger.info(
-                        f"[stream-dsd:ios] terminado: {sent}/{data_size} bytes enviados "
-                        f"(+{(time.monotonic() - t_req_start)*1000:.0f}ms desde el request)"
-                        + (f" | ffmpeg stderr: {err_txt}" if err_txt else " | sin stderr"))
-
-            resp = Response(
-                stream_with_context(generate_wav()),
-                status=200,
-                mimetype='audio/wav',
-            )
-            resp.headers['Content-Length'] = str(44 + data_size)
-            resp.headers['Accept-Ranges']  = 'none'
-            resp.headers['Cache-Control']  = 'no-store'
-            resp.headers['X-DSD-Source']   = os.path.basename(absolute_path)
-            resp.headers['X-DSD-Rate']     = str(sample_rate)
-            resp.headers['X-DSD-iOS-WAV']  = '1'
-            if start_sec > 0:
-                resp.headers['X-DSD-StartSec'] = f'{start_sec:.3f}'
-            return resp
-        # ffprobe falló — cae al FLAC de siempre en vez de romper la reproducción
-        app.logger.warning(f"[stream-dsd] sin duración para iOS, uso FLAC como fallback: {absolute_path}")
-
-    # Build ffmpeg command.
-    # -ss BEFORE -i: fast native DSF seek (avoids transcoding the skip portion).
-    # DSD64 (2.82 MHz) → 176.4 kHz PCM (÷16); same ratio for DSD128/DSD256.
-    # -loglevel quiet + stderr=DEVNULL: avoids stderr pipe deadlock under load.
-    cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-nostdin']
-    if start_sec > 0:
-        cmd += ['-ss', f'{start_sec:.3f}']   # seek before input = fast
-    cmd += [
-        '-i', absolute_path,
-        '-vn',                        # drop embedded cover art (DSF stores album art)
-        '-ar', '176400',              # 176.4 kHz — universal browser FLAC support
-        '-sample_fmt', 's32',         # 32-bit integer, full DSD dynamic range
-        '-c:a', 'flac',
-        '-compression_level', '0',    # fastest encode → lowest latency
-        '-f', 'flac',
-        'pipe:1'
-    ]
-
-    def generate():
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,   # no stderr pipe → no deadlock risk
-            stdin=subprocess.DEVNULL,    # avoid stdin-related ffmpeg hangs under Flask's subprocess model
-        )
+    if not cache_hit:
+        tmp_path = f'{cache_path}.{os.getpid()}.tmp'
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+            '-i', absolute_path,
+            '-vn',                        # drop embedded cover art (DSF stores album art)
+            '-ar', '176400',              # 176.4 kHz — universal browser FLAC support
+            '-sample_fmt', 's32',         # 32-bit integer, full DSD dynamic range
+            '-c:a', 'flac',
+            '-compression_level', '0',    # fastest encode
+            '-f', 'flac',                 # explicit — tmp_path ends in .tmp, not .flac,
+                                           # so ffmpeg can't infer the muxer from the extension
+            tmp_path,
+        ]
         try:
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                yield chunk
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode != 0 or not os.path.isfile(tmp_path):
+                app.logger.error(
+                    f"[stream-dsd] ffmpeg failed for {absolute_path}: "
+                    f"{result.stderr.decode(errors='replace')[:500]}"
+                )
+                return "Transcode failed", 500
+            os.replace(tmp_path, cache_path)
         finally:
-            try:
-                proc.stdout.close()
-            except OSError:
-                pass
-            if proc.poll() is None:
-                # Client disconnected (track skipped/stopped) before ffmpeg finished —
-                # don't leave it running, it will otherwise block writing to a dead pipe.
-                proc.terminate()
-                try:
-                    proc.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-            else:
-                proc.wait()
+            if os.path.isfile(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
 
-    resp = Response(
-        stream_with_context(generate()),
-        status=200,
-        mimetype='audio/flac',
-    )
-    resp.headers['Accept-Ranges']   = 'none'    # tell browser not to byte-range seek
-    resp.headers['Cache-Control']   = 'no-store'
-    resp.headers['X-DSD-Source']    = os.path.basename(absolute_path)
-    resp.headers['X-DSD-Rate']      = '176400'
-    if start_sec > 0:
-        resp.headers['X-DSD-StartSec'] = f'{start_sec:.3f}'
+    resp = _serve_audio(cache_path)
+    resp.headers['Content-Type']  = 'audio/flac'
+    resp.headers['X-DSD-Source']  = os.path.basename(absolute_path)
+    resp.headers['X-DSD-Rate']    = '176400'
+    resp.headers['X-DSD-Cache']   = 'hit' if cache_hit else 'miss'
     return resp
 
 

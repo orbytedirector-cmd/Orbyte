@@ -4,6 +4,8 @@ let currentAudio = null;
 let lyricsData = null;
 let lyricsInterval = null;
 let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-stop recovery)
+let _lastProgressPos   = 0;   // highest currentTime actually reached since the last reconnect
+const MAX_RECONNECT_ATTEMPTS = 8;   // short-lived mobile network drops can chain several times in a row
 
 // Intención del usuario: true mientras "debería estar sonando" (se puso en
 // true al arrancar/reanudar, false solo cuando el usuario pausa/detiene a
@@ -124,6 +126,7 @@ function playTrack(index) {
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
+    _lastProgressPos   = 0;
     _shouldBePlaying = true;
     // Re-enable play button now that there's something to play
     const playBtn = document.getElementById('play-btn');
@@ -324,6 +327,13 @@ function updateProgress() {
     if (ct)   ct.textContent = formatTime(currentAudio.currentTime);
     if (tt)   tt.textContent = formatTime(dur);
     syncLyrics(currentAudio.currentTime);
+
+    // Stream is healthy again — restore the full retry budget instead of
+    // letting it get drained by several small drops in a row.
+    if (currentAudio.currentTime > _lastProgressPos + 2) {
+        _lastProgressPos = currentAudio.currentTime;
+        _reconnectAttempts = 0;
+    }
 }
 
 // El audio se puede pausar sin que nosotros lo hayamos pedido: una llamada
@@ -465,24 +475,9 @@ _updateShuffleRepeatButtons();
 
 function seekTo(percent) {
     if (!currentAudio) return;
-    const track = queue[currentIndex];
-
-    // DSD streams are non-seekable (live transcoded FLAC pipe).
-    // Restart ffmpeg from the desired position via the ?start= server param.
-    if (track && track.is_dsd) {
-        const dur = currentAudio._trackDuration || track.duration || 0;
-        if (!dur) return;
-        const seekSec = Math.max(0, (percent / 100) * dur);
-        const baseUrl = buildDsdStreamUrl(track.file_path);
-        const seekUrl = `${baseUrl}?start=${seekSec.toFixed(2)}`;
-        const wasPlaying = !currentAudio.paused;
-        currentAudio.src = seekUrl;
-        currentAudio._trackDuration = dur;          // preserve known duration
-        currentAudio.load();
-        if (wasPlaying) currentAudio.play().catch(e => console.error('[DSD seek]', e));
-        return;
-    }
-
+    // /stream-dsd now serves a fully transcoded, byte-range-seekable file
+    // (see app.py), so DSD tracks seek exactly like any other track — no
+    // more rebuilding the URL with ?start= and reloading from scratch.
     const dur = (currentAudio.duration && isFinite(currentAudio.duration))
         ? currentAudio.duration
         : (currentAudio._trackDuration || 0);
@@ -502,7 +497,7 @@ function _handleTrackEnded() {
     // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
     const dur = currentAudio ? (currentAudio._trackDuration || 0) : 0;
     const pos = currentAudio ? (currentAudio.currentTime || 0) : 0;
-    if (dur > 3 && pos < dur - 3 && _reconnectAttempts < 3) {
+    if (dur > 3 && pos < dur - 3 && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         handleAudioError({ type: 'premature-end' });
         return;
     }
@@ -519,20 +514,21 @@ function handleAudioError(e) {
     const nearEnd = dur > 0 && lastPos >= dur - 1.5;
 
     // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
-    // stopping abruptly. Works for DSD (ffmpeg restarts at lastPos) and regular
-    // files (Range-request seek once metadata reloads). Capped to avoid retry loops.
-    if (!nearEnd && _reconnectAttempts < 3) {
+    // stopping abruptly. /stream-dsd now serves a cached, byte-range-seekable
+    // file exactly like /audio does, so DSD and regular tracks reconnect the
+    // same way: reload the source and seek back to lastPos once metadata is
+    // available. Capped to avoid infinite retry loops, but the budget resets
+    // on genuine progress (see updateProgress) so a flaky connection that
+    // recovers repeatedly doesn't burn through it on its own.
+    if (!nearEnd && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         _reconnectAttempts++;
         console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
-        if (track.is_dsd) {
-            currentAudio.src = `${buildDsdStreamUrl(track.file_path)}?start=${lastPos.toFixed(2)}`;
-        } else {
-            currentAudio.src = track.audio_url || buildAudioUrl(track.file_path);
-            currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
-                currentAudio.removeEventListener('loadedmetadata', _seekOnce);
-                if (lastPos > 0) currentAudio.currentTime = lastPos;
-            });
-        }
+        currentAudio.src = track.audio_url ||
+            (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
+        currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
+            currentAudio.removeEventListener('loadedmetadata', _seekOnce);
+            if (lastPos > 0) currentAudio.currentTime = lastPos;
+        });
         currentAudio._trackDuration = dur;
         currentAudio.load();
         currentAudio.play().catch(() => {});
@@ -540,6 +536,14 @@ function handleAudioError(e) {
     }
 
     console.error('Audio error:', e);
+    if (!nearEnd) {
+        // Retry budget exhausted — don't leave playback silently stuck on a
+        // dead track for the rest of the session. Move on so the playlist
+        // keeps going instead of appearing to have just "stopped".
+        console.warn('[player] Giving up on current track after repeated stream drops — skipping to next.');
+        nextTrack();
+        return;
+    }
     document.getElementById('play-btn').textContent = '▶';
 }
 
