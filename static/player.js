@@ -505,8 +505,17 @@ function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
 function _handleTrackEnded() {
     // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
     // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
-    const dur = currentAudio ? (currentAudio._trackDuration || 0) : 0;
-    const pos = currentAudio ? (currentAudio.currentTime || 0) : 0;
+    // Prefer the REAL duration the browser measured from the audio data it actually
+    // received over the DB-sourced _trackDuration: those can differ by a couple of
+    // seconds after a DSD→FLAC transcode (sample-rate conversion rounding, etc.), and
+    // trusting the DB value there made a perfectly normal end-of-track look
+    // "premature" — routing it into the error-reconnect path (which re-fetches the
+    // SAME just-finished track) instead of into nextTrack(), so the next queued track
+    // never even got requested.
+    if (!currentAudio) { nextTrack(); return; }
+    const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
+    const dur = realDur || currentAudio._trackDuration || 0;
+    const pos = currentAudio.currentTime || 0;
     if (dur > 3 && pos < dur - 3 && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         handleAudioError({ type: 'premature-end' });
         return;
@@ -520,7 +529,8 @@ function handleAudioError(e) {
     if (!track || !currentAudio) { console.error('Audio error:', e); return; }
 
     const lastPos = currentAudio.currentTime || 0;
-    const dur     = currentAudio._trackDuration || track.duration || 0;
+    const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
+    const dur     = realDur || currentAudio._trackDuration || track.duration || 0;
     const nearEnd = dur > 0 && lastPos >= dur - 1.5;
 
     // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
