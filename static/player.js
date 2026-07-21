@@ -159,6 +159,17 @@ function playTrack(index) {
         _resumeAudioCtxIfNeeded();
         currentAudio.play().then(() => {
             document.getElementById('play-btn').textContent = '⏸';
+            // Recién ahora — con el audio del navegador ya confirmado
+            // arrancando — se dispara el push al DAC nativo (MPD). Antes se
+            // lanzaba en paralelo con .play(), y en un avance automático de
+            // playlist en 2do plano (evento 'ended' sin gesto del usuario)
+            // esa segunda fetch compitiendo por la misma ventana limitada de
+            // ejecución/red que iOS le da a la pestaña en background parece
+            // ser lo que dejaba el stream DSD cargando sin avanzar hasta
+            // volver a primer plano. Las pistas no-DSD nunca llaman a esto
+            // y nunca mostraron el problema — es la asimetría más concreta
+            // entre las dos ramas.
+            playViaMPD(track.file_path || '', { silent: true });
         }).catch(e => {
             console.error('[DSD] play error:', e);
             // No asumir "está sonando" si play() fue rechazado (típico en iOS
@@ -170,7 +181,6 @@ function playTrack(index) {
         // Show known duration immediately — DSD stream returns Infinity/NaN
         const tt = document.getElementById('total-time');
         if (tt && track.duration) tt.textContent = formatTime(track.duration);
-        playViaMPD(track.file_path || '', { silent: true });
         updatePlayerBar(track);
         updateVisualizer(track.led_color);
         dispatchPlayerState(true);
