@@ -5,7 +5,7 @@
 
   <div class="admin-stats">
     <div class="admin-stat-card">
-      <span class="admin-stat-num admin-stat-online">{{ online_count }}</span>
+      <span class="admin-stat-num admin-stat-online" data-online-count>{{ online_count }}</span>
       <span class="admin-stat-label">Usuarios en línea</span>
     </div>
     <div class="admin-stat-card">
@@ -50,13 +50,14 @@
       <thead><tr><th></th><th>Correo</th><th>Rol</th><th>Última conexión</th><th>Dispositivo</th><th>Acciones</th></tr></thead>
       <tbody>
         {% for u in approved %}
-        <tr>
+        <tr data-user-row="{{ u.id }}">
           <td><span class="admin-dot {{ 'admin-dot-on' if u.online else 'admin-dot-off' }}"
+                     data-dot="{{ u.id }}"
                      title="{{ 'En línea' if u.online else 'Desconectado' }}"></span></td>
           <td>{{ u.email }}</td>
           <td>{{ 'Admin' if u.is_admin else 'Usuario' }}</td>
-          <td>{{ u.last_seen or '—' }}</td>
-          <td>{{ u.last_device or '—' }}</td>
+          <td data-lastseen="{{ u.id }}">{{ u.last_seen or '—' }}</td>
+          <td data-lastdevice="{{ u.id }}">{{ u.last_device or '—' }}</td>
           <td class="admin-actions">
             {% if not u.is_admin %}
             <form method="POST" action="/admin/usuarios/{{ u.id }}/revoke" class="admin-inline-form"
@@ -74,4 +75,37 @@
     </table>
   </div>
 </div>
+
+<script>
+  // ── Refresco en vivo del estado (en línea / última conexión / dispositivo) ──
+  // Antes esto solo se veía actualizado al volver a entrar al panel. Ahora se
+  // refresca solo cada 15s mientras la página está visible, sin recargar nada.
+  (function() {
+    async function _refreshAdminStatus() {
+      if (document.visibilityState !== 'visible') return;
+      try {
+        const res = await fetch('/admin/usuarios/estado', {cache: 'no-store'});
+        if (!res.ok) return;
+        const data = await res.json();
+        const countEl = document.querySelector('[data-online-count]');
+        if (countEl) countEl.textContent = data.online_count;
+        Object.entries(data.users).forEach(([uid, info]) => {
+          const dot = document.querySelector(`[data-dot="${uid}"]`);
+          if (dot) {
+            dot.classList.toggle('admin-dot-on', info.online);
+            dot.classList.toggle('admin-dot-off', !info.online);
+            dot.title = info.online ? 'En línea' : 'Desconectado';
+          }
+          const lastSeen = document.querySelector(`[data-lastseen="${uid}"]`);
+          if (lastSeen) lastSeen.textContent = info.last_seen || '—';
+          const lastDevice = document.querySelector(`[data-lastdevice="${uid}"]`);
+          if (lastDevice) lastDevice.textContent = info.last_device || '—';
+        });
+      } catch (e) { /* silencioso — se reintenta en el próximo tick */ }
+    }
+    if (window._adminStatusInterval) clearInterval(window._adminStatusInterval);
+    window._adminStatusInterval = setInterval(_refreshAdminStatus, 15000);
+    document.addEventListener('visibilitychange', _refreshAdminStatus);
+  })();
+</script>
 {% endblock %}

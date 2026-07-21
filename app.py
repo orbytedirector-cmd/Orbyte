@@ -5,12 +5,15 @@ import tempfile
 import hashlib
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote
 from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context, session, redirect, url_for
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 import sqlite3
 import mimetypes
 import subprocess
@@ -163,6 +166,111 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 # el login funcione accediendo por Tailscale vía http://100.x.x.x sin TLS.
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '0') == '1'
 
+# ── Auth: notificaciones por correo (signup pendiente / aprobado / rechazado) ─
+# Todas estas variables son opcionales: si SMTP_HOST no está definida, el envío
+# de correos se omite silenciosamente (con un warning en el log) y el flujo de
+# signup/aprobación/rechazo sigue funcionando igual — nunca rompe la app.
+SMTP_HOST       = os.environ.get('SMTP_HOST', '')
+SMTP_PORT       = int(os.environ.get('SMTP_PORT', '587'))
+SMTP_USER       = os.environ.get('SMTP_USER', '')
+SMTP_PASSWORD   = os.environ.get('SMTP_PASSWORD', '')
+SMTP_FROM_EMAIL = os.environ.get('SMTP_FROM_EMAIL', SMTP_USER)
+SMTP_FROM_NAME  = os.environ.get('SMTP_FROM_NAME', 'Orbyte')
+SMTP_USE_TLS    = os.environ.get('SMTP_USE_TLS', '1') == '1'
+
+def _send_email(to_addr, subject, html_body):
+    """Envía un correo HTML. Nunca lanza excepción — si falla, solo lo deja
+    registrado en el log para no interrumpir signup/aprobación/rechazo."""
+    if not SMTP_HOST:
+        app.logger.warning(
+            f'SMTP no configurado — se omite el envío de "{subject}" a {to_addr}. '
+            f'Definí SMTP_HOST / SMTP_USER / SMTP_PASSWORD (y opcionalmente '
+            f'SMTP_PORT, SMTP_FROM_EMAIL, SMTP_FROM_NAME, SMTP_USE_TLS) como '
+            f'variables de entorno para activar las notificaciones por correo.'
+        )
+        return False
+    try:
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>'
+        msg['To'] = to_addr
+        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+            if SMTP_USE_TLS:
+                server.starttls()
+            if SMTP_USER:
+                server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_FROM_EMAIL, [to_addr], msg.as_string())
+        return True
+    except Exception as e:
+        app.logger.warning(f'No se pudo enviar el correo "{subject}" a {to_addr}: {e}')
+        return False
+
+def _email_wrapper(title, message_html):
+    """Envoltorio HTML con el lenguaje visual de Orbyte (negro + dorado) para
+    todos los correos transaccionales. Usa colores sólidos (sin gradientes de
+    texto) porque la mayoría de los clientes de correo no soportan
+    background-clip:text de forma confiable."""
+    return f'''<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#000000;font-family:Arial,Helvetica,sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#000000;padding:32px 16px;">
+    <tr><td align="center">
+      <table role="presentation" width="100%" style="max-width:480px;background:#0d0d0d;border:1px solid rgba(200,146,10,0.35);border-radius:16px;overflow:hidden;">
+        <tr><td style="padding:32px 32px 8px;text-align:center;">
+          <div style="font-size:24px;font-weight:900;letter-spacing:3px;color:#F5C518;">ORBYTE</div>
+        </td></tr>
+        <tr><td style="padding:8px 32px 0;">
+          <h1 style="color:#EFEFEF;font-size:19px;margin:16px 0 8px;font-family:Arial,Helvetica,sans-serif;">{title}</h1>
+        </td></tr>
+        <tr><td style="padding:0 32px 32px;color:#AAAAAA;font-size:14px;line-height:1.6;font-family:Arial,Helvetica,sans-serif;">
+          {message_html}
+        </td></tr>
+        <tr><td style="padding:16px 32px;border-top:1px solid #1C1C1C;text-align:center;">
+          <span style="color:#444444;font-size:11px;font-family:Arial,Helvetica,sans-serif;">Orbyte &mdash; tu biblioteca de música Hi-Res</span>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>'''
+
+def _send_signup_pending_email(to_addr):
+    _send_email(
+        to_addr, 'Tu cuenta en Orbyte está en revisión',
+        _email_wrapper('Cuenta creada — pendiente de aprobación', f'''
+            <p>Hola,</p>
+            <p>Tu cuenta <strong style="color:#EFEFEF;">{to_addr}</strong> se creó correctamente en Orbyte.</p>
+            <p>Un administrador tiene que revisarla antes de que puedas ingresar. Te vamos a avisar
+            a este mismo correo apenas se apruebe o se rechace.</p>
+        ''')
+    )
+
+def _send_account_approved_email(to_addr):
+    login_url = url_for('login', _external=True)
+    _send_email(
+        to_addr, '¡Tu cuenta en Orbyte fue aprobada!',
+        _email_wrapper('Cuenta aprobada ✓', f'''
+            <p>Buenas noticias — tu cuenta <strong style="color:#EFEFEF;">{to_addr}</strong> fue aprobada.</p>
+            <p>Ya podés iniciar sesión y empezar a escuchar.</p>
+            <p style="text-align:center;margin:28px 0 8px;">
+              <a href="{login_url}" style="background:#C8920A;color:#000000;text-decoration:none;
+                 padding:12px 28px;border-radius:8px;font-weight:700;display:inline-block;
+                 font-family:Arial,Helvetica,sans-serif;">Iniciar sesión</a>
+            </p>
+        ''')
+    )
+
+def _send_account_rejected_email(to_addr):
+    _send_email(
+        to_addr, 'Tu solicitud de cuenta en Orbyte',
+        _email_wrapper('Solicitud no aprobada', f'''
+            <p>Tu solicitud de cuenta <strong style="color:#EFEFEF;">{to_addr}</strong> no fue aprobada
+            por el administrador.</p>
+            <p>Si creés que se trata de un error, respondé este correo para contactar al administrador.</p>
+        ''')
+    )
+
 # ── Diamond SVG helper ────────────────────────────────────────────────────────
 _DIAMOND_SVG_TMPL = (
     '<svg width="{w}" height="{h}" viewBox="0 0 20 22" fill="none" '
@@ -289,6 +397,12 @@ def get_db_connection():
 # "en línea" mucho después de haber cerrado la app.
 ONLINE_WINDOW_MINUTES = 2
 
+def _utcnow_iso():
+    """Igual que datetime.utcnow().isoformat() (mismo formato, sin offset) pero
+    sin el DeprecationWarning de Python 3.12+. Se mantiene el formato exacto
+    para no romper las comparaciones de string ya guardadas en last_seen/etc."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+
 def get_current_user():
     """Devuelve el dict del usuario logueado (o None) a partir de la sesión."""
     uid = session.get('user_id')
@@ -354,7 +468,7 @@ def _touch_user_activity(user_id):
         ip = (request.headers.get('X-Forwarded-For', request.remote_addr) or '').split(',')[0].strip()
         conn.execute(
             'UPDATE users SET last_seen=?, last_device=?, last_ip=? WHERE id=?',
-            (datetime.utcnow().isoformat(), device, ip, user_id)
+            (_utcnow_iso(), device, ip, user_id)
         )
         conn.commit()
     finally:
@@ -401,7 +515,7 @@ def signup():
                     error = 'Ya existe una cuenta con ese correo.'
                 else:
                     is_admin_email = (email == ADMIN_EMAIL)
-                    now = datetime.utcnow().isoformat()
+                    now = _utcnow_iso()
                     conn.execute(
                         'INSERT INTO users (email, password_hash, is_admin, is_approved, created_at, approved_at) '
                         'VALUES (?, ?, ?, ?, ?, ?)',
@@ -410,6 +524,8 @@ def signup():
                          now, now if is_admin_email else None)
                     )
                     conn.commit()
+                    if not is_admin_email:
+                        _send_signup_pending_email(email)
                     return redirect(url_for('login', created=('admin' if is_admin_email else 'pending')))
             finally:
                 conn.close()
@@ -473,14 +589,45 @@ def admin_users():
     try:
         rows  = conn.execute('SELECT * FROM users ORDER BY is_approved ASC, created_at DESC').fetchall()
         users = [dict(r) for r in rows]
-        cutoff = (datetime.utcnow() - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
         for u in users:
             u['online'] = bool(u['last_seen'] and u['last_seen'] >= cutoff)
         pending  = [u for u in users if not u['is_approved']]
         approved = [u for u in users if u['is_approved']]
-        return render_template('admin_users.html', pending=pending, approved=approved,
-                               online_count=sum(1 for u in users if u['online']),
-                               admin_email=ADMIN_EMAIL)
+        response = app.make_response(render_template(
+            'admin_users.html', pending=pending, approved=approved,
+            online_count=sum(1 for u in users if u['online']),
+            admin_email=ADMIN_EMAIL
+        ))
+        # No-store: esta vista no debe quedar en ningún caché (navegador, SW,
+        # proxy) — el estado en línea / última conexión tiene que ser siempre
+        # el actual, nunca una copia vieja servida desde caché.
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+        response.headers['Pragma'] = 'no-cache'
+        return response
+    finally:
+        conn.close()
+
+@app.route('/admin/usuarios/estado')
+@admin_required
+def admin_users_estado():
+    """JSON liviano para refrescar en vivo el estado (en línea / última
+    conexión / dispositivo) del panel admin sin recargar toda la página."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT id, last_seen, last_device FROM users').fetchall()
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+        users = {}
+        for r in rows:
+            users[r['id']] = {
+                'online': bool(r['last_seen'] and r['last_seen'] >= cutoff),
+                'last_seen': r['last_seen'],
+                'last_device': r['last_device'],
+            }
+        online_count = sum(1 for u in users.values() if u['online'])
+        response = jsonify({'users': users, 'online_count': online_count})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
     finally:
         conn.close()
 
@@ -490,10 +637,13 @@ def admin_approve_user(user_id):
     conn = get_db_connection()
     try:
         conn.execute('UPDATE users SET is_approved=1, approved_at=? WHERE id=?',
-                     (datetime.utcnow().isoformat(), user_id))
+                     (_utcnow_iso(), user_id))
         conn.commit()
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
     finally:
         conn.close()
+    if row:
+        _send_account_approved_email(row['email'])
     return redirect(url_for('admin_users'))
 
 @app.route('/admin/usuarios/<int:user_id>/reject', methods=['POST'])
@@ -508,6 +658,8 @@ def admin_reject_user(user_id):
         conn.commit()
     finally:
         conn.close()
+    if row:
+        _send_account_rejected_email(row['email'])
     return redirect(url_for('admin_users'))
 
 @app.route('/admin/usuarios/<int:user_id>/revoke', methods=['POST'])
@@ -3249,4 +3401,4 @@ def api_debug_dsd():
 
 if __name__ == '__main__':
     _load_favorites()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5001)

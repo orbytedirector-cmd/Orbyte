@@ -1,6 +1,6 @@
 // HiRes Browser — Service Worker
 // Caches static assets for offline shell; audio and API always go to network.
-const CACHE_NAME = 'hires-v2';
+const CACHE_NAME = 'hires-v3';
 
 const STATIC_ASSETS = [
   '/',
@@ -31,12 +31,18 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // Always fetch from network: API calls, audio streams, DSD streams, covers
+  // Always fetch from network: API calls, audio streams, DSD streams, covers,
+  // el panel de administración (datos siempre en vivo) y las páginas de login/
+  // signup/logout (no tiene sentido cachear pantallas de autenticación).
   if (url.pathname.startsWith('/api/') ||
       url.pathname.startsWith('/audio/') ||
       url.pathname.startsWith('/stream-dsd/') ||
       url.pathname.startsWith('/cover/') ||
       url.pathname.startsWith('/play-mpd') ||
+      url.pathname.startsWith('/admin/') ||
+      url.pathname === '/login' ||
+      url.pathname === '/signup' ||
+      url.pathname === '/logout' ||
       e.request.method !== 'GET') {
     return; // let browser handle normally
   }
