@@ -7,3 +7,4 @@ venv/
 *.patch
 *.diff
 .secret_key
+.env
