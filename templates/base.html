@@ -1067,6 +1067,7 @@
         });
         if (pushState) history.pushState({url}, '', url);
         window.scrollTo(0, 0);
+        document.dispatchEvent(new CustomEvent('orbyte:navigated', { detail: { url } }));
       } catch(e) {
         window.location.href = url;
       } finally {
@@ -1434,7 +1435,7 @@
       }, { passive: false });
     }
   </script>
-  <script src="{{ url_for('static', filename='tutorial.js') }}?v=20260717"></script>
+  <script src="{{ url_for('static', filename='tutorial.js') }}?v=20260720"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>

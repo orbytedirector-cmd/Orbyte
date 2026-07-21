@@ -610,8 +610,21 @@
     document.body.appendChild(fabEl);
   }
 
+  // El FAB vive fuera de <main>, así que la navegación SPA (que solo
+  // reemplaza el contenido de <main>) no lo recrea ni lo destruye — hay que
+  // decidir a mano si se muestra según la ruta actual. Solo debe verse en
+  // Home para no interferir con la navegación dentro de las demás páginas.
+  // base.html emite 'orbyte:navigated' al terminar cada navegación SPA
+  // (incluye back/forward vía popstate).
+  function updateFabVisibility() {
+    if (!fabEl) return;
+    fabEl.classList.toggle('tour-fab-hidden', window.location.pathname !== '/');
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────────
   buildFab();
+  updateFabVisibility();
+  document.addEventListener('orbyte:navigated', updateFabVisibility);
   maybeShowWelcome();
 
   window.OrbyteTutorial = { start: start, restart: start };
