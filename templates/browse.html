@@ -302,8 +302,14 @@
      el ancho, para que no se corten ni fuercen scroll horizontal. No se
      oculta ningún dato, solo se reordena. */
 @media (max-width: 768px) {
+  /* Fix: browse-header-left (flex:1; min-width:0) se dejaba aplastar a un
+     ancho casi nulo por browse-header-right (flex-shrink:0), partiendo el
+     título letra por letra y produciendo la superposición visual con los
+     botones/sort-bar. Se apilan en filas separadas a ancho completo y se
+     permite que los botones de la derecha envuelvan si no caben en una fila. */
+  .browse-header { flex-direction: column; align-items: stretch; }
   .browse-title { font-size: 1.3rem; }
-  .browse-header-right { gap: 0.5rem; }
+  .browse-header-right { gap: 0.5rem; flex-wrap: wrap; }
   .sort-pills { gap: 0.28rem; }
   .sort-pill  { font-size: 0.72rem; padding: 0.22rem 0.6rem; }
 
