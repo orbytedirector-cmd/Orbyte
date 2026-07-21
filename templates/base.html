@@ -47,6 +47,15 @@
             <a href="/letter/" class="alphabet-btn">#</a>
           </nav>
         </div>
+        {% if current_user %}
+        <div class="header-user">
+          {% if current_user.is_admin %}
+          <a href="/admin/usuarios" class="header-user-link" title="Panel de administración">⚙ Admin</a>
+          {% endif %}
+          <span class="header-user-email" title="{{ current_user.email }}">{{ current_user.email }}</span>
+          <a href="/logout" class="header-user-link header-user-logout" title="Cerrar sesión">⏻ Salir</a>
+        </div>
+        {% endif %}
       </div>
     </header>
 
@@ -326,6 +335,18 @@
   <script>
     // Favourites set — loaded from server on each page render
     window._favIds = new Set({{ fav_ids|list|tojson|safe if fav_ids is defined else '[]' }});
+
+    // ── Sesión: heartbeat periódico (usuarios en línea + dispositivo) ────────
+    (function() {
+      function _sendHeartbeat() {
+        fetch('/api/heartbeat', {method: 'POST'}).catch(() => {});
+      }
+      _sendHeartbeat();
+      setInterval(_sendHeartbeat, 25000);
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') _sendHeartbeat();
+      });
+    })();
     // ── Controls — addEventListener only (no onclick attrs) ─────────────────
     document.getElementById('play-btn').addEventListener('click', togglePlayPause);
     document.getElementById('prev-btn').addEventListener('click', prevTrack);

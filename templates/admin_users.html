@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="admin-wrap">
+  <h1 class="admin-title">Panel de administración</h1>
+
+  <div class="admin-stats">
+    <div class="admin-stat-card">
+      <span class="admin-stat-num admin-stat-online">{{ online_count }}</span>
+      <span class="admin-stat-label">Usuarios en línea</span>
+    </div>
+    <div class="admin-stat-card">
+      <span class="admin-stat-num">{{ pending|length }}</span>
+      <span class="admin-stat-label">Solicitudes pendientes</span>
+    </div>
+    <div class="admin-stat-card">
+      <span class="admin-stat-num">{{ approved|length }}</span>
+      <span class="admin-stat-label">Usuarios aprobados</span>
+    </div>
+  </div>
+
+  {% if pending %}
+  <h2 class="admin-section-title">Pendientes de aprobación</h2>
+  <div class="admin-table-wrap">
+    <table class="admin-table">
+      <thead><tr><th>Correo</th><th>Solicitado</th><th>Acciones</th></tr></thead>
+      <tbody>
+        {% for u in pending %}
+        <tr>
+          <td>{{ u.email }}</td>
+          <td>{{ u.created_at }}</td>
+          <td class="admin-actions">
+            <form method="POST" action="/admin/usuarios/{{ u.id }}/approve" class="admin-inline-form">
+              <button class="track-btn primary admin-btn-sm" type="submit">✓ Aprobar</button>
+            </form>
+            <form method="POST" action="/admin/usuarios/{{ u.id }}/reject" class="admin-inline-form"
+                  onsubmit="return confirm('¿Rechazar y eliminar esta solicitud de {{ u.email }}?');">
+              <button class="track-btn ghost admin-btn-sm" type="submit">✕ Rechazar</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <h2 class="admin-section-title">Usuarios</h2>
+  <div class="admin-table-wrap">
+    <table class="admin-table">
+      <thead><tr><th></th><th>Correo</th><th>Rol</th><th>Última conexión</th><th>Dispositivo</th><th>Acciones</th></tr></thead>
+      <tbody>
+        {% for u in approved %}
+        <tr>
+          <td><span class="admin-dot {{ 'admin-dot-on' if u.online else 'admin-dot-off' }}"
+                     title="{{ 'En línea' if u.online else 'Desconectado' }}"></span></td>
+          <td>{{ u.email }}</td>
+          <td>{{ 'Admin' if u.is_admin else 'Usuario' }}</td>
+          <td>{{ u.last_seen or '—' }}</td>
+          <td>{{ u.last_device or '—' }}</td>
+          <td class="admin-actions">
+            {% if not u.is_admin %}
+            <form method="POST" action="/admin/usuarios/{{ u.id }}/revoke" class="admin-inline-form"
+                  onsubmit="return confirm('¿Revocar el acceso de {{ u.email }}?');">
+              <button class="track-btn ghost admin-btn-sm" type="submit">Revocar</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not approved %}
+        <tr><td colspan="6" class="admin-empty">Todavía no hay usuarios aprobados.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

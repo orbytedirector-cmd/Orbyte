@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Iniciar sesión — Orbyte</title>
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="auth-body">
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <img src="/static/logo-full.png" alt="Orbyte" class="auth-logo">
+
+      {% if created == 'pending' %}
+      <div class="auth-notice auth-notice-ok">✓ Cuenta creada. Un administrador debe aprobarla antes de que puedas ingresar.</div>
+      {% elif created == 'admin' %}
+      <div class="auth-notice auth-notice-ok">✓ Cuenta de administrador creada. Ya puedes iniciar sesión.</div>
+      {% endif %}
+      {% if pending_msg %}
+      <div class="auth-notice auth-notice-warn">Tu cuenta todavía no ha sido aprobada por el administrador.</div>
+      {% endif %}
+      {% if error %}
+      <div class="auth-notice auth-notice-error">{{ error }}</div>
+      {% endif %}
+
+      <form method="POST" class="auth-form">
+        <input type="hidden" name="next" value="{{ next }}">
+        <label class="auth-label" for="login-email">Correo</label>
+        <input type="email" id="login-email" name="email" class="auth-input" required autocomplete="email" autofocus>
+        <label class="auth-label" for="login-password">Contraseña</label>
+        <input type="password" id="login-password" name="password" class="auth-input" required autocomplete="current-password">
+        <button type="submit" class="track-btn primary auth-submit">Iniciar sesión</button>
+      </form>
+
+      <div class="auth-footer">¿No tienes cuenta? <a href="/signup">Crear una</a></div>
+    </div>
+  </div>
+</body>
+</html>

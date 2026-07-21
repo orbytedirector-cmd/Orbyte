@@ -3,10 +3,14 @@ import re
 import json
 import tempfile
 import hashlib
+import secrets
 import time
+from datetime import datetime, timedelta
+from functools import wraps
 from urllib.parse import quote
-from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
+from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context, session, redirect, url_for
 from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
 import sqlite3
 import mimetypes
 import subprocess
@@ -112,6 +116,53 @@ def lang_label(code):
 app = Flask(__name__)
 CORS(app)
 
+# ── Auth: secret key + session cookie config ─────────────────────────────────
+# El correo del administrador (dueño de la plataforma). Cualquier signup con
+# este correo queda auto-aprobado y con permisos de admin.
+ADMIN_EMAIL = 'orbytedirector@gmail.com'
+
+def _load_or_create_secret_key():
+    """Usa SECRET_KEY de entorno si está definida (recomendado en producción).
+    Si no, genera una clave y la persiste en .secret_key junto a app.py para
+    que las sesiones sobrevivan reinicios del servidor sin configuración manual."""
+    env_key = os.environ.get('SECRET_KEY')
+    if env_key:
+        return env_key
+    key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.secret_key')
+    try:
+        if os.path.isfile(key_path):
+            with open(key_path, 'r') as f:
+                existing = f.read().strip()
+                if existing:
+                    return existing
+        new_key = secrets.token_hex(32)
+        with open(key_path, 'w') as f:
+            f.write(new_key)
+        try:
+            os.chmod(key_path, 0o600)
+        except Exception:
+            pass
+        return new_key
+    except Exception:
+        # Último recurso: clave en memoria (las sesiones no sobreviven un reinicio)
+        return secrets.token_hex(32)
+
+app.secret_key = _load_or_create_secret_key()
+if not os.environ.get('SECRET_KEY'):
+    app.logger.warning(
+        'SECRET_KEY no está definida como variable de entorno — usando una clave '
+        'generada y guardada en .secret_key. Para producción, exporta SECRET_KEY '
+        'con un valor fijo (ej: python3 -c "import secrets;print(secrets.token_hex(32))").'
+    )
+
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+# Solo marcar la cookie como Secure si Orbyte se sirve por HTTPS (ej. detrás de
+# un reverse proxy TLS o Tailscale Serve). Por defecto queda en False para que
+# el login funcione accediendo por Tailscale vía http://100.x.x.x sin TLS.
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', '0') == '1'
+
 # ── Diamond SVG helper ────────────────────────────────────────────────────────
 _DIAMOND_SVG_TMPL = (
     '<svg width="{w}" height="{h}" viewBox="0 0 20 22" fill="none" '
@@ -150,11 +201,15 @@ def inject_globals():
     # routes below). Referencing them here is safe even though they are
     # defined later in the file: Flask only calls this function per-request,
     # long after the whole module has finished loading.
+    current_user = None
+    if session.get('user_id'):
+        current_user = {'email': session.get('user_email', ''), 'is_admin': bool(session.get('is_admin'))}
     return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS,
             'ADV_QUALITY_OPTIONS': QUALITY_OPTIONS,
             'ADV_POP_BUCKETS': POP_BUCKETS,
             'ADV_ENERGY_BUCKETS': ENERGY_BUCKETS,
-            'ADV_BAIL_BUCKETS': BAIL_BUCKETS}
+            'ADV_BAIL_BUCKETS': BAIL_BUCKETS,
+            'current_user': current_user}
 
 MUSIC_ROOT = "/mnt/musica/"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music.db")
@@ -206,8 +261,268 @@ def get_db_connection():
         "CREATE INDEX IF NOT EXISTS idx_tracks_dedupe_norm "
         "ON tracks (LOWER(TRIM(title)), LOWER(TRIM(artist)))"
     )
+    # Lazy migration: tabla de usuarios (login/sesiones). CREATE TABLE IF NOT
+    # EXISTS es prácticamente gratis una vez creada la tabla.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            email         TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin      INTEGER NOT NULL DEFAULT 0,
+            is_approved   INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            approved_at   TEXT,
+            last_seen     TEXT,
+            last_device   TEXT,
+            last_ip       TEXT
+        )
+    ''')
     conn.commit()
     return conn
+
+# ── Auth: helpers, decorators, device parsing ─────────────────────────────────
+
+# Cuánto tiempo sin heartbeat antes de considerar a un usuario "desconectado"
+# en el panel admin. El JS del cliente manda un heartbeat cada ~25s (ver
+# base.html), así que 2 minutos da margen de sobra para pestañas en segundo
+# plano / iOS Safari throttling sin ser tan largo como para mostrar gente
+# "en línea" mucho después de haber cerrado la app.
+ONLINE_WINDOW_MINUTES = 2
+
+def get_current_user():
+    """Devuelve el dict del usuario logueado (o None) a partir de la sesión."""
+    uid = session.get('user_id')
+    if not uid:
+        return None
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT * FROM users WHERE id=?', (uid,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+def login_required(view):
+    """Exige sesión iniciada. Para uso en rutas específicas — el grueso de la
+    app ya queda protegido por el before_request _require_login más abajo."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get('user_id'):
+            return redirect(url_for('login', next=request.path))
+        return view(*args, **kwargs)
+    return wrapped
+
+def admin_required(view):
+    """Exige sesión iniciada Y permisos de administrador."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get('user_id'):
+            return redirect(url_for('login', next=request.path))
+        if not session.get('is_admin'):
+            return "No autorizado", 403
+        return view(*args, **kwargs)
+    return wrapped
+
+def _parse_device(user_agent):
+    """Traduce un User-Agent a una etiqueta legible: 'iPhone · Safari', etc."""
+    if not user_agent:
+        return 'Desconocido'
+    ua = user_agent.lower()
+    if   'ipad' in ua:                 platform = 'iPad'
+    elif 'iphone' in ua:               platform = 'iPhone'
+    elif 'android' in ua:              platform = 'Android'
+    elif 'macintosh' in ua or 'mac os' in ua: platform = 'Mac'
+    elif 'windows' in ua:              platform = 'Windows'
+    elif 'linux' in ua:                platform = 'Linux'
+    else:                              platform = 'Desconocido'
+
+    if   'crios' in ua:                browser = 'Chrome'
+    elif 'fxios' in ua:                browser = 'Firefox'
+    elif 'edg/' in ua:                 browser = 'Edge'
+    elif 'chrome/' in ua:              browser = 'Chrome'
+    elif 'firefox/' in ua:             browser = 'Firefox'
+    elif 'safari' in ua and 'chrome' not in ua: browser = 'Safari'
+    else:                              browser = ''
+
+    return f'{platform} · {browser}' if browser else platform
+
+def _touch_user_activity(user_id):
+    """Actualiza last_seen/last_device/last_ip del usuario — llamado en login
+    y en cada heartbeat del cliente."""
+    conn = get_db_connection()
+    try:
+        device = _parse_device(request.headers.get('User-Agent', ''))
+        ip = (request.headers.get('X-Forwarded-For', request.remote_addr) or '').split(',')[0].strip()
+        conn.execute(
+            'UPDATE users SET last_seen=?, last_device=?, last_ip=? WHERE id=?',
+            (datetime.utcnow().isoformat(), device, ip, user_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+@app.before_request
+def _require_login():
+    """Protege toda la plataforma: sin sesión válida, redirige a /login (o
+    devuelve 401 JSON para rutas /api/ para no romper el JS del cliente)."""
+    ep = request.endpoint
+    if ep in ('login', 'signup', 'static', 'service_worker') or request.path.startswith('/static/'):
+        return
+    if not session.get('user_id'):
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'not_authenticated'}), 401
+        return redirect(url_for('login', next=request.path))
+    if not session.get('is_approved'):
+        session.clear()
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'account_not_approved'}), 403
+        return redirect(url_for('login', pending='1'))
+
+# ── Auth: rutas de signup / login / logout / heartbeat / admin ───────────────
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if session.get('user_id'):
+        return redirect(url_for('home'))
+    error = None
+    if request.method == 'POST':
+        email     = (request.form.get('email') or '').strip().lower()
+        password  = request.form.get('password') or ''
+        password2 = request.form.get('password2') or ''
+        if not email or '@' not in email or '.' not in email.split('@')[-1]:
+            error = 'Correo inválido.'
+        elif len(password) < 8:
+            error = 'La contraseña debe tener al menos 8 caracteres.'
+        elif password != password2:
+            error = 'Las contraseñas no coinciden.'
+        else:
+            conn = get_db_connection()
+            try:
+                if conn.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone():
+                    error = 'Ya existe una cuenta con ese correo.'
+                else:
+                    is_admin_email = (email == ADMIN_EMAIL)
+                    now = datetime.utcnow().isoformat()
+                    conn.execute(
+                        'INSERT INTO users (email, password_hash, is_admin, is_approved, created_at, approved_at) '
+                        'VALUES (?, ?, ?, ?, ?, ?)',
+                        (email, generate_password_hash(password),
+                         1 if is_admin_email else 0, 1 if is_admin_email else 0,
+                         now, now if is_admin_email else None)
+                    )
+                    conn.commit()
+                    return redirect(url_for('login', created=('admin' if is_admin_email else 'pending')))
+            finally:
+                conn.close()
+    return render_template('signup.html', error=error)
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if session.get('user_id'):
+        return redirect(url_for('home'))
+    error = None
+    if request.method == 'POST':
+        email    = (request.form.get('email') or '').strip().lower()
+        password = request.form.get('password') or ''
+        next_url = request.form.get('next') or ''
+        conn = get_db_connection()
+        try:
+            row = conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+            user = dict(row) if row else None
+        finally:
+            conn.close()
+        if not user or not check_password_hash(user['password_hash'], password):
+            error = 'Correo o contraseña incorrectos.'
+        elif not user['is_approved']:
+            error = 'Tu cuenta aún no ha sido aprobada por el administrador.'
+        else:
+            session.clear()
+            session.permanent  = True
+            session['user_id']     = user['id']
+            session['user_email']  = user['email']
+            session['is_admin']    = bool(user['is_admin'])
+            session['is_approved'] = True
+            _touch_user_activity(user['id'])
+            if not next_url.startswith('/'):
+                next_url = url_for('home')
+            return redirect(next_url)
+    return render_template('login.html', error=error,
+                           created=request.args.get('created'),
+                           pending_msg=request.args.get('pending'),
+                           next=request.args.get('next', ''))
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+@app.route('/api/heartbeat', methods=['POST'])
+@login_required
+def api_heartbeat():
+    _touch_user_activity(session['user_id'])
+    return jsonify({'status': 'ok'})
+
+@app.route('/admin')
+@admin_required
+def admin_dashboard():
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/usuarios')
+@admin_required
+def admin_users():
+    conn = get_db_connection()
+    try:
+        rows  = conn.execute('SELECT * FROM users ORDER BY is_approved ASC, created_at DESC').fetchall()
+        users = [dict(r) for r in rows]
+        cutoff = (datetime.utcnow() - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+        for u in users:
+            u['online'] = bool(u['last_seen'] and u['last_seen'] >= cutoff)
+        pending  = [u for u in users if not u['is_approved']]
+        approved = [u for u in users if u['is_approved']]
+        return render_template('admin_users.html', pending=pending, approved=approved,
+                               online_count=sum(1 for u in users if u['online']),
+                               admin_email=ADMIN_EMAIL)
+    finally:
+        conn.close()
+
+@app.route('/admin/usuarios/<int:user_id>/approve', methods=['POST'])
+@admin_required
+def admin_approve_user(user_id):
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE users SET is_approved=1, approved_at=? WHERE id=?',
+                     (datetime.utcnow().isoformat(), user_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/usuarios/<int:user_id>/reject', methods=['POST'])
+@admin_required
+def admin_reject_user(user_id):
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+        if row and row['email'] == ADMIN_EMAIL:
+            return "No se puede eliminar la cuenta de administrador", 400
+        conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for('admin_users'))
+
+@app.route('/admin/usuarios/<int:user_id>/revoke', methods=['POST'])
+@admin_required
+def admin_revoke_user(user_id):
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+        if row and row['email'] == ADMIN_EMAIL:
+            return "No se puede revocar al administrador", 400
+        conn.execute('UPDATE users SET is_approved=0, approved_at=NULL WHERE id=?', (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for('admin_users'))
 
 def _fmt_seconds(seconds):
     if not seconds or seconds < 0:
