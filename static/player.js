@@ -24,6 +24,76 @@ try {
 
 const MUSIC_ROOT = "/mnt/musica/";
 
+// ── Remote diagnostic log (temporal) ─────────────────────────────────────────
+// Instrumentación para diagnosticar el corte de reproducción DSD→DSD en 2do
+// plano. Como no hay forma práctica de sacar la consola del navegador del
+// celular en el momento del bug, cada evento relevante se manda al server
+// por sendBeacon (diseñado justo para esto: no espera respuesta, sobrevive
+// que la pestaña se vaya a 2do plano o se descargue) y aparece en el mismo
+// log de la terminal que ya venís compartiendo, con el prefijo [CLIENT-LOG].
+// Puramente aditivo: nunca puede romper la reproducción (todo en try/catch),
+// y se puede apagar con DEBUG_REMOTE_LOG=false o borrar entero una vez
+// diagnosticado el problema real.
+const DEBUG_REMOTE_LOG = true;
+
+function _rlog(event, data) {
+    if (!DEBUG_REMOTE_LOG) return;
+    try {
+        const t = queue[currentIndex];
+        const payload = JSON.stringify(Object.assign({
+            event,
+            t_client: Date.now(),
+            hidden: (typeof document !== 'undefined') ? document.hidden : null,
+            vis: (typeof document !== 'undefined') ? document.visibilityState : null,
+            idx: currentIndex,
+            track: t ? t.title : null,
+            is_dsd: t ? !!t.is_dsd : null,
+        }, data || {}));
+        if (navigator.sendBeacon) {
+            navigator.sendBeacon('/api/client-log', new Blob([payload], { type: 'application/json' }));
+        } else {
+            fetch('/api/client-log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: payload,
+                keepalive: true,
+            }).catch(() => {});
+        }
+    } catch (e) { /* el diagnóstico nunca debe poder romper la reproducción */ }
+}
+
+// Engancha los listeners de diagnóstico a un <audio> recién creado. Puramente
+// aditivo — no reemplaza ni interfiere con los listeners reales ya existentes
+// (timeupdate/error/pause/onended), el DOM permite múltiples listeners para
+// el mismo evento sin conflicto.
+function _attachDiagListeners(audio) {
+    ['waiting', 'stalled', 'suspend', 'abort', 'emptied', 'canplay', 'canplaythrough',
+     'loadstart', 'loadedmetadata', 'playing', 'play', 'pause', 'ended'].forEach(evt => {
+        audio.addEventListener(evt, () => _rlog('audio_' + evt, {
+            currentTime: audio.currentTime,
+            duration:    audio.duration,
+            readyState:  audio.readyState,
+            networkState:audio.networkState,
+            paused:      audio.paused,
+            ended:       audio.ended,
+        }));
+    });
+    audio.addEventListener('error', () => {
+        const err = audio.error;
+        _rlog('audio_error_event', {
+            code:        err ? err.code : null,
+            message:     err ? err.message : null,
+            currentTime: audio.currentTime,
+            src:         audio.currentSrc,
+        });
+    });
+}
+
+document.addEventListener('freeze',  () => _rlog('page_freeze', {}));
+document.addEventListener('resume',  () => _rlog('page_resume', {}));
+window.addEventListener('pagehide', (e) => _rlog('pagehide', { persisted: e.persisted }));
+window.addEventListener('pageshow', (e) => _rlog('pageshow', { persisted: e.persisted }));
+
 // ── SVG Diamond helper — used wherever a LED color indicator is shown ────────
 function _makeDiamondSVG(ledColor, size) {
     const sizes = { sm: '11px', md: '13px', lg: '16px', np: '18px' };
@@ -132,6 +202,7 @@ function playTrack(index) {
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.removeAttribute('data-empty');
     const track = queue[currentIndex];
+    _rlog('playTrack_call', { toIndex: index, title: track && track.title, isDsd: !!(track && track.is_dsd) });
 
     // Expose current track globally so base.html lyrics system can read track.id
     window._currentTrack = track;
@@ -146,6 +217,7 @@ function playTrack(index) {
             currentAudio.addEventListener('pause', _handleUnexpectedPause);
             currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
             currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
+            _attachDiagListeners(currentAudio);
             // Solo se conecta al Web Audio graph si Normalizar ya está activo.
             // Conectar siempre acá (aunque el usuario nunca use Normalizar) deja
             // TODA la reproducción dependiendo de un AudioContext, que iOS
@@ -157,8 +229,10 @@ function playTrack(index) {
         currentAudio._trackDuration = track.duration || 0;
         currentAudio.load();
         _resumeAudioCtxIfNeeded();
+        _rlog('play_call_dsd', { src: streamUrl, audioCtxState: _audioCtx ? _audioCtx.state : null });
         currentAudio.play().then(() => {
             document.getElementById('play-btn').textContent = '⏸';
+            _rlog('play_resolved_dsd', { currentTime: currentAudio.currentTime, readyState: currentAudio.readyState });
             // Recién ahora — con el audio del navegador ya confirmado
             // arrancando — se dispara el push al DAC nativo (MPD). Antes se
             // lanzaba en paralelo con .play(), y en un avance automático de
@@ -172,6 +246,7 @@ function playTrack(index) {
             playViaMPD(track.file_path || '', { silent: true });
         }).catch(e => {
             console.error('[DSD] play error:', e);
+            _rlog('play_rejected_dsd', { error: String(e), name: e && e.name });
             // No asumir "está sonando" si play() fue rechazado (típico en iOS
             // cuando pasó demasiado tiempo desde el toque del usuario).
             document.getElementById('play-btn').textContent = '▶';
@@ -195,6 +270,7 @@ function playTrack(index) {
         currentAudio.addEventListener('pause', _handleUnexpectedPause);
         currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
         currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
+        _attachDiagListeners(currentAudio);
         if (normalizeEnabled) _ensureNormalizeGraph();
     }
 
@@ -203,10 +279,13 @@ function playTrack(index) {
     currentAudio._trackDuration = track.duration || 0;
     currentAudio.load();
     _resumeAudioCtxIfNeeded();
+    _rlog('play_call', { src: currentAudio.src });
     currentAudio.play().then(() => {
         document.getElementById('play-btn').textContent = '⏸';
+        _rlog('play_resolved', { currentTime: currentAudio.currentTime, readyState: currentAudio.readyState });
     }).catch(e => {
         console.error('Play error:', e);
+        _rlog('play_rejected', { error: String(e), name: e && e.name });
         document.getElementById('play-btn').textContent = '▶';
         dispatchPlayerState(false);
     });
@@ -360,10 +439,26 @@ function updateProgress() {
 // mientras estamos en 2do plano, una pausa impuesta se respeta y se deja
 // pausada hasta que el usuario vuelva a nuestra app.
 function _handleUnexpectedPause() {
-    if (!_shouldBePlaying || !currentAudio || currentAudio.ended) return;
-    if (document.hidden) return;
+    if (!_shouldBePlaying || !currentAudio || currentAudio.ended) {
+        _rlog('unexpected_pause_skip', { reason: 'not_should_be_playing_or_no_audio_or_ended', shouldBePlaying: _shouldBePlaying, ended: currentAudio ? currentAudio.ended : null });
+        return;
+    }
+    if (document.hidden) {
+        _rlog('unexpected_pause_skip', { reason: 'document_hidden' });
+        return;
+    }
+    _rlog('unexpected_pause_retry', {
+        currentTime:  currentAudio.currentTime,
+        readyState:   currentAudio.readyState,
+        networkState: currentAudio.networkState,
+        audioCtxState: _audioCtx ? _audioCtx.state : null,
+    });
     _resumeAudioCtxIfNeeded();
-    currentAudio.play().catch(() => {});
+    currentAudio.play().then(() => {
+        _rlog('unexpected_pause_retry_resolved', { currentTime: currentAudio.currentTime });
+    }).catch(e => {
+        _rlog('unexpected_pause_retry_rejected', { error: String(e), name: e && e.name });
+    });
 }
 
 // El sistema (lock screen / Centro de Control) necesita que playbackState
@@ -419,6 +514,7 @@ function prevTrack() {
 }
 
 function nextTrack() {
+    _rlog('nextTrack_call', { currentIndex, queueLen: queue.length, shuffleEnabled, repeatMode });
     if (shuffleEnabled) { playTrack(_randomIndexExcluding(currentIndex)); return; }
     if (currentIndex < queue.length - 1) { playTrack(currentIndex + 1); return; }
     if (repeatMode === 'all') { playTrack(0); return; }
@@ -512,11 +608,13 @@ function _handleTrackEnded() {
     // "premature" — routing it into the error-reconnect path (which re-fetches the
     // SAME just-finished track) instead of into nextTrack(), so the next queued track
     // never even got requested.
-    if (!currentAudio) { nextTrack(); return; }
+    if (!currentAudio) { _rlog('track_ended', { branch: 'no_audio_next' }); nextTrack(); return; }
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
     const dur = realDur || currentAudio._trackDuration || 0;
     const pos = currentAudio.currentTime || 0;
+    _rlog('track_ended', { dur, pos, realDur, reconnectAttempts: _reconnectAttempts });
     if (dur > 3 && pos < dur - 3 && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        _rlog('track_ended_treated_as_premature', { dur, pos });
         handleAudioError({ type: 'premature-end' });
         return;
     }
@@ -532,6 +630,10 @@ function handleAudioError(e) {
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
     const dur     = realDur || currentAudio._trackDuration || track.duration || 0;
     const nearEnd = dur > 0 && lastPos >= dur - 1.5;
+    _rlog('handleAudioError_call', {
+        reason: e && e.type, lastPos, dur, realDur, nearEnd, reconnectAttempts: _reconnectAttempts,
+        networkState: currentAudio.networkState, readyState: currentAudio.readyState,
+    });
 
     // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
     // stopping abruptly. /stream-dsd now serves a cached, byte-range-seekable
@@ -543,6 +645,7 @@ function handleAudioError(e) {
     if (!nearEnd && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         _reconnectAttempts++;
         console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
+        _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos });
         currentAudio.src = track.audio_url ||
             (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
         currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
@@ -561,6 +664,7 @@ function handleAudioError(e) {
         // dead track for the rest of the session. Move on so the playlist
         // keeps going instead of appearing to have just "stopped".
         console.warn('[player] Giving up on current track after repeated stream drops — skipping to next.');
+        _rlog('handleAudioError_giving_up', { reconnectAttempts: _reconnectAttempts, lastPos, dur });
         nextTrack();
         return;
     }
@@ -589,11 +693,12 @@ function updateMediaSession(track, playing) {
     // por el bloqueo de pantalla, sin esto los botones del lock screen
     // "no hacen nada" (audio internamente sigue mudo aunque currentAudio
     // reporte estar reproduciendo).
-    navigator.mediaSession.setActionHandler('play',         () => { _shouldBePlaying = true;  _resumeAudioCtxIfNeeded(); currentAudio && currentAudio.play(); dispatchPlayerState(true);  });
-    navigator.mediaSession.setActionHandler('pause',        () => { _shouldBePlaying = false; currentAudio && currentAudio.pause(); dispatchPlayerState(false); });
-    navigator.mediaSession.setActionHandler('previoustrack',() => { _resumeAudioCtxIfNeeded(); prevTrack(); });
-    navigator.mediaSession.setActionHandler('nexttrack',    () => { _resumeAudioCtxIfNeeded(); nextTrack(); });
+    navigator.mediaSession.setActionHandler('play',         () => { _rlog('mediasession_action', { action: 'play' });  _shouldBePlaying = true;  _resumeAudioCtxIfNeeded(); currentAudio && currentAudio.play(); dispatchPlayerState(true);  });
+    navigator.mediaSession.setActionHandler('pause',        () => { _rlog('mediasession_action', { action: 'pause' }); _shouldBePlaying = false; currentAudio && currentAudio.pause(); dispatchPlayerState(false); });
+    navigator.mediaSession.setActionHandler('previoustrack',() => { _rlog('mediasession_action', { action: 'previoustrack' }); _resumeAudioCtxIfNeeded(); prevTrack(); });
+    navigator.mediaSession.setActionHandler('nexttrack',    () => { _rlog('mediasession_action', { action: 'nexttrack' });     _resumeAudioCtxIfNeeded(); nextTrack(); });
     navigator.mediaSession.setActionHandler('seekto', details => {
+        _rlog('mediasession_action', { action: 'seekto', seekTime: details.seekTime });
         _resumeAudioCtxIfNeeded();
         if (currentAudio && details.seekTime != null) currentAudio.currentTime = details.seekTime;
     });
@@ -928,6 +1033,7 @@ function _ensureNormalizeGraph() {
     if (!currentAudio || _normSource) return;   // no audio yet, or already wired up
     try {
         _audioCtx     = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+        _audioCtx.addEventListener('statechange', () => _rlog('audiocontext_statechange', { state: _audioCtx.state }));
         _normSource   = _audioCtx.createMediaElementSource(currentAudio);
         _normAnalyser = _audioCtx.createAnalyser();
         _normAnalyser.fftSize = 1024;
@@ -965,6 +1071,7 @@ function _resumeAudioCtxIfNeeded() {
 }
 
 document.addEventListener('visibilitychange', () => {
+    _rlog('visibilitychange', { hidden: document.hidden, visibilityState: document.visibilityState });
     if (!document.hidden) _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
 });
 
@@ -982,12 +1089,22 @@ let _watchdogStallTicks = 0;
 setInterval(() => {
     if (!_shouldBePlaying || !currentAudio) { _watchdogStallTicks = 0; return; }
 
+    _rlog('watchdog_tick', {
+        currentTime:  currentAudio.currentTime,
+        paused:       currentAudio.paused,
+        ended:        currentAudio.ended,
+        networkState: currentAudio.networkState,
+        readyState:   currentAudio.readyState,
+        stallTicks:   _watchdogStallTicks,
+        audioCtxState: _audioCtx ? _audioCtx.state : null,
+    });
+
     // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
-    if (currentAudio.ended) { _handleTrackEnded(); return; }
+    if (currentAudio.ended) { _rlog('watchdog_branch', { branch: 'ended' }); _handleTrackEnded(); return; }
 
     // Quedó pausado por el sistema y el listener de 'pause' no lo recuperó
     // (p.ej. se perdió el evento) — reintentar.
-    if (currentAudio.paused) { _handleUnexpectedPause(); return; }
+    if (currentAudio.paused) { _rlog('watchdog_branch', { branch: 'paused' }); _handleUnexpectedPause(); return; }
 
     // Reporta estar reproduciendo pero currentTime no avanza — pipe/decoder
     // trabado. Se le dan ~8s (2 ticks) antes de forzar una reconexión,
@@ -997,6 +1114,7 @@ setInterval(() => {
         _watchdogStallTicks++;
         if (_watchdogStallTicks >= 2) {
             _watchdogStallTicks = 0;
+            _rlog('watchdog_branch', { branch: 'stall_triggering_reconnect', t });
             handleAudioError({ type: 'watchdog-stall' });
         }
     } else {

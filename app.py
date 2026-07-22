@@ -2792,6 +2792,26 @@ def stream_dsd(filepath):
     return resp
 
 
+# ── Diagnóstico remoto del player (temporal) ─────────────────────────────────
+# Sink para los eventos de reproducción que manda static/player.js por
+# sendBeacon. Es la única forma práctica de ver qué pasa adentro del
+# navegador del celular durante el bug de reproducción DSD→DSD en 2do
+# plano, ya que no siempre se puede sacar la consola del navegador en el
+# momento exacto. Cada línea queda en este mismo log con el prefijo
+# [CLIENT-LOG], grepeable. No afecta la reproducción ni el resto de la app;
+# nunca levanta una excepción hacia el cliente.
+@app.route('/api/client-log', methods=['POST'])
+def api_client_log():
+    try:
+        data = request.get_json(silent=True, force=True) or {}
+    except Exception:
+        data = {}
+    ua = request.headers.get('User-Agent', '')[:90]
+    name = data.pop('event', '?')
+    app.logger.info(f"[CLIENT-LOG] {name} | {data} | ua={ua}")
+    return ('', 204)
+
+
 @app.route('/api/favorites', methods=['GET'])
 def api_favorites_list():
     """Return all favorited tracks with full metadata."""
