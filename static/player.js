@@ -139,6 +139,45 @@ function buildDsdStreamUrl(path) {
     return '/stream-dsd/' + p.split('/').map(s => encodeURIComponent(s)).join('/');
 }
 
+// ── DSD prewarm ────────────────────────────────────────────────────────────
+// El corte de reproducción en 2do plano resultó estar ligado a que el
+// primer pedido a una pista DSD sin cachear puede tardar bastante (el
+// server transcodifica el archivo completo antes de mandar el primer
+// byte) — eso disparaba el detector de "stream caído" del watchdog, que a
+// su vez terminaba dejando al <audio> mudo justo en el peor momento para
+// que el navegador congele la pestaña en 2do plano. La forma más directa
+// de evitar el problema de raíz es que la pista nunca tenga que esperar
+// nada: pedirle al server que la transcodifique ANTES de que le toque
+// sonar, mientras lo que esté sonando ahora (DSD o no) sigue reproduciendo
+// tranquilo — server-side corre en un hilo aparte sin bloquear nada.
+//
+// Se dispara: al cargar/agregar pistas a la cola (por si el usuario arma
+// toda la playlist de entrada) y en cada avance de pista (por si se está
+// escuchando un álbum completo y las pistas se van agregando o quedando
+// varias más adelante en la cola con tiempo de sobra para procesarse).
+const DSD_PREWARM_LOOKAHEAD = 3;     // cuántas pistas por delante de la actual se precalientan
+const _dsdPrewarmed = new Set();     // file_path ya pedidos esta sesión — evita pedidos repetidos
+
+function _prewarmDsd(track) {
+    if (!track || !track.is_dsd || !track.file_path) return;
+    if (_dsdPrewarmed.has(track.file_path)) return;
+    _dsdPrewarmed.add(track.file_path);
+    try {
+        fetch('/api/prewarm-dsd', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: track.file_path }),
+        }).then(r => r.json()).then(d => {
+            _rlog('prewarm_dsd_response', { file: track.file_path, status: d.status });
+        }).catch(() => {});
+    } catch (e) { /* el prewarm es solo una optimización — nunca debe romper nada */ }
+}
+
+function _prewarmUpcomingDsd() {
+    const end = Math.min(queue.length, currentIndex + 1 + DSD_PREWARM_LOOKAHEAD);
+    for (let i = currentIndex + 1; i < end; i++) _prewarmDsd(queue[i]);
+}
+
 // ── Queue & playback ──────────────────────────────────────────────────────────
 
 function loadQueue(tracks) {
@@ -166,6 +205,7 @@ function loadQueue(tracks) {
     }));
     // Notify playlist panel so it reflects the current queue
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
+    _prewarmUpcomingDsd();
 }
 
 // Varias vistas (browse/home/artist/search/album) hacen `await fetch(...)`
@@ -198,6 +238,7 @@ function playTrack(index) {
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
     _lastProgressPos   = 0;
     _shouldBePlaying = true;
+    _prewarmUpcomingDsd();
     // Re-enable play button now that there's something to play
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.removeAttribute('data-empty');
@@ -642,7 +683,24 @@ function handleAudioError(e) {
     // available. Capped to avoid infinite retry loops, but the budget resets
     // on genuine progress (see updateProgress) so a flaky connection that
     // recovers repeatedly doesn't burn through it on its own.
+    //
+    // EXCEPTO en 2do plano: reasignar .src/load() dejaba al <audio> sin
+    // sonar por un instante (readyState vuelve a 0) mientras la pestaña está
+    // oculta — y los logs de dos pruebas independientes muestran que los
+    // únicos cortes largos (varios minutos sin ningún evento, ni siquiera
+    // del watchdog corriendo en JS puro sin red) empezaron justo después de
+    // esta reconexión. Toda transición que NO pasó por acá — incluyendo
+    // DSD→DSD sin stall — funcionó perfecto en 2do plano. Todo indica que
+    // ese instante sin audio es lo que le da pie a iOS/el navegador para
+    // congelar el hilo de JS de la pestaña, y una vez congelado nada de
+    // este código puede volver a ejecutarse para recuperarlo. Mientras está
+    // oculta, mejor no tocar nada: _handleUnexpectedPause() ya recupera al
+    // toque en cuanto la app vuelve a primer plano (ver visibilitychange).
     if (!nearEnd && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        if (document.hidden) {
+            _rlog('reconnect_suppressed_hidden', { lastPos, dur, reconnectAttempts: _reconnectAttempts });
+            return;
+        }
         _reconnectAttempts++;
         console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
         _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos });
@@ -1107,14 +1165,21 @@ setInterval(() => {
     if (currentAudio.paused) { _rlog('watchdog_branch', { branch: 'paused' }); _handleUnexpectedPause(); return; }
 
     // Reporta estar reproduciendo pero currentTime no avanza — pipe/decoder
-    // trabado. Se le dan ~8s (2 ticks) antes de forzar una reconexión,
-    // reutilizando el mismo mecanismo que ya existe para caídas de red.
+    // trabado, o (para DSD) el server sigue transcodificando: en un
+    // cache-miss, /stream-dsd no manda el primer byte hasta terminar de
+    // transcodificar el archivo completo, lo que en discos largos puede
+    // tardar bastante más que 8s sin que haya ningún problema real. Antes
+    // eso se confundía con un stream caído y disparaba una reconexión
+    // innecesaria — por eso a DSD se le da mucho más margen (~32s) antes
+    // de considerarlo un stall genuino.
     const t = currentAudio.currentTime;
     if (t === _watchdogLastTime) {
         _watchdogStallTicks++;
-        if (_watchdogStallTicks >= 2) {
+        const _track = queue[currentIndex];
+        const stallThreshold = (_track && _track.is_dsd) ? 8 : 2;   // ticks de 4s
+        if (_watchdogStallTicks >= stallThreshold) {
             _watchdogStallTicks = 0;
-            _rlog('watchdog_branch', { branch: 'stall_triggering_reconnect', t });
+            _rlog('watchdog_branch', { branch: 'stall_triggering_reconnect', t, stallThreshold });
             handleAudioError({ type: 'watchdog-stall' });
         }
     } else {
@@ -1248,6 +1313,7 @@ function appendToQueue(track) {
     const normalized = _normalizeTrack(track);
     queue.push(normalized);
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
+    _prewarmDsd(normalized);   // el push puede caer fuera de la ventana de lookahead — precalentar directo
 }
 window.appendToQueue = appendToQueue;
 window.loadQueue  = loadQueue;

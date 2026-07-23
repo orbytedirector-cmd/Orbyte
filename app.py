@@ -4,6 +4,7 @@ import json
 import tempfile
 import hashlib
 import time
+import threading
 from urllib.parse import quote
 from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context
 from flask_cors import CORS
@@ -111,6 +112,23 @@ def lang_label(code):
 
 app = Flask(__name__)
 CORS(app)
+
+# ── Log a archivo (además de la terminal) ────────────────────────────────────
+# La terminal de start.sh trunca el scroll en sesiones largas — varias veces
+# se perdió el tramo justo donde pasaba el corte de reproducción. Este handler
+# no reemplaza la salida por consola, la complementa: todo lo que ya se ve en
+# terminal (incluidas las líneas [CLIENT-LOG]) queda además en un archivo
+# rotativo que se puede revisar completo después con `cat` o `tail -f` sin
+# depender del buffer de la terminal.
+import logging
+from logging.handlers import RotatingFileHandler
+
+_debug_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'orbyte_debug.log')
+_file_handler = RotatingFileHandler(_debug_log_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding='utf-8')
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s in %(module)s: %(message)s'))
+app.logger.addHandler(_file_handler)
+app.logger.setLevel(logging.INFO)
 
 # ── Diamond SVG helper ────────────────────────────────────────────────────────
 _DIAMOND_SVG_TMPL = (
@@ -2711,6 +2729,18 @@ def play_mpd():
 # repeat request — including the reconnect-from-lastPos calls the player
 # already makes on a network hiccup, and the watchdog's stall recovery —
 # hits the cache and is served instantly.
+#
+# That one-time cost is exactly what /api/prewarm-dsd (below) exists to hide:
+# static/player.js calls it as soon as a DSD track enters the queue, or
+# whenever playback advances and a DSD track comes within a couple of slots
+# of the current one — so the transcode runs in a background thread while
+# whatever's currently playing (DSD or not) keeps streaming normally, and by
+# the time /stream-dsd is actually requested for it, it's already a cache
+# hit. This is what actually prevents the background-freeze failure mode
+# from ever being triggered in the first place, rather than just handling it
+# gracefully after the fact (see the hidden-tab reconnect-suppression note
+# in handleAudioError in player.js) — a track that never needs to stall
+# never risks it.
 _DSD_CACHE_DIR      = os.path.join(tempfile.gettempdir(), 'orbyte_dsd_cache')
 _DSD_CACHE_MAX_AGE  = 4 * 3600   # seconds — long enough for a listening session
 
@@ -2739,6 +2769,75 @@ def _dsd_cache_cleanup():
     except FileNotFoundError:
         pass
 
+# Un lock por archivo cacheado — evita que una reproducción real y un
+# prewarm en curso para la MISMA pista disparen dos ffmpeg compitiendo por
+# CPU. El que llega segundo espera al primero en vez de arrancar el suyo.
+_dsd_transcode_locks       = {}
+_dsd_transcode_locks_guard = threading.Lock()
+
+def _dsd_transcode_lock(cache_path):
+    with _dsd_transcode_locks_guard:
+        lock = _dsd_transcode_locks.get(cache_path)
+        if lock is None:
+            lock = threading.Lock()
+            _dsd_transcode_locks[cache_path] = lock
+        return lock
+
+def _dsd_transcode_lock_release(cache_path, lock):
+    lock.release()
+    with _dsd_transcode_locks_guard:
+        if _dsd_transcode_locks.get(cache_path) is lock:
+            _dsd_transcode_locks.pop(cache_path, None)
+
+def _transcode_dsd_to_cache(absolute_path, cache_path):
+    """Run the actual ffmpeg transcode and atomically publish it to cache_path.
+    Returns True on success. Caller must already hold that path's lock."""
+    tmp_path = f'{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp'
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-i', absolute_path,
+        '-vn',                        # drop embedded cover art (DSF stores album art)
+        '-ar', '176400',              # 176.4 kHz — universal browser FLAC support
+        '-sample_fmt', 's32',         # 32-bit integer, full DSD dynamic range
+        '-c:a', 'flac',
+        '-compression_level', '0',    # fastest encode
+        '-f', 'flac',                 # explicit — tmp_path ends in .tmp, not .flac,
+                                       # so ffmpeg can't infer the muxer from the extension
+        tmp_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0 or not os.path.isfile(tmp_path):
+            app.logger.error(
+                f"[dsd-transcode] ffmpeg failed for {absolute_path}: "
+                f"{result.stderr.decode(errors='replace')[:500]}"
+            )
+            return False
+        os.replace(tmp_path, cache_path)
+        return True
+    finally:
+        if os.path.isfile(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+
+def _resolve_music_path(raw_path):
+    """Resolve a client-supplied path to an absolute path guaranteed to sit
+    inside MUSIC_ROOT, or None if it doesn't. Shared by /stream-dsd and
+    /api/prewarm-dsd so both apply the exact same containment check."""
+    filepath = clean_db_path(raw_path or '')
+    if not filepath:
+        return None
+    absolute_path = filepath if os.path.isabs(filepath) else os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
+    try:
+        root_real = os.path.realpath(MUSIC_ROOT)
+        path_real = os.path.realpath(absolute_path)
+        if os.path.commonpath([path_real, root_real]) != root_real:
+            return None
+    except ValueError:
+        return None
+    return absolute_path
+
+
 @app.route('/stream-dsd/<path:filepath>')
 def stream_dsd(filepath):
     """
@@ -2757,32 +2856,17 @@ def stream_dsd(filepath):
     cache_hit  = os.path.isfile(cache_path)
 
     if not cache_hit:
-        tmp_path = f'{cache_path}.{os.getpid()}.tmp'
-        cmd = [
-            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-            '-i', absolute_path,
-            '-vn',                        # drop embedded cover art (DSF stores album art)
-            '-ar', '176400',              # 176.4 kHz — universal browser FLAC support
-            '-sample_fmt', 's32',         # 32-bit integer, full DSD dynamic range
-            '-c:a', 'flac',
-            '-compression_level', '0',    # fastest encode
-            '-f', 'flac',                 # explicit — tmp_path ends in .tmp, not .flac,
-                                           # so ffmpeg can't infer the muxer from the extension
-            tmp_path,
-        ]
+        # Si /api/prewarm-dsd ya está transcodificando esta misma pista,
+        # esperamos a que termine en vez de arrancar un segundo ffmpeg.
+        lock = _dsd_transcode_lock(cache_path)
+        lock.acquire()
         try:
-            result = subprocess.run(cmd, capture_output=True, timeout=300)
-            if result.returncode != 0 or not os.path.isfile(tmp_path):
-                app.logger.error(
-                    f"[stream-dsd] ffmpeg failed for {absolute_path}: "
-                    f"{result.stderr.decode(errors='replace')[:500]}"
-                )
-                return "Transcode failed", 500
-            os.replace(tmp_path, cache_path)
+            cache_hit = os.path.isfile(cache_path)   # puede haberse cacheado mientras esperábamos
+            if not cache_hit:
+                if not _transcode_dsd_to_cache(absolute_path, cache_path):
+                    return "Transcode failed", 500
         finally:
-            if os.path.isfile(tmp_path):
-                try: os.remove(tmp_path)
-                except OSError: pass
+            _dsd_transcode_lock_release(cache_path, lock)
 
     resp = _serve_audio(cache_path)
     resp.headers['Content-Type']  = 'audio/flac'
@@ -2790,6 +2874,45 @@ def stream_dsd(filepath):
     resp.headers['X-DSD-Rate']    = '176400'
     resp.headers['X-DSD-Cache']   = 'hit' if cache_hit else 'miss'
     return resp
+
+
+@app.route('/api/prewarm-dsd', methods=['POST'])
+def api_prewarm_dsd():
+    """
+    Kick off the DSD→FLAC transcode for a track in a background thread and
+    return immediately, without waiting for it to finish. Called from
+    static/player.js as soon as a DSD track enters the queue, or whenever
+    playback advances and one comes within a couple of slots of the current
+    track — see _prewarmUpcomingDsd() there. The ffmpeg subprocess itself
+    runs outside the Python GIL while it waits (subprocess.run releases it),
+    so this doesn't block Flask from serving whatever's currently playing,
+    even on the single-threaded dev server.
+    """
+    data = request.get_json(silent=True) or {}
+    absolute_path = _resolve_music_path(data.get('path', ''))
+    if not absolute_path:
+        return jsonify({'status': 'error', 'message': 'Invalid or missing path'}), 400
+    if not os.path.isfile(absolute_path):
+        return jsonify({'status': 'error', 'message': 'File not found'}), 404
+
+    cache_path = _dsd_cache_path(absolute_path)
+    if os.path.isfile(cache_path):
+        return jsonify({'status': 'already_cached'})
+
+    lock = _dsd_transcode_lock(cache_path)
+    if not lock.acquire(blocking=False):
+        return jsonify({'status': 'already_in_progress'})
+
+    def _prewarm_job():
+        try:
+            ok = _transcode_dsd_to_cache(absolute_path, cache_path)
+            if ok:
+                app.logger.info(f"[prewarm-dsd] cached: {os.path.basename(absolute_path)}")
+        finally:
+            _dsd_transcode_lock_release(cache_path, lock)
+
+    threading.Thread(target=_prewarm_job, daemon=True).start()
+    return jsonify({'status': 'started'})
 
 
 # ── Diagnóstico remoto del player (temporal) ─────────────────────────────────
