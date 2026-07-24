@@ -6,6 +6,8 @@ let lyricsInterval = null;
 let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-stop recovery)
 let _lastProgressPos   = 0;   // highest currentTime actually reached since the last reconnect
 const MAX_RECONNECT_ATTEMPTS = 8;   // short-lived mobile network drops can chain several times in a row
+let _unexpectedPauseRetries = 0;    // reintentos "gentiles" (solo .play(), sin tocar .src) ya usados en 2do plano para la pista actual
+const MAX_HIDDEN_PAUSE_RETRIES = 2; // acotado a propósito — ver comentario en _handleUnexpectedPause
 
 // Intención del usuario: true mientras "debería estar sonando" (se puso en
 // true al arrancar/reanudar, false solo cuando el usuario pausa/detiene a
@@ -236,6 +238,7 @@ function playTrack(index) {
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
+    _unexpectedPauseRetries = 0;
     _lastProgressPos   = 0;
     _shouldBePlaying = true;
     _prewarmUpcomingDsd();
@@ -485,9 +488,39 @@ function _handleUnexpectedPause() {
         return;
     }
     if (document.hidden) {
-        _rlog('unexpected_pause_skip', { reason: 'document_hidden' });
+        // A diferencia de handleAudioError (que reasigna .src y llama load(),
+        // la acción que arrastraba al freeze de varios minutos en iOS), acá
+        // solo se vuelve a llamar .play() sobre el MISMO elemento — sin
+        // tocar el buffer ni resetear readyState. Confirmado con logs reales
+        // en Android: una pista DSD ya cacheada (prewarm) y con
+        // readyState=4 (datos completos) puede igual quedar pausada por el
+        // sistema a los pocos milisegundos de arrancar en 2do plano, sin que
+        // haya habido ningún stall ni reconexión de por medio — para ESE
+        // caso puntual, reintentar .play() es una operación liviana y seria
+        // razonable, no el gesto disruptivo que causaba el freeze.
+        //
+        // Se limita a MAX_HIDDEN_PAUSE_RETRIES intentos por pista y solo si
+        // ya hay buffer de sobra (readyState>=3, HAVE_FUTURE_DATA) — así no
+        // se confunde con un stall real (que ya maneja el watchdog aparte) y
+        // no se insiste indefinidamente por si la pausa es en realidad una
+        // llamada entrante o otra app tomándose el foco de audio de verdad,
+        // donde SÍ hay que respetarla y no pelearla (ver comentario arriba).
+        if (currentAudio.readyState >= 3 && _unexpectedPauseRetries < MAX_HIDDEN_PAUSE_RETRIES) {
+            _unexpectedPauseRetries++;
+            _rlog('unexpected_pause_retry_hidden', {
+                attempt: _unexpectedPauseRetries, currentTime: currentAudio.currentTime, readyState: currentAudio.readyState,
+            });
+            currentAudio.play().then(() => {
+                _rlog('unexpected_pause_retry_hidden_resolved', { currentTime: currentAudio.currentTime });
+            }).catch(e => {
+                _rlog('unexpected_pause_retry_hidden_rejected', { error: String(e), name: e && e.name });
+            });
+            return;
+        }
+        _rlog('unexpected_pause_skip', { reason: 'document_hidden', readyState: currentAudio.readyState, retriesUsed: _unexpectedPauseRetries });
         return;
     }
+    _unexpectedPauseRetries = 0;   // ya en primer plano — reponer el margen para la próxima vez que se oculte
     _rlog('unexpected_pause_retry', {
         currentTime:  currentAudio.currentTime,
         readyState:   currentAudio.readyState,
