@@ -426,10 +426,16 @@ def get_db_connection():
     # propia fila acá y su propia sesión Flask firmada — la fila (no el
     # User-Agent, que es igual para dos iPhones) ES el identificador de
     # dispositivo que pide el ticket.
+    # Un participante = un dispositivo/conexión distinguible. device_key
+    # identifica el DISPOSITIVO físico (no la cookie de sesión, que se puede
+    # perder o descartar a propósito) para que reescanear el QR — con o sin
+    # sesión activa — vuelva a mapear a la MISMA fila y no reinicie el cupo
+    # de pistas (ver _collab_device_key).
     conn.execute('''
         CREATE TABLE IF NOT EXISTS collab_participants (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id    INTEGER NOT NULL,
+            device_key    TEXT NOT NULL,
             name          TEXT NOT NULL,
             joined_at     TEXT NOT NULL DEFAULT (datetime('now')),
             last_seen     TEXT
@@ -445,6 +451,10 @@ def get_db_connection():
             dispatched      INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_collab_participant_device "
+        "ON collab_participants (session_id, device_key)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_collab_queue_session_disp "
         "ON collab_queue_items (session_id, dispatched)"
@@ -793,6 +803,40 @@ def _collab_get_session_by_token(conn, token):
     ).fetchone()
     return dict(row) if row else None
 
+def _collab_device_key():
+    """Identificador de DISPOSITIVO (no de sesión/cookie) para que un mismo
+    celular no pueda 'reiniciar' su cupo de pistas re-escaneando el QR con
+    otro nombre. IP + User-Agent es lo más parecido a una MAC address que un
+    servidor web puede ver — no es infalible (un cambio de IP por
+    reconexión de WiFi generaría una fila nueva), pero para el caso de uso
+    (invitados de confianza en una reunión) es suficiente, y es justo lo que
+    pediste usar."""
+    ua = request.headers.get('User-Agent', '')
+    raw = f"{request.remote_addr}|{ua}"
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
+
+def _collab_find_or_create_participant(conn, sess, name=None):
+    """Busca un participante YA existente para este dispositivo en esta
+    sesión (re-escaneo del QR, con o sin cookie de invitado vigente) y lo
+    reutiliza — así su cupo de pistas sigue contando desde donde iba en vez
+    de resetearse. Si no existe, lo crea con el nombre dado."""
+    device_key = _collab_device_key()
+    row = conn.execute(
+        'SELECT * FROM collab_participants WHERE session_id=? AND device_key=?',
+        (sess['id'], device_key)
+    ).fetchone()
+    if row:
+        conn.execute('UPDATE collab_participants SET last_seen=? WHERE id=?', (_utcnow_iso(), row['id']))
+        conn.commit()
+        return dict(row), False
+    cur = conn.execute(
+        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (sess['id'], device_key, name or 'Invitado', _utcnow_iso(), _utcnow_iso())
+    )
+    conn.commit()
+    return {'id': cur.lastrowid, 'name': name or 'Invitado'}, True
+
 def _collab_window_count(conn, session_row, participant_id):
     """Cuántas pistas agregó este participante dentro de la ventana de tiempo
     configurada (ventana móvil desde 'ahora', no un contador que se resetea a
@@ -832,12 +876,14 @@ def _collab_fair_order(conn, session_id):
                 pending = True
     return result
 
-def _collab_try_add(conn, session_id, participant_id, track_id, confirm_duplicate, confirm_album):
+def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
     """Un solo intento de agregar UNA pista — usado por /api/collab/add.
     Devuelve un dict con 'status': ok | limit | duplicate | album_warning |
-    expired | error. duplicate/album_warning son AVISOS (ver ticket, "debe
-    mostrar un aviso"): no insertan nada salvo que venga confirm_*=True, para
-    que el cliente pueda mostrar el aviso y reintentar con confirmación."""
+    expired | error. 'duplicate' es un BLOQUEO duro: si la pista ya está en
+    la playlist colaborativa (la haya agregado quien sea) no se vuelve a
+    agregar, punto. 'album_warning' sigue siendo un aviso con confirmación
+    (agregar 4+ pistas propias del mismo álbum sigue siendo una elección
+    legítima del invitado, solo se le sugiere variar)."""
     sess = conn.execute('SELECT * FROM collab_sessions WHERE id=? AND is_active=1', (session_id,)).fetchone()
     if not sess:
         return {'status': 'expired', 'message': 'La sesión colaborativa ya terminó.'}
@@ -857,9 +903,9 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_duplicat
            WHERE cqi.session_id=? AND cqi.track_id=? LIMIT 1''',
         (session_id, track_id)
     ).fetchone()
-    if dup and not confirm_duplicate:
+    if dup:
         return {'status': 'duplicate', 'added_by': dup['name'],
-                'message': f"«{track['title']}» ya la agregó {dup['name']} a la playlist."}
+                'message': f"«{track['title']}» ya está en la playlist colaborativa (la agregó {dup['name']})."}
 
     if track['album_id'] and not confirm_album:
         album_count = conn.execute(
@@ -878,51 +924,6 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_duplicat
     )
     conn.commit()
     return {'status': 'ok', 'remaining': sess['max_tracks'] - (count + 1)}
-
-def _collab_try_add_batch(conn, session_id, participant_id, track_ids):
-    """Agregar VARIAS pistas de una (ej. 'Reproducir álbum completo'). A
-    diferencia de _collab_try_add, acá los avisos son informativos y se dan
-    UNA vez al final — no tiene sentido interrumpir con un confirm() por
-    cada una de las N pistas de un álbum que el invitado ya eligió a
-    propósito. Duplicados se saltan solos; el límite corta la lista donde
-    corresponda en vez de rechazar todo el lote."""
-    sess = conn.execute('SELECT * FROM collab_sessions WHERE id=? AND is_active=1', (session_id,)).fetchone()
-    if not sess:
-        return {'status': 'expired', 'message': 'La sesión colaborativa ya terminó.'}
-
-    slots_left = sess['max_tracks'] - _collab_window_count(conn, sess, participant_id)
-    added, skipped_dup = 0, 0
-    album_counts = {}
-    for tid in track_ids:
-        if slots_left <= 0:
-            break
-        track = conn.execute('SELECT id, album_id FROM tracks WHERE id=?', (tid,)).fetchone()
-        if not track:
-            continue
-        dup = conn.execute(
-            'SELECT 1 FROM collab_queue_items WHERE session_id=? AND track_id=? LIMIT 1',
-            (session_id, tid)
-        ).fetchone()
-        if dup:
-            skipped_dup += 1
-            continue
-        conn.execute(
-            'INSERT INTO collab_queue_items (session_id, participant_id, track_id, added_at) VALUES (?, ?, ?, ?)',
-            (session_id, participant_id, tid, _utcnow_iso())
-        )
-        added += 1
-        slots_left -= 1
-        if track['album_id']:
-            album_counts[track['album_id']] = album_counts.get(track['album_id'], 0) + 1
-    conn.commit()
-
-    album_notice = None
-    if any(n > COLLAB_ALBUM_WARNING_THRESHOLD for n in album_counts.values()):
-        album_notice = ('Agregaste varias pistas del mismo álbum de una — para una playlist '
-                         'más variada, después sumá también de otros álbumes.')
-    return {'status': 'ok', 'added': added, 'skipped_duplicates': skipped_dup,
-            'capped_by_limit': slots_left <= 0 and (added + skipped_dup) < len(track_ids),
-            'album_notice': album_notice}
 
 
 @app.route('/admin/colaborativa')
@@ -1073,31 +1074,42 @@ def api_admin_collab_pull():
 
 @app.route('/colab/join/<token>', methods=['GET', 'POST'])
 def collab_join(token):
-    """Pantalla pública (sin sesión) a la que apunta el QR. GET muestra el
-    formulario de nombre; POST crea el participante y arranca su sesión de
-    invitado — de ahí en más navega la app como cualquier página normal."""
+    """Pantalla pública (sin sesión) a la que apunta el QR. Si el
+    DISPOSITIVO (no la cookie) ya es participante de esta sesión — porque
+    todavía tiene la sesión de invitado activa, o porque la perdió y volvió
+    a escanear el mismo QR — se lo reengancha directo a la fila que ya
+    tenía, sin pedirle el nombre de nuevo y sin resetear su cupo de pistas.
+    Recién si es la primera vez que este dispositivo entra a ESTA sesión se
+    muestra el formulario para elegir un nombre."""
     conn = get_db_connection()
     try:
         sess = _collab_get_session_by_token(conn, token)
         if not sess:
             return render_template('collab_join.html', error='invalid', collab_session=None, token=token)
-        if session.get('is_collab_guest') and session.get('collab_session_id') == sess['id']:
-            return redirect(url_for('home'))
-        if request.method == 'POST':
-            name = (request.form.get('name') or '').strip()[:40] or 'Invitado'
-            cur = conn.execute(
-                'INSERT INTO collab_participants (session_id, name, joined_at, last_seen) VALUES (?, ?, ?, ?)',
-                (sess['id'], name, _utcnow_iso(), _utcnow_iso())
-            )
+
+        device_key = _collab_device_key()
+        existing_row = conn.execute(
+            'SELECT * FROM collab_participants WHERE session_id=? AND device_key=?',
+            (sess['id'], device_key)
+        ).fetchone()
+
+        if existing_row:
+            participant = dict(existing_row)
+            conn.execute('UPDATE collab_participants SET last_seen=? WHERE id=?', (_utcnow_iso(), participant['id']))
             conn.commit()
-            session.clear()
-            session.permanent = True
-            session['is_collab_guest']       = True
-            session['collab_session_id']     = sess['id']
-            session['collab_participant_id'] = cur.lastrowid
-            session['collab_name']           = name
-            return redirect(url_for('home'))
-        return render_template('collab_join.html', error=None, collab_session=sess, token=token)
+        elif request.method == 'POST':
+            name = (request.form.get('name') or '').strip()[:40] or 'Invitado'
+            participant, _ = _collab_find_or_create_participant(conn, sess, name)
+        else:
+            return render_template('collab_join.html', error=None, collab_session=sess, token=token)
+
+        session.clear()
+        session.permanent = True
+        session['is_collab_guest']       = True
+        session['collab_session_id']     = sess['id']
+        session['collab_participant_id'] = participant['id']
+        session['collab_name']           = participant['name']
+        return redirect(url_for('home'))
     finally:
         conn.close()
 
@@ -1120,26 +1132,7 @@ def api_collab_add():
     try:
         result = _collab_try_add(
             conn, session['collab_session_id'], session['collab_participant_id'], track_id,
-            confirm_duplicate=bool(data.get('confirm_duplicate')),
             confirm_album=bool(data.get('confirm_album'))
-        )
-        return jsonify(result)
-    finally:
-        conn.close()
-
-
-@app.route('/api/collab/add-batch', methods=['POST'])
-def api_collab_add_batch():
-    if not session.get('is_collab_guest'):
-        return jsonify({'status': 'error', 'message': 'No sos parte de una sesión colaborativa activa.'}), 403
-    data = request.get_json(silent=True) or {}
-    track_ids = data.get('track_ids') or []
-    if not isinstance(track_ids, list) or not track_ids:
-        return jsonify({'status': 'error', 'message': 'Falta track_ids'}), 400
-    conn = get_db_connection()
-    try:
-        result = _collab_try_add_batch(
-            conn, session['collab_session_id'], session['collab_participant_id'], track_ids[:200]
         )
         return jsonify(result)
     finally:

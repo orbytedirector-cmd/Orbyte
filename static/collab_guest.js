@@ -29,7 +29,6 @@
     try {
       r = await postJSON('/api/collab/add', {
         track_id: track.id,
-        confirm_duplicate: !!opts.confirmDuplicate,
         confirm_album: !!opts.confirmAlbum,
       });
     } catch (e) {
@@ -41,14 +40,13 @@
       return true;
     }
     if (r.status === 'duplicate') {
-      if (confirm(r.message + '\n\n¿Agregarla igual?')) {
-        return addOne(track, { confirmDuplicate: true, confirmAlbum: opts.confirmAlbum });
-      }
+      // Bloqueo duro: ya está en la playlist, no se ofrece agregarla de nuevo.
+      notify(r.message);
       return false;
     }
     if (r.status === 'album_warning') {
       if (confirm(r.message + '\n\n¿Agregar igual?')) {
-        return addOne(track, { confirmDuplicate: opts.confirmDuplicate, confirmAlbum: true });
+        return addOne(track, { confirmAlbum: true });
       }
       return false;
     }
@@ -56,25 +54,22 @@
     return false;
   }
 
-  async function addBatch(tracks) {
-    const ids = (tracks || []).map((t) => t && t.id).filter(Boolean);
-    if (!ids.length) return;
-    let r;
-    try {
-      r = await postJSON('/api/collab/add-batch', { track_ids: ids });
-    } catch (e) {
-      notify('No se pudo conectar con el servidor para agregar el álbum.');
-      return;
+  // Un invitado nunca puede agregar un álbum/lista completa de una — solo
+  // pistas sueltas (ver ticket). Si "reproducir álbum" (o cualquier otra
+  // acción de "reproducir todo": Top tracks del artista, favoritos,
+  // resultados de búsqueda…) dispara esto con varias pistas del MISMO
+  // álbum, lo mandamos a la ficha del álbum para que las sume de a una.
+  // Si son de álbumes mezclados (ej. "reproducir todo" en una búsqueda) no
+  // hay a dónde redirigirlo con sentido, así que solo se le avisa.
+  function handleBulk(list) {
+    const firstAlbumId = list[0] && list[0].album_id;
+    const sameAlbum = firstAlbumId && list.every((t) => t && t.album_id === firstAlbumId);
+    if (sameAlbum) {
+      notify('Como invitado no podés agregar el álbum completo de una — te llevamos a su ficha para que sumes las pistas que quieras, una por una.');
+      window.location.href = `/album/${firstAlbumId}`;
+    } else {
+      notify('Como invitado solo podés agregar canciones de a una — entrá a cada pista o álbum y agregalas individualmente.');
     }
-    if (r.status !== 'ok') {
-      notify(r.message || 'No se pudo agregar el álbum.');
-      return;
-    }
-    let msg = `Se agregaron ${r.added} pista(s) a la playlist colaborativa.`;
-    if (r.skipped_duplicates) msg += ` ${r.skipped_duplicates} ya estaban en la cola.`;
-    if (r.capped_by_limit) msg += ' Llegaste al máximo de pistas permitido — el resto no se agregó.';
-    notify(msg);
-    if (r.album_notice) notify(r.album_notice);
   }
 
   // Un invitado no tiene reproductor propio: estas quedan como no-ops
@@ -87,8 +82,8 @@
   window.prependAndPlay = function (track) { addOne(track); };
   window.prependTracksAndPlay = function (tracks) {
     const list = Array.isArray(tracks) ? tracks : [tracks];
-    if (list.length > 1) addBatch(list);
-    else addOne(list[0]);
+    if (list.length <= 1) { addOne(list[0]); return; }
+    handleBulk(list);
   };
 
   window.toggleFavorite = function () {
