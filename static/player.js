@@ -7,7 +7,19 @@ let _reconnectAttempts = 0;   // caps auto-reconnect retries per track (abrupt-s
 let _lastProgressPos   = 0;   // highest currentTime actually reached since the last reconnect
 const MAX_RECONNECT_ATTEMPTS = 8;   // short-lived mobile network drops can chain several times in a row
 let _unexpectedPauseRetries = 0;    // reintentos "gentiles" (solo .play(), sin tocar .src) ya usados en 2do plano para la pista actual
-const MAX_HIDDEN_PAUSE_RETRIES = 2; // acotado a propósito — ver comentario en _handleUnexpectedPause
+const MAX_HIDDEN_PAUSE_RETRIES = 6;  // ver comentario en _handleUnexpectedPause — cada intento espera HIDDEN_PAUSE_RETRY_DELAY_MS
+const HIDDEN_PAUSE_RETRY_DELAY_MS = 250;
+
+// Cuántos cambios de pista AUTOMÁTICOS (por 'ended', sin ningún toque del
+// usuario de por medio) van encadenados desde la última vez que la pestaña
+// estuvo visible. La evidencia acumulada (varias pruebas cruzadas PC/Android/
+// iOS, incluida una con Flac-DSD-Flac-DSD que descartó que fuera específico
+// de DSD) muestra que la falla de reproducción en 2do plano se concentra
+// consistentemente en la 2da transición automática de la sesión, sin
+// importar el formato de las pistas — nunca en la 1ra, casi nunca después de
+// la 2da. Se expone en cada línea de log para que este patrón quede visible
+// de entrada, sin tener que reconstruirlo a mano de los timestamps cada vez.
+let _bgAutoAdvanceCount = 0;
 
 // Intención del usuario: true mientras "debería estar sonando" (se puso en
 // true al arrancar/reanudar, false solo cuando el usuario pausa/detiene a
@@ -50,6 +62,7 @@ function _rlog(event, data) {
             idx: currentIndex,
             track: t ? t.title : null,
             is_dsd: t ? !!t.is_dsd : null,
+            bgAutoAdvanceCount: _bgAutoAdvanceCount,
         }, data || {}));
         if (navigator.sendBeacon) {
             navigator.sendBeacon('/api/client-log', new Blob([payload], { type: 'application/json' }));
@@ -239,6 +252,7 @@ function playTrack(index) {
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
     _unexpectedPauseRetries = 0;
+    if (!document.hidden) _bgAutoAdvanceCount = 0;   // arranque en primer plano — reponer la cuenta
     _lastProgressPos   = 0;
     _shouldBePlaying = true;
     _prewarmUpcomingDsd();
@@ -499,22 +513,49 @@ function _handleUnexpectedPause() {
         // caso puntual, reintentar .play() es una operación liviana y seria
         // razonable, no el gesto disruptivo que causaba el freeze.
         //
-        // Se limita a MAX_HIDDEN_PAUSE_RETRIES intentos por pista y solo si
+        // Se limita a MAX_HIDDEN_PAUSE_RETRIES intentos por pista, con
+        // HIDDEN_PAUSE_RETRY_DELAY_MS de por medio entre cada uno, y solo si
         // ya hay buffer de sobra (readyState>=3, HAVE_FUTURE_DATA) — así no
         // se confunde con un stall real (que ya maneja el watchdog aparte) y
         // no se insiste indefinidamente por si la pausa es en realidad una
         // llamada entrante o otra app tomándose el foco de audio de verdad,
         // donde SÍ hay que respetarla y no pelearla (ver comentario arriba).
+        //
+        // El delay es a propósito: los logs muestran el propio navegador
+        // pausando y despausando el MISMO elemento en ciclos de apenas
+        // 15-20ms varias veces seguidas antes de asentarse — reintentar al
+        // toque, a esa misma velocidad, es competir contra ese ciclo en vez
+        // de darle margen para resolverse solo.
         if (currentAudio.readyState >= 3 && _unexpectedPauseRetries < MAX_HIDDEN_PAUSE_RETRIES) {
             _unexpectedPauseRetries++;
-            _rlog('unexpected_pause_retry_hidden', {
-                attempt: _unexpectedPauseRetries, currentTime: currentAudio.currentTime, readyState: currentAudio.readyState,
+            const attempt      = _unexpectedPauseRetries;
+            const audioRef     = currentAudio;
+            const indexAtCall  = currentIndex;
+            _rlog('unexpected_pause_retry_hidden_scheduled', {
+                attempt, currentTime: currentAudio.currentTime, readyState: currentAudio.readyState,
+                delayMs: HIDDEN_PAUSE_RETRY_DELAY_MS,
             });
-            currentAudio.play().then(() => {
-                _rlog('unexpected_pause_retry_hidden_resolved', { currentTime: currentAudio.currentTime });
-            }).catch(e => {
-                _rlog('unexpected_pause_retry_hidden_rejected', { error: String(e), name: e && e.name });
-            });
+            setTimeout(() => {
+                // Puede haber cambiado de pista, o haber vuelto a primer
+                // plano (donde ya corre otro camino de recuperación) mientras
+                // esperábamos — no pisar nada si el contexto ya cambió.
+                if (currentAudio !== audioRef || currentIndex !== indexAtCall || !document.hidden || audioRef.ended) {
+                    _rlog('unexpected_pause_retry_hidden_stale', { attempt });
+                    return;
+                }
+                if (!audioRef.paused) {
+                    _rlog('unexpected_pause_retry_hidden_already_playing', { attempt });
+                    return;
+                }
+                _rlog('unexpected_pause_retry_hidden', {
+                    attempt, currentTime: audioRef.currentTime, readyState: audioRef.readyState,
+                });
+                audioRef.play().then(() => {
+                    _rlog('unexpected_pause_retry_hidden_resolved', { attempt, currentTime: audioRef.currentTime });
+                }).catch(e => {
+                    _rlog('unexpected_pause_retry_hidden_rejected', { attempt, error: String(e), name: e && e.name });
+                });
+            }, HIDDEN_PAUSE_RETRY_DELAY_MS);
             return;
         }
         _rlog('unexpected_pause_skip', { reason: 'document_hidden', readyState: currentAudio.readyState, retriesUsed: _unexpectedPauseRetries });
@@ -588,6 +629,7 @@ function prevTrack() {
 }
 
 function nextTrack() {
+    if (document.hidden) _bgAutoAdvanceCount++;
     _rlog('nextTrack_call', { currentIndex, queueLen: queue.length, shuffleEnabled, repeatMode });
     if (shuffleEnabled) { playTrack(_randomIndexExcluding(currentIndex)); return; }
     if (currentIndex < queue.length - 1) { playTrack(currentIndex + 1); return; }
@@ -1162,6 +1204,7 @@ function _resumeAudioCtxIfNeeded() {
 }
 
 document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) _bgAutoAdvanceCount = 0;
     _rlog('visibilitychange', { hidden: document.hidden, visibilityState: document.visibilityState });
     if (!document.hidden) _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
 });
