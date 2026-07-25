@@ -5,6 +5,13 @@
 
 cd "$(dirname "$0")"
 
+# Cargar variables de entorno desde .env si existe (no se sube a git)
+if [ -f .env ]; then
+  set -a
+  source .env
+  set +a
+fi
+
 # Check if virtual environment exists
 if [ ! -d "venv" ]; then
     echo "Creating virtual environment..."
@@ -15,7 +22,9 @@ fi
 source venv/bin/activate
 
 # Install dependencies
-pip install -q flask flask-cors
+# qrcode[pil]: genera el QR de invitación de la Playlist Colaborativa
+# (/admin/colaborativa) — es la única dependencia nueva que trae esa feature.
+pip install -q flask flask-cors qrcode[pil]
 
 # Start the application
 echo "Starting HiRes Browser..."

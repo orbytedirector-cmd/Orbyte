@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Unirse a la playlist — Orbyte</title>
+
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Orbyte">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="auth-body">
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <img src="/static/logo-full.png" alt="Orbyte" class="auth-logo">
+
+      {% if error == 'invalid' %}
+      <div class="auth-notice auth-notice-error">
+        Este QR ya no es válido — la sesión colaborativa terminó o nunca existió.
+        Pedile al anfitrión que genere uno nuevo.
+      </div>
+      {% else %}
+      <p style="color:var(--text-secondary);margin:0 0 1rem;text-align:center">
+        Te vas a unir a la playlist colaborativa. Vas a poder navegar la biblioteca
+        y añadir pistas a la cola — hasta
+        {{ collab_session.max_tracks }} pistas cada {{ collab_session.window_hours }}h.
+      </p>
+      <form method="POST" class="auth-form">
+        <label class="auth-label" for="collab-name">¿Cómo te llamamos?</label>
+        <input type="text" id="collab-name" name="name" class="auth-input" maxlength="40"
+               placeholder="Tu nombre" required autofocus autocomplete="off">
+        <button type="submit" class="track-btn primary auth-submit">Unirme</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+</body>
+</html>

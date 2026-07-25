@@ -2056,3 +2056,43 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   .auth-logo { height: 48px; margin-bottom: 1rem; }
   .auth-input { padding: 0.6rem 0.7rem; font-size: 0.9rem; }
 }
+
+/* ── Playlist colaborativa: modo invitado ─────────────────────────────────
+   Un invitado no tiene reproductor propio (ver ticket) — se navega la app
+   tal cual (browse/artist/album/track/search sin ningún cambio de markup)
+   y solo se le oculta lo que no le corresponde: barra de reproductor, NP
+   overlay, panel de playlist, modales de letra/similares y los corazones
+   de favoritos (son de una cuenta real, no de un invitado de una fiesta). */
+.collab-guest-mode .player-bar,
+.collab-guest-mode .np-overlay,
+.collab-guest-mode .playlist-panel,
+.collab-guest-mode #lyrics-modal-overlay,
+.collab-guest-mode #similar-modal-overlay,
+.collab-guest-mode #similar-artists-modal-overlay,
+.collab-guest-mode .fav-btn {
+  display: none !important;
+}
+
+/* ── Panel /admin/colaborativa y pantalla /colab/join/<token> ───────────── */
+.collab-wrap { padding-bottom: 2rem; }
+.collab-card {
+  background: #0a0a0a;
+  border: 1px solid var(--border-gold);
+  border-radius: 14px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.25rem;
+}
+.collab-qr-box { display: flex; align-items: center; gap: 1.5rem; flex-wrap: wrap; }
+.collab-qr-box img { width: 220px; height: 220px; border-radius: 10px; background: #fff; padding: 8px; }
+.collab-limits-form { display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end; margin-top: 0.75rem; }
+.collab-limits-form label { display: block; font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 0.25rem; }
+.collab-limits-form input {
+  background: #000; border: 1px solid var(--border-gold); border-radius: 8px;
+  color: var(--text-gold); padding: 0.45rem 0.6rem; width: 110px; font-size: 0.9rem;
+}
+.collab-participant-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
+.collab-participant-list li {
+  display: flex; justify-content: space-between; padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(200,146,10,0.12); font-size: 0.88rem;
+}
+.collab-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }

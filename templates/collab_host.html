@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="collab-wrap">
+  <h1 class="admin-title">Playlist colaborativa</h1>
+
+  {% if not collab_session %}
+  <div class="collab-card">
+    <p style="color:var(--text-secondary);margin-top:0">
+      No hay ninguna sesión activa. Al crear una se genera un QR de un solo uso
+      (vale para toda la reunión, deja de servir cuando la finalizás) para que
+      tus invitados se unan desde su celular y agreguen pistas a la cola.
+    </p>
+    <form method="POST" action="/admin/colaborativa/crear" class="collab-limits-form">
+      <div>
+        <label for="max_tracks">Máx. pistas por dispositivo</label>
+        <input type="number" id="max_tracks" name="max_tracks" min="1" value="{{ default_max }}">
+      </div>
+      <div>
+        <label for="window_hours">Cada cuántas horas</label>
+        <input type="number" id="window_hours" name="window_hours" min="0.5" step="0.5" value="{{ default_window }}">
+      </div>
+      <button type="submit" class="track-btn primary">Generar QR</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="collab-card">
+    <div class="collab-qr-box">
+      {% if qrcode_available %}
+      <img src="/admin/colaborativa/qr.png?t={{ collab_session.token }}" alt="QR playlist colaborativa">
+      {% else %}
+      <div style="color:var(--text-secondary);max-width:220px">
+        Falta instalar la librería para generar el QR — corré <code>pip install qrcode[pil]</code>
+        en el server y recargá esta página.
+      </div>
+      {% endif %}
+      <div>
+        <p style="margin:0 0 0.4rem;color:var(--text-secondary);font-size:0.85rem">Link directo (por si el QR no anda):</p>
+        <p style="word-break:break-all;font-size:0.85rem"><a href="{{ join_url }}">{{ join_url }}</a></p>
+        <p style="margin:0.75rem 0 0;font-size:0.85rem;color:var(--text-secondary)">
+          Límite: <strong style="color:var(--text-gold)">{{ collab_session.max_tracks }}</strong> pistas cada
+          <strong style="color:var(--text-gold)">{{ collab_session.window_hours }}h</strong> por dispositivo.
+        </p>
+      </div>
+    </div>
+
+    <h2 class="admin-section-title">Participantes (<span id="collab-participant-count">{{ participants|length }}</span>)</h2>
+    <ul class="collab-participant-list" id="collab-participant-list">
+      {% for p in participants %}
+      <li><span>{{ p.name }}</span><span style="color:var(--text-muted)">{{ p.joined_at }}</span></li>
+      {% else %}
+      <li style="color:var(--text-muted)">Todavía nadie se unió.</li>
+      {% endfor %}
+    </ul>
+
+    <p style="margin-top:0.9rem;font-size:0.9rem">
+      Pistas pendientes de cargar a tu reproductor:
+      <strong id="collab-pending-count" style="color:var(--text-gold)">{{ pending_count }}</strong>
+    </p>
+
+    <div class="collab-actions">
+      <button type="button" class="track-btn primary" onclick="collabPullQueue()">⬇ Actualizar cola</button>
+      <form method="POST" action="/admin/colaborativa/finalizar"
+            onsubmit="return confirm('¿Finalizar la sesión colaborativa? El QR deja de servir.');">
+        <button type="submit" class="track-btn ghost">Finalizar sesión</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+</div>
+<script src="{{ url_for('static', filename='collab_host.js') }}?v=20260725"></script>
+{% endblock %}

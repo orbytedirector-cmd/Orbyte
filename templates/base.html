@@ -25,7 +25,7 @@
 
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
-<body>
+<body class="{{ 'collab-guest-mode' if collab_guest }}">
   <div class="base-container">
     <header class="header">
       <div class="header-top">
@@ -51,9 +51,15 @@
         <div class="header-user">
           {% if current_user.is_admin %}
           <a href="/admin/usuarios" class="header-user-link" title="Panel de administración">⚙ Admin</a>
+          <a href="/admin/colaborativa" class="header-user-link" title="Playlist colaborativa (QR para invitados)">🎉 Colaborativa</a>
           {% endif %}
           <span class="header-user-email" title="{{ current_user.email }}">{{ current_user.email }}</span>
           <a href="/logout" class="header-user-link header-user-logout" title="Cerrar sesión">⏻ Salir</a>
+        </div>
+        {% elif collab_guest %}
+        <div class="header-user">
+          <span class="header-user-email" title="Invitado de la playlist colaborativa">🎉 {{ collab_guest.name }}</span>
+          <a href="/colab/salir" class="header-user-link header-user-logout" title="Salir de la sesión">⏻ Salir</a>
         </div>
         {% endif %}
       </div>
@@ -332,11 +338,21 @@
   </div>
 
   <script src="{{ url_for('static', filename='player.js') }}?v=20260606b"></script>
+  {% if collab_guest %}
+  <!-- Invitado de playlist colaborativa: sobrescribe playTrack/appendToQueue/
+       etc. para que "reproducir/añadir" en cualquier página (album.html,
+       browse.html, etc., sin tocarlas) mande la pista a la cola del server
+       en vez de sonar acá. -->
+  <script src="{{ url_for('static', filename='collab_guest.js') }}?v=20260725"></script>
+  {% endif %}
   <script>
     // Favourites set — loaded from server on each page render
     window._favIds = new Set({{ fav_ids|list|tojson|safe if fav_ids is defined else '[]' }});
 
+    {% if not collab_guest %}
     // ── Sesión: heartbeat periódico (usuarios en línea + dispositivo) ────────
+    // (No aplica a invitados de playlist colaborativa: no tienen cuenta real
+    // ni aparecen en /admin/usuarios, /api/heartbeat les devuelve 403.)
     (function() {
       function _sendHeartbeat() {
         fetch('/api/heartbeat', {method: 'POST'}).catch(() => {});
@@ -347,6 +363,7 @@
         if (document.visibilityState === 'visible') _sendHeartbeat();
       });
     })();
+    {% endif %}
     // ── Controls — addEventListener only (no onclick attrs) ─────────────────
     document.getElementById('play-btn').addEventListener('click', togglePlayPause);
     document.getElementById('prev-btn').addEventListener('click', prevTrack);

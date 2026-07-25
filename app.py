@@ -22,6 +22,18 @@ try:
 except ImportError:
     req_lib = None
 
+# Playlist colaborativa: genera el QR de invitación como PNG. Es una
+# dependencia NUEVA (no está en start.sh) — se instala con:
+#   pip install qrcode[pil]
+# Igual que con requests/mpd más arriba, su ausencia no rompe el resto de la
+# app: solo /admin/colaborativa/qr.png devuelve un error explicando qué falta.
+try:
+    import qrcode
+    from io import BytesIO
+    _QRCODE_AVAILABLE = True
+except ImportError:
+    _QRCODE_AVAILABLE = False
+
 # Some systems' mimetypes DB doesn't know .flac — register it explicitly so
 # /stream-dsd's cached output always gets served with the right Content-Type.
 mimetypes.add_type('audio/flac', '.flac')
@@ -312,12 +324,20 @@ def inject_globals():
     current_user = None
     if session.get('user_id'):
         current_user = {'email': session.get('user_email', ''), 'is_admin': bool(session.get('is_admin'))}
+    # Playlist colaborativa: un invitado nunca tiene current_user (no pasó
+    # por /login) — collab_guest es su equivalente acotado, usado por
+    # base.html para ocultar reproductor/favoritos/panel admin y mostrar el
+    # nombre + cupo en su lugar.
+    collab_guest = None
+    if session.get('is_collab_guest'):
+        collab_guest = {'name': session.get('collab_name', 'Invitado')}
     return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS,
             'ADV_QUALITY_OPTIONS': QUALITY_OPTIONS,
             'ADV_POP_BUCKETS': POP_BUCKETS,
             'ADV_ENERGY_BUCKETS': ENERGY_BUCKETS,
             'ADV_BAIL_BUCKETS': BAIL_BUCKETS,
-            'current_user': current_user}
+            'current_user': current_user,
+            'collab_guest': collab_guest}
 
 MUSIC_ROOT = "/mnt/musica/"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music.db")
@@ -385,6 +405,54 @@ def get_db_connection():
             last_ip       TEXT
         )
     ''')
+    # Lazy migration: Playlist colaborativa (QR + invitados + cola). Igual
+    # que arriba, CREATE TABLE IF NOT EXISTS es prácticamente gratis una vez
+    # creadas. Solo puede haber UNA sesión activa a la vez (is_active=1) —
+    # crear una nueva desactiva cualquier otra (ver admin_collab_crear).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS collab_sessions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            token         TEXT UNIQUE NOT NULL,
+            created_by    INTEGER NOT NULL,
+            max_tracks    INTEGER NOT NULL DEFAULT 20,
+            window_hours  REAL NOT NULL DEFAULT 2,
+            is_active     INTEGER NOT NULL DEFAULT 1,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            closed_at     TEXT
+        )
+    ''')
+    # Un participante = un dispositivo/conexión distinguible: no hay
+    # usuario/contraseña de invitado compartido, cada escaneo del QR crea su
+    # propia fila acá y su propia sesión Flask firmada — la fila (no el
+    # User-Agent, que es igual para dos iPhones) ES el identificador de
+    # dispositivo que pide el ticket.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS collab_participants (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id    INTEGER NOT NULL,
+            name          TEXT NOT NULL,
+            joined_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            last_seen     TEXT
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS collab_queue_items (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      INTEGER NOT NULL,
+            participant_id  INTEGER NOT NULL,
+            track_id        INTEGER NOT NULL,
+            added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+            dispatched      INTEGER NOT NULL DEFAULT 0
+        )
+    ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_collab_queue_session_disp "
+        "ON collab_queue_items (session_id, dispatched)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_collab_queue_participant_added "
+        "ON collab_queue_items (participant_id, added_at)"
+    )
     conn.commit()
     return conn
 
@@ -474,12 +542,36 @@ def _touch_user_activity(user_id):
     finally:
         conn.close()
 
+# Playlist colaborativa: endpoints vedados a una sesión de invitado. Invitado
+# = "navega y añade a la cola colaborativa" (ver ticket) — nada de admin,
+# favoritos (son de una cuenta real), ni acceso directo a audio/stream (no
+# tiene reproductor). Todo lo demás (home, artist, album, track, search,
+# browse, búsqueda avanzada y sus /api/ de lectura) queda accesible tal cual
+# ya está, sin tocar esos templates.
+_COLLAB_GUEST_BLOCKED_ENDPOINTS = {
+    'admin_dashboard', 'admin_users', 'admin_users_estado', 'admin_approve_user',
+    'admin_reject_user', 'admin_revoke_user',
+    'admin_collab', 'admin_collab_crear', 'admin_collab_finalizar', 'admin_collab_qr',
+    'api_admin_collab_estado', 'api_admin_collab_pull',
+    'api_favorites_list', 'api_favorites_toggle', 'api_favorites_rebuild_cache', 'favorites_page',
+    'audio_file', 'stream_dsd', 'api_heartbeat',
+}
+
 @app.before_request
 def _require_login():
     """Protege toda la plataforma: sin sesión válida, redirige a /login (o
     devuelve 401 JSON para rutas /api/ para no romper el JS del cliente)."""
     ep = request.endpoint
-    if ep in ('login', 'signup', 'static', 'service_worker') or request.path.startswith('/static/'):
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join') or request.path.startswith('/static/'):
+        return
+    # Sesión de invitado de playlist colaborativa: autenticada pero acotada
+    # a un subconjunto de la app — nunca pasa por el chequeo de user_id/
+    # is_approved de abajo, que es exclusivo de cuentas reales.
+    if session.get('is_collab_guest'):
+        if ep in _COLLAB_GUEST_BLOCKED_ENDPOINTS:
+            if request.path.startswith('/api/'):
+                return jsonify({'error': 'not_authorized_guest'}), 403
+            return "No autorizado para invitados de la playlist colaborativa", 403
         return
     if not session.get('user_id'):
         if request.path.startswith('/api/'):
@@ -675,6 +767,384 @@ def admin_revoke_user(user_id):
     finally:
         conn.close()
     return redirect(url_for('admin_users'))
+
+# ── Playlist colaborativa ──────────────────────────────────────────────────────
+# Ver ticket: invitados se unen vía QR (una sesión = un QR, válido hasta que
+# el admin la cierra), navegan la biblioteca (reusando browse/artist/album/
+# track/search tal cual existen) y solo pueden AÑADIR pistas a una cola en el
+# servidor — nunca reproducir. El admin la "levanta" desde /admin/colaborativa
+# y la reparte en SU reproductor local con /api/admin/colaborativa/cola-pendiente,
+# a partir de ahí es una playlist más que maneja con total libertad (reordenar/
+# quitar/reproducir ya lo hace el playlist-panel existente, sin tocarlo).
+
+COLLAB_ALBUM_WARNING_THRESHOLD = 3     # aviso (no bloqueo) al pasar 3 pistas del mismo álbum
+COLLAB_DEFAULT_MAX_TRACKS      = 20
+COLLAB_DEFAULT_WINDOW_HOURS    = 2
+
+def _collab_active_session(conn):
+    row = conn.execute(
+        'SELECT * FROM collab_sessions WHERE is_active=1 ORDER BY id DESC LIMIT 1'
+    ).fetchone()
+    return dict(row) if row else None
+
+def _collab_get_session_by_token(conn, token):
+    row = conn.execute(
+        'SELECT * FROM collab_sessions WHERE token=? AND is_active=1', (token,)
+    ).fetchone()
+    return dict(row) if row else None
+
+def _collab_window_count(conn, session_row, participant_id):
+    """Cuántas pistas agregó este participante dentro de la ventana de tiempo
+    configurada (ventana móvil desde 'ahora', no un contador que se resetea a
+    horario fijo — así el ticket "puede volver a agregar más si el evento se
+    extiende" funciona sin ningún job/cron adicional)."""
+    window_start = (datetime.now(timezone.utc).replace(tzinfo=None)
+                     - timedelta(hours=session_row['window_hours'])).isoformat()
+    return conn.execute(
+        'SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=? AND added_at>=?',
+        (participant_id, window_start)
+    ).fetchone()[0]
+
+def _collab_fair_order(conn, session_id):
+    """Intercala round-robin las pistas TODAVÍA NO entregadas al reproductor
+    del host, agrupadas por participante (cada quien conserva el orden en que
+    fue agregando las suyas). Con 10/3/5 pistas por dispositivo el resultado
+    es D1,D2,D3, D1,D2,D3, D1,D2,D3, D1,D3, D1,D3, D1,D1,D1,D1,D1,D1 — todos
+    escuchan algo propio en las primeras 3 pistas en vez de que el que agregó
+    menos espere a que se acaben las 10 del primero."""
+    rows = conn.execute(
+        'SELECT id, participant_id, track_id FROM collab_queue_items '
+        'WHERE session_id=? AND dispatched=0 ORDER BY added_at ASC', (session_id,)
+    ).fetchall()
+    by_participant, order = {}, []
+    for r in rows:
+        pid = r['participant_id']
+        if pid not in by_participant:
+            by_participant[pid] = []
+            order.append(pid)
+        by_participant[pid].append(dict(r))
+    result, pending = [], True
+    while pending:
+        pending = False
+        for pid in order:
+            if by_participant[pid]:
+                result.append(by_participant[pid].pop(0))
+                pending = True
+    return result
+
+def _collab_try_add(conn, session_id, participant_id, track_id, confirm_duplicate, confirm_album):
+    """Un solo intento de agregar UNA pista — usado por /api/collab/add.
+    Devuelve un dict con 'status': ok | limit | duplicate | album_warning |
+    expired | error. duplicate/album_warning son AVISOS (ver ticket, "debe
+    mostrar un aviso"): no insertan nada salvo que venga confirm_*=True, para
+    que el cliente pueda mostrar el aviso y reintentar con confirmación."""
+    sess = conn.execute('SELECT * FROM collab_sessions WHERE id=? AND is_active=1', (session_id,)).fetchone()
+    if not sess:
+        return {'status': 'expired', 'message': 'La sesión colaborativa ya terminó.'}
+    track = conn.execute('SELECT id, title, artist, album_id FROM tracks WHERE id=?', (track_id,)).fetchone()
+    if not track:
+        return {'status': 'error', 'message': 'Pista no encontrada.'}
+
+    count = _collab_window_count(conn, sess, participant_id)
+    if count >= sess['max_tracks']:
+        return {'status': 'limit', 'message':
+                f"Llegaste al máximo de {sess['max_tracks']} pistas cada {sess['window_hours']:g}h. "
+                f"Esperá un poco — el cupo se libera solo con el tiempo."}
+
+    dup = conn.execute(
+        '''SELECT cp.name FROM collab_queue_items cqi
+           JOIN collab_participants cp ON cp.id = cqi.participant_id
+           WHERE cqi.session_id=? AND cqi.track_id=? LIMIT 1''',
+        (session_id, track_id)
+    ).fetchone()
+    if dup and not confirm_duplicate:
+        return {'status': 'duplicate', 'added_by': dup['name'],
+                'message': f"«{track['title']}» ya la agregó {dup['name']} a la playlist."}
+
+    if track['album_id'] and not confirm_album:
+        album_count = conn.execute(
+            'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND participant_id=? '
+            'AND track_id IN (SELECT id FROM tracks WHERE album_id=?)',
+            (session_id, participant_id, track['album_id'])
+        ).fetchone()[0]
+        if album_count >= COLLAB_ALBUM_WARNING_THRESHOLD:
+            return {'status': 'album_warning',
+                    'message': f"Ya agregaste {album_count} pistas de este álbum — "
+                               f"probá sumar variedad, tu cupo de pistas es limitado."}
+
+    conn.execute(
+        'INSERT INTO collab_queue_items (session_id, participant_id, track_id, added_at) VALUES (?, ?, ?, ?)',
+        (session_id, participant_id, track_id, _utcnow_iso())
+    )
+    conn.commit()
+    return {'status': 'ok', 'remaining': sess['max_tracks'] - (count + 1)}
+
+def _collab_try_add_batch(conn, session_id, participant_id, track_ids):
+    """Agregar VARIAS pistas de una (ej. 'Reproducir álbum completo'). A
+    diferencia de _collab_try_add, acá los avisos son informativos y se dan
+    UNA vez al final — no tiene sentido interrumpir con un confirm() por
+    cada una de las N pistas de un álbum que el invitado ya eligió a
+    propósito. Duplicados se saltan solos; el límite corta la lista donde
+    corresponda en vez de rechazar todo el lote."""
+    sess = conn.execute('SELECT * FROM collab_sessions WHERE id=? AND is_active=1', (session_id,)).fetchone()
+    if not sess:
+        return {'status': 'expired', 'message': 'La sesión colaborativa ya terminó.'}
+
+    slots_left = sess['max_tracks'] - _collab_window_count(conn, sess, participant_id)
+    added, skipped_dup = 0, 0
+    album_counts = {}
+    for tid in track_ids:
+        if slots_left <= 0:
+            break
+        track = conn.execute('SELECT id, album_id FROM tracks WHERE id=?', (tid,)).fetchone()
+        if not track:
+            continue
+        dup = conn.execute(
+            'SELECT 1 FROM collab_queue_items WHERE session_id=? AND track_id=? LIMIT 1',
+            (session_id, tid)
+        ).fetchone()
+        if dup:
+            skipped_dup += 1
+            continue
+        conn.execute(
+            'INSERT INTO collab_queue_items (session_id, participant_id, track_id, added_at) VALUES (?, ?, ?, ?)',
+            (session_id, participant_id, tid, _utcnow_iso())
+        )
+        added += 1
+        slots_left -= 1
+        if track['album_id']:
+            album_counts[track['album_id']] = album_counts.get(track['album_id'], 0) + 1
+    conn.commit()
+
+    album_notice = None
+    if any(n > COLLAB_ALBUM_WARNING_THRESHOLD for n in album_counts.values()):
+        album_notice = ('Agregaste varias pistas del mismo álbum de una — para una playlist '
+                         'más variada, después sumá también de otros álbumes.')
+    return {'status': 'ok', 'added': added, 'skipped_duplicates': skipped_dup,
+            'capped_by_limit': slots_left <= 0 and (added + skipped_dup) < len(track_ids),
+            'album_notice': album_notice}
+
+
+@app.route('/admin/colaborativa')
+@admin_required
+def admin_collab():
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        participants, pending_count, dispatched_count, join_url = [], 0, 0, None
+        if sess:
+            participants = [dict(r) for r in conn.execute(
+                'SELECT * FROM collab_participants WHERE session_id=? ORDER BY joined_at', (sess['id'],)
+            ).fetchall()]
+            pending_count = conn.execute(
+                'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
+            ).fetchone()[0]
+            dispatched_count = conn.execute(
+                'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=1', (sess['id'],)
+            ).fetchone()[0]
+            join_url = url_for('collab_join', token=sess['token'], _external=True)
+        return render_template('collab_host.html', collab_session=sess, participants=participants,
+                               pending_count=pending_count, dispatched_count=dispatched_count,
+                               join_url=join_url, qrcode_available=_QRCODE_AVAILABLE,
+                               default_max=COLLAB_DEFAULT_MAX_TRACKS,
+                               default_window=COLLAB_DEFAULT_WINDOW_HOURS)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/colaborativa/crear', methods=['POST'])
+@admin_required
+def admin_collab_crear():
+    max_tracks   = request.form.get('max_tracks', COLLAB_DEFAULT_MAX_TRACKS, type=int) or COLLAB_DEFAULT_MAX_TRACKS
+    window_hours = request.form.get('window_hours', COLLAB_DEFAULT_WINDOW_HOURS, type=float) or COLLAB_DEFAULT_WINDOW_HOURS
+    max_tracks   = max(1, max_tracks)
+    window_hours = max(0.5, window_hours)
+    conn = get_db_connection()
+    try:
+        # Solo puede haber una sesión activa: cerrar cualquier otra antes de
+        # abrir la nueva (mismo QR viejo deja de servir automáticamente).
+        conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
+        token = secrets.token_urlsafe(16)
+        conn.execute(
+            'INSERT INTO collab_sessions (token, created_by, max_tracks, window_hours, is_active, created_at) '
+            'VALUES (?, ?, ?, ?, 1, ?)',
+            (token, session['user_id'], max_tracks, window_hours, _utcnow_iso())
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for('admin_collab'))
+
+
+@app.route('/admin/colaborativa/finalizar', methods=['POST'])
+@admin_required
+def admin_collab_finalizar():
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for('admin_collab'))
+
+
+@app.route('/admin/colaborativa/qr.png')
+@admin_required
+def admin_collab_qr():
+    if not _QRCODE_AVAILABLE:
+        return ("Falta instalar la librería qrcode — corré: pip install qrcode[pil]", 501)
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+    finally:
+        conn.close()
+    if not sess:
+        return "No hay una sesión colaborativa activa", 404
+    join_url = url_for('collab_join', token=sess['token'], _external=True)
+    img = qrcode.make(join_url)
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    buf.seek(0)
+    resp = Response(buf.getvalue(), mimetype='image/png')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/admin/colaborativa/estado')
+@admin_required
+def api_admin_collab_estado():
+    """JSON liviano para refrescar en vivo el panel /admin/colaborativa
+    (participantes + cola pendiente) — mismo patrón que /admin/usuarios/estado."""
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify({'active': False})
+        participants = [dict(r) for r in conn.execute(
+            'SELECT id, name, joined_at FROM collab_participants WHERE session_id=? ORDER BY joined_at',
+            (sess['id'],)
+        ).fetchall()]
+        pending = conn.execute(
+            'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
+        ).fetchone()[0]
+        return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
+                        'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours']})
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/colaborativa/cola-pendiente')
+@admin_required
+def api_admin_collab_pull():
+    """Devuelve — y marca como entregadas — las pistas todavía no
+    despachadas, ya intercaladas en orden justo (_collab_fair_order). El
+    admin las agrega a SU cola local con appendToQueue() (ver collab_host.js)
+    exactamente como agregaría cualquier otra pista, y desde ahí las maneja
+    con total libertad — reordenar/quitar ya lo permite el playlist-panel
+    existente, no hace falta tocarlo."""
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify([])
+        ordered_items = _collab_fair_order(conn, sess['id'])
+        if not ordered_items:
+            return jsonify([])
+        ids = [it['track_id'] for it in ordered_items]
+        placeholders = ','.join('?' * len(ids))
+        rows = conn.execute(
+            f'''SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
+                       al.artist_id, ar.name as artist_name
+                FROM tracks t
+                LEFT JOIN albums al ON t.album_id=al.id
+                LEFT JOIN artists ar ON al.artist_id=ar.id
+                WHERE t.id IN ({placeholders})''', ids
+        ).fetchall()
+        by_id = {r['id']: r for r in rows}
+        result = [track_to_json(by_id[it['track_id']]) for it in ordered_items if it['track_id'] in by_id]
+        item_ids = [it['id'] for it in ordered_items]
+        placeholders2 = ','.join('?' * len(item_ids))
+        conn.execute(f'UPDATE collab_queue_items SET dispatched=1 WHERE id IN ({placeholders2})', item_ids)
+        conn.commit()
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/colab/join/<token>', methods=['GET', 'POST'])
+def collab_join(token):
+    """Pantalla pública (sin sesión) a la que apunta el QR. GET muestra el
+    formulario de nombre; POST crea el participante y arranca su sesión de
+    invitado — de ahí en más navega la app como cualquier página normal."""
+    conn = get_db_connection()
+    try:
+        sess = _collab_get_session_by_token(conn, token)
+        if not sess:
+            return render_template('collab_join.html', error='invalid', collab_session=None, token=token)
+        if session.get('is_collab_guest') and session.get('collab_session_id') == sess['id']:
+            return redirect(url_for('home'))
+        if request.method == 'POST':
+            name = (request.form.get('name') or '').strip()[:40] or 'Invitado'
+            cur = conn.execute(
+                'INSERT INTO collab_participants (session_id, name, joined_at, last_seen) VALUES (?, ?, ?, ?)',
+                (sess['id'], name, _utcnow_iso(), _utcnow_iso())
+            )
+            conn.commit()
+            session.clear()
+            session.permanent = True
+            session['is_collab_guest']       = True
+            session['collab_session_id']     = sess['id']
+            session['collab_participant_id'] = cur.lastrowid
+            session['collab_name']           = name
+            return redirect(url_for('home'))
+        return render_template('collab_join.html', error=None, collab_session=sess, token=token)
+    finally:
+        conn.close()
+
+
+@app.route('/colab/salir')
+def collab_leave():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/api/collab/add', methods=['POST'])
+def api_collab_add():
+    if not session.get('is_collab_guest'):
+        return jsonify({'status': 'error', 'message': 'No sos parte de una sesión colaborativa activa.'}), 403
+    data = request.get_json(silent=True) or {}
+    track_id = data.get('track_id')
+    if not track_id:
+        return jsonify({'status': 'error', 'message': 'Falta track_id'}), 400
+    conn = get_db_connection()
+    try:
+        result = _collab_try_add(
+            conn, session['collab_session_id'], session['collab_participant_id'], track_id,
+            confirm_duplicate=bool(data.get('confirm_duplicate')),
+            confirm_album=bool(data.get('confirm_album'))
+        )
+        return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/api/collab/add-batch', methods=['POST'])
+def api_collab_add_batch():
+    if not session.get('is_collab_guest'):
+        return jsonify({'status': 'error', 'message': 'No sos parte de una sesión colaborativa activa.'}), 403
+    data = request.get_json(silent=True) or {}
+    track_ids = data.get('track_ids') or []
+    if not isinstance(track_ids, list) or not track_ids:
+        return jsonify({'status': 'error', 'message': 'Falta track_ids'}), 400
+    conn = get_db_connection()
+    try:
+        result = _collab_try_add_batch(
+            conn, session['collab_session_id'], session['collab_participant_id'], track_ids[:200]
+        )
+        return jsonify(result)
+    finally:
+        conn.close()
+
 
 def _fmt_seconds(seconds):
     if not seconds or seconds < 0:
