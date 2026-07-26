@@ -9,6 +9,12 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote
 from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context, session, redirect, url_for
+# itsdangerous ya viene con Flask (lo usa internamente para firmar la cookie
+# de sesión) — no es una dependencia nueva. La usamos para los tokens de
+# /cast-audio: de corta duración y atados a una pista puntual, para que un
+# dispositivo UPnP externo (que no puede loguearse) pueda pedir el archivo
+# sin dejar la librería abierta al público.
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 import smtplib
@@ -572,7 +578,7 @@ def _require_login():
     """Protege toda la plataforma: sin sesión válida, redirige a /login (o
     devuelve 401 JSON para rutas /api/ para no romper el JS del cliente)."""
     ep = request.endpoint
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join') or request.path.startswith('/static/'):
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio') or request.path.startswith('/static/'):
         return
     # Sesión de invitado de playlist colaborativa: autenticada pero acotada
     # a un subconjunto de la app — nunca pasa por el chequeo de user_id/
@@ -3467,6 +3473,48 @@ def _serve_audio(absolute_path):
         resp.headers['Content-Length'] = length
         return resp
     return send_file(absolute_path, conditional=True)
+
+
+# ── Transmitir a dispositivo de red (UPnP/DLNA, YXC) ────────────────────────
+# /audio/<path> exige sesión — un receiver o parlante MusicCast no puede
+# loguearse. Esta ruta es la excepción pública: un admin genera un token de
+# corta duración atado a UNA pista puntual justo antes de mandarle el
+# comando SetAVTransportURI al dispositivo, así nunca queda un link
+# permanente a la librería dando vueltas. Sirve el archivo CRUDO (ni
+# siquiera FLAC/DSD pasan por transcodificación — /stream-dsd existe porque
+# el navegador no puede reproducir DSD nativo, pero un renderer UPnP como el
+# RX-A880 sí, así que acá directamente no hace falta).
+_CAST_TOKEN_MAX_AGE = 600  # 10 minutos
+_cast_signer = URLSafeTimedSerializer(app.secret_key, salt='cast-audio-v1')
+
+def cast_token_for_track(track_id):
+    return _cast_signer.dumps({'track_id': track_id})
+
+@app.route('/cast-audio/<int:track_id>')
+def cast_audio(track_id):
+    token = request.args.get('token', '')
+    try:
+        data = _cast_signer.loads(token, max_age=_CAST_TOKEN_MAX_AGE)
+    except SignatureExpired:
+        return "Token vencido — pedí uno nuevo desde /admin/colaborativa o el reproductor", 403
+    except BadSignature:
+        return "Token inválido", 403
+    if data.get('track_id') != track_id:
+        return "Token no corresponde a esta pista", 403
+
+    conn = get_db_connection()
+    try:
+        track = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not track or not track['file_path']:
+        return "Pista no encontrada", 404
+
+    path = clean_db_path(track['file_path'])
+    if not os.path.isfile(path):
+        app.logger.warning(f"cast_audio: archivo no encontrado en disco: {path}")
+        return "Archivo no encontrado en disco", 404
+    return _serve_audio(path)
 
 def parse_range_header(rh, file_size):
     if not rh.startswith('bytes='): return (0, None)
