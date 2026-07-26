@@ -3,6 +3,12 @@ import re
 import json
 import tempfile
 import hashlib
+import socket
+import urllib.request
+import urllib.error
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as _xml_escape
+from urllib.parse import urljoin, urlparse
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -469,6 +475,24 @@ def get_db_connection():
         "CREATE INDEX IF NOT EXISTS idx_collab_queue_participant_added "
         "ON collab_queue_items (participant_id, added_at)"
     )
+    # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
+    # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
+    # volvemos a escanear la red en cada request: el escaneo SSDP es lento
+    # (varios segundos) y ruidoso (agarra TVs, el router…), así que se hace
+    # solo cuando el admin aprieta "Buscar dispositivos" y acá queda
+    # guardado el resultado ya filtrado (solo lo que tiene AVTransport).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS cast_targets (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            name          TEXT NOT NULL,
+            control_url   TEXT NOT NULL UNIQUE,
+            ip            TEXT,
+            manufacturer  TEXT,
+            model_name    TEXT,
+            discovered_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used_at  TEXT
+        )
+    ''')
     conn.commit()
     return conn
 
@@ -571,6 +595,9 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'api_admin_collab_estado', 'api_admin_collab_pull',
     'api_favorites_list', 'api_favorites_toggle', 'api_favorites_rebuild_cache', 'favorites_page',
     'audio_file', 'stream_dsd', 'api_heartbeat',
+    # "Reproducir en…" — un invitado NUNCA debe poder redirigir el audio del
+    # anfitrión a otro dispositivo de la casa.
+    'api_admin_cast_discover', 'api_admin_cast_targets', 'api_admin_cast_target_delete', 'api_admin_cast_play',
 }
 
 @app.before_request
@@ -3515,6 +3542,211 @@ def cast_audio(track_id):
         app.logger.warning(f"cast_audio: archivo no encontrado en disco: {path}")
         return "Archivo no encontrado en disco", 404
     return _serve_audio(path)
+
+
+# ── "Reproducir en…" — UPnP/DLNA hacia otros dispositivos de la casa ───────────
+# Mismo mecanismo validado a mano con tools/cast_discovery.py y
+# tools/cast_test.py contra el RX-A880 real — acá queda integrado al panel
+# del reproductor. Los scripts de tools/ se dejan tal cual (ya probados
+# contra hardware real) en vez de hacerlos depender de este código.
+
+_CAST_SSDP_ADDR, _CAST_SSDP_PORT = '239.255.255.250', 1900
+_CAST_MIME_BY_EXT = {
+    '.flac': 'audio/flac', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+    '.aiff': 'audio/aiff', '.aif': 'audio/aiff', '.m4a': 'audio/mp4',
+    '.dsf': 'audio/x-dsd', '.dff': 'audio/x-dsd',
+}
+
+def _cast_ssdp_discover(timeout=4):
+    """Devuelve las LOCATION únicas que respondieron al M-SEARCH — mismo
+    mecanismo que tools/cast_discovery.py, resumido acá para poder
+    dispararlo desde el botón del panel sin depender de un script externo."""
+    msg = '\r\n'.join([
+        'M-SEARCH * HTTP/1.1', f'HOST: {_CAST_SSDP_ADDR}:{_CAST_SSDP_PORT}',
+        'MAN: "ssdp:discover"', f'MX: {min(timeout, 5)}', 'ST: ssdp:all', '', '',
+    ]).encode('utf-8')
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.settimeout(timeout)
+    sock.sendto(msg, (_CAST_SSDP_ADDR, _CAST_SSDP_PORT))
+    locations, deadline = set(), time.time() + timeout
+    while time.time() < deadline:
+        try:
+            data, _addr = sock.recvfrom(65507)
+        except socket.timeout:
+            break
+        for line in data.decode('utf-8', errors='ignore').split('\r\n'):
+            if line.lower().startswith('location:'):
+                locations.add(line.split(':', 1)[1].strip())
+    sock.close()
+    return locations
+
+def _cast_fetch_device_info(location, timeout=4):
+    """(friendlyName, manufacturer, modelName, av_transport_url, ip) o None
+    si no es un dispositivo que sirva (sin AVTransport = no renderer de audio)."""
+    try:
+        with urllib.request.urlopen(location, timeout=timeout) as resp:
+            root = ET.fromstring(resp.read())
+    except (urllib.error.URLError, TimeoutError, OSError, ET.ParseError):
+        return None
+    ns = {'d': 'urn:schemas-upnp-org:device-1-0'}
+    device = root.find('d:device', ns)
+    if device is None:
+        return None
+    def text_of(tag, default='?'):
+        el = device.find(f'd:{tag}', ns)
+        return el.text.strip() if el is not None and el.text else default
+    av_transport_url = None
+    for service in device.findall('.//d:service', ns):
+        st_el = service.find('d:serviceType', ns)
+        if st_el is not None and st_el.text and 'AVTransport' in st_el.text:
+            cu = service.find('d:controlURL', ns)
+            if cu is not None and cu.text:
+                av_transport_url = urljoin(location, cu.text.strip())
+    if not av_transport_url:
+        return None
+    return text_of('friendlyName'), text_of('manufacturer'), text_of('modelName'), \
+        av_transport_url, urlparse(location).hostname
+
+def _cast_guess_protocol_info(file_path):
+    ext = os.path.splitext(file_path)[1].lower()
+    mime = _CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
+    return f'http-get:*:{mime}:*'
+
+def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_size=None):
+    size_attr = f' size="{file_size}"' if file_size else ''
+    return (
+        '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        f'<item id="{track_id}" parentID="0" restricted="1">'
+        f'<dc:title>{_xml_escape(title or "Pista")}</dc:title>'
+        f'<dc:creator>{_xml_escape(artist or "")}</dc:creator>'
+        '<upnp:class>object.item.audioItem.musicTrack</upnp:class>'
+        f'<res protocolInfo="{_xml_escape(protocol_info)}"{size_attr}>{_xml_escape(media_url)}</res>'
+        '</item></DIDL-Lite>'
+    )
+
+def _cast_soap_call(control_url, action, body_xml, timeout=8):
+    envelope = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+        's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+        f'<s:Body>{body_xml}</s:Body></s:Envelope>'
+    ).encode('utf-8')
+    req = urllib.request.Request(control_url, data=envelope, method='POST')
+    req.add_header('Content-Type', 'text/xml; charset="utf-8"')
+    req.add_header('SOAPACTION', f'"urn:schemas-upnp-org:service:AVTransport:1#{action}"')
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode('utf-8', errors='ignore')
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode('utf-8', errors='ignore')
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return None, str(e)
+
+def _cast_send_track(control_url, media_url, didl):
+    status, body = _cast_soap_call(control_url, 'SetAVTransportURI',
+        f'<u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        f'<InstanceID>0</InstanceID><CurrentURI>{_xml_escape(media_url)}</CurrentURI>'
+        f'<CurrentURIMetaData>{_xml_escape(didl)}</CurrentURIMetaData></u:SetAVTransportURI>')
+    if status != 200:
+        return status, body
+    return _cast_soap_call(control_url, 'Play',
+        '<u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play>')
+
+
+@app.route('/api/admin/cast/discover', methods=['POST'])
+@admin_required
+def api_admin_cast_discover():
+    """Escanea la LAN (SSDP) y guarda/actualiza los dispositivos con
+    AVTransport encontrados. Puede tardar unos segundos — es sincrónico a
+    propósito, así el botón "Buscar dispositivos" del panel sabe cuándo
+    terminó."""
+    locations = _cast_ssdp_discover(timeout=4)
+    conn = get_db_connection()
+    found = 0
+    try:
+        for location in locations:
+            info = _cast_fetch_device_info(location)
+            if not info:
+                continue
+            name, manufacturer, model_name, av_transport_url, ip = info
+            conn.execute('''
+                INSERT INTO cast_targets (name, control_url, ip, manufacturer, model_name, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(control_url) DO UPDATE SET
+                    name=excluded.name, ip=excluded.ip,
+                    manufacturer=excluded.manufacturer, model_name=excluded.model_name
+            ''', (name, av_transport_url, ip, manufacturer, model_name, _utcnow_iso()))
+            found += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok', 'found': found})
+
+
+@app.route('/api/admin/cast/targets')
+@admin_required
+def api_admin_cast_targets():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT * FROM cast_targets ORDER BY name').fetchall()
+        return jsonify([dict(r) for r in rows])
+    finally:
+        conn.close()
+
+
+@app.route('/api/admin/cast/targets/<int:target_id>', methods=['DELETE'])
+@admin_required
+def api_admin_cast_target_delete(target_id):
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM cast_targets WHERE id=?', (target_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/admin/cast/play', methods=['POST'])
+@admin_required
+def api_admin_cast_play():
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    track_id = data.get('track_id')
+    if not target_id or not track_id:
+        return jsonify({'status': 'error', 'message': 'Falta target_id o track_id'}), 400
+
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+        track = conn.execute('SELECT id, title, artist, file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+        if not target:
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}), 404
+        if not track:
+            return jsonify({'status': 'error', 'message': 'Pista no encontrada'}), 404
+
+        file_path = clean_db_path(track['file_path'])
+        if not os.path.isfile(file_path):
+            return jsonify({'status': 'error', 'message': 'El archivo no está en disco'}), 404
+
+        token = cast_token_for_track(track['id'])
+        media_url = f"{request.host_url.rstrip('/')}/cast-audio/{track['id']}?token={token}"
+        protocol_info = _cast_guess_protocol_info(file_path)
+        didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
+                                 media_url, os.path.getsize(file_path))
+
+        status, body = _cast_send_track(target['control_url'], media_url, didl)
+        if status == 200:
+            conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
+            conn.commit()
+            return jsonify({'status': 'ok', 'device': target['name']})
+        return jsonify({'status': 'error',
+                        'message': f'El dispositivo no aceptó el comando (HTTP {status}). ¿Sigue prendido y en la misma red?'}), 502
+    finally:
+        conn.close()
 
 def parse_range_header(rh, file_size):
     if not rh.startswith('bytes='): return (0, None)

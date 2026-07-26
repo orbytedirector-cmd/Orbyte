@@ -274,6 +274,36 @@
           </div>
         </div>
 
+        {% if current_user and current_user.is_admin %}
+        <!-- "Reproducir en…" — UPnP/DLNA hacia el receiver, MusicCast, etc.
+             Distinto de "Salida" (outputs de MPD EN el server) y del botón
+             de AirPlay de acá al lado (que es del propio Safari/iOS): esto
+             transmite la pista actual sin pérdida a cualquier dispositivo
+             de la casa que el admin haya descubierto/guardado. Solo visible
+             para el admin — un invitado de la playlist colaborativa jamás
+             debe poder redirigir el audio de la casa. -->
+        <div class="cast-wrap">
+          <button class="cast-main-btn" id="cast-btn" onclick="toggleCastPanel()" title="Reproducir en… (UPnP/DLNA)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 16.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10.5"/>
+              <path d="M12 15l5 6H7l5-6z"/>
+            </svg>
+          </button>
+          <div class="outputs-panel" id="cast-panel" style="display:none">
+            <div class="outputs-panel-header">
+              <span>Reproducir en…</span>
+              <button class="outputs-close-btn" onclick="toggleCastPanel()">✕</button>
+            </div>
+            <div id="cast-list">
+              <span style="color:var(--text-muted);font-size:0.82rem;padding:0.5rem;display:block">Cargando…</span>
+            </div>
+            <div class="cast-panel-footer">
+              <button class="cast-discover-btn" onclick="castDiscover()" id="cast-discover-btn">🔍 Buscar dispositivos</button>
+            </div>
+          </div>
+        </div>
+        {% endif %}
+
         <!-- AirPlay 2 (transmitir a un dispositivo de red) — distinto del panel
              "Salida" de arriba, que es para los outputs de MPD EN el propio
              servidor. Esto usa el picker nativo de Safari/WebKit para un
@@ -356,6 +386,10 @@
        browse.html, etc., sin tocarlas) mande la pista a la cola del server
        en vez de sonar acá. -->
   <script src="{{ url_for('static', filename='collab_guest.js') }}?v=20260725"></script>
+  {% endif %}
+  {% if current_user and current_user.is_admin %}
+  <!-- "Reproducir en…" (UPnP/DLNA) — solo el admin lo puede usar. -->
+  <script src="{{ url_for('static', filename='cast.js') }}?v=20260726"></script>
   {% endif %}
   <script>
     // Favourites set — loaded from server on each page render

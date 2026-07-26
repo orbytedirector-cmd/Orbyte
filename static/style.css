@@ -2096,3 +2096,33 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   border-bottom: 1px solid rgba(200,146,10,0.12); font-size: 0.88rem;
 }
 .collab-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
+
+/* ── "Reproducir en…" (UPnP/DLNA) — mismo patrón visual que .outputs-wrap,
+   pero como componente propio para poder mostrarlo solo al admin sin pisar
+   el botón de Salida (que es de MPD en el server, otro concepto). */
+.cast-wrap { position:relative; }
+.cast-main-btn {
+  display:flex; align-items:center; justify-content:center;
+  width:32px; height:32px; padding:0; border-radius:8px;
+  border:1px solid var(--border); background:rgba(255,255,255,0.05);
+  color:var(--text-primary); cursor:pointer;
+  transition:border-color 0.2s, background 0.2s;
+}
+.cast-main-btn:hover { border-color:var(--accent); background:rgba(200,146,10,0.08); }
+.cast-main-btn svg { width:18px; height:18px; }
+
+.cast-panel-footer { padding:0.5rem 0.75rem; border-top:1px solid var(--border); }
+.cast-discover-btn {
+  width:100%; padding:0.4rem 0.6rem; border-radius:8px;
+  border:1px solid var(--border-gold); background:rgba(200,146,10,0.06);
+  color:var(--text-gold); cursor:pointer; font-size:0.8rem;
+}
+.cast-discover-btn:hover { background:rgba(200,146,10,0.14); }
+.cast-discover-btn:disabled { opacity:0.6; cursor:default; }
+
+.cast-play-btn, .cast-remove-btn {
+  background:none; border:none; cursor:pointer; padding:0.2rem 0.4rem;
+  border-radius:4px; font-size:0.85rem; color:var(--text-secondary);
+}
+.cast-play-btn:hover { color:var(--led-green); background:rgba(34,255,68,0.1); }
+.cast-remove-btn:hover { color:var(--led-red); background:rgba(255,34,68,0.1); }
