@@ -248,6 +248,7 @@ window.primeAudioForGesture = primeAudioForGesture;
 
 function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
+    if (_crossfadeInProgress) _abortCrossfade('manual_track_change');
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
@@ -481,6 +482,16 @@ function updateProgress() {
         _lastProgressPos = currentAudio.currentTime;
         _reconnectAttempts = 0;
     }
+
+    // Crossfade opcional: arrancar la siguiente pista un poco antes de que
+    // termine ésta, superpuestas, para que nunca exista un "arranque en
+    // frío" de <audio> en 2do plano (ver _startCrossfade).
+    if (crossfadeEnabled && !_crossfadeInProgress && dur > crossfadeDurationSec + 2 && currentIndex < queue.length - 1) {
+        const remaining = dur - currentAudio.currentTime;
+        if (remaining > 0 && remaining <= crossfadeDurationSec) {
+            _startCrossfade();
+        }
+    }
 }
 
 // El audio se puede pausar sin que nosotros lo hayamos pedido: una llamada
@@ -559,6 +570,7 @@ function _handleUnexpectedPause() {
             return;
         }
         _rlog('unexpected_pause_skip', { reason: 'document_hidden', readyState: currentAudio.readyState, retriesUsed: _unexpectedPauseRetries });
+        if (_unexpectedPauseRetries >= MAX_HIDDEN_PAUSE_RETRIES) _showCrossfadeHint();
         return;
     }
     _unexpectedPauseRetries = 0;   // ya en primer plano — reponer el margen para la próxima vez que se oculte
@@ -715,6 +727,11 @@ function seekFromClick(event, bar) {
 function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
 
 function _handleTrackEnded() {
+    // Si esto dispara en medio de un crossfade en curso, ya lo está
+    // manejando _finishCrossfade — avanzar acá también duplicaría la
+    // transición (dos playTrack casi simultáneos para la misma pista).
+    if (_crossfadeInProgress) return;
+
     // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
     // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
     // Prefer the REAL duration the browser measured from the audio data it actually
@@ -1145,6 +1162,234 @@ window.updateTabTitle = updateTabTitle;
 // A fast safety limiter sits after the gain stage purely to catch clipping on
 // unexpected transients; it does not add loudness on its own. Nothing here
 // touches the source stream, the transcode, or the bitrate/format.
+// ── Crossfade (opcional) ──────────────────────────────────────────────────────
+// Motivo: en 2do plano, iOS/Android a veces cortan un <audio> recién arrancado
+// —confirmado con logs reales: se ve el 'play' arrancar, sonar una fracción de
+// segundo, y cortarse, repetidas veces— específicamente en transiciones
+// automáticas de pista sin que el usuario haya tocado la pantalla. Nunca pasa
+// mientras una pista YA está sonando de corrido. El crossfade evita el punto
+// débil de raíz: en vez de parar una pista y arrancar la siguiente desde cero
+// (un "arranque en frío"), la siguiente empieza a sonar unos segundos antes de
+// que termine la actual, superpuestas, así el navegador nunca ve un corte real
+// entre pistas. Apagado por default — el flujo normal (instantáneo, sin
+// superposición) sigue siendo el de siempre; esto es una opción aparte.
+let crossfadeEnabled = false;
+try { crossfadeEnabled = localStorage.getItem('orbyte_crossfade') === '1'; } catch (e) {}
+
+let crossfadeDurationSec = 4;
+try {
+    const storedDur = parseFloat(localStorage.getItem('orbyte_crossfade_duration'));
+    if (!isNaN(storedDur) && storedDur > 0) crossfadeDurationSec = storedDur;
+} catch (e) {}
+const CROSSFADE_MIN_SEC  = 1;
+const CROSSFADE_MAX_SEC  = 10;
+const CROSSFADE_TICK_MS  = 100;
+
+let _crossfadeAudio      = null;   // el <audio> "de repuesto" mientras se prepara/ejecuta el fundido
+let _crossfadeInProgress = false;
+let _crossfadeTimer      = null;
+
+function _createBareAudioElement() {
+    // Deliberadamente mínimo: sin watchdog, sin reconexión, sin listeners de
+    // diagnóstico — es un elemento de corta vida, sólo para la superposición.
+    // Si algo sale mal acá, _abortCrossfade() lo descarta entero y la pista
+    // actual sigue su curso normal como si el crossfade no hubiese existido.
+    return new Audio();
+}
+
+function _startCrossfade() {
+    if (_crossfadeInProgress || !currentAudio) return;
+    const nextIndex = currentIndex + 1;
+    const nextTrackObj = queue[nextIndex];
+    if (!nextTrackObj) return;
+
+    _crossfadeInProgress = true;
+    _rlog('crossfade_start', { fromIndex: currentIndex, toIndex: nextIndex, durationSec: crossfadeDurationSec });
+
+    const nextAudio = _createBareAudioElement();
+    nextAudio.volume = 0;
+    nextAudio.src = nextTrackObj.audio_url ||
+        (nextTrackObj.is_dsd ? buildDsdStreamUrl(nextTrackObj.file_path) : buildAudioUrl(nextTrackObj.file_path));
+    _crossfadeAudio = nextAudio;
+
+    nextAudio.addEventListener('error', () => _abortCrossfade('next_track_error'));
+
+    nextAudio.play().then(() => {
+        if (_crossfadeAudio !== nextAudio) return;   // se abortó mientras cargaba
+        _runCrossfadeRamp(currentAudio, nextAudio, nextTrackObj, nextIndex);
+    }).catch(e => {
+        _abortCrossfade('play_rejected: ' + e);
+    });
+}
+
+function _runCrossfadeRamp(oldAudio, newAudio, nextTrackObj, nextIndex) {
+    const startTime   = Date.now();
+    const durationMs  = crossfadeDurationSec * 1000;
+    const startVolOld = oldAudio.volume;
+
+    // setInterval, no requestAnimationFrame: rAF se frena por completo con la
+    // pestaña oculta (todo lo contrario de lo que necesitamos acá), mientras
+    // que setInterval sigue corriendo — más lento si el navegador lo
+    // throttlea, pero corriendo, que es lo que importa para no dejar el
+    // fundido a mitad de camino.
+    _crossfadeTimer = setInterval(() => {
+        if (_crossfadeAudio !== newAudio) { clearInterval(_crossfadeTimer); _crossfadeTimer = null; return; }
+        const frac = Math.min(1, (Date.now() - startTime) / durationMs);
+        try {
+            oldAudio.volume = Math.max(0, startVolOld * (1 - frac));
+            newAudio.volume = frac;
+        } catch (e) {}
+        if (frac >= 1 || oldAudio.ended) {
+            clearInterval(_crossfadeTimer);
+            _crossfadeTimer = null;
+            _finishCrossfade(oldAudio, newAudio, nextTrackObj, nextIndex);
+        }
+    }, CROSSFADE_TICK_MS);
+}
+
+function _finishCrossfade(oldAudio, newAudio, nextTrackObj, nextIndex) {
+    _rlog('crossfade_finish', { toIndex: nextIndex });
+
+    // Retirar la pista vieja: sacarle los listeners antes de soltarla para
+    // que no dispare nada más (reconexión, watchdog) sobre un elemento que
+    // ya no es el actual.
+    try {
+        oldAudio.onended = null;
+        oldAudio.pause();
+        oldAudio.src = '';
+    } catch (e) {}
+
+    // Recién ahora se engancha el set completo de listeners — durante la
+    // preparación del fundido, newAudio sólo tenía el listener mínimo de
+    // error, para no interferir con la UI de la pista que todavía "manda".
+    newAudio.volume = 1;
+    newAudio.addEventListener('timeupdate', updateProgress);
+    newAudio.addEventListener('error', handleAudioError);
+    newAudio.addEventListener('pause', _handleUnexpectedPause);
+    newAudio.addEventListener('play',  () => _syncMediaSessionState(true));
+    newAudio.addEventListener('pause', () => _syncMediaSessionState(false));
+    _attachDiagListeners(newAudio);
+    newAudio.onended = _handleTrackEnded;
+
+    currentAudio = newAudio;
+    window.currentAudio = newAudio;
+    currentIndex = nextIndex;
+    window.currentIndex = currentIndex;
+    _reconnectAttempts      = 0;
+    _unexpectedPauseRetries = 0;
+    _lastProgressPos        = newAudio.currentTime || 0;
+    if (!document.hidden) _bgAutoAdvanceCount = 0;
+
+    _crossfadeInProgress = false;
+    _crossfadeAudio      = null;
+
+    window._currentTrack = nextTrackObj;
+    updatePlayerBar(nextTrackObj);
+    updateVisualizer(nextTrackObj.led_color);
+    dispatchPlayerState(true);
+    clearSyncedLyrics();
+    _prewarmUpcomingDsd();
+
+    _rlog('crossfade_promoted', { newIndex: currentIndex, title: nextTrackObj.title });
+}
+
+function _abortCrossfade(reason) {
+    if (!_crossfadeInProgress && !_crossfadeAudio) return;
+    _rlog('crossfade_aborted', { reason });
+    _crossfadeInProgress = false;
+    if (_crossfadeTimer) { clearInterval(_crossfadeTimer); _crossfadeTimer = null; }
+    if (_crossfadeAudio) {
+        try { _crossfadeAudio.pause(); _crossfadeAudio.src = ''; } catch (e) {}
+        _crossfadeAudio = null;
+    }
+    if (currentAudio) {
+        try { currentAudio.volume = 1; } catch (e) {}   // por si el fundido ya había bajado el volumen
+    }
+}
+
+// Aviso puntual, no invasivo: un toast chico que se muestra UNA sola vez en
+// total (se recuerda en localStorage), sólo cuando de verdad se topó con el
+// corte que el crossfade existe para evitar — no se ofrece a las apuradas ni
+// se repite cada vez.
+function _showCrossfadeHint() {
+    if (crossfadeEnabled) return;
+    try { if (localStorage.getItem('orbyte_crossfade_hint_shown') === '1') return; } catch (e) {}
+    try { localStorage.setItem('orbyte_crossfade_hint_shown', '1'); } catch (e) {}
+    try {
+        const toast = document.createElement('div');
+        toast.textContent = '💡 Si la reproducción se corta al cambiar de pista en 2do plano, probá activar "Crossfade" en el reproductor.';
+        toast.style.cssText = 'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);' +
+            'max-width:90vw;background:rgba(20,20,24,0.94);color:#fff;padding:10px 16px;' +
+            'border-radius:10px;font-size:13px;line-height:1.4;z-index:9999;' +
+            'box-shadow:0 4px 16px rgba(0,0,0,0.35);text-align:center;opacity:0;transition:opacity .4s ease;';
+        document.body.appendChild(toast);
+        setTimeout(() => { toast.style.opacity = '1'; }, 10);
+        setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 500); }, 6000);
+    } catch (e) {}
+}
+
+function _updateCrossfadeButtons() {
+    const bar = document.getElementById('crossfade-btn');
+    const np  = document.getElementById('np-crossfade-btn');
+    if (bar) bar.classList.toggle('is-active', crossfadeEnabled);
+    if (np)  np.classList.toggle('np-action-active', crossfadeEnabled);
+}
+
+function toggleCrossfade() {
+    crossfadeEnabled = !crossfadeEnabled;
+    try { localStorage.setItem('orbyte_crossfade', crossfadeEnabled ? '1' : '0'); } catch (e) {}
+    if (!crossfadeEnabled) _abortCrossfade('toggled_off');
+    _updateCrossfadeButtons();
+}
+window.toggleCrossfade = toggleCrossfade;
+
+function setCrossfadeDuration(seconds) {
+    const v = Math.min(CROSSFADE_MAX_SEC, Math.max(CROSSFADE_MIN_SEC, Number(seconds) || crossfadeDurationSec));
+    crossfadeDurationSec = v;
+    try { localStorage.setItem('orbyte_crossfade_duration', String(v)); } catch (e) {}
+    return v;
+}
+window.setCrossfadeDuration = setCrossfadeDuration;
+window.getCrossfadeDuration = () => crossfadeDurationSec;
+
+const CROSSFADE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c3-6 6-6 9 0s6 6 9 0"/><path d="M3 12c3 6 6 6 9 0s6-6 9 0" opacity="0.4"/></svg>`;
+
+// La plantilla no trae un botón de Crossfade (funcionalidad agregada después) —
+// se inserta uno al lado de "Normalizar", copiándole la clase para que quede
+// visualmente igual a los demás controles del reproductor, sin tocar HTML/CSS.
+function _ensureCrossfadeButton() {
+    if (!document.getElementById('crossfade-btn')) {
+        const normalizeBtn = document.getElementById('normalize-btn');
+        if (normalizeBtn) {
+            const btn = document.createElement('button');
+            btn.id = 'crossfade-btn';
+            btn.className = normalizeBtn.className;
+            btn.title = 'Crossfade — fundido entre pistas (evita cortes al cambiar de tema en 2do plano)';
+            btn.innerHTML = CROSSFADE_SVG;
+            btn.onclick = toggleCrossfade;
+            normalizeBtn.insertAdjacentElement('afterend', btn);
+        }
+    }
+    if (!document.getElementById('np-crossfade-btn')) {
+        const npNormalizeBtn = document.getElementById('np-normalize-btn');
+        if (npNormalizeBtn) {
+            const btn = document.createElement('button');
+            btn.id = 'np-crossfade-btn';
+            btn.className = npNormalizeBtn.className;
+            btn.title = 'Crossfade — fundido entre pistas';
+            btn.innerHTML = CROSSFADE_SVG;
+            btn.onclick = toggleCrossfade;
+            npNormalizeBtn.insertAdjacentElement('afterend', btn);
+        }
+    }
+    _updateCrossfadeButtons();
+}
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _ensureCrossfadeButton);
+} else {
+    _ensureCrossfadeButton();
+}
+
 let normalizeEnabled = false;
 try { normalizeEnabled = localStorage.getItem('orbyte_normalize') === '1'; } catch (e) {}
 
