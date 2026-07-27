@@ -6,6 +6,7 @@ import hashlib
 import socket
 import urllib.request
 import urllib.error
+import http.client
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as _xml_escape
 from urllib.parse import urljoin, urlparse
@@ -3685,7 +3686,18 @@ def _cast_soap_call(control_url, action, body_xml, timeout=8):
     req.add_header('SOAPACTION', f'"urn:schemas-upnp-org:service:AVTransport:1#{action}"')
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode('utf-8', errors='ignore')
+            status = resp.status
+            try:
+                data = resp.read()
+            except http.client.IncompleteRead as e:
+                # Renderers UPnP reales (stacks HTTP embebidos, de bajo costo)
+                # a veces mandan un Content-Length que no coincide con lo que
+                # realmente escriben en la respuesta. Esto pasa LEYENDO la
+                # respuesta — el comando ya se le mandó y ejecutó igual — así
+                # que nos quedamos con lo parcial en vez de tirar la llamada
+                # entera (visto en la práctica contra el RX-A880 real).
+                data = e.partial
+            return status, data.decode('utf-8', errors='ignore')
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode('utf-8', errors='ignore')
     except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -3858,6 +3870,7 @@ def api_admin_cast_seek():
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
 
 
+def parse_range_header(rh, file_size):
     if not rh.startswith('bytes='): return (0, None)
     parts = rh[6:].split('-')
     start = int(parts[0])

@@ -2120,12 +2120,13 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .cast-discover-btn:hover { background:rgba(200,146,10,0.14); }
 .cast-discover-btn:disabled { opacity:0.6; cursor:default; }
 
-.cast-play-btn, .cast-remove-btn {
+.cast-remove-btn {
   background:none; border:none; cursor:pointer; padding:0.2rem 0.4rem;
   border-radius:4px; font-size:0.85rem; color:var(--text-secondary);
 }
-.cast-play-btn:hover { color:var(--led-green); background:rgba(34,255,68,0.1); }
 .cast-remove-btn:hover { color:var(--led-red); background:rgba(255,34,68,0.1); }
+.cast-item-active { background:rgba(34,255,68,0.06); }
+.cast-item-active .output-name { color:var(--led-green); }
 
 .cast-main-btn.active {
   border-color:var(--led-green); color:var(--led-green);
