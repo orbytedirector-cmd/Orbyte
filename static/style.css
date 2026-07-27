@@ -2126,3 +2126,18 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 }
 .cast-play-btn:hover { color:var(--led-green); background:rgba(34,255,68,0.1); }
 .cast-remove-btn:hover { color:var(--led-red); background:rgba(255,34,68,0.1); }
+
+.cast-main-btn.active {
+  border-color:var(--led-green); color:var(--led-green);
+  background:rgba(34,255,68,0.1);
+}
+.cast-active-row {
+  display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+  padding:0.5rem 0.75rem; font-size:0.82rem; color:var(--text-gold);
+  border-bottom:1px solid var(--border-gold); background:rgba(200,146,10,0.06);
+}
+.cast-stop-btn {
+  padding:0.2rem 0.55rem; border-radius:6px; border:1px solid var(--led-red);
+  background:rgba(255,34,68,0.08); color:var(--led-red); cursor:pointer; font-size:0.76rem;
+}
+.cast-stop-btn:hover { background:rgba(255,34,68,0.18); }

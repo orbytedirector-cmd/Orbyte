@@ -598,6 +598,7 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     # "Reproducir en…" — un invitado NUNCA debe poder redirigir el audio del
     # anfitrión a otro dispositivo de la casa.
     'api_admin_cast_discover', 'api_admin_cast_targets', 'api_admin_cast_target_delete', 'api_admin_cast_play',
+    'api_admin_cast_transport', 'api_admin_cast_seek',
 }
 
 @app.before_request
@@ -605,7 +606,7 @@ def _require_login():
     """Protege toda la plataforma: sin sesión válida, redirige a /login (o
     devuelve 401 JSON para rutas /api/ para no romper el JS del cliente)."""
     ep = request.endpoint
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio') or request.path.startswith('/static/'):
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio', 'cast_cover') or request.path.startswith('/static/'):
         return
     # Sesión de invitado de playlist colaborativa: autenticada pero acotada
     # a un subconjunto de la app — nunca pasa por el chequeo de user_id/
@@ -3544,6 +3545,34 @@ def cast_audio(track_id):
     return _serve_audio(path)
 
 
+@app.route('/cast-cover/<int:track_id>')
+def cast_cover(track_id):
+    """Igual que /cast-audio pero para la portada — usa el MISMO token (está
+    atado al track_id, sirve para las dos cosas de esa pista puntual)."""
+    token = request.args.get('token', '')
+    try:
+        data = _cast_signer.loads(token, max_age=_CAST_TOKEN_MAX_AGE)
+    except (SignatureExpired, BadSignature):
+        return "Token inválido o vencido", 403
+    if data.get('track_id') != track_id:
+        return "Token no corresponde a esta pista", 403
+
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            'SELECT al.cover_path FROM tracks t LEFT JOIN albums al ON t.album_id = al.id WHERE t.id=?',
+            (track_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or not row['cover_path']:
+        return "Sin portada", 404
+    cover_path = clean_db_path(row['cover_path'])
+    if not os.path.isfile(cover_path):
+        return "Portada no encontrada en disco", 404
+    return send_file(cover_path, conditional=True)
+
+
 # ── "Reproducir en…" — UPnP/DLNA hacia otros dispositivos de la casa ───────────
 # Mismo mecanismo validado a mano con tools/cast_discovery.py y
 # tools/cast_test.py contra el RX-A880 real — acá queda integrado al panel
@@ -3613,8 +3642,24 @@ def _cast_guess_protocol_info(file_path):
     mime = _CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
     return f'http-get:*:{mime}:*'
 
-def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_size=None):
+def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_size=None,
+                      album=None, genre=None, track_number=None, cover_url=None):
     size_attr = f' size="{file_size}"' if file_size else ''
+    extra = ''
+    if album:
+        extra += f'<upnp:album>{_xml_escape(album)}</upnp:album>'
+    if artist:
+        extra += f'<upnp:artist>{_xml_escape(artist)}</upnp:artist>'
+    if genre:
+        extra += f'<upnp:genre>{_xml_escape(genre)}</upnp:genre>'
+    if track_number:
+        extra += f'<upnp:originalTrackNumber>{_xml_escape(str(track_number))}</upnp:originalTrackNumber>'
+    if cover_url:
+        # dlna:profileID="JPEG_TN" es lo que esperan la mayoría de los renderers
+        # reales (confirmado contra implementaciones tipo Gerbera/Twonky) — sin
+        # el namespace dlna correcto, muchos renderers directamente lo ignoran.
+        extra += (f'<upnp:albumArtURI xmlns:dlna="urn:schemas-dlna-org:metadata-1-0" '
+                  f'dlna:profileID="JPEG_TN">{_xml_escape(cover_url)}</upnp:albumArtURI>')
     return (
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
         'xmlns:dc="http://purl.org/dc/elements/1.1/" '
@@ -3623,6 +3668,7 @@ def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_siz
         f'<dc:title>{_xml_escape(title or "Pista")}</dc:title>'
         f'<dc:creator>{_xml_escape(artist or "")}</dc:creator>'
         '<upnp:class>object.item.audioItem.musicTrack</upnp:class>'
+        f'{extra}'
         f'<res protocolInfo="{_xml_escape(protocol_info)}"{size_attr}>{_xml_escape(media_url)}</res>'
         '</item></DIDL-Lite>'
     )
@@ -3722,7 +3768,11 @@ def api_admin_cast_play():
     conn = get_db_connection()
     try:
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
-        track = conn.execute('SELECT id, title, artist, file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+        track = conn.execute('''
+            SELECT t.id, t.title, t.artist, t.file_path, t.genre, t.track_number,
+                   al.name AS album_name, al.cover_path
+            FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
+            WHERE t.id=?''', (track_id,)).fetchone()
         if not target:
             return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}), 404
         if not track:
@@ -3733,10 +3783,14 @@ def api_admin_cast_play():
             return jsonify({'status': 'error', 'message': 'El archivo no está en disco'}), 404
 
         token = cast_token_for_track(track['id'])
-        media_url = f"{request.host_url.rstrip('/')}/cast-audio/{track['id']}?token={token}"
+        base = request.host_url.rstrip('/')
+        media_url = f"{base}/cast-audio/{track['id']}?token={token}"
+        cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
         protocol_info = _cast_guess_protocol_info(file_path)
         didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
-                                 media_url, os.path.getsize(file_path))
+                                 media_url, os.path.getsize(file_path),
+                                 album=track['album_name'], genre=track['genre'],
+                                 track_number=track['track_number'], cover_url=cover_url)
 
         status, body = _cast_send_track(target['control_url'], media_url, didl)
         if status == 200:
@@ -3748,7 +3802,62 @@ def api_admin_cast_play():
     finally:
         conn.close()
 
-def parse_range_header(rh, file_size):
+
+@app.route('/api/admin/cast/transport', methods=['POST'])
+@admin_required
+def api_admin_cast_transport():
+    """Play/Pause/Stop sobre lo que el renderer YA tiene cargado — no hace
+    falta reenviar la pista, AVTransport lo maneja como cualquier control
+    remoto. Usado para que pausar/reanudar en el reproductor local también
+    pause/reanude en el dispositivo transmitiendo (ver static/cast.js)."""
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    action = data.get('action')
+    if action not in ('Play', 'Pause', 'Stop'):
+        return jsonify({'status': 'error', 'message': 'Acción inválida'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    body = (f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            f'<InstanceID>0</InstanceID>{"<Speed>1</Speed>" if action == "Play" else ""}</u:{action}>')
+    status, body_resp = _cast_soap_call(target['control_url'], action, body)
+    if status == 200:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
+@app.route('/api/admin/cast/seek', methods=['POST'])
+@admin_required
+def api_admin_cast_seek():
+    """Mueve la posición de reproducción en el renderer — usado cuando se
+    arrastra la barra de progreso del reproductor local."""
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    seconds = data.get('seconds')
+    if target_id is None or seconds is None:
+        return jsonify({'status': 'error', 'message': 'Faltan parámetros'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    seconds = max(0, int(seconds))
+    target_time = f'{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}'
+    body = ('<u:Seek xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            '<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>'
+            f'<Target>{target_time}</Target></u:Seek>')
+    status, body_resp = _cast_soap_call(target['control_url'], 'Seek', body)
+    if status == 200:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
     if not rh.startswith('bytes='): return (0, None)
     parts = rh[6:].split('-')
     start = int(parts[0])

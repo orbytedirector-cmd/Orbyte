@@ -135,6 +135,11 @@ function playTrack(index) {
 
     // Expose current track globally so base.html lyrics system can read track.id
     window._currentTrack = track;
+    // "Reproducir en…" (UPnP/DLNA): si hay una transmisión activa, cast.js
+    // define este hook y replica el cambio de pista al dispositivo — cubre
+    // next/prev/auto-avance porque todos pasan por acá. No-op si cast.js
+    // no está cargado (usuarios sin panel de admin).
+    if (window._castMirror) window._castMirror.onTrackStart(track);
 
     if (track.is_dsd) {
         // Play via ffmpeg stream in the browser; also attempt native DAC via MPD (silent on error)
@@ -386,12 +391,14 @@ function togglePlayPause() {
         document.getElementById('play-btn').textContent = '⏸';
         dispatchPlayerState(true);
         if (window._currentTrack) updateMediaSession(window._currentTrack, true);
+        if (window._castMirror) window._castMirror.onPlayPause(true);
     } else {
         _shouldBePlaying = false;
         currentAudio.pause();
         document.getElementById('play-btn').textContent = '▶';
         dispatchPlayerState(false);
         if (window._currentTrack) updateMediaSession(window._currentTrack, false);
+        if (window._castMirror) window._castMirror.onPlayPause(false);
     }
 }
 
@@ -481,7 +488,10 @@ function seekTo(percent) {
     const dur = (currentAudio.duration && isFinite(currentAudio.duration))
         ? currentAudio.duration
         : (currentAudio._trackDuration || 0);
-    if (dur > 0) currentAudio.currentTime = (percent / 100) * dur;
+    if (dur > 0) {
+        currentAudio.currentTime = (percent / 100) * dur;
+        if (window._castMirror) window._castMirror.onSeek(currentAudio.currentTime);
+    }
 }
 
 function seekFromClick(event, bar) {
