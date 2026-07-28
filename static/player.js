@@ -980,8 +980,11 @@ document.addEventListener('visibilitychange', () => {
         _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
         // Recuperación inmediata al volver a la pestaña: no esperar al próximo
         // tick del watchdog (ver más abajo) para darnos cuenta de que la
-        // pista ya terminó mientras estuvo en 2do plano.
+        // pista ya terminó mientras estuvo en 2do plano, ni para que el
+        // contador de tiempo dejen de mostrar el valor viejo de antes de
+        // perder el foco.
         if (currentAudio && currentAudio.ended) _handleTrackEnded();
+        updateProgress();
     }
 });
 
@@ -1008,6 +1011,11 @@ let _watchdogStallTicks = 0;
 
 function _watchdogTick() {
     if (!_shouldBePlaying || !currentAudio) { _watchdogStallTicks = 0; return; }
+
+    // timeupdate se reduce mucho (o casi no dispara) en pestañas de fondo —
+    // sin esto el contador y la barra quedaban "congelados" en el valor de
+    // antes de perder el foco, aunque el audio siguiera avanzando en serio.
+    updateProgress();
 
     // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
     if (currentAudio.ended) { _handleTrackEnded(); return; }
