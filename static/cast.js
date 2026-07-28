@@ -6,19 +6,28 @@
 // {id, name} cuando salió elegido como salida. Elegir un dispositivo es una
 // decisión de "a partir de ahora el audio sale por acá" — no hace falta que
 // haya nada sonando ni en cola para elegirlo; player.js simplemente consulta
-// este estado cada vez que hace algo (cambia de pista, pausa, busca) y actúa
-// en consecuencia vía los hooks de más abajo. Mientras hay un dispositivo
-// elegido, el <audio> local queda muteado (volume=0): sigue "sonando" en
-// silencio nada más para que toda la lógica existente de progreso/fin-de-
-// pista/auto-avance siga funcionando sin tocarla.
+// este estado cada vez que hace algo (cambia de pista, pausa, busca, cambia
+// el volumen) y actúa en consecuencia vía los hooks de más abajo.
+//
+// Mientras hay un dispositivo elegido, el <audio> local queda muteado con
+// currentAudio.muted = true — es el MISMO mecanismo nativo que ya usa el
+// botón de silenciar del reproductor (ver player.js), no un volume=0
+// paralelo: así el valor de currentAudio.volume queda intacto (lo sigue
+// manejando el slider con normalidad) y no hay forma de que se "filtre"
+// audio local sin querer. El volumen real, mientras se transmite, lo maneja
+// el dispositivo remoto por RenderingControl.
 (function () {
   'use strict';
 
   let _targetsCache = [];
   let _seekDebounceTimer = null;
+  let _volumeDebounceTimer = null;
 
-  function _muteLocal(mute) {
-    if (window.currentAudio) window.currentAudio.volume = mute ? 0 : 1;
+  function _muteLocal() {
+    // El cálculo real (silenciado a mano O transmitiendo) vive en
+    // player.js — acá solo le avisamos que recalcule, así el botón de
+    // silenciar del usuario y esto nunca se pisan entre sí.
+    if (window._applyMuteState) window._applyMuteState();
   }
 
   function _setActiveButtonState(active) {
@@ -32,17 +41,24 @@
   window._castMirror = {
     onTrackStart(track) {
       if (!window._castTarget || !track || !track.id) return;
-      _muteLocal(true);
+      console.log('[cast] nueva pista, espejando a', window._castTarget.name, '->', track.title);
+      _muteLocal();
       _castSendTrack(track);
     },
     onPlayPause(playing) {
       if (!window._castTarget) return;
+      console.log('[cast]', playing ? 'Play' : 'Pause', '->', window._castTarget.name);
       _castTransport(playing ? 'Play' : 'Pause');
     },
     onSeek(seconds) {
       if (!window._castTarget) return;
       clearTimeout(_seekDebounceTimer);
       _seekDebounceTimer = setTimeout(() => _castSeek(seconds), 350);
+    },
+    onVolumeChange(v) {
+      if (!window._castTarget) return;
+      clearTimeout(_volumeDebounceTimer);
+      _volumeDebounceTimer = setTimeout(() => _castVolume(v), 150);
     },
   };
 
@@ -54,29 +70,45 @@
         body: JSON.stringify({ target_id: window._castTarget.id, track_id: track.id }),
       }).then((r) => r.json());
       if (r.status !== 'ok') console.warn('[cast] no se pudo transmitir la pista:', r.message);
+      else console.log('[cast] transmitiendo OK:', track.title);
+      return r;
     } catch (e) {
       console.warn('[cast] error de red al transmitir la pista:', e);
+      return { status: 'error', message: 'Error de red' };
     }
   }
 
   async function _castTransport(action) {
     try {
-      await fetch('/api/admin/cast/transport', {
+      const r = await fetch('/api/admin/cast/transport', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_id: window._castTarget.id, action }),
-      });
-    } catch (e) { /* noop */ }
+      }).then((r) => r.json());
+      if (r.status !== 'ok') console.warn(`[cast] ${action} falló:`, r.message);
+    } catch (e) { console.warn(`[cast] error de red en ${action}:`, e); }
   }
 
   async function _castSeek(seconds) {
     try {
-      await fetch('/api/admin/cast/seek', {
+      const r = await fetch('/api/admin/cast/seek', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_id: window._castTarget.id, seconds: Math.round(seconds) }),
-      });
-    } catch (e) { /* noop */ }
+      }).then((r) => r.json());
+      if (r.status !== 'ok') console.warn('[cast] seek falló:', r.message);
+    } catch (e) { console.warn('[cast] error de red en seek:', e); }
+  }
+
+  async function _castVolume(v) {
+    try {
+      const r = await fetch('/api/admin/cast/volume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_id: window._castTarget.id, volume: Math.round(v * 100) }),
+      }).then((r) => r.json());
+      if (r.status !== 'ok') console.warn('[cast] volumen: el dispositivo no lo soporta o falló:', r.message);
+    } catch (e) { console.warn('[cast] error de red al cambiar volumen:', e); }
   }
 
   // ── Panel: abrir/cerrar, listar, buscar ───────────────────────────────────
@@ -88,14 +120,14 @@
     if (opening) loadCastTargets();
   }
 
-  function _renderCastList() {
+  function _renderCastList(statusLine) {
     const list = document.getElementById('cast-list');
     if (!list) return;
 
     let html = '';
     if (window._castTarget) {
       html += `<div class="cast-active-row">
-        <span>🔊 Salida: <strong>${_escapeHtml(window._castTarget.name)}</strong></span>
+        <span>🔊 Salida: <strong>${_escapeHtml(window._castTarget.name)}</strong>${statusLine ? ' — ' + _escapeHtml(statusLine) : ''}</span>
         <button class="cast-stop-btn" onclick="castStop()">Volver a local</button>
       </div>`;
     }
@@ -124,6 +156,7 @@
       _targetsCache = await fetch('/api/admin/cast/targets').then((r) => r.json());
       if (!Array.isArray(_targetsCache)) _targetsCache = [];
     } catch (e) {
+      console.warn('[cast] no se pudo cargar la lista de dispositivos:', e);
       _targetsCache = [];
     }
     _renderCastList();
@@ -133,8 +166,10 @@
     const btn = document.getElementById('cast-discover-btn');
     if (btn && !silent) { btn.disabled = true; btn.textContent = '🔍 Buscando… (unos segundos)'; }
     try {
-      await fetch('/api/admin/cast/discover', { method: 'POST' });
+      const r = await fetch('/api/admin/cast/discover', { method: 'POST' }).then((r) => r.json());
+      console.log(`[cast] búsqueda terminada, ${r.found ?? '?'} dispositivo(s) con AVTransport`);
     } catch (e) {
+      console.warn('[cast] búsqueda falló:', e);
       if (!silent) alert('No se pudo completar la búsqueda.');
     } finally {
       if (btn && !silent) { btn.disabled = false; btn.textContent = '🔍 Buscar dispositivos'; }
@@ -159,27 +194,35 @@
 
     window._castTarget = { id: target.id, name: target.name };
     _setActiveButtonState(true);
-    _muteLocal(true);
-    _renderCastList();
+    _muteLocal();
+    _renderCastList('conectando…');
 
-    // Si ya hay algo cargado (sonando o pausado), lo manda ya mismo para
-    // que el cambio de salida sea inmediato — sin esto habría que esperar
-    // a la próxima pista para escuchar algo en el dispositivo nuevo.
     const track = window._currentTrack;
     if (track && track.id) {
-      await _castSendTrack(track);
+      // Puede tardar unos segundos (si es DSD, el server prueba varios
+      // formatos hasta encontrar el que el dispositivo acepta — ver
+      // _cast_try_send_track en app.py) — por eso el "conectando…" de arriba.
+      const r = await _castSendTrack(track);
+      if (r.status !== 'ok') {
+        alert(r.message || 'No se pudo transmitir a ese dispositivo.');
+        _renderCastList();
+        return;
+      }
       if (window.currentAudio && window.currentAudio.currentTime > 1) {
         _castSeek(window.currentAudio.currentTime);
       }
+      const slider = document.getElementById('volume-slider');
+      if (slider) _castVolume(parseFloat(slider.value));
       if (window.currentAudio && window.currentAudio.paused) _castTransport('Pause');
     }
+    _renderCastList();
   }
 
   function castStop() {
     if (window._castTarget) _castTransport('Stop');
     window._castTarget = null;
     _setActiveButtonState(false);
-    _muteLocal(false);
+    _muteLocal();
     _renderCastList();
   }
 

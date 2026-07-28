@@ -175,7 +175,11 @@ function playTrack(index) {
         // Show known duration immediately — DSD stream returns Infinity/NaN
         const tt = document.getElementById('total-time');
         if (tt && track.duration) tt.textContent = formatTime(track.duration);
-        playViaMPD(track.file_path || '', { silent: true });
+        // "Reproducir en…": si el audio está saliendo por un dispositivo
+        // UPnP, este passthrough a MPD (que suena por la salida local del
+        // SERVER, no del navegador) queda apagado — si no, el DSD sonaba
+        // igual por ahí aunque el mute local del <audio> estuviera bien.
+        if (!window._castTarget) playViaMPD(track.file_path || '', { silent: true });
         updatePlayerBar(track);
         updateVisualizer(track.led_color);
         dispatchPlayerState(true);
@@ -500,7 +504,14 @@ function seekFromClick(event, bar) {
     seekTo(pct);
 }
 
-function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
+function setVolume(v) {
+    if (currentAudio) currentAudio.volume = v;
+    // "Reproducir en…": mientras hay un dispositivo elegido, currentAudio
+    // sigue muteado (_applyMuteState, más arriba) así que este valor nunca
+    // sale por los parlantes locales — el volumen real lo maneja el
+    // dispositivo remoto vía RenderingControl (ver cast.js/api_admin_cast_volume).
+    if (window._castMirror) window._castMirror.onVolumeChange(v);
+}
 
 function _handleTrackEnded() {
     // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
@@ -818,10 +829,20 @@ window.toggleFavorite = toggleFavorite;
 
 let _muted = false;
 
+// Silenciado local real = lo pidió el usuario a mano (_muted) O hay una
+// transmisión activa (window._castTarget) — se combinan acá en un solo
+// lugar para que el botón de silenciar y "Reproducir en…" (cast.js) nunca
+// se pisen entre sí (antes cada uno tocaba currentAudio.muted por su
+// cuenta, y target/pausa por HTML nativo).
+function _applyMuteState() {
+    if (currentAudio) currentAudio.muted = _muted || !!window._castTarget;
+}
+window._applyMuteState = _applyMuteState;
+
 function toggleMute() {
     if (!currentAudio) return;
     _muted = !_muted;
-    currentAudio.muted = _muted;
+    _applyMuteState();
     const icon   = document.getElementById('vol-icon');
     const slider = document.getElementById('volume-slider');
     if (icon)   icon.textContent     = _muted ? '🔇' : '🔊';

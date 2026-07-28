@@ -494,6 +494,14 @@ def get_db_connection():
             last_used_at  TEXT
         )
     ''')
+    # Lazy migration: el volumen se controla con OTRO servicio UPnP
+    # (RenderingControl, no AVTransport) — se agrega la columna para las
+    # bases que ya tenían cast_targets de antes de esto.
+    try:
+        conn.execute("ALTER TABLE cast_targets ADD COLUMN rendering_control_url TEXT")
+        conn.commit()
+    except Exception:
+        pass  # La columna ya existe
     conn.commit()
     return conn
 
@@ -599,7 +607,7 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     # "Reproducir en…" — un invitado NUNCA debe poder redirigir el audio del
     # anfitrión a otro dispositivo de la casa.
     'api_admin_cast_discover', 'api_admin_cast_targets', 'api_admin_cast_target_delete', 'api_admin_cast_play',
-    'api_admin_cast_transport', 'api_admin_cast_seek',
+    'api_admin_cast_transport', 'api_admin_cast_seek', 'api_admin_cast_volume',
 }
 
 @app.before_request
@@ -3586,6 +3594,13 @@ _CAST_MIME_BY_EXT = {
     '.aiff': 'audio/aiff', '.aif': 'audio/aiff', '.m4a': 'audio/mp4',
     '.dsf': 'audio/x-dsd', '.dff': 'audio/x-dsd',
 }
+# DSD por UPnP/DLNA no tiene un MIME único estandarizado — distintos
+# renderers reales esperan cosas distintas (confirmado investigando: hay
+# implementaciones que solo aceptan audio/dsd o audio/x-dsd, otras solo
+# audio/x-dsf/audio/dsf, sin relación con la extensión real del archivo).
+# En vez de adivinar uno y fallar en silencio, se prueban en orden hasta
+# que el dispositivo efectivamente arranca a reproducir.
+_CAST_DSD_MIME_CANDIDATES = ['audio/x-dsd', 'audio/dsd', 'audio/x-dsf', 'audio/dsf']
 
 def _cast_ssdp_discover(timeout=4):
     """Devuelve las LOCATION únicas que respondieron al M-SEARCH — mismo
@@ -3612,8 +3627,12 @@ def _cast_ssdp_discover(timeout=4):
     return locations
 
 def _cast_fetch_device_info(location, timeout=4):
-    """(friendlyName, manufacturer, modelName, av_transport_url, ip) o None
-    si no es un dispositivo que sirva (sin AVTransport = no renderer de audio)."""
+    """(friendlyName, manufacturer, modelName, av_transport_url, rendering_control_url, ip)
+    o None si no es un dispositivo que sirva (sin AVTransport = no renderer
+    de audio). rendering_control_url puede ser None — no todos los
+    renderers lo separan de AVTransport, en ese caso el volumen por UPnP
+    simplemente no está disponible para ese dispositivo (se degrada solo,
+    no rompe el resto del cast)."""
     try:
         with urllib.request.urlopen(location, timeout=timeout) as resp:
             root = ET.fromstring(resp.read())
@@ -3627,21 +3646,20 @@ def _cast_fetch_device_info(location, timeout=4):
         el = device.find(f'd:{tag}', ns)
         return el.text.strip() if el is not None and el.text else default
     av_transport_url = None
+    rendering_control_url = None
     for service in device.findall('.//d:service', ns):
         st_el = service.find('d:serviceType', ns)
-        if st_el is not None and st_el.text and 'AVTransport' in st_el.text:
-            cu = service.find('d:controlURL', ns)
-            if cu is not None and cu.text:
-                av_transport_url = urljoin(location, cu.text.strip())
+        service_type = st_el.text if st_el is not None and st_el.text else ''
+        cu = service.find('d:controlURL', ns)
+        cu_text = cu.text.strip() if cu is not None and cu.text else None
+        if 'AVTransport' in service_type and cu_text:
+            av_transport_url = urljoin(location, cu_text)
+        elif 'RenderingControl' in service_type and cu_text:
+            rendering_control_url = urljoin(location, cu_text)
     if not av_transport_url:
         return None
     return text_of('friendlyName'), text_of('manufacturer'), text_of('modelName'), \
-        av_transport_url, urlparse(location).hostname
-
-def _cast_guess_protocol_info(file_path):
-    ext = os.path.splitext(file_path)[1].lower()
-    mime = _CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream'
-    return f'http-get:*:{mime}:*'
+        av_transport_url, rendering_control_url, urlparse(location).hostname
 
 def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_size=None,
                       album=None, genre=None, track_number=None, cover_url=None):
@@ -3674,7 +3692,7 @@ def _cast_build_didl(track_id, title, artist, protocol_info, media_url, file_siz
         '</item></DIDL-Lite>'
     )
 
-def _cast_soap_call(control_url, action, body_xml, timeout=8):
+def _cast_soap_call(control_url, action, body_xml, timeout=8, service='AVTransport'):
     envelope = (
         '<?xml version="1.0" encoding="utf-8"?>'
         '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
@@ -3683,7 +3701,7 @@ def _cast_soap_call(control_url, action, body_xml, timeout=8):
     ).encode('utf-8')
     req = urllib.request.Request(control_url, data=envelope, method='POST')
     req.add_header('Content-Type', 'text/xml; charset="utf-8"')
-    req.add_header('SOAPACTION', f'"urn:schemas-upnp-org:service:AVTransport:1#{action}"')
+    req.add_header('SOAPACTION', f'"urn:schemas-upnp-org:service:{service}:1#{action}"')
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             status = resp.status
@@ -3703,6 +3721,28 @@ def _cast_soap_call(control_url, action, body_xml, timeout=8):
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         return None, str(e)
 
+def _cast_get_transport_state(control_url, timeout=4):
+    """Consulta GetTransportInfo — el estado REAL del renderer (PLAYING,
+    TRANSITIONING, STOPPED, NO_MEDIA_PRESENT…), no solo si el SOAP call
+    anterior devolvió 200. Un renderer puede aceptar SetAVTransportURI+Play
+    (200 los dos) y sin embargo nunca arrancar a sonar si no reconoce el
+    formato — esto es lo único que lo detecta de verdad. Devuelve el string
+    de estado, o None si no se pudo consultar."""
+    status, body = _cast_soap_call(
+        control_url, 'GetTransportInfo',
+        '<u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        '<InstanceID>0</InstanceID></u:GetTransportInfo>', timeout=timeout)
+    if status != 200:
+        return None
+    m = re.search(r'<CurrentTransportState>([^<]*)</CurrentTransportState>', body)
+    return m.group(1) if m else None
+
+def _cast_set_volume(rendering_control_url, volume_0_100, timeout=4):
+    body = ('<u:SetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
+            '<InstanceID>0</InstanceID><Channel>Master</Channel>'
+            f'<DesiredVolume>{int(volume_0_100)}</DesiredVolume></u:SetVolume>')
+    return _cast_soap_call(rendering_control_url, 'SetVolume', body, timeout=timeout, service='RenderingControl')
+
 def _cast_send_track(control_url, media_url, didl):
     status, body = _cast_soap_call(control_url, 'SetAVTransportURI',
         f'<u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
@@ -3713,6 +3753,36 @@ def _cast_send_track(control_url, media_url, didl):
     return _cast_soap_call(control_url, 'Play',
         '<u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
         '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play>')
+
+
+def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, file_size, mime_candidates):
+    """Prueba cada mime de mime_candidates hasta que el renderer EFECTIVAMENTE
+    arranca a reproducir (confirmado con GetTransportInfo — un renderer puede
+    aceptar SetAVTransportURI+Play con 200 en los dos y jamás sonar si no
+    reconoce el formato, es justo lo que pasaba con DSD). Para archivos no-DSD
+    mime_candidates trae un solo elemento, así que el comportamiento es
+    idéntico al de antes, solo que ahora también queda confirmado por estado
+    real en vez de confiar ciegamente en el 200.
+    Devuelve (ok: bool, mime_usado: str|None, motivo_si_falló: str|None)."""
+    last_reason = 'El dispositivo no respondió'
+    for mime in mime_candidates:
+        protocol_info = f'http-get:*:{mime}:*'
+        didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
+                                 media_url, file_size, album=track['album_name'], genre=track['genre'],
+                                 track_number=track['track_number'], cover_url=cover_url)
+        status, body = _cast_send_track(control_url, media_url, didl)
+        app.logger.info(f"[cast] SetAVTransportURI+Play mime={mime} -> HTTP {status}")
+        if status != 200:
+            last_reason = f'El dispositivo devolvió HTTP {status} para {mime}'
+            continue
+        time.sleep(1.2)  # darle tiempo al renderer a intentar arrancar antes de preguntar
+        state = _cast_get_transport_state(control_url)
+        app.logger.info(f"[cast] estado tras mime={mime}: {state}")
+        if state in ('STOPPED', 'NO_MEDIA_PRESENT', None):
+            last_reason = f'El dispositivo no aceptó el formato {mime} (estado: {state or "no se pudo consultar"})'
+            continue
+        return True, mime, None
+    return False, None, last_reason
 
 
 @app.route('/api/admin/cast/discover', methods=['POST'])
@@ -3730,14 +3800,14 @@ def api_admin_cast_discover():
             info = _cast_fetch_device_info(location)
             if not info:
                 continue
-            name, manufacturer, model_name, av_transport_url, ip = info
+            name, manufacturer, model_name, av_transport_url, rendering_control_url, ip = info
             conn.execute('''
-                INSERT INTO cast_targets (name, control_url, ip, manufacturer, model_name, discovered_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO cast_targets (name, control_url, rendering_control_url, ip, manufacturer, model_name, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(control_url) DO UPDATE SET
-                    name=excluded.name, ip=excluded.ip,
+                    name=excluded.name, ip=excluded.ip, rendering_control_url=excluded.rendering_control_url,
                     manufacturer=excluded.manufacturer, model_name=excluded.model_name
-            ''', (name, av_transport_url, ip, manufacturer, model_name, _utcnow_iso()))
+            ''', (name, av_transport_url, rendering_control_url, ip, manufacturer, model_name, _utcnow_iso()))
             found += 1
         conn.commit()
     finally:
@@ -3798,19 +3868,25 @@ def api_admin_cast_play():
         base = request.host_url.rstrip('/')
         media_url = f"{base}/cast-audio/{track['id']}?token={token}"
         cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
-        protocol_info = _cast_guess_protocol_info(file_path)
-        didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
-                                 media_url, os.path.getsize(file_path),
-                                 album=track['album_name'], genre=track['genre'],
-                                 track_number=track['track_number'], cover_url=cover_url)
+        file_size = os.path.getsize(file_path)
 
-        status, body = _cast_send_track(target['control_url'], media_url, didl)
-        if status == 200:
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.dsf', '.dff'):
+            mime_candidates = _CAST_DSD_MIME_CANDIDATES
+        else:
+            mime_candidates = [_CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream']
+
+        ok, mime_used, reason = _cast_try_send_track(
+            target['control_url'], track, media_url, cover_url, file_path, file_size, mime_candidates)
+
+        if ok:
+            app.logger.info(f"[cast] '{track['title']}' -> {target['name']} OK (mime={mime_used})")
             conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
             conn.commit()
             return jsonify({'status': 'ok', 'device': target['name']})
-        return jsonify({'status': 'error',
-                        'message': f'El dispositivo no aceptó el comando (HTTP {status}). ¿Sigue prendido y en la misma red?'}), 502
+
+        app.logger.warning(f"[cast] '{track['title']}' -> {target['name']} FALLÓ: {reason}")
+        return jsonify({'status': 'error', 'message': reason}), 502
     finally:
         conn.close()
 
@@ -3837,6 +3913,7 @@ def api_admin_cast_transport():
     body = (f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
             f'<InstanceID>0</InstanceID>{"<Speed>1</Speed>" if action == "Play" else ""}</u:{action}>')
     status, body_resp = _cast_soap_call(target['control_url'], action, body)
+    app.logger.info(f"[cast] {action} -> {target['name']}: HTTP {status}")
     if status == 200:
         return jsonify({'status': 'ok'})
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
@@ -3865,6 +3942,34 @@ def api_admin_cast_seek():
             '<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>'
             f'<Target>{target_time}</Target></u:Seek>')
     status, body_resp = _cast_soap_call(target['control_url'], 'Seek', body)
+    app.logger.info(f"[cast] Seek {seconds}s -> {target['name']}: HTTP {status}")
+    if status == 200:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
+@app.route('/api/admin/cast/volume', methods=['POST'])
+@admin_required
+def api_admin_cast_volume():
+    """Volumen del DISPOSITIVO — servicio UPnP separado (RenderingControl,
+    no AVTransport). Si el renderer no lo expone, se degrada solo (ver
+    _cast_fetch_device_info) en vez de romper el resto del cast."""
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    volume = data.get('volume')  # 0-100
+    if target_id is None or volume is None:
+        return jsonify({'status': 'error', 'message': 'Faltan parámetros'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    if not target['rendering_control_url']:
+        return jsonify({'status': 'error', 'message': 'Este dispositivo no expone control de volumen por UPnP'}), 501
+    status, body_resp = _cast_set_volume(target['rendering_control_url'], max(0, min(100, int(volume))))
+    app.logger.info(f"[cast] SetVolume {volume} -> {target['name']}: HTTP {status}")
     if status == 200:
         return jsonify({'status': 'ok'})
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
