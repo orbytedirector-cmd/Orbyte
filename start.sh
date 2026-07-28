@@ -24,7 +24,7 @@ source venv/bin/activate
 # Install dependencies
 # qrcode[pil]: genera el QR de invitación de la Playlist Colaborativa
 # (/admin/colaborativa) — es la única dependencia nueva que trae esa feature.
-pip install -q flask flask-cors qrcode[pil]
+pip install -q flask flask-cors qrcode[pil] mutagen
 
 # Start the application
 echo "Starting HiRes Browser..."

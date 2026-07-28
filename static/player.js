@@ -976,7 +976,13 @@ function _resumeAudioCtxIfNeeded() {
 }
 
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
+    if (!document.hidden) {
+        _handleUnexpectedPause();   // no-op si no corresponde (ver _shouldBePlaying)
+        // Recuperación inmediata al volver a la pestaña: no esperar al próximo
+        // tick del watchdog (ver más abajo) para darnos cuenta de que la
+        // pista ya terminó mientras estuvo en 2do plano.
+        if (currentAudio && currentAudio.ended) _handleTrackEnded();
+    }
 });
 
 // ── Watchdog de reproducción en 2do plano ───────────────────────────────────
@@ -987,10 +993,20 @@ document.addEventListener('visibilitychange', () => {
 // rato largo). Cada pocos segundos se revisa si "debería estar sonando" y
 // realmente lo está, y si no, se intenta recuperar sin esperar a que el
 // usuario reabra la app.
+//
+// BUG encontrado: este propio watchdog corría con setInterval en el hilo
+// principal — que es justo lo que Chrome frena agresivamente en pestañas de
+// fondo (hasta una vez por MINUTO tras un rato, "intensive throttling" desde
+// Chrome 88). O sea que la red de seguridad se frenaba por la misma razón
+// que el mecanismo que debía cubrir, y el silencio entre pistas podía durar
+// hasta que el usuario volvía a la pestaña. La solución estándar (confirmada
+// contra la documentación de Chrome y varias fuentes): un Web Worker corre
+// en su propio hilo y NO sufre ese throttling — así que el tick de acá abajo
+// se movió adentro de uno. La lógica de recuperación en sí no cambió nada.
 let _watchdogLastTime   = -1;
 let _watchdogStallTicks = 0;
 
-setInterval(() => {
+function _watchdogTick() {
     if (!_shouldBePlaying || !currentAudio) { _watchdogStallTicks = 0; return; }
 
     // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
@@ -1014,7 +1030,21 @@ setInterval(() => {
         _watchdogStallTicks = 0;
     }
     _watchdogLastTime = t;
-}, 4000);
+}
+
+(function _startWatchdog() {
+    try {
+        const workerSrc = 'setInterval(() => postMessage(1), 4000);';
+        const blobUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
+        const worker = new Worker(blobUrl);
+        worker.onmessage = _watchdogTick;
+        worker.onerror = () => { worker.terminate(); setInterval(_watchdogTick, 4000); };
+    } catch (e) {
+        // Navegador sin soporte de Workers (rarísimo hoy) — mejor un
+        // watchdog throttleable que ninguno.
+        setInterval(_watchdogTick, 4000);
+    }
+})();
 
 function _normTick() {
     if (!normalizeEnabled || !_normAnalyser || !currentAudio || currentAudio.paused) return;
