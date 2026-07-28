@@ -3647,9 +3647,11 @@ def _cast_fetch_device_info(location, timeout=4):
         return el.text.strip() if el is not None and el.text else default
     av_transport_url = None
     rendering_control_url = None
+    seen_service_types = []
     for service in device.findall('.//d:service', ns):
         st_el = service.find('d:serviceType', ns)
         service_type = st_el.text if st_el is not None and st_el.text else ''
+        seen_service_types.append(service_type)
         cu = service.find('d:controlURL', ns)
         cu_text = cu.text.strip() if cu is not None and cu.text else None
         if 'AVTransport' in service_type and cu_text:
@@ -3658,6 +3660,9 @@ def _cast_fetch_device_info(location, timeout=4):
             rendering_control_url = urljoin(location, cu_text)
     if not av_transport_url:
         return None
+    app.logger.info(f"[cast] {text_of('friendlyName')} ({location}) servicios: {seen_service_types}")
+    if not rendering_control_url:
+        app.logger.info(f"[cast] {text_of('friendlyName')}: sin RenderingControl -> sin volumen por UPnP para este dispositivo")
     return text_of('friendlyName'), text_of('manufacturer'), text_of('modelName'), \
         av_transport_url, rendering_control_url, urlparse(location).hostname
 
@@ -4371,4 +4376,14 @@ def api_debug_dsd():
 
 if __name__ == '__main__':
     _load_favorites()
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    # threaded=True: sin esto, el server de desarrollo de Flask atiende UN
+    # solo pedido HTTP a la vez. Con "Reproducir en…" activo hay como mínimo
+    # DOS clientes pidiendo streams de audio en simultáneo — el navegador
+    # local (silenciado, pero igual está bajando /audio/...) y el
+    # dispositivo UPnP bajando /cast-audio/... — y sin threaded, uno de los
+    # dos queda haciendo fila detrás del otro. Es la causa más probable del
+    # desfasaje de ~30s y el audio "pegado"/entrecortado en el parlante:
+    # cada vez que el hilo único se lo lleva otro pedido (un heartbeat, el
+    # polling del panel de cast, el propio audio local), la descarga hacia
+    # el dispositivo remoto se corta un instante y retoma de a tirones.
+    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
