@@ -1,6 +1,15 @@
 // HiRes Browser — Service Worker
 // Caches static assets for offline shell; audio and API always go to network.
-const CACHE_NAME = 'hires-v3';
+//
+// v4: cache-first para /static/ quedó mordiendo la cola cada vez que se
+// actualizaba player.js/cast.js sin acordarse de subir el ?v= de la URL —
+// el navegador seguía sirviendo la copia vieja cacheada indefinidamente, sin
+// importar cuántas veces se corrigiera el archivo en el server. Bumpear
+// CACHE_NAME acá fuerza a tirar TODO lo cacheado hasta ahora (ver
+// 'activate' más abajo), y de acá en más /static/ usa network-first: en LAN
+// el costo extra es nada, y esta clase de bug (arreglo que nunca se ve
+// reflejado porque quedó cacheado) deja de poder pasar.
+const CACHE_NAME = 'hires-v4';
 
 const STATIC_ASSETS = [
   '/',
@@ -27,7 +36,8 @@ self.addEventListener('activate', e => {
   self.clients.claim();
 });
 
-// Fetch — network-first for API/audio; cache-first for static assets
+// Fetch — network-first para todo lo navegable/estático; audio/API nunca
+// pasan por acá (se excluyen más abajo).
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
@@ -38,6 +48,8 @@ self.addEventListener('fetch', e => {
       url.pathname.startsWith('/audio/') ||
       url.pathname.startsWith('/stream-dsd/') ||
       url.pathname.startsWith('/cover/') ||
+      url.pathname.startsWith('/cast-audio/') ||
+      url.pathname.startsWith('/cast-cover/') ||
       url.pathname.startsWith('/play-mpd') ||
       url.pathname.startsWith('/admin/') ||
       url.pathname === '/login' ||
@@ -47,21 +59,9 @@ self.addEventListener('fetch', e => {
     return; // let browser handle normally
   }
 
-  // Static assets: cache-first with network fallback
-  if (url.pathname.startsWith('/static/')) {
-    e.respondWith(
-      caches.match(e.request).then(cached =>
-        cached || fetch(e.request).then(res => {
-          const clone = res.clone();
-          caches.open(CACHE_NAME).then(c => c.put(e.request, clone));
-          return res;
-        })
-      )
-    );
-    return;
-  }
-
-  // HTML pages: network-first, fall back to cache
+  // Estáticos y páginas HTML: network-first, cache solo como respaldo si no
+  // hay red (antes era cache-first para /static/, que es justo lo que
+  // causaba servir versiones viejas para siempre).
   e.respondWith(
     fetch(e.request).then(res => {
       const clone = res.clone();

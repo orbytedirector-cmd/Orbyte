@@ -379,7 +379,7 @@
 
   </div>
 
-  <script src="{{ url_for('static', filename='player.js') }}?v=20260606b"></script>
+  <script src="{{ url_for('static', filename='player.js') }}?v=20260728"></script>
   {% if collab_guest %}
   <!-- Invitado de playlist colaborativa: sobrescribe playTrack/appendToQueue/
        etc. para que "reproducir/añadir" en cualquier página (album.html,
@@ -389,7 +389,7 @@
   {% endif %}
   {% if current_user and current_user.is_admin %}
   <!-- "Reproducir en…" (UPnP/DLNA) — solo el admin lo puede usar. -->
-  <script src="{{ url_for('static', filename='cast.js') }}?v=20260726"></script>
+  <script src="{{ url_for('static', filename='cast.js') }}?v=20260728"></script>
   {% endif %}
   <script>
     // Favourites set — loaded from server on each page render
