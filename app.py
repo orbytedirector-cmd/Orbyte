@@ -625,17 +625,25 @@ def artist(artist_id):
         similar_artists = build_similar_artists(conn, ar_data.get('similar_artists_json'), limit=12)
 
         # Top / most popular tracks for this artist — powers the "Populares" tab
+        # Reutiliza el mismo dedupe por (Título, Artista) + mejor score que ya
+        # usa la vista de filtros de pistas (_track_dedupe_condition) — sin
+        # esto, la misma canción presente en varios álbumes (ediciones,
+        # remasters, etc.) podía ocupar más de uno de los 10 lugares del Top,
+        # y no necesariamente con la copia de mejor calidad.
+        top_tracks_where = 'al.artist_id = ?'
+        top_tracks_dedupe = _track_dedupe_condition(extra_where=top_tracks_where, track_alias='t', pop_alias='tpc')
         top_tracks_raw = conn.execute(
-            '''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
+            f'''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
                       COALESCE(tpc.pop_score, 0) as pop_score,
                       COALESCE(tpc.stars, 0) as pop_stars
                FROM tracks t
                JOIN albums al ON al.id = t.album_id
                LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
-               WHERE al.artist_id = ?
+               WHERE {top_tracks_where}
+                 AND {top_tracks_dedupe}
                ORDER BY pop_score DESC, t.title
                LIMIT 10''',
-            (artist_id,)
+            (artist_id, artist_id)   # una vez para el WHERE exterior, una vez para el re-prefijado dentro del dedupe
         ).fetchall()
         top_tracks = []
         for t in top_tracks_raw:
@@ -2912,6 +2920,161 @@ def api_prewarm_dsd():
             _dsd_transcode_lock_release(cache_path, lock)
 
     threading.Thread(target=_prewarm_job, daemon=True).start()
+    return jsonify({'status': 'started'})
+
+
+# ── Pares combinados (crossfade "de verdad") ─────────────────────────────────
+# El crossfade con dos <audio> simultáneos (versión anterior) resultó bloqueado
+# por Chrome en 2do plano: "The play() request was interrupted because
+# video-only background media was paused to save power" — Chrome sólo tolera
+# UNA sesión de audio "reclamada" (la de navigator.mediaSession) por pestaña;
+# un segundo <audio> reproduciendo en paralelo se trata como contenido no
+# reclamado y se corta.
+#
+# La alternativa real: que el navegador nunca vea una segunda pista. Acá se
+# combinan dos pistas consecutivas en un ÚNICO archivo (remuestreadas a una
+# tasa común, con un fundido corto en el borde para que no sea un corte seco)
+# y se sirve como si fuera una sola. El cliente reproduce ese único archivo de
+# punta a punta — nunca hay un segundo .play() para la transición A→B, así que
+# nunca se dispara la política que bloqueaba el crossfade anterior. Cuando el
+# reproductor cruza el punto exacto donde termina A y empieza B, sólo actualiza
+# la UI (título, artista, portada, metadata) en silencio; el audio nunca se
+# corta ni se reinicia.
+#
+# Alcance de esta primera versión: sólo PARES (pista actual + siguiente).
+# Encadenar 3+ pistas seguidas sin nunca volver a tocar .play() requeriría
+# combinar toda la cola por adelantado — mucho más caro y no compatible con
+# una cola que el usuario sigue modificando en vivo. Con pares alcanza para
+# resolver el caso confirmado (la 2da transición en 2do plano es la que
+# falla); si hiciera falta más, conviene medirlo antes de construir más.
+_PAIR_SAMPLE_RATE = 176400   # misma tasa universal que ya se usa para DSD
+
+def _pair_cache_path(path_a, path_b, fade_sec):
+    os.makedirs(_DSD_CACHE_DIR, exist_ok=True)   # mismo directorio de caché que ya usa DSD
+    try: mtime_a = os.path.getmtime(path_a)
+    except OSError: mtime_a = 0
+    try: mtime_b = os.path.getmtime(path_b)
+    except OSError: mtime_b = 0
+    key = hashlib.sha1(f'{path_a}:{mtime_a}|{path_b}:{mtime_b}|fade={fade_sec}'.encode('utf-8')).hexdigest()
+    return os.path.join(_DSD_CACHE_DIR, f'pair_{key}.flac')
+
+def _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec):
+    """
+    Concatena A+B en un solo FLAC, con un fundido secuencial en el borde
+    (A se apaga sobre sus últimos fade_sec segundos, B aparece desde
+    silencio sobre sus primeros fade_sec) en vez de un corte seco. No es un
+    mezclado superpuesto tipo DJ — eso es más complejo de armar bien y no
+    hacía falta para resolver el corte de fondo; queda como posible mejora
+    a futuro si se quiere una curva más suave.
+    """
+    tmp_path = f'{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp'
+    fade_sec = max(0.0, min(fade_sec, max(0.0, (duration_a or 0) - 0.5)))   # nunca más largo que casi toda A
+    fade_start_a = max(0.0, (duration_a or 0) - fade_sec)
+    filter_complex = (
+        f'[0:a]aresample={_PAIR_SAMPLE_RATE}'
+        + (f',afade=t=out:st={fade_start_a:.3f}:d={fade_sec:.3f}' if fade_sec > 0 else '')
+        + '[a0];'
+        f'[1:a]aresample={_PAIR_SAMPLE_RATE}'
+        + (f',afade=t=in:st=0:d={fade_sec:.3f}' if fade_sec > 0 else '')
+        + '[a1];'
+        '[a0][a1]concat=n=2:v=0:a=1[out]'
+    )
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-i', path_a, '-i', path_b,
+        '-filter_complex', filter_complex,
+        '-map', '[out]',
+        '-sample_fmt', 's32',
+        '-c:a', 'flac', '-compression_level', '0',
+        '-f', 'flac',
+        tmp_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        if result.returncode != 0 or not os.path.isfile(tmp_path):
+            app.logger.error(
+                f"[track-pair] ffmpeg failed for {path_a} + {path_b}: "
+                f"{result.stderr.decode(errors='replace')[:500]}"
+            )
+            return False
+        os.replace(tmp_path, cache_path)
+        return True
+    finally:
+        if os.path.isfile(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+
+def _resolve_pair_tracks(track_a_id, track_b_id):
+    """Devuelve (path_a, path_b, duration_a) o None si algo no existe."""
+    conn = get_db_connection()
+    try:
+        ta = conn.execute('SELECT file_path, duration FROM tracks WHERE id=?', (track_a_id,)).fetchone()
+        tb = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_b_id,)).fetchone()
+    finally:
+        conn.close()
+    if not ta or not tb:
+        return None
+    path_a = clean_db_path(ta['file_path'])
+    path_b = clean_db_path(tb['file_path'])
+    if not os.path.isfile(path_a) or not os.path.isfile(path_b):
+        return None
+    return path_a, path_b, (ta['duration'] or 0)
+
+
+@app.route('/api/track-pair/<int:track_a_id>/<int:track_b_id>')
+def track_pair(track_a_id, track_b_id):
+    fade_sec = request.args.get('fade', 4.0, type=float)
+    resolved = _resolve_pair_tracks(track_a_id, track_b_id)
+    if not resolved:
+        return "Track not found", 404
+    path_a, path_b, duration_a = resolved
+
+    cache_path = _pair_cache_path(path_a, path_b, fade_sec)
+    if not os.path.isfile(cache_path):
+        lock = _dsd_transcode_lock(cache_path)   # mismo mecanismo de lock por ruta que ya usa DSD
+        lock.acquire()
+        try:
+            if not os.path.isfile(cache_path):
+                if not _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec):
+                    return "No se pudo combinar", 500
+        finally:
+            _dsd_transcode_lock_release(cache_path, lock)
+
+    resp = _serve_audio(cache_path)
+    resp.headers['Content-Type']        = 'audio/flac'
+    resp.headers['X-Pair-Boundary-Sec'] = f'{duration_a:.3f}'
+    return resp
+
+
+@app.route('/api/prewarm-pair/<int:track_a_id>/<int:track_b_id>', methods=['POST'])
+def api_prewarm_pair(track_a_id, track_b_id):
+    """Arma el combo A+B en un hilo aparte, sin esperar — igual que
+    /api/prewarm-dsd. static/player.js lo llama apenas arranca A, si el
+    crossfade está activo, para que el combo ya esté listo en caché para
+    cuando currentTime cruce el borde de A."""
+    fade_sec = request.args.get('fade', 4.0, type=float)
+    resolved = _resolve_pair_tracks(track_a_id, track_b_id)
+    if not resolved:
+        return jsonify({'status': 'error', 'message': 'Track not found'}), 404
+    path_a, path_b, duration_a = resolved
+
+    cache_path = _pair_cache_path(path_a, path_b, fade_sec)
+    if os.path.isfile(cache_path):
+        return jsonify({'status': 'already_cached'})
+
+    lock = _dsd_transcode_lock(cache_path)
+    if not lock.acquire(blocking=False):
+        return jsonify({'status': 'already_in_progress'})
+
+    def _prewarm_pair_job():
+        try:
+            ok = _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec)
+            if ok:
+                app.logger.info(f"[prewarm-pair] cached: {os.path.basename(path_a)} + {os.path.basename(path_b)}")
+        finally:
+            _dsd_transcode_lock_release(cache_path, lock)
+
+    threading.Thread(target=_prewarm_pair_job, daemon=True).start()
     return jsonify({'status': 'started'})
 
 

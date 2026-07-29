@@ -36,6 +36,101 @@ try {
     repeatMode = localStorage.getItem('orbyte_repeat') || 'off';
 } catch (e) {}
 
+// ── Persistencia de cola/reproducción (sobrevive F5 y navegación) ───────────
+// Antes, un F5 (o simplemente navegar a otra página — esta app no es una
+// SPA, cada click de verdad recarga) perdía la playlist entera y la posición
+// de reproducción sin ningún aviso. sessionStorage es la elección correcta
+// acá: sobrevive recargas y navegación dentro de la MISMA pestaña/sesión,
+// pero no resucita una cola de hace días si se abre una pestaña nueva.
+//
+// Al recuperar el estado NO se arranca la reproducción sola — los
+// navegadores no dejan hacer autoplay al cargar la página sin un gesto del
+// usuario, y aunque dejaran, tampoco tendría sentido: se deja todo listo,
+// pausado, en el punto exacto donde estaba, para retomar con un toque en
+// Play.
+const QUEUE_STORAGE_KEY      = 'orbyte_queue_state';
+const QUEUE_STORAGE_MAX_AGE_MS = 12 * 3600 * 1000;   // 12h — no resucitar algo de hace demasiado
+
+function _persistQueueState() {
+    try {
+        if (!queue.length) { sessionStorage.removeItem(QUEUE_STORAGE_KEY); return; }
+        const state = {
+            queue,
+            currentIndex,
+            currentTime:  currentAudio ? (currentAudio.currentTime || 0) : 0,
+            wasPlaying:   !!(currentAudio && !currentAudio.paused),
+            shuffleEnabled, repeatMode,
+            savedAt: Date.now(),
+        };
+        sessionStorage.setItem(QUEUE_STORAGE_KEY, JSON.stringify(state));
+    } catch (e) { /* storage lleno o no disponible — no es motivo para romper nada */ }
+}
+
+function _restoreQueueState() {
+    let raw;
+    try { raw = sessionStorage.getItem(QUEUE_STORAGE_KEY); } catch (e) { return; }
+    if (!raw) return;
+    let state;
+    try { state = JSON.parse(raw); } catch (e) { return; }
+    if (!state || !Array.isArray(state.queue) || !state.queue.length) return;
+    if (Date.now() - (state.savedAt || 0) > QUEUE_STORAGE_MAX_AGE_MS) return;
+
+    queue = state.queue;
+    currentIndex = Math.min(Math.max(0, state.currentIndex || 0), queue.length - 1);
+    window.currentIndex = currentIndex;
+    if (typeof state.shuffleEnabled === 'boolean') shuffleEnabled = state.shuffleEnabled;
+    if (typeof state.repeatMode === 'string') repeatMode = state.repeatMode;
+
+    const track = queue[currentIndex];
+    if (!track) return;
+    window._currentTrack = track;
+
+    if (!currentAudio) {
+        currentAudio = new Audio();
+        currentAudio.addEventListener('timeupdate', updateProgress);
+        currentAudio.addEventListener('error', handleAudioError);
+        currentAudio.addEventListener('pause', _handleUnexpectedPause);
+        currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
+        currentAudio.addEventListener('pause', () => _syncMediaSessionState(false));
+        _attachDiagListeners(currentAudio);
+    }
+    currentAudio.src = track.audio_url ||
+        (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
+    currentAudio._trackDuration = track.duration || 0;
+    currentAudio.load();
+    const restoreTime = state.currentTime || 0;
+    if (restoreTime > 0) {
+        currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
+            currentAudio.removeEventListener('loadedmetadata', _seekOnce);
+            try { currentAudio.currentTime = restoreTime; } catch (e) {}
+        });
+    }
+    window.currentAudio = currentAudio;
+
+    updatePlayerBar(track);
+    const playBtn = document.getElementById('play-btn');
+    if (playBtn) { playBtn.textContent = '▶'; playBtn.removeAttribute('data-empty'); }
+    updateVisualizer(track.led_color);
+    dispatchPlayerState(false);
+    document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
+    if (typeof _updateShuffleRepeatButtons === 'function') _updateShuffleRepeatButtons();
+    _prewarmUpcomingDsd();
+    _rlog('queue_restored', { restoredIndex: currentIndex, restoredTime: restoreTime, queueLen: queue.length });
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _restoreQueueState);
+} else {
+    _restoreQueueState();
+}
+
+// Guardar en los momentos que importan: cuando cambia la cola/pista, y
+// justo antes de que la página se vaya (F5, cerrar, navegar) — este último
+// es el que de verdad importa para no perder los últimos segundos de
+// posición reproducida.
+window.addEventListener('pagehide',    _persistQueueState);
+window.addEventListener('beforeunload', _persistQueueState);
+
 const MUSIC_ROOT = "/mnt/musica/";
 
 // ── Remote diagnostic log (temporal) ─────────────────────────────────────────
@@ -221,6 +316,7 @@ function loadQueue(tracks) {
     // Notify playlist panel so it reflects the current queue
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
     _prewarmUpcomingDsd();
+    _persistQueueState();
 }
 
 // Varias vistas (browse/home/artist/search/album) hacen `await fetch(...)`
@@ -248,7 +344,8 @@ window.primeAudioForGesture = primeAudioForGesture;
 
 function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
-    if (_crossfadeInProgress) _abortCrossfade('manual_track_change');
+    _pairedNextIndex = null;   // cambio manual de pista — lo que estuviera sonando de un combo ya no aplica
+    _pairOffsetSec = 0;
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
@@ -266,9 +363,35 @@ function playTrack(index) {
     // Expose current track globally so base.html lyrics system can read track.id
     window._currentTrack = track;
 
+    // Crossfade (pares combinados): si está activo y hay una pista
+    // siguiente, se pide el archivo A+B combinado en vez del archivo normal
+    // de A — la transición se maneja después en _checkPairBoundary(), sin
+    // volver a tocar .src/.play() nunca. Si el combo falló una vez para
+    // esta pista (_pairGaveUpForIndex), no se reintenta en bucle — se
+    // reproduce A normal y listo.
+    let audioSrc = track.audio_url ||
+        (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
+    let pairedTrackObj = null;
+    if (crossfadeEnabled && track.duration && currentIndex < queue.length - 1 && _pairGaveUpForIndex !== currentIndex) {
+        const nextTrackObj = queue[currentIndex + 1];
+        const pairUrl = buildTrackPairUrl(track, nextTrackObj, crossfadeDurationSec);
+        if (pairUrl) {
+            audioSrc = pairUrl;
+            pairedTrackObj = nextTrackObj;
+            _prewarmPairIfNeeded(track, nextTrackObj);
+        }
+    }
+    if (pairedTrackObj) {
+        _pairedNextIndex = currentIndex + 1;
+        _pairBoundarySec = track.duration || 0;
+    } else {
+        _pairedNextIndex = null;
+    }
+    _pairOffsetSec = 0;
+
     if (track.is_dsd) {
         // Play via ffmpeg stream in the browser; also attempt native DAC via MPD (silent on error)
-        const streamUrl = track.audio_url || buildDsdStreamUrl(track.file_path);
+        const streamUrl = audioSrc;
         if (!currentAudio) {
             currentAudio = new Audio();
             currentAudio.addEventListener('timeupdate', updateProgress);
@@ -319,6 +442,7 @@ function playTrack(index) {
         updateVisualizer(track.led_color);
         dispatchPlayerState(true);
         clearSyncedLyrics();
+        _persistQueueState();
         return;
     }
 
@@ -334,7 +458,7 @@ function playTrack(index) {
     }
 
     currentAudio.onended = _handleTrackEnded;
-    currentAudio.src = track.audio_url || buildAudioUrl(track.file_path);
+    currentAudio.src = audioSrc;
     currentAudio._trackDuration = track.duration || 0;
     currentAudio.load();
     _resumeAudioCtxIfNeeded();
@@ -354,6 +478,7 @@ function playTrack(index) {
     updateVisualizer(track.led_color);
     dispatchPlayerState(true);
     clearSyncedLyrics();
+    _persistQueueState();
 }
 
 function playViaMPD(filepath, { silent = false } = {}) {
@@ -456,9 +581,15 @@ function updateProgress() {
     const fill = document.getElementById('progress-fill');
     const ct   = document.getElementById('current-time');
     const tt   = document.getElementById('total-time');
-    const dur  = (currentAudio.duration && isFinite(currentAudio.duration))
-        ? currentAudio.duration : (currentAudio._trackDuration || 0);
-    const pct  = dur ? (currentAudio.currentTime / dur) * 100 : 0;
+
+    // Si se está reproduciendo un combo A+B, currentAudio.currentTime cuenta
+    // desde el principio del ARCHIVO combinado — _pairOffsetSec es 0
+    // mientras se escucha A, y pasa a valer la duración de A apenas se
+    // cruza el borde (ver _checkPairBoundary), para que lo que se MUESTRA
+    // siga reflejando la posición dentro de la pista visible, no del combo.
+    const displayTime = Math.max(0, currentAudio.currentTime - _pairOffsetSec);
+    const dur = currentAudio._trackDuration || 0;
+    const pct  = dur ? (displayTime / dur) * 100 : 0;
     if (fill) {
         fill.style.width = `${pct}%`;
         // Color progress bar to match current track quality
@@ -472,9 +603,9 @@ function updateProgress() {
         const track = queue[currentIndex];
         if (track) thumb.style.background = `var(--led-${track.led_color || 'white'})`;
     }
-    if (ct)   ct.textContent = formatTime(currentAudio.currentTime);
+    if (ct)   ct.textContent = formatTime(displayTime);
     if (tt)   tt.textContent = formatTime(dur);
-    syncLyrics(currentAudio.currentTime);
+    syncLyrics(displayTime);
 
     // Stream is healthy again — restore the full retry budget instead of
     // letting it get drained by several small drops in a row.
@@ -483,16 +614,12 @@ function updateProgress() {
         _reconnectAttempts = 0;
     }
 
-    // Crossfade opcional: arrancar la siguiente pista un poco antes de que
-    // termine ésta, superpuestas, para que nunca exista un "arranque en
-    // frío" de <audio> en 2do plano (ver _startCrossfade).
-    if (crossfadeEnabled && !_crossfadeInProgress && dur > crossfadeDurationSec + 2 && currentIndex < queue.length - 1) {
-        const remaining = dur - currentAudio.currentTime;
-        if (remaining > 0 && remaining <= crossfadeDurationSec) {
-            _startCrossfade();
-        }
-    }
+    // Si se está reproduciendo un combo, revisar si ya se cruzó el borde
+    // entre A y B — esto reemplaza por completo al mecanismo de fundido
+    // superpuesto anterior (ver comentario grande más arriba).
+    if (_pairedNextIndex !== null) _checkPairBoundary();
 }
+
 
 // El audio se puede pausar sin que nosotros lo hayamos pedido: una llamada
 // entra, Siri interrumpe, otra app (Instagram, etc.) toma el foco de audio.
@@ -727,10 +854,12 @@ function seekFromClick(event, bar) {
 function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
 
 function _handleTrackEnded() {
-    // Si esto dispara en medio de un crossfade en curso, ya lo está
-    // manejando _finishCrossfade — avanzar acá también duplicaría la
-    // transición (dos playTrack casi simultáneos para la misma pista).
-    if (_crossfadeInProgress) return;
+    // Si esto dispara mientras se reproducía un combo A+B, el borde ya se
+    // cruzó hace rato (ver _checkPairBoundary, llamado en cada timeupdate) —
+    // esto es simplemente el final real del archivo combinado. Se limpia
+    // el estado del combo por las dudas y se sigue el flujo normal.
+    _pairedNextIndex = null;
+    _pairOffsetSec = 0;
 
     // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
     // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
@@ -758,6 +887,16 @@ function _handleTrackEnded() {
 function handleAudioError(e) {
     const track = queue[currentIndex];
     if (!track || !currentAudio) { console.error('Audio error:', e); return; }
+
+    if (_pairedNextIndex !== null) {
+        // El combo A+B falló a mitad de camino — no insistir con él para
+        // esta pista; el reconnect de abajo ya usa track.audio_url (el
+        // archivo normal, sin combinar), así que esto sólo evita
+        // reintentar el combo roto en la próxima llamada.
+        _pairGaveUpForIndex = currentIndex;
+        _pairedNextIndex = null;
+        _pairOffsetSec = 0;
+    }
 
     const lastPos = currentAudio.currentTime || 0;
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
@@ -923,6 +1062,7 @@ function resetPlayerBar() {
     // Notify listeners that nothing is playing
     document.dispatchEvent(new CustomEvent('playerStateChange', { detail: { playing: false } }));
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: [] } }));
+    _persistQueueState();   // queue ya está vacía acá — esto limpia sessionStorage
 }
 window.resetPlayerBar = resetPlayerBar;
 
@@ -1162,17 +1302,29 @@ window.updateTabTitle = updateTabTitle;
 // A fast safety limiter sits after the gain stage purely to catch clipping on
 // unexpected transients; it does not add loudness on its own. Nothing here
 // touches the source stream, the transcode, or the bitrate/format.
-// ── Crossfade (opcional) ──────────────────────────────────────────────────────
-// Motivo: en 2do plano, iOS/Android a veces cortan un <audio> recién arrancado
-// —confirmado con logs reales: se ve el 'play' arrancar, sonar una fracción de
-// segundo, y cortarse, repetidas veces— específicamente en transiciones
-// automáticas de pista sin que el usuario haya tocado la pantalla. Nunca pasa
-// mientras una pista YA está sonando de corrido. El crossfade evita el punto
-// débil de raíz: en vez de parar una pista y arrancar la siguiente desde cero
-// (un "arranque en frío"), la siguiente empieza a sonar unos segundos antes de
-// que termine la actual, superpuestas, así el navegador nunca ve un corte real
-// entre pistas. Apagado por default — el flujo normal (instantáneo, sin
-// superposición) sigue siendo el de siempre; esto es una opción aparte.
+// ── Crossfade — pares combinados (2da versión) ───────────────────────────────
+// La 1ra versión (dos <audio> simultáneos superpuestos) quedó bloqueada por
+// Chrome en 2do plano: "The play() request was interrupted because
+// video-only background media was paused to save power" — Chrome sólo
+// tolera UNA sesión de audio "reclamada" (la de navigator.mediaSession) por
+// pestaña; un segundo <audio> reproduciendo en paralelo se trata como
+// contenido no reclamado y se corta.
+//
+// Este mecanismo evita el problema de raíz en vez de pelearlo: el servidor
+// combina la pista actual + la siguiente en UN SOLO archivo (con un fundido
+// corto en el borde), y el navegador lo reproduce de punta a punta como si
+// fuera una sola pista. Nunca hay un segundo .play() para la transición —
+// así que nunca se dispara la política que bloqueaba la versión anterior.
+// Cuando currentTime cruza el punto exacto donde termina A y empieza B, sólo
+// se actualiza la UI (título, portada, metadata) en silencio; el audio
+// nunca se corta ni se reinicia.
+//
+// Alcance: sólo PARES (pista actual + siguiente). Encadenar 3+ pistas
+// seguidas sin nunca volver a tocar .play() implicaría combinar toda la cola
+// por adelantado — mucho más caro, y no compatible con una cola que el
+// usuario sigue modificando en vivo. Con pares alcanza para el caso
+// confirmado (la 2da transición en 2do plano es la que falla); si hiciera
+// falta encadenar más, conviene medirlo antes de construir más.
 let crossfadeEnabled = false;
 try { crossfadeEnabled = localStorage.getItem('orbyte_crossfade') === '1'; } catch (e) {}
 
@@ -1181,130 +1333,62 @@ try {
     const storedDur = parseFloat(localStorage.getItem('orbyte_crossfade_duration'));
     if (!isNaN(storedDur) && storedDur > 0) crossfadeDurationSec = storedDur;
 } catch (e) {}
-const CROSSFADE_MIN_SEC  = 1;
-const CROSSFADE_MAX_SEC  = 10;
-const CROSSFADE_TICK_MS  = 100;
+const CROSSFADE_MIN_SEC = 1;
+const CROSSFADE_MAX_SEC = 10;
 
-let _crossfadeAudio      = null;   // el <audio> "de repuesto" mientras se prepara/ejecuta el fundido
-let _crossfadeInProgress = false;
-let _crossfadeTimer      = null;
+// Si currentAudio está reproduciendo un combo A+B, acá se guarda en qué
+// índice de la cola "empieza B" y en qué segundo del combo está el borde —
+// null cuando no se está reproduciendo un combo.
+let _pairedNextIndex     = null;
+let _pairBoundarySec     = null;   // segundo del archivo combinado donde A termina y empieza B
+let _pairOffsetSec       = 0;      // cuánto restarle a currentAudio.currentTime para el tiempo "real" de la pista visible
+let _pairGaveUpForIndex  = -1;     // si el combo falló una vez para esta pista, no reintentar en bucle
 
-function _createBareAudioElement() {
-    // Deliberadamente mínimo: sin watchdog, sin reconexión, sin listeners de
-    // diagnóstico — es un elemento de corta vida, sólo para la superposición.
-    // Si algo sale mal acá, _abortCrossfade() lo descarta entero y la pista
-    // actual sigue su curso normal como si el crossfade no hubiese existido.
-    return new Audio();
+function buildTrackPairUrl(trackA, trackB, fadeSec) {
+    if (!trackA || !trackB || !trackA.id || !trackB.id) return null;
+    return `/api/track-pair/${trackA.id}/${trackB.id}?fade=${fadeSec}`;
 }
 
-function _startCrossfade() {
-    if (_crossfadeInProgress || !currentAudio) return;
-    const nextIndex = currentIndex + 1;
+function _prewarmPairIfNeeded(trackA, trackB) {
+    if (!crossfadeEnabled || !trackA || !trackB || !trackA.id || !trackB.id) return;
+    try {
+        fetch(`/api/prewarm-pair/${trackA.id}/${trackB.id}?fade=${crossfadeDurationSec}`, { method: 'POST' })
+            .then(r => r.json())
+            .then(d => _rlog('prewarm_pair_response', { a: trackA.title, b: trackB.title, status: d.status }))
+            .catch(() => {});
+    } catch (e) { /* el prewarm es sólo una optimización — nunca debe romper nada */ }
+}
+
+// Se llama desde updateProgress() en cada timeupdate mientras se reproduce
+// un combo — cuando currentTime cruza el borde, "cambia de pista" sin
+// tocar el audio para nada, sólo actualizando la UI.
+function _checkPairBoundary() {
+    if (_pairedNextIndex === null || !currentAudio) return;
+    if (currentAudio.currentTime < _pairBoundarySec) return;
+
+    const nextIndex = _pairedNextIndex;
     const nextTrackObj = queue[nextIndex];
+    _pairedNextIndex = null;
     if (!nextTrackObj) return;
 
-    _crossfadeInProgress = true;
-    _rlog('crossfade_start', { fromIndex: currentIndex, toIndex: nextIndex, durationSec: crossfadeDurationSec });
+    _rlog('pair_boundary_crossed', { newIndex: nextIndex, title: nextTrackObj.title, atTime: currentAudio.currentTime });
 
-    const nextAudio = _createBareAudioElement();
-    nextAudio.volume = 0;
-    nextAudio.src = nextTrackObj.audio_url ||
-        (nextTrackObj.is_dsd ? buildDsdStreamUrl(nextTrackObj.file_path) : buildAudioUrl(nextTrackObj.file_path));
-    _crossfadeAudio = nextAudio;
-
-    nextAudio.addEventListener('error', () => _abortCrossfade('next_track_error'));
-
-    nextAudio.play().then(() => {
-        if (_crossfadeAudio !== nextAudio) return;   // se abortó mientras cargaba
-        _runCrossfadeRamp(currentAudio, nextAudio, nextTrackObj, nextIndex);
-    }).catch(e => {
-        _abortCrossfade('play_rejected: ' + e);
-    });
-}
-
-function _runCrossfadeRamp(oldAudio, newAudio, nextTrackObj, nextIndex) {
-    const startTime   = Date.now();
-    const durationMs  = crossfadeDurationSec * 1000;
-    const startVolOld = oldAudio.volume;
-
-    // setInterval, no requestAnimationFrame: rAF se frena por completo con la
-    // pestaña oculta (todo lo contrario de lo que necesitamos acá), mientras
-    // que setInterval sigue corriendo — más lento si el navegador lo
-    // throttlea, pero corriendo, que es lo que importa para no dejar el
-    // fundido a mitad de camino.
-    _crossfadeTimer = setInterval(() => {
-        if (_crossfadeAudio !== newAudio) { clearInterval(_crossfadeTimer); _crossfadeTimer = null; return; }
-        const frac = Math.min(1, (Date.now() - startTime) / durationMs);
-        try {
-            oldAudio.volume = Math.max(0, startVolOld * (1 - frac));
-            newAudio.volume = frac;
-        } catch (e) {}
-        if (frac >= 1 || oldAudio.ended) {
-            clearInterval(_crossfadeTimer);
-            _crossfadeTimer = null;
-            _finishCrossfade(oldAudio, newAudio, nextTrackObj, nextIndex);
-        }
-    }, CROSSFADE_TICK_MS);
-}
-
-function _finishCrossfade(oldAudio, newAudio, nextTrackObj, nextIndex) {
-    _rlog('crossfade_finish', { toIndex: nextIndex });
-
-    // Retirar la pista vieja: sacarle los listeners antes de soltarla para
-    // que no dispare nada más (reconexión, watchdog) sobre un elemento que
-    // ya no es el actual.
-    try {
-        oldAudio.onended = null;
-        oldAudio.pause();
-        oldAudio.src = '';
-    } catch (e) {}
-
-    // Recién ahora se engancha el set completo de listeners — durante la
-    // preparación del fundido, newAudio sólo tenía el listener mínimo de
-    // error, para no interferir con la UI de la pista que todavía "manda".
-    newAudio.volume = 1;
-    newAudio.addEventListener('timeupdate', updateProgress);
-    newAudio.addEventListener('error', handleAudioError);
-    newAudio.addEventListener('pause', _handleUnexpectedPause);
-    newAudio.addEventListener('play',  () => _syncMediaSessionState(true));
-    newAudio.addEventListener('pause', () => _syncMediaSessionState(false));
-    _attachDiagListeners(newAudio);
-    newAudio.onended = _handleTrackEnded;
-
-    currentAudio = newAudio;
-    window.currentAudio = newAudio;
+    _pairOffsetSec = _pairBoundarySec;
     currentIndex = nextIndex;
     window.currentIndex = currentIndex;
+    window._currentTrack = nextTrackObj;
+    currentAudio._trackDuration = nextTrackObj.duration || 0;
     _reconnectAttempts      = 0;
     _unexpectedPauseRetries = 0;
-    _lastProgressPos        = newAudio.currentTime || 0;
+    _lastProgressPos        = currentAudio.currentTime;
     if (!document.hidden) _bgAutoAdvanceCount = 0;
 
-    _crossfadeInProgress = false;
-    _crossfadeAudio      = null;
-
-    window._currentTrack = nextTrackObj;
     updatePlayerBar(nextTrackObj);
     updateVisualizer(nextTrackObj.led_color);
     dispatchPlayerState(true);
     clearSyncedLyrics();
     _prewarmUpcomingDsd();
-
-    _rlog('crossfade_promoted', { newIndex: currentIndex, title: nextTrackObj.title });
-}
-
-function _abortCrossfade(reason) {
-    if (!_crossfadeInProgress && !_crossfadeAudio) return;
-    _rlog('crossfade_aborted', { reason });
-    _crossfadeInProgress = false;
-    if (_crossfadeTimer) { clearInterval(_crossfadeTimer); _crossfadeTimer = null; }
-    if (_crossfadeAudio) {
-        try { _crossfadeAudio.pause(); _crossfadeAudio.src = ''; } catch (e) {}
-        _crossfadeAudio = null;
-    }
-    if (currentAudio) {
-        try { currentAudio.volume = 1; } catch (e) {}   // por si el fundido ya había bajado el volumen
-    }
+    _persistQueueState();
 }
 
 // Aviso puntual, no invasivo: un toast chico que se muestra UNA sola vez en
@@ -1338,7 +1422,6 @@ function _updateCrossfadeButtons() {
 function toggleCrossfade() {
     crossfadeEnabled = !crossfadeEnabled;
     try { localStorage.setItem('orbyte_crossfade', crossfadeEnabled ? '1' : '0'); } catch (e) {}
-    if (!crossfadeEnabled) _abortCrossfade('toggled_off');
     _updateCrossfadeButtons();
 }
 window.toggleCrossfade = toggleCrossfade;
@@ -1364,7 +1447,7 @@ function _ensureCrossfadeButton() {
             const btn = document.createElement('button');
             btn.id = 'crossfade-btn';
             btn.className = normalizeBtn.className;
-            btn.title = 'Crossfade — fundido entre pistas (evita cortes al cambiar de tema en 2do plano)';
+            btn.title = 'Crossfade — combina esta pista y la siguiente en un solo archivo para que nunca haya un corte al pasar de una a otra en 2do plano';
             btn.innerHTML = CROSSFADE_SVG;
             btn.onclick = toggleCrossfade;
             normalizeBtn.insertAdjacentElement('afterend', btn);
@@ -1376,7 +1459,7 @@ function _ensureCrossfadeButton() {
             const btn = document.createElement('button');
             btn.id = 'np-crossfade-btn';
             btn.className = npNormalizeBtn.className;
-            btn.title = 'Crossfade — fundido entre pistas';
+            btn.title = 'Crossfade — combina pistas consecutivas para que no se corten en 2do plano';
             btn.innerHTML = CROSSFADE_SVG;
             btn.onclick = toggleCrossfade;
             npNormalizeBtn.insertAdjacentElement('afterend', btn);
@@ -1389,6 +1472,7 @@ if (document.readyState === 'loading') {
 } else {
     _ensureCrossfadeButton();
 }
+
 
 let normalizeEnabled = false;
 try { normalizeEnabled = localStorage.getItem('orbyte_normalize') === '1'; } catch (e) {}
@@ -1507,6 +1591,7 @@ setInterval(() => {
         _watchdogStallTicks = 0;
     }
     _watchdogLastTime = t;
+    _persistQueueState();
 }, 4000);
 
 function _normTick() {
@@ -1635,6 +1720,7 @@ function appendToQueue(track) {
     queue.push(normalized);
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
     _prewarmDsd(normalized);   // el push puede caer fuera de la ventana de lookahead — precalentar directo
+    _persistQueueState();
 }
 window.appendToQueue = appendToQueue;
 window.loadQueue  = loadQueue;
