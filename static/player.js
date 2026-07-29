@@ -312,14 +312,25 @@ function updatePlayerBar(track) {
     updateTabTitle();
 }
 
-function updateProgress() {
+function updateProgress(overrideCurrentTime) {
     if (!currentAudio) return;
     const fill = document.getElementById('progress-fill');
     const ct   = document.getElementById('current-time');
     const tt   = document.getElementById('total-time');
     const dur  = (currentAudio.duration && isFinite(currentAudio.duration))
         ? currentAudio.duration : (currentAudio._trackDuration || 0);
-    const pct  = dur ? (currentAudio.currentTime / dur) * 100 : 0;
+    // "Reproducir en…": mientras se transmite, la posición sale del reloj de
+    // pared de cast.js, nunca de currentAudio.currentTime — ese valor puede
+    // quedar trabado si el navegador frena el audio local muteado en 2do
+    // plano. Esto se detecta acá adentro (no solo cuando alguien se acuerda
+    // de pasar el override) para que TODOS los llamadores —incluido el
+    // 'timeupdate' nativo, que sigue disparando igual— usen el valor
+    // correcto sin excepción.
+    const casting = !overrideCurrentTime && window._castTarget && window._castMirror && window._castMirror.getElapsed;
+    const cur = (overrideCurrentTime != null) ? overrideCurrentTime
+        : casting ? window._castMirror.getElapsed()
+        : currentAudio.currentTime;
+    const pct  = dur ? (cur / dur) * 100 : 0;
     if (fill) {
         fill.style.width = `${pct}%`;
         // Color progress bar to match current track quality
@@ -333,9 +344,14 @@ function updateProgress() {
         const track = queue[currentIndex];
         if (track) thumb.style.background = `var(--led-${track.led_color || 'white'})`;
     }
-    if (ct)   ct.textContent = formatTime(currentAudio.currentTime);
+    if (ct)   ct.textContent = formatTime(cur);
     if (tt)   tt.textContent = formatTime(dur);
-    syncLyrics(currentAudio.currentTime);
+    syncLyrics(cur);
+
+    // Lo de acá abajo es seguimiento de salud del STREAM LOCAL — no aplica
+    // (ni conviene, currentAudio puede estar trabado a propósito) mientras
+    // se transmite.
+    if (overrideCurrentTime != null || window._castTarget) return;
 
     // Stream is healthy again — restore the full retry budget instead of
     // letting it get drained by several small drops in a row.
@@ -514,13 +530,20 @@ function setVolume(v) {
 }
 
 function _handleTrackEnded() {
-    // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
-    // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
-    const dur = currentAudio ? (currentAudio._trackDuration || 0) : 0;
-    const pos = currentAudio ? (currentAudio.currentTime || 0) : 0;
-    if (dur > 3 && pos < dur - 3 && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-        handleAudioError({ type: 'premature-end' });
-        return;
+    // "Reproducir en…": mientras se transmite, quien llamó a esta función
+    // (el watchdog, vía el reloj de pared de cast.js) ya confirmó que la
+    // pista terminó de verdad — no re-chequear contra currentAudio, que
+    // puede seguir mostrando una posición vieja si el navegador lo frenó en
+    // 2do plano (por eso dejamos de confiar en él para esto al castear).
+    if (!window._castTarget) {
+        // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
+        // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
+        const dur = currentAudio ? (currentAudio._trackDuration || 0) : 0;
+        const pos = currentAudio ? (currentAudio.currentTime || 0) : 0;
+        if (dur > 3 && pos < dur - 3 && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            handleAudioError({ type: 'premature-end' });
+            return;
+        }
     }
     if (repeatMode === 'one') { playTrack(currentIndex); return; }
     nextTrack();
@@ -1011,6 +1034,15 @@ let _watchdogStallTicks = 0;
 
 function _watchdogTick() {
     if (!_shouldBePlaying || !currentAudio) { _watchdogStallTicks = 0; return; }
+
+    if (window._castTarget && window._castMirror && window._castMirror.getElapsed) {
+        // Mientras se transmite NO confiamos en currentAudio (ver nota de
+        // cast.js sobre el audio local muteado quedando trabado en 2do
+        // plano) — la posición real la da el reloj de pared del cast.
+        updateProgress(window._castMirror.getElapsed());
+        if (window._castMirror.isEnded()) _handleTrackEnded();
+        return;
+    }
 
     // timeupdate se reduce mucho (o casi no dispara) en pestañas de fondo —
     // sin esto el contador y la barra quedaban "congelados" en el valor de

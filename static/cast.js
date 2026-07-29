@@ -35,6 +35,43 @@
     if (btn) btn.classList.toggle('active', !!active);
   }
 
+  // ── Reloj de pared para la posición mientras se transmite ────────────────
+  // El <audio> local queda muteado mientras casteás. Un audio MUTEADO en una
+  // pestaña de fondo NO recibe la misma excepción de throttling que le da el
+  // navegador a un audio realmente audible (esa excepción es justo lo que la
+  // pestaña pierde al no haber cast activo). En la práctica esto significa
+  // que currentAudio.currentTime puede quedar directamente TRABADO en 2do
+  // plano — no es que se refresque poco, el valor deja de avanzar del todo.
+  // El dispositivo remoto (el que de verdad está sonando) no tiene ese
+  // problema. Por eso, mientras hay cast activo, dejamos de confiar en
+  // currentAudio para la posición y calculamos todo por reloj de pared
+  // (Date.now()), que nunca se frena.
+  let _castClock = null; // {startWallMs, pausedAtSec, isPaused, durationSec}
+
+  function _castClockStart(durationSec, startAtSec) {
+    const at = startAtSec || 0;
+    _castClock = { startWallMs: Date.now() - at * 1000, pausedAtSec: at, isPaused: false, durationSec: durationSec || 0 };
+  }
+  function _castClockElapsed() {
+    if (!_castClock) return 0;
+    return _castClock.isPaused ? _castClock.pausedAtSec : (Date.now() - _castClock.startWallMs) / 1000;
+  }
+  function _castClockSetPaused(paused) {
+    if (!_castClock) return;
+    if (paused) {
+      _castClock.pausedAtSec = _castClockElapsed();
+      _castClock.isPaused = true;
+    } else {
+      _castClock.startWallMs = Date.now() - _castClock.pausedAtSec * 1000;
+      _castClock.isPaused = false;
+    }
+  }
+  function _castClockSeek(seconds) {
+    if (!_castClock) return;
+    _castClock.pausedAtSec = seconds;
+    _castClock.startWallMs = Date.now() - seconds * 1000;
+  }
+
   // ── Hooks que llama player.js en cada acción de transporte — acá es donde
   // el reproductor "sabe" si el audio sale local o transmitido, y actúa
   // distinto según corresponda. ───────────────────────────────────────────
@@ -43,15 +80,18 @@
       if (!window._castTarget || !track || !track.id) return;
       console.log('[cast] nueva pista, espejando a', window._castTarget.name, '->', track.title);
       _muteLocal();
+      _castClockStart(track.duration || 0);
       _castSendTrack(track);
     },
     onPlayPause(playing) {
       if (!window._castTarget) return;
+      _castClockSetPaused(!playing);
       console.log('[cast]', playing ? 'Play' : 'Pause', '->', window._castTarget.name);
       _castTransport(playing ? 'Play' : 'Pause');
     },
     onSeek(seconds) {
       if (!window._castTarget) return;
+      _castClockSeek(seconds);
       clearTimeout(_seekDebounceTimer);
       _seekDebounceTimer = setTimeout(() => _castSeek(seconds), 350);
     },
@@ -59,6 +99,13 @@
       if (!window._castTarget) return;
       clearTimeout(_volumeDebounceTimer);
       _volumeDebounceTimer = setTimeout(() => _castVolume(v), 150);
+    },
+    // Consultados por el watchdog de player.js en vez de currentAudio
+    // mientras hay cast activo (ver nota del reloj de pared, más arriba).
+    getElapsed()  { return _castClockElapsed(); },
+    isEnded() {
+      if (!_castClock || !_castClock.durationSec) return false;
+      return _castClockElapsed() >= _castClock.durationSec - 0.5;
     },
   };
 
@@ -199,21 +246,22 @@
 
     const track = window._currentTrack;
     if (track && track.id) {
+      const startPos = (window.currentAudio && window.currentAudio.currentTime > 1) ? window.currentAudio.currentTime : 0;
+      _castClockStart(track.duration || 0, startPos);
       // Puede tardar unos segundos (si es DSD, el server prueba varios
       // formatos hasta encontrar el que el dispositivo acepta — ver
       // _cast_try_send_track en app.py) — por eso el "conectando…" de arriba.
       const r = await _castSendTrack(track);
       if (r.status !== 'ok') {
         alert(r.message || 'No se pudo transmitir a ese dispositivo.');
+        _castClock = null;
         _renderCastList();
         return;
       }
-      if (window.currentAudio && window.currentAudio.currentTime > 1) {
-        _castSeek(window.currentAudio.currentTime);
-      }
+      if (startPos > 0) _castSeek(startPos);
       const slider = document.getElementById('volume-slider');
       if (slider) _castVolume(parseFloat(slider.value));
-      if (window.currentAudio && window.currentAudio.paused) _castTransport('Pause');
+      if (window.currentAudio && window.currentAudio.paused) { _castClockSetPaused(true); _castTransport('Pause'); }
     }
     _renderCastList();
   }
@@ -221,6 +269,7 @@
   function castStop() {
     if (window._castTarget) _castTransport('Stop');
     window._castTarget = null;
+    _castClock = null;
     _setActiveButtonState(false);
     _muteLocal();
     _renderCastList();
