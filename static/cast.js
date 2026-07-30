@@ -54,8 +54,15 @@
   let _castClock = null; // {startWallMs, pausedAtSec, isPaused, durationSec}
 
   function _castClockStart(durationSec, startAtSec) {
-    const at = startAtSec || 0;
-    _castClock = { startWallMs: Date.now() - at * 1000, pausedAtSec: at, isPaused: false, durationSec: durationSec || 0 };
+    let at = Number(startAtSec) || 0;
+    let dur = Number(durationSec) || 0;
+    if (startAtSec != null && !Number.isFinite(Number(startAtSec))) {
+        console.warn('[cast] _castClockStart recibió startAtSec no numérico:', startAtSec);
+    }
+    if (durationSec != null && !Number.isFinite(Number(durationSec))) {
+        console.warn('[cast] _castClockStart recibió durationSec no numérico (revisar track.duration):', durationSec);
+    }
+    _castClock = { startWallMs: Date.now() - at * 1000, pausedAtSec: at, isPaused: false, durationSec: dur };
   }
   function _castClockElapsed() {
     if (!_castClock) return 0;

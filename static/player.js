@@ -327,9 +327,15 @@ function updateProgress(overrideCurrentTime) {
     // 'timeupdate' nativo, que sigue disparando igual— usen el valor
     // correcto sin excepción.
     const casting = !overrideCurrentTime && window._castTarget && window._castMirror && window._castMirror.getElapsed;
-    const cur = (overrideCurrentTime != null) ? overrideCurrentTime
+    let cur = (overrideCurrentTime != null) ? overrideCurrentTime
         : casting ? window._castMirror.getElapsed()
         : currentAudio.currentTime;
+    if (!Number.isFinite(Number(cur))) {
+        console.warn('[player] updateProgress recibió un valor no numérico:', cur,
+            '| overrideCurrentTime:', overrideCurrentTime, '| casting:', !!casting,
+            '| _castTarget:', window._castTarget, '| track:', window._currentTrack);
+        cur = 0;
+    }
     const pct  = dur ? (cur / dur) * 100 : 0;
     if (fill) {
         fill.style.width = `${pct}%`;
@@ -793,7 +799,13 @@ document.addEventListener('keydown', e => {
 });
 
 function formatTime(s) {
-    if (!s || s < 0) return '0:00';
+    // !s solo atajaba el NaN NUMÉRICO — si algo río arriba manda el STRING
+    // "NaN" (o cualquier otra basura no numérica), se colaba derecho y
+    // terminaba mostrando literalmente "NaN:NaN" en pantalla. Number(s)
+    // normaliza cualquier entrada rara a un número real o a NaN de verdad,
+    // y de ahí Number.isFinite() sí lo atrapa siempre.
+    s = Number(s);
+    if (!Number.isFinite(s) || s < 0) return '0:00';
     const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
     if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
     return `${m}:${String(sec).padStart(2,'0')}`;
