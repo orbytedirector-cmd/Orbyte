@@ -272,10 +272,16 @@
   }
 
   // ── Panel: abrir/cerrar, listar, buscar ───────────────────────────────────
-  function toggleCastPanel() {
+  // El mismo panel se abre desde dos botones que NO están en el mismo lugar
+  // de la pantalla: #cast-btn (barra chica, abajo a la derecha) y
+  // #np-cast-btn (reproductor en primer plano, centrado con el resto de los
+  // np-action). Por eso el anclaje del panel depende de quién lo abrió — ver
+  // #cast-panel / .cast-panel--centered en style.css.
+  function toggleCastPanel(anchor) {
     const panel = document.getElementById('cast-panel');
     if (!panel) return;
     const opening = panel.style.display === 'none';
+    if (opening) panel.classList.toggle('cast-panel--centered', anchor === 'centered');
     panel.style.display = opening ? 'block' : 'none';
     if (opening) loadCastTargets();
   }

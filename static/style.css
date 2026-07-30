@@ -2170,6 +2170,14 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   width:min(320px, calc(100vw - 2rem));
   max-height:min(60vh, 420px); overflow-y:auto;
 }
+/* Variante para cuando lo abre #np-cast-btn (reproductor en primer plano):
+   ese botón está centrado junto al resto de los np-action, no pegado al
+   borde derecho de la pantalla como #cast-btn en la barra chica — así que
+   el panel también se centra ahí. toggleCastPanel('centered') en cast.js
+   agrega esta clase solo en ese caso. */
+#cast-panel.cast-panel--centered {
+  left:50%; right:auto; transform:translateX(-50%);
+}
 .cast-active-row {
   display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
   padding:0.5rem 0.75rem; font-size:0.82rem; color:var(--text-gold);
