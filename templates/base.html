@@ -145,6 +145,19 @@
               <svg class="heart-svg" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>
             </button>
             <button class="np-action" id="np-lyrics-btn" onclick="openLyricsFromNP()" title="Letra">🎵</button>
+            {% if current_user and current_user.is_admin %}
+            <!-- Mismo botón/panel "Reproducir en…" (UPnP/DLNA) que la barra
+                 chica (ver #cast-btn/#cast-panel más abajo) — toggleCastPanel()
+                 abre/cierra el ÚNICO panel que existe en la página, así que
+                 no hace falta duplicarlo, solo el botón. Admin-only, igual
+                 que en la barra. -->
+            <button class="np-action" id="np-cast-btn" onclick="toggleCastPanel()" title="Reproducir en… (UPnP/DLNA)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 16.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10.5"/>
+                <path d="M12 15l5 6H7l5-6z"/>
+              </svg>
+            </button>
+            {% endif %}
             <button class="np-action normalize-toggle" id="np-normalize-btn" onclick="toggleNormalize()" title="Normalizar volumen">
               <svg class="normalize-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
                 <line x1="5" y1="21" x2="5" y2="14"/><line x1="5" y1="10" x2="5" y2="3"/><circle cx="5" cy="12" r="2"/>

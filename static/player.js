@@ -447,15 +447,36 @@ function nextTrack() {
 
 function _stopAndRewind() {
     if (!queue.length) return;
-    playTrack(0);
-    // playTrack() de arriba marca _shouldBePlaying = true — esto es una
-    // parada real (fin de cola), no una interrupción, así que se anula acá
-    // para que el listener de 'pause' no intente reanudar solo.
+    // OJO: acá NO se llama a playTrack(0). Esto es un final de cola real
+    // (repeat off, sin nada más para reproducir) — playTrack() dispara una
+    // reproducción DE VERDAD (recarga el <audio>, llama a .play(), y si hay
+    // un dispositivo UPnP transmitiendo, le reenvía la pista desde el
+    // principio vía _castMirror.onTrackStart). Llamarlo acá y pausar un
+    // instante después hacía que la pista arrancara a sonar de nuevo antes
+    // de detenerse — se sentía como si "se repitiera al menos una vez"
+    // (y en un dispositivo remoto, literalmente la reiniciaba). Acá solo
+    // se resetea el estado/UI a "pista 0, detenido", sin volver a sonar.
+    currentIndex = 0;
+    window.currentIndex = currentIndex;
     _shouldBePlaying = false;
+    const track = queue[0];
+    window._currentTrack = track;
+
+    // Si había un dispositivo UPnP transmitiendo, que también quede en
+    // pausa (no "Stop" — Stop puede limpiar la URI cargada en algunos
+    // renderers; Pause alcanza para cortar el sonido y deja todo listo si
+    // el usuario aprieta play de nuevo).
+    if (window._castTarget && window._castMirror) window._castMirror.onPlayPause(false);
+
     if (currentAudio) {
         currentAudio.pause();
         currentAudio.currentTime = 0;
     }
+    if (track) {
+        updatePlayerBar(track);       // refleja portada/título/etc. de la pista 0 sin sonar
+        updateVisualizer(track.led_color);
+    }
+    _shouldBePlaying = false;
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.textContent = '▶';
     const viz = document.getElementById('player-visualizer');

@@ -4,6 +4,8 @@ import json
 import tempfile
 import hashlib
 import socket
+import signal
+import atexit
 import urllib.request
 import urllib.error
 import http.client
@@ -3748,6 +3750,21 @@ def _cast_set_volume(rendering_control_url, volume_0_100, timeout=4):
             f'<DesiredVolume>{int(volume_0_100)}</DesiredVolume></u:SetVolume>')
     return _cast_soap_call(rendering_control_url, 'SetVolume', body, timeout=timeout, service='RenderingControl')
 
+def _cast_get_volume(rendering_control_url, timeout=4):
+    """GetVolume — el volumen que el dispositivo YA tiene configurado (perilla
+    física, control remoto, o lo que haya quedado de antes). Se usa al
+    conectar para reflejarlo en el slider local en vez de imponerle el valor
+    del slider al dispositivo (que podía dejarlo sonando muy fuerte o muy
+    bajo la primera vez). Devuelve un int 0-100, o None si no se pudo leer
+    (dispositivo sin RenderingControl, o que no responde GetVolume)."""
+    body = ('<u:GetVolume xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
+            '<InstanceID>0</InstanceID><Channel>Master</Channel></u:GetVolume>')
+    status, resp_body = _cast_soap_call(rendering_control_url, 'GetVolume', body, timeout=timeout, service='RenderingControl')
+    if status != 200:
+        return None
+    m = re.search(r'<CurrentVolume>(\d+)</CurrentVolume>', resp_body)
+    return max(0, min(100, int(m.group(1)))) if m else None
+
 def _cast_send_track(control_url, media_url, didl):
     status, body = _cast_soap_call(control_url, 'SetAVTransportURI',
         f'<u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
@@ -3843,6 +3860,49 @@ def api_admin_cast_target_delete(target_id):
     return jsonify({'status': 'ok'})
 
 
+# ── Estado en memoria de "qué dispositivo está transmitiendo ahora" ────────
+# Solo vive en RAM mientras vive el proceso (no es una columna nueva de la
+# base — ver regla 2 de AGENTE.md). Sirve para un único propósito: si el
+# server se apaga de forma PROLIJA (systemctl stop, Ctrl+C, redeploy, o el
+# propio auto-reload del modo debug de Flask), poder avisarle "Stop" al
+# dispositivo ANTES de morir, en vez de dejarlo sonando indefinidamente sin
+# que nadie lo controle (ver _cast_stop_active_on_shutdown más abajo).
+_cast_active_target = None  # {'id', 'name', 'control_url'} o None
+
+
+def _cast_stop_active_on_shutdown(*_args):
+    """Le manda Stop al dispositivo activo antes de que el proceso muera.
+    OJO — esto SOLO puede cubrir un apagado prolijo: un crash real (kill -9,
+    segfault, corte de luz) no ejecuta ni una línea de Python, así que
+    ningún hook de este lado puede interceptarlo. Para ese caso, el
+    respaldo es el heartbeat del propio navegador (ver static/cast.js):
+    detecta que el server dejó de responder y corta la transmisión desde
+    ahí, aunque no pueda garantizar el Stop en el dispositivo mismo."""
+    global _cast_active_target
+    if not _cast_active_target:
+        return
+    target = _cast_active_target
+    _cast_active_target = None
+    try:
+        app.logger.info(f"[cast] apagado del server — mandando Stop a {target['name']} antes de salir")
+        _cast_soap_call(
+            target['control_url'], 'Stop',
+            '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            '<InstanceID>0</InstanceID></u:Stop>', timeout=3)
+    except Exception as e:
+        app.logger.warning(f"[cast] no se pudo avisar Stop al apagar: {e}")
+
+
+atexit.register(_cast_stop_active_on_shutdown)
+try:
+    # signal.signal solo se puede llamar desde el hilo principal — si en algún
+    # momento esto corre bajo un servidor WSGI que lo importa desde otro
+    # hilo, se degrada solo al atexit.register de arriba (que sigue andando).
+    signal.signal(signal.SIGTERM, lambda signum, frame: (_cast_stop_active_on_shutdown(), os._exit(0)))
+except (ValueError, OSError):
+    pass
+
+
 @app.route('/api/admin/cast/play', methods=['POST'])
 @admin_required
 def api_admin_cast_play():
@@ -3888,6 +3948,8 @@ def api_admin_cast_play():
             app.logger.info(f"[cast] '{track['title']}' -> {target['name']} OK (mime={mime_used})")
             conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
             conn.commit()
+            global _cast_active_target
+            _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
             return jsonify({'status': 'ok', 'device': target['name']})
 
         app.logger.warning(f"[cast] '{track['title']}' -> {target['name']} FALLÓ: {reason}")
@@ -3920,6 +3982,12 @@ def api_admin_cast_transport():
     status, body_resp = _cast_soap_call(target['control_url'], action, body)
     app.logger.info(f"[cast] {action} -> {target['name']}: HTTP {status}")
     if status == 200:
+        global _cast_active_target
+        if action == 'Stop':
+            if _cast_active_target and _cast_active_target.get('id') == target['id']:
+                _cast_active_target = None
+        else:  # Play / Pause — sigue "activo" para el hook de apagado prolijo
+            _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
         return jsonify({'status': 'ok'})
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
 
@@ -3953,12 +4021,36 @@ def api_admin_cast_seek():
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
 
 
-@app.route('/api/admin/cast/volume', methods=['POST'])
+@app.route('/api/admin/cast/volume', methods=['GET', 'POST'])
 @admin_required
 def api_admin_cast_volume():
     """Volumen del DISPOSITIVO — servicio UPnP separado (RenderingControl,
     no AVTransport). Si el renderer no lo expone, se degrada solo (ver
-    _cast_fetch_device_info) en vez de romper el resto del cast."""
+    _cast_fetch_device_info) en vez de romper el resto del cast.
+
+    GET  ?target_id=N  -> consulta el volumen ACTUAL del dispositivo
+                          (GetVolume) — usado al conectar, para reflejarlo
+                          en el slider local en vez de imponerle el valor
+                          que tuviera el slider (ver static/cast.js).
+    POST {target_id, volume} -> fija el volumen (SetVolume, como antes)."""
+    if request.method == 'GET':
+        target_id = request.args.get('target_id', type=int)
+        if target_id is None:
+            return jsonify({'status': 'error', 'message': 'Falta target_id'}), 400
+        conn = get_db_connection()
+        try:
+            target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+        finally:
+            conn.close()
+        if not target:
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+        if not target['rendering_control_url']:
+            return jsonify({'status': 'error', 'message': 'Este dispositivo no expone control de volumen por UPnP'}), 501
+        volume = _cast_get_volume(target['rendering_control_url'])
+        if volume is None:
+            return jsonify({'status': 'error', 'message': 'El dispositivo no respondió GetVolume'}), 502
+        return jsonify({'status': 'ok', 'volume': volume})
+
     data = request.get_json(silent=True) or {}
     target_id = data.get('target_id')
     volume = data.get('volume')  # 0-100

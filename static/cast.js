@@ -33,6 +33,11 @@
   function _setActiveButtonState(active) {
     const btn = document.getElementById('cast-btn');
     if (btn) btn.classList.toggle('active', !!active);
+    // Mismo botón, replicado en el reproductor en primer plano (np-overlay)
+    // — usa la clase que ya usan el resto de los np-action (fav, normalizar,
+    // etc.) en vez de "active", que es la del botón chico de la barra.
+    const npBtn = document.getElementById('np-cast-btn');
+    if (npBtn) npBtn.classList.toggle('np-action-active', !!active);
   }
 
   // ── Reloj de pared para la posición mientras se transmite ────────────────
@@ -158,6 +163,114 @@
     } catch (e) { console.warn('[cast] error de red al cambiar volumen:', e); }
   }
 
+  // Al conectar, en vez de IMPONERLE al dispositivo el volumen que tuviera
+  // el slider local (podía dejarlo sonando muy fuerte o casi mudo la
+  // primera vez), se lee el volumen que el dispositivo YA tiene configurado
+  // (perilla física, control remoto, o lo que haya quedado de una sesión
+  // anterior) y se refleja en el slider local. Se asigna el .value
+  // directamente (sin pasar por setVolume()) para no disparar un
+  // SetVolume de vuelta hacia el dispositivo con el valor que acabamos de
+  // leer de ahí mismo.
+  async function _castSyncVolumeFromDevice(targetId) {
+    try {
+      const r = await fetch(`/api/admin/cast/volume?target_id=${targetId}`).then((r) => r.json());
+      if (r.status === 'ok' && typeof r.volume === 'number') {
+        const v = Math.max(0, Math.min(100, r.volume)) / 100;
+        const slider = document.getElementById('volume-slider');
+        if (slider) slider.value = v;
+        if (window.currentAudio) window.currentAudio.volume = v;
+        console.log('[cast] volumen detectado en el dispositivo:', r.volume);
+      } else {
+        console.log('[cast] no se pudo leer el volumen del dispositivo — se mantiene el del slider local:', r.message || '');
+      }
+    } catch (e) {
+      console.warn('[cast] error de red al leer el volumen del dispositivo:', e);
+    }
+  }
+
+  // ── Heartbeat: reaccionar si el server se cae mientras se transmite ─────
+  // El navegador NUNCA le habla directo al dispositivo UPnP en operación
+  // normal — todos los comandos (Play/Pause/Stop/Seek/Volume) salen del
+  // SERVER (ver las llamadas a fetch('/api/admin/cast/...') de arriba). Si
+  // el server deja de responder, ya no hay forma FORMAL de pedirle "Stop"
+  // al dispositivo. Lo que sí podemos hacer desde acá:
+  //   1) Dejar de fingir que seguimos transmitiendo: limpiar el estado
+  //      local de inmediato y avisar en el panel — esto es lo confiable.
+  //   2) Como último recurso, intentar un SOAP Stop DIRECTO navegador ->
+  //      dispositivo (sin pasar por el server), usando la control_url que
+  //      ya tenemos cacheada de la última vez que se listaron los
+  //      dispositivos. Esto es best-effort, NO garantizado: la mayoría de
+  //      los renderers UPnP no implementan CORS ni responden bien un
+  //      preflight, así que el navegador puede bloquear la respuesta antes
+  //      de que le llegue — no hay forma de confirmarlo desde JS.
+  // Un apagado PROLIJO del server (systemctl stop, redeploy, Ctrl+C, el
+  // propio auto-reload del modo debug) ya manda su Stop desde el propio
+  // server antes de morir (ver _cast_stop_active_on_shutdown en app.py) —
+  // eso SÍ es confiable. Este heartbeat es el respaldo para cuando el
+  // server se cae de golpe y no llega a avisar nada.
+  const HEARTBEAT_MS = 8000;
+  const HEARTBEAT_MAX_FAILS = 2;
+  let _heartbeatTimer = null;
+  let _heartbeatFails = 0;
+
+  function _heartbeatStart() {
+    if (_heartbeatTimer) return;
+    _heartbeatFails = 0;
+    _heartbeatTimer = setInterval(_heartbeatTick, HEARTBEAT_MS);
+  }
+  function _heartbeatStop() {
+    clearInterval(_heartbeatTimer);
+    _heartbeatTimer = null;
+    _heartbeatFails = 0;
+  }
+  async function _heartbeatTick() {
+    if (!window._castTarget) { _heartbeatStop(); return; }
+    try {
+      const r = await fetch('/api/admin/cast/targets', { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      _heartbeatFails = 0;
+    } catch (e) {
+      _heartbeatFails++;
+      console.warn(`[cast] heartbeat sin respuesta del server (${_heartbeatFails}/${HEARTBEAT_MAX_FAILS}):`, e);
+      if (_heartbeatFails >= HEARTBEAT_MAX_FAILS) _handleServerUnreachable();
+    }
+  }
+
+  async function _handleServerUnreachable() {
+    const target = window._castTarget;
+    if (!target) { _heartbeatStop(); return; }
+    const cached = _targetsCache.find((t) => t.id === target.id);
+    _heartbeatStop();
+    console.warn('[cast] el server no responde — cortando la transmisión localmente');
+    window._castTarget = null;
+    _castClock = null;
+    _setActiveButtonState(false);
+    _muteLocal();
+    const list = document.getElementById('cast-list');
+    if (list) {
+      list.innerHTML = `<div class="cast-active-row" style="color:var(--led-red);border-color:var(--led-red)">
+        <span>⚠️ Se perdió la conexión con el server — se cortó la transmisión a "${_escapeHtml(target.name)}"</span>
+      </div>`;
+    }
+    // Best-effort: intento directo al dispositivo, sin pasar por el server
+    // (ver nota grande más arriba — puede no llegar, no hay forma de saberlo).
+    if (cached && cached.control_url) {
+      try {
+        await fetch(cached.control_url, {
+          method: 'POST',
+          mode: 'no-cors',
+          headers: { 'Content-Type': 'text/xml; charset="utf-8"' },
+          body: '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+              + 's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body>'
+              + '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1"><InstanceID>0</InstanceID></u:Stop>'
+              + '</s:Body></s:Envelope>',
+        });
+      } catch (e) {
+        console.warn('[cast] Stop directo al dispositivo tampoco llegó (esperable sin el server de por medio):', e);
+      }
+    }
+  }
+
   // ── Panel: abrir/cerrar, listar, buscar ───────────────────────────────────
   function toggleCastPanel() {
     const panel = document.getElementById('cast-panel');
@@ -243,6 +356,11 @@
     _setActiveButtonState(true);
     _muteLocal();
     _renderCastList('conectando…');
+    _heartbeatStart();
+
+    // Detectar el volumen que el dispositivo ya tiene configurado ANTES de
+    // mandarle la pista, para no competir con SetAVTransportURI+Play.
+    await _castSyncVolumeFromDevice(target.id);
 
     const track = window._currentTrack;
     if (track && track.id) {
@@ -259,8 +377,6 @@
         return;
       }
       if (startPos > 0) _castSeek(startPos);
-      const slider = document.getElementById('volume-slider');
-      if (slider) _castVolume(parseFloat(slider.value));
       if (window.currentAudio && window.currentAudio.paused) { _castClockSetPaused(true); _castTransport('Pause'); }
     }
     _renderCastList();
@@ -272,6 +388,7 @@
     _castClock = null;
     _setActiveButtonState(false);
     _muteLocal();
+    _heartbeatStop();
     _renderCastList();
   }
 

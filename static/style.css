@@ -2132,6 +2132,13 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   border-color:var(--led-green); color:var(--led-green);
   background:rgba(34,255,68,0.1);
 }
+/* #cast-panel es un único elemento en el DOM, dentro de .cast-wrap (footer),
+   pero ahora también se puede abrir desde el botón del reproductor en
+   primer plano (.np-overlay, z-index:800) — sin este override se quedaría
+   tapado detrás del overlay (.outputs-panel normal es z-index:400). La
+   posición (absolute, relativa a .cast-wrap) no cambia: sigue apareciendo
+   donde vive el botón de la barra chica, solo que ahora por encima de todo. */
+#cast-panel { z-index:850; }
 .cast-active-row {
   display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
   padding:0.5rem 0.75rem; font-size:0.82rem; color:var(--text-gold);
