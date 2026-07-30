@@ -2157,10 +2157,16 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
    eso. Subir el z-index de #cast-panel sin moverlo de ahí adentro no
    alcanzaba: seguía pintándose siempre detrás de .np-overlay. Ver el
    comentario grande en base.html, junto a donde quedó el panel ahora. */
+/* Anclado abajo a la derecha, cerca de donde vive el botón que lo abre
+   (#cast-btn en el footer, right:1.25rem porque .player-bar tiene
+   padding:0 1.25rem — es el mismo borde derecho donde termina
+   .player-right). Antes de moverlo de lugar en el DOM (ver comentario en
+   base.html) usaba position:absolute relativo a .cast-wrap para lograr este
+   mismo anclaje "pegado al botón" — con position:fixed hay que repetir ese
+   offset a mano, pero el resultado visual es el mismo. */
 #cast-panel {
   position:fixed; z-index:850;
-  left:50%; right:auto; bottom:calc(var(--player-h) + 0.75rem);
-  transform:translateX(-50%);
+  right:1.25rem; left:auto; bottom:calc(var(--player-h) + 0.75rem);
   width:min(320px, calc(100vw - 2rem));
   max-height:min(60vh, 420px); overflow-y:auto;
 }
