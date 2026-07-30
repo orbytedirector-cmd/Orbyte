@@ -2132,13 +2132,38 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   border-color:var(--led-green); color:var(--led-green);
   background:rgba(34,255,68,0.1);
 }
-/* #cast-panel es un único elemento en el DOM, dentro de .cast-wrap (footer),
-   pero ahora también se puede abrir desde el botón del reproductor en
-   primer plano (.np-overlay, z-index:800) — sin este override se quedaría
-   tapado detrás del overlay (.outputs-panel normal es z-index:400). La
-   posición (absolute, relativa a .cast-wrap) no cambia: sigue apareciendo
-   donde vive el botón de la barra chica, solo que ahora por encima de todo. */
-#cast-panel { z-index:850; }
+/* Ícono del botón replicado en el reproductor en primer plano (np-cast-btn,
+   ver base.html) — sin esta clase el <svg> no tiene ancho/alto propios y el
+   navegador lo renderiza a su tamaño intrínseco (gigante y con los bordes
+   mal escalados). Mismo patrón que .normalize-svg más arriba. */
+.cast-np-svg { width:18px; height:18px; display:block; }
+/* Mismo verde que .cast-main-btn.active de la barra chica — el estado
+   "np-action-active" genérico (línea ~1339) es dorado, pero este botón no es
+   un toggle de preferencia como normalizar/favorito: representa una
+   conexión activa a un dispositivo, y ese significado ya tiene su propio
+   color establecido en toda la app (verde = transmitiendo). #np-cast-btn +
+   .np-action-active pesa más que .np-action.np-action-active, así que gana. */
+#np-cast-btn.np-action-active {
+  color:var(--led-green); background:rgba(34,255,68,0.12);
+}
+/* #cast-panel es un ÚNICO elemento en el DOM que ahora se puede abrir desde
+   dos botones: el de la barra chica (dentro de .cast-wrap, en el footer) y
+   el del reproductor en primer plano (.np-overlay, z-index:800). Mientras
+   heredaba "position:absolute" de .outputs-panel, su posición quedaba
+   calculada respecto de .cast-wrap — es decir, siempre "atado" al footer de
+   fondo, aunque se abriera desde el reproductor en primer plano. Ahí se
+   veía como si el panel apareciera en la página de fondo, desconectado de
+   la ventana en primer plano donde el usuario lo abrió. Por eso pasa a ser
+   un panel fijo a la pantalla (no relativo a ningún botón en particular):
+   se ve igual, en el mismo lugar, sin importar desde cuál de los dos
+   botones se abra. */
+#cast-panel {
+  position:fixed; z-index:850;
+  left:50%; right:auto; bottom:calc(var(--player-h) + 0.75rem);
+  transform:translateX(-50%);
+  width:min(320px, calc(100vw - 2rem));
+  max-height:min(60vh, 420px); overflow-y:auto;
+}
 .cast-active-row {
   display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
   padding:0.5rem 0.75rem; font-size:0.82rem; color:var(--text-gold);
