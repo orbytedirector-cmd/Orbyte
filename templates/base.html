@@ -175,6 +175,36 @@
       </div><!-- /np-card -->
     </div><!-- /np-overlay -->
 
+    {% if current_user and current_user.is_admin %}
+    <!-- #cast-panel vive ACÁ, como hermano de .np-overlay y .player-bar, y NO
+         adentro de .cast-wrap (donde estaba antes, ver el botón #cast-btn
+         más abajo en .player-bar). Motivo: .player-bar tiene
+         backdrop-filter (y en mobile, además, transform:translateZ(0) — ver
+         el comentario del bug de iOS Safari en la media query de más abajo).
+         Cualquiera de esas dos propiedades en un ancestro crea su propio
+         contexto de apilamiento/containing-block para descendientes con
+         position:fixed — así que un #cast-panel anidado ahí adentro queda
+         SIEMPRE pintado detrás de .np-overlay (z-index:800), sin importar
+         qué z-index se le ponga al panel mismo (ver intento anterior, que
+         por eso no funcionaba desde el reproductor en primer plano). Acá
+         afuera no hay ningún ancestro así, así que su position:fixed +
+         z-index (ver #cast-panel en style.css) funcionan de verdad. El
+         botón que lo abre/cierra (toggleCastPanel(), en cast.js) no cambia:
+         funciona por id, no le importa dónde vive el panel en el DOM. -->
+    <div class="outputs-panel" id="cast-panel" style="display:none">
+      <div class="outputs-panel-header">
+        <span>Reproducir en…</span>
+        <button class="outputs-close-btn" onclick="toggleCastPanel()">✕</button>
+      </div>
+      <div id="cast-list">
+        <span style="color:var(--text-muted);font-size:0.82rem;padding:0.5rem;display:block">Cargando…</span>
+      </div>
+      <div class="cast-panel-footer">
+        <button class="cast-discover-btn" onclick="castDiscover()" id="cast-discover-btn">🔍 Buscar dispositivos</button>
+      </div>
+    </div>
+    {% endif %}
+
     <!-- ─── Player Bar ─────────────────────────────────────────────────────── -->
     <footer class="player-bar" id="player-bar">
 
@@ -294,7 +324,11 @@
              transmite la pista actual sin pérdida a cualquier dispositivo
              de la casa que el admin haya descubierto/guardado. Solo visible
              para el admin — un invitado de la playlist colaborativa jamás
-             debe poder redirigir el audio de la casa. -->
+             debe poder redirigir el audio de la casa.
+
+             OJO: el panel (#cast-panel) NO vive acá adentro — ver el
+             comentario grande junto a donde quedó el panel ahora (justo
+             antes de <footer class="player-bar">) para el porqué. -->
         <div class="cast-wrap">
           <button class="cast-main-btn" id="cast-btn" onclick="toggleCastPanel()" title="Reproducir en… (UPnP/DLNA)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -302,18 +336,6 @@
               <path d="M12 15l5 6H7l5-6z"/>
             </svg>
           </button>
-          <div class="outputs-panel" id="cast-panel" style="display:none">
-            <div class="outputs-panel-header">
-              <span>Reproducir en…</span>
-              <button class="outputs-close-btn" onclick="toggleCastPanel()">✕</button>
-            </div>
-            <div id="cast-list">
-              <span style="color:var(--text-muted);font-size:0.82rem;padding:0.5rem;display:block">Cargando…</span>
-            </div>
-            <div class="cast-panel-footer">
-              <button class="cast-discover-btn" onclick="castDiscover()" id="cast-discover-btn">🔍 Buscar dispositivos</button>
-            </div>
-          </div>
         </div>
         {% endif %}
 

@@ -2146,17 +2146,17 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 #np-cast-btn.np-action-active {
   color:var(--led-green); background:rgba(34,255,68,0.12);
 }
-/* #cast-panel es un ÚNICO elemento en el DOM que ahora se puede abrir desde
-   dos botones: el de la barra chica (dentro de .cast-wrap, en el footer) y
-   el del reproductor en primer plano (.np-overlay, z-index:800). Mientras
-   heredaba "position:absolute" de .outputs-panel, su posición quedaba
-   calculada respecto de .cast-wrap — es decir, siempre "atado" al footer de
-   fondo, aunque se abriera desde el reproductor en primer plano. Ahí se
-   veía como si el panel apareciera en la página de fondo, desconectado de
-   la ventana en primer plano donde el usuario lo abrió. Por eso pasa a ser
-   un panel fijo a la pantalla (no relativo a ningún botón en particular):
-   se ve igual, en el mismo lugar, sin importar desde cuál de los dos
-   botones se abra. */
+/* #cast-panel es un ÚNICO elemento en el DOM que se puede abrir desde dos
+   botones: el de la barra chica (#cast-btn, dentro de .cast-wrap, en el
+   footer) y el del reproductor en primer plano (#np-cast-btn). El panel en
+   sí YA NO vive dentro de .cast-wrap/.player-bar — se movió en base.html a
+   ser hermano de .np-overlay y .player-bar, porque .player-bar tiene
+   backdrop-filter (y en mobile además transform), y cualquiera de esas dos
+   propiedades en un ancestro le crea su propio contexto de apilamiento a
+   TODO lo de adentro — ningún z-index de un descendiente puede escapar de
+   eso. Subir el z-index de #cast-panel sin moverlo de ahí adentro no
+   alcanzaba: seguía pintándose siempre detrás de .np-overlay. Ver el
+   comentario grande en base.html, junto a donde quedó el panel ahora. */
 #cast-panel {
   position:fixed; z-index:850;
   left:50%; right:auto; bottom:calc(var(--player-h) + 0.75rem);
