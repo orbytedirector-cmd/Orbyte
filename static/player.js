@@ -9,6 +9,7 @@ const MAX_RECONNECT_ATTEMPTS = 8;   // short-lived mobile network drops can chai
 let _unexpectedPauseRetries = 0;    // reintentos "gentiles" (solo .play(), sin tocar .src) ya usados en 2do plano para la pista actual
 const MAX_HIDDEN_PAUSE_RETRIES = 6;  // ver comentario en _handleUnexpectedPause — cada intento espera HIDDEN_PAUSE_RETRY_DELAY_MS
 const HIDDEN_PAUSE_RETRY_DELAY_MS = 250;
+let _hiddenStallRetries = 0;   // mismo tipo de reintento gentil que _unexpectedPauseRetries, pero para un stall (handleAudioError) detectado en 2do plano — presupuesto separado porque es un evento distinto, ver handleAudioError
 
 // Cuántos cambios de pista AUTOMÁTICOS (por 'ended', sin ningún toque del
 // usuario de por medio) van encadenados desde la última vez que la pestaña
@@ -350,6 +351,7 @@ function playTrack(index) {
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
     _unexpectedPauseRetries = 0;
+    _hiddenStallRetries = 0;
     if (!document.hidden) _bgAutoAdvanceCount = 0;   // arranque en primer plano — reponer la cuenta
     _lastProgressPos   = 0;
     _shouldBePlaying = true;
@@ -612,6 +614,7 @@ function updateProgress() {
     if (currentAudio.currentTime > _lastProgressPos + 2) {
         _lastProgressPos = currentAudio.currentTime;
         _reconnectAttempts = 0;
+        _hiddenStallRetries = 0;
     }
 
     // Si se está reproduciendo un combo, revisar si ya se cruzó el borde
@@ -888,15 +891,22 @@ function handleAudioError(e) {
     const track = queue[currentIndex];
     if (!track || !currentAudio) { console.error('Audio error:', e); return; }
 
-    if (_pairedNextIndex !== null) {
-        // El combo A+B falló a mitad de camino — no insistir con él para
-        // esta pista; el reconnect de abajo ya usa track.audio_url (el
-        // archivo normal, sin combinar), así que esto sólo evita
-        // reintentar el combo roto en la próxima llamada.
-        _pairGaveUpForIndex = currentIndex;
-        _pairedNextIndex = null;
-        _pairOffsetSec = 0;
-    }
+    // OJO: antes esto abandonaba el combo A+B acá mismo, ANTES de intentar
+    // reconectar — es decir, un solo drop de red transitorio (algo muy común
+    // en el momento exacto de un stall que dispara este handler) tiraba el
+    // crossfade a la basura para el resto de esa pista, aunque el archivo
+    // combinado ya estuviera 100% cacheado en el server (confirmado en los
+    // logs: "prewarm_pair_response: already_cached" segundos antes del
+    // drop). El resultado visible era el corte seco que el crossfade existe
+    // para evitar: la pista actual llegaba a su propio final (más corto que
+    // el combo, porque el combo mide A+B) y de ahí saltaba con un
+    // nextTrack() normal — hard reload con su buffering, en vez de la
+    // transición sin cortes que ya estaba sonando. Ahora la decisión de
+    // abandonar el combo se posterga hasta más abajo, después de intentar
+    // reconectar AL MISMO combo (ver bloque de reconexión) — sólo se lo da
+    // por perdido si ese reintento también agota el presupuesto o la pista
+    // ya está por terminar.
+    const wasPaired = _pairedNextIndex !== null;
 
     const lastPos = currentAudio.currentTime || 0;
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
@@ -904,7 +914,7 @@ function handleAudioError(e) {
     const nearEnd = dur > 0 && lastPos >= dur - 1.5;
     _rlog('handleAudioError_call', {
         reason: e && e.type, lastPos, dur, realDur, nearEnd, reconnectAttempts: _reconnectAttempts,
-        networkState: currentAudio.networkState, readyState: currentAudio.readyState,
+        networkState: currentAudio.networkState, readyState: currentAudio.readyState, wasPaired,
     });
 
     // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
@@ -929,22 +939,86 @@ function handleAudioError(e) {
     // toque en cuanto la app vuelve a primer plano (ver visibilitychange).
     if (!nearEnd && _reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
         if (document.hidden) {
-            _rlog('reconnect_suppressed_hidden', { lastPos, dur, reconnectAttempts: _reconnectAttempts });
+            // Antes esto no hacía nada más que loguear y volver — la pista
+            // quedaba trabada hasta que el usuario reabría la app a mano
+            // (justo el patrón que _bgAutoAdvanceCount viene marcando: casi
+            // siempre en la 2da transición automática en 2do plano). Seguimos
+            // sin tocar .src/.load() acá — eso es lo que causaba el freeze
+            // largo de varios minutos — pero antes de rendirnos del todo se
+            // intenta lo mismo que ya está probado como seguro en
+            // _handleUnexpectedPause para este mismo escenario (oculto,
+            // buffer ya lleno): sólo volver a llamar .play() sobre el MISMO
+            // elemento. Cubre el caso confirmado en los logs de Android de un
+            // stream con readyState alto que igual queda mudo por el sistema
+            // sin que haya habido ningún drop de datos real — un .play() sin
+            // reasignar nada puede destrabarlo; si el stall es de verdad
+            // (todavía sin buffer suficiente), esto no hace nada pero tampoco
+            // puede empeorar nada.
+            if (currentAudio.readyState >= 3 && _hiddenStallRetries < MAX_HIDDEN_PAUSE_RETRIES) {
+                _hiddenStallRetries++;
+                const attempt     = _hiddenStallRetries;
+                const audioRef    = currentAudio;
+                const indexAtCall = currentIndex;
+                _rlog('hidden_stall_retry_scheduled', {
+                    attempt, lastPos, dur, wasPaired, readyState: currentAudio.readyState,
+                    delayMs: HIDDEN_PAUSE_RETRY_DELAY_MS,
+                });
+                setTimeout(() => {
+                    if (currentAudio !== audioRef || currentIndex !== indexAtCall || !document.hidden || audioRef.ended) {
+                        _rlog('hidden_stall_retry_stale', { attempt });
+                        return;
+                    }
+                    _rlog('hidden_stall_retry', { attempt, currentTime: audioRef.currentTime, readyState: audioRef.readyState });
+                    audioRef.play().then(() => {
+                        _rlog('hidden_stall_retry_resolved', { attempt, currentTime: audioRef.currentTime });
+                    }).catch(e2 => {
+                        _rlog('hidden_stall_retry_rejected', { attempt, error: String(e2), name: e2 && e2.name });
+                    });
+                }, HIDDEN_PAUSE_RETRY_DELAY_MS);
+            } else {
+                _rlog('reconnect_suppressed_hidden', {
+                    lastPos, dur, reconnectAttempts: _reconnectAttempts, wasPaired,
+                    hiddenStallRetriesUsed: _hiddenStallRetries,
+                });
+            }
             return;
         }
         _reconnectAttempts++;
+        // Si el drop pasó reproduciendo un combo A+B, reconectar AL MISMO
+        // combo en vez de degradar a la pista sola — es un FLAC servido con
+        // Range igual que cualquier otro (ver _serve_audio en el server), así
+        // que reconecta exactamente igual. _pairedNextIndex/_pairBoundarySec/
+        // _pairOffsetSec no se tocan, así que _checkPairBoundary() sigue
+        // funcionando normal después de esto.
+        const pairUrl = wasPaired ? buildTrackPairUrl(track, queue[_pairedNextIndex], crossfadeDurationSec) : null;
+        const reconnectSrc = pairUrl ||
+            (track.audio_url || (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path)));
         console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
-        _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos });
-        currentAudio.src = track.audio_url ||
-            (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
+        _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos, wasPaired, toPairUrl: !!pairUrl });
+        currentAudio.src = reconnectSrc;
         currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
             currentAudio.removeEventListener('loadedmetadata', _seekOnce);
             if (lastPos > 0) currentAudio.currentTime = lastPos;
         });
-        currentAudio._trackDuration = dur;
+        // _trackDuration siempre representa la duración de la pista visible
+        // actual (track A cuando hay combo) — nunca la duración real del
+        // recurso cargado, que al reconectar A+B mide el combo entero (A+B) y
+        // pisaría el total/progreso mostrado con un valor mucho más largo que
+        // el de la pista que en realidad se está viendo/escuchando.
+        currentAudio._trackDuration = track.duration || currentAudio._trackDuration || 0;
         currentAudio.load();
         currentAudio.play().catch(() => {});
         return;
+    }
+
+    // A partir de acá se da por perdido el intento actual (se agotó el
+    // presupuesto de reconexión, o la pista ya está casi en su final real).
+    // Si era un combo, ahora sí se abandona para esta pista — el próximo
+    // playTrack() para el siguiente índice ya no lo va a volver a pedir.
+    if (wasPaired) {
+        _pairGaveUpForIndex = currentIndex;
+        _pairedNextIndex = null;
+        _pairOffsetSec = 0;
     }
 
     console.error('Audio error:', e);
@@ -953,7 +1027,7 @@ function handleAudioError(e) {
         // dead track for the rest of the session. Move on so the playlist
         // keeps going instead of appearing to have just "stopped".
         console.warn('[player] Giving up on current track after repeated stream drops — skipping to next.');
-        _rlog('handleAudioError_giving_up', { reconnectAttempts: _reconnectAttempts, lastPos, dur });
+        _rlog('handleAudioError_giving_up', { reconnectAttempts: _reconnectAttempts, lastPos, dur, wasPaired });
         nextTrack();
         return;
     }
@@ -1380,6 +1454,7 @@ function _checkPairBoundary() {
     currentAudio._trackDuration = nextTrackObj.duration || 0;
     _reconnectAttempts      = 0;
     _unexpectedPauseRetries = 0;
+    _hiddenStallRetries     = 0;
     _lastProgressPos        = currentAudio.currentTime;
     if (!document.hidden) _bgAutoAdvanceCount = 0;
 
