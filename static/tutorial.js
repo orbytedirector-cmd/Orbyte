@@ -190,6 +190,11 @@
       body: 'Sube automáticamente el volumen de pistas silenciosas o en DSD, sin recodificar el audio.'
     },
     {
+      id: 'crossfade', target: '#crossfade-btn',
+      title: '🎚️ Crossfade',
+      body: 'Combina el final de una pista con el inicio de la siguiente en un solo archivo. En celulares, actívalo para que la música no se corte al cambiar de pista con la app en 2do plano o la pantalla bloqueada.'
+    },
+    {
       id: 'repeat', target: '#repeat-btn',
       title: '🔁 Repetir',
       body: 'Alterna entre repetir toda la cola, repetir solo la pista actual, o desactivar la repetición.'

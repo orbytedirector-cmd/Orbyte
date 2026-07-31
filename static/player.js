@@ -1435,7 +1435,7 @@ function setCrossfadeDuration(seconds) {
 window.setCrossfadeDuration = setCrossfadeDuration;
 window.getCrossfadeDuration = () => crossfadeDurationSec;
 
-const CROSSFADE_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c3-6 6-6 9 0s6 6 9 0"/><path d="M3 12c3 6 6 6 9 0s6-6 9 0" opacity="0.4"/></svg>`;
+const CROSSFADE_SVG = `<svg class="crossfade-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12c3-6 6-6 9 0s6 6 9 0"/><path d="M3 12c3 6 6 6 9 0s6-6 9 0" opacity="0.4"/></svg>`;
 
 // La plantilla no trae un botón de Crossfade (funcionalidad agregada después) —
 // se inserta uno al lado de "Normalizar", copiándole la clase para que quede

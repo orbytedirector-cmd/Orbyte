@@ -262,6 +262,8 @@ input[type=range].volume-slider { width:70px; accent-color:var(--accent); }
 #np-similar-btn:hover .similar-svg { transform:scale(1.12); }
 .similar-artists-svg { width:18px; height:18px; display:block; overflow:visible; transition:transform 0.2s ease; }
 #np-similar-artists-btn:hover .similar-artists-svg { transform:scale(1.12); }
+.crossfade-svg { width:18px; height:18px; display:block; overflow:visible; transition:transform 0.2s ease; }
+.normalize-toggle:hover .crossfade-svg { transform:scale(1.12); }
 @keyframes normalizePulse {
   0%, 100% { box-shadow:0 0 0 0 rgba(200,146,10,0.35); }
   50%      { box-shadow:0 0 0 5px rgba(200,146,10,0); }
