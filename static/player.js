@@ -1072,7 +1072,9 @@ function _watchdogTick() {
         // Mientras se transmite NO confiamos en currentAudio (ver nota de
         // cast.js sobre el audio local muteado quedando trabado en 2do
         // plano) — la posición real la da el reloj de pared del cast.
-        updateProgress(window._castMirror.getElapsed());
+        const elapsed = window._castMirror.getElapsed();
+        updateProgress(elapsed);
+        if (window._updateNPProgress) window._updateNPProgress(elapsed);
         if (window._castMirror.isEnded()) _handleTrackEnded();
         return;
     }
@@ -1081,28 +1083,38 @@ function _watchdogTick() {
     // sin esto el contador y la barra quedaban "congelados" en el valor de
     // antes de perder el foco, aunque el audio siguiera avanzando en serio.
     updateProgress();
+    if (window._updateNPProgress) window._updateNPProgress();
 
     // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
+    // Esto se revisa siempre, visible u oculta la pestaña (es justo el caso
+    // que el watchdog existe para cubrir).
     if (currentAudio.ended) { _handleTrackEnded(); return; }
 
     // Quedó pausado por el sistema y el listener de 'pause' no lo recuperó
-    // (p.ej. se perdió el evento) — reintentar.
+    // (p.ej. se perdió el evento) — reintentar. También siempre.
     if (currentAudio.paused) { _handleUnexpectedPause(); return; }
 
-    // Reporta estar reproduciendo pero currentTime no avanza — pipe/decoder
-    // trabado. Se le dan ~8s (2 ticks) antes de forzar una reconexión,
-    // reutilizando el mismo mecanismo que ya existe para caídas de red.
-    const t = currentAudio.currentTime;
-    if (t === _watchdogLastTime) {
-        _watchdogStallTicks++;
-        if (_watchdogStallTicks >= 2) {
+    // Detección de "trabado" (currentTime no avanza entre ticks) — SOLO con
+    // la pestaña visible. En 2do plano un currentTime congelado es
+    // esperable por el throttling del propio navegador, no necesariamente
+    // un problema real; forzar acá una reconexión reiniciaba el audio a 0
+    // cada ~8s sin necesidad — eso era el "0:00 que aparece y desaparece"
+    // en el reproductor estándar.
+    if (!document.hidden) {
+        const t = currentAudio.currentTime;
+        if (t === _watchdogLastTime) {
+            _watchdogStallTicks++;
+            if (_watchdogStallTicks >= 2) {
+                _watchdogStallTicks = 0;
+                handleAudioError({ type: 'watchdog-stall' });
+            }
+        } else {
             _watchdogStallTicks = 0;
-            handleAudioError({ type: 'watchdog-stall' });
         }
+        _watchdogLastTime = t;
     } else {
         _watchdogStallTicks = 0;
     }
-    _watchdogLastTime = t;
 }
 
 (function _startWatchdog() {

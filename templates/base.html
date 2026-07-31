@@ -414,7 +414,7 @@
 
   </div>
 
-  <script src="{{ url_for('static', filename='player.js') }}?v=20260730"></script>
+  <script src="{{ url_for('static', filename='player.js') }}?v=20260731"></script>
   {% if collab_guest %}
   <!-- Invitado de playlist colaborativa: sobrescribe playTrack/appendToQueue/
        etc. para que "reproducir/añadir" en cualquier página (album.html,
@@ -1348,21 +1348,32 @@
       }
     });
 
-    // Progress sync for NP — reuses the same DSD-aware duration fallback as the
-    // playerbar's updateProgress() in player.js (audio.duration is Infinity/NaN
-    // while a DSD stream is live-transcoding; _trackDuration carries the known value).
-    setInterval(() => {
+    // Progress sync para NP. "Reproducir en…": mientras se transmite,
+    // currentAudio queda muteado y en 2do plano el navegador puede frenar su
+    // decodificación — por eso NO se confía en audio.currentTime acá, igual
+    // que en updateProgress() de player.js. Expuesta como función global
+    // para que el watchdog (Worker, inmune al throttling de setInterval en
+    // pestañas de fondo) también la llame — el setInterval de acá abajo da
+    // la fluidez visual mientras la pestaña está visible, pero por sí solo
+    // sufría el mismo throttling que ya afectaba al reproductor estándar.
+    window._updateNPProgress = function(overrideCurrentTime) {
       if (!_npOpen) return;
       const audio = window.currentAudio;
       if (!audio) return;
       const dur = (audio.duration && isFinite(audio.duration))
           ? audio.duration : (audio._trackDuration || 0);
       if (!dur) return;
-      const pct = (audio.currentTime / dur) * 100;
+      const casting = overrideCurrentTime == null && window._castTarget && window._castMirror && window._castMirror.getElapsed;
+      const cur = (overrideCurrentTime != null) ? overrideCurrentTime
+          : casting ? window._castMirror.getElapsed()
+          : audio.currentTime;
+      const safeCur = Number.isFinite(Number(cur)) ? cur : 0;
+      const pct = (safeCur / dur) * 100;
       document.getElementById('np-progress-fill').style.width = pct + '%';
-      document.getElementById('np-current').textContent = formatTime(audio.currentTime);
+      document.getElementById('np-current').textContent = formatTime(safeCur);
       document.getElementById('np-total').textContent   = formatTime(dur);
-    }, 500);
+    };
+    setInterval(() => window._updateNPProgress(), 500);
 
     // Seek from NP progress bar — delegates to the unified seekTo() in player.js,
     // which already handles DSD streams (server-side restart via ?start=) correctly.
