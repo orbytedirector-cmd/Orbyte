@@ -608,6 +608,7 @@ function updateProgress() {
     if (ct)   ct.textContent = formatTime(displayTime);
     if (tt)   tt.textContent = formatTime(dur);
     syncLyrics(displayTime);
+    _updateMediaSessionPosition(displayTime, dur);
 
     // Stream is healthy again — restore the full retry budget instead of
     // letting it get drained by several small drops in a row.
@@ -1039,6 +1040,33 @@ function dispatchPlayerState(playing) {
 }
 
 // ── Media Session API — CarPlay / lock screen / Android Auto ──────────────────
+// setPositionState() es lo que le dice al widget de bloqueo (iOS/Android)
+// DÓNDE está la reproducción — sin esto, el sistema infiere su propia
+// posición asumiendo avance continuo desde la última vez que playbackState
+// pasó a 'playing', totalmente desconectado del <audio> real. Eso es lo que
+// hacía que el lock screen mostrara un current time/tiempo restante que no
+// coincidía con lo que sonaba: cada avance automático de pista (nextTrack),
+// cada cruce de borde de un combo A+B (_checkPairBoundary — el título/
+// portada cambian pero playbackState nunca se toca, así que el sistema ni
+// se entera de que "empezó una pista nueva") y cada reconexión por drop de
+// red dejaban al sistema con su propio reloj interno cada vez más
+// desalineado del real. Se llama con la MISMA pareja (displayTime, dur) que
+// ya usa la barra de progreso del reproductor — nunca currentAudio.currentTime
+// crudo, que durante un combo mide el archivo combinado entero, no la pista
+// que se ve en pantalla.
+function _updateMediaSessionPosition(displayTime, dur) {
+    if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') return;
+    if (!dur || !isFinite(dur) || dur <= 0) return;
+    const position = Math.min(Math.max(0, displayTime || 0), dur);
+    try {
+        navigator.mediaSession.setPositionState({
+            duration: dur,
+            playbackRate: (currentAudio && currentAudio.playbackRate) || 1,
+            position,
+        });
+    } catch (e) { /* posición inválida en un instante de transición — se corrige en el próximo tick */ }
+}
+
 function updateMediaSession(track, playing) {
     if (!('mediaSession' in navigator)) return;
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -1050,6 +1078,14 @@ function updateMediaSession(track, playing) {
             : [],
     });
     navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
+    // Corregir la posición YA, sin esperar al próximo timeupdate — importante
+    // sobre todo al cruzar el borde de un combo, donde el título cambia pero
+    // ningún evento 'play'/'pause' se dispara para avisarle al sistema.
+    if (currentAudio) {
+        const displayTime = Math.max(0, currentAudio.currentTime - _pairOffsetSec);
+        const dur = currentAudio._trackDuration || track.duration || 0;
+        _updateMediaSessionPosition(displayTime, dur);
+    }
 
     // Action handlers — allow CarPlay/lock-screen controls to work.
     // _resumeAudioCtxIfNeeded() primero: si el AudioContext quedó suspendido
