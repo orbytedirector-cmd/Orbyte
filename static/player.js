@@ -108,7 +108,12 @@ function loadQueue(tracks) {
 function primeAudioForGesture() {
     if (!currentAudio) {
         currentAudio = new Audio();
-        currentAudio.addEventListener('timeupdate', updateProgress);
+        // OJO: nunca pasar updateProgress directo a addEventListener — el
+        // navegador invoca el listener con el objeto Event nativo como
+        // primer argumento, y updateProgress(overrideCurrentTime) lo
+        // interpreta como una posición explícita (ver bug documentado
+        // junto a la definición de updateProgress más abajo).
+        currentAudio.addEventListener('timeupdate', () => updateProgress());
         currentAudio.addEventListener('error', handleAudioError);
         currentAudio.addEventListener('pause', _handleUnexpectedPause);
         currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
@@ -146,7 +151,10 @@ function playTrack(index) {
         const streamUrl = track.audio_url || buildDsdStreamUrl(track.file_path);
         if (!currentAudio) {
             currentAudio = new Audio();
-            currentAudio.addEventListener('timeupdate', updateProgress);
+            // Ver nota en primeAudioForGesture: nunca pasar updateProgress
+            // directo a addEventListener, el Event nativo se cuela como
+            // overrideCurrentTime.
+            currentAudio.addEventListener('timeupdate', () => updateProgress());
             currentAudio.addEventListener('error', handleAudioError);
             currentAudio.addEventListener('pause', _handleUnexpectedPause);
             currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
@@ -189,7 +197,10 @@ function playTrack(index) {
 
     if (!currentAudio) {
         currentAudio = new Audio();
-        currentAudio.addEventListener('timeupdate', updateProgress);
+        // Ver nota en primeAudioForGesture: nunca pasar updateProgress
+        // directo a addEventListener, el Event nativo se cuela como
+        // overrideCurrentTime.
+        currentAudio.addEventListener('timeupdate', () => updateProgress());
         currentAudio.addEventListener('error', handleAudioError);
         currentAudio.addEventListener('pause', _handleUnexpectedPause);
         currentAudio.addEventListener('play',  () => _syncMediaSessionState(true));
@@ -326,8 +337,15 @@ function updateProgress(overrideCurrentTime) {
     // de pasar el override) para que TODOS los llamadores —incluido el
     // 'timeupdate' nativo, que sigue disparando igual— usen el valor
     // correcto sin excepción.
-    const casting = !overrideCurrentTime && window._castTarget && window._castMirror && window._castMirror.getElapsed;
-    let cur = (overrideCurrentTime != null) ? overrideCurrentTime
+    // hasOverride exige typeof === 'number': updateProgress se usa también
+    // como listener de 'timeupdate' (ver primeAudioForGesture/playTrack) y
+    // el navegador invoca los listeners pasando el objeto Event nativo como
+    // primer argumento — con solo "!= null" ese Event se colaba acá como si
+    // fuera una posición válida y pisaba el tiempo real a 0 en cada tick
+    // (el bug de "0:00 fijo" del reproductor estándar).
+    const hasOverride = typeof overrideCurrentTime === 'number' && Number.isFinite(overrideCurrentTime);
+    const casting = !hasOverride && window._castTarget && window._castMirror && window._castMirror.getElapsed;
+    let cur = hasOverride ? overrideCurrentTime
         : casting ? window._castMirror.getElapsed()
         : currentAudio.currentTime;
     if (!Number.isFinite(Number(cur))) {
@@ -357,7 +375,7 @@ function updateProgress(overrideCurrentTime) {
     // Lo de acá abajo es seguimiento de salud del STREAM LOCAL — no aplica
     // (ni conviene, currentAudio puede estar trabado a propósito) mientras
     // se transmite.
-    if (overrideCurrentTime != null || window._castTarget) return;
+    if (hasOverride || window._castTarget) return;
 
     // Stream is healthy again — restore the full retry budget instead of
     // letting it get drained by several small drops in a row.
