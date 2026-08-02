@@ -2923,65 +2923,83 @@ def api_prewarm_dsd():
     return jsonify({'status': 'started'})
 
 
-# ── Pares combinados (crossfade "de verdad") ─────────────────────────────────
-# El crossfade con dos <audio> simultáneos (versión anterior) resultó bloqueado
-# por Chrome en 2do plano: "The play() request was interrupted because
-# video-only background media was paused to save power" — Chrome sólo tolera
-# UNA sesión de audio "reclamada" (la de navigator.mediaSession) por pestaña;
-# un segundo <audio> reproduciendo en paralelo se trata como contenido no
-# reclamado y se corta.
+# ── Cadenas combinadas de N pistas (crossfade "de verdad", sesión continua) ──
+# Generaliza el mecanismo de pares de arriba a una VENTANA RODANTE de varias
+# pistas seguidas combinadas en un único archivo (ver CHAIN_WINDOW_SIZE en
+# static/player.js). Mismo motivo de fondo que los pares: el navegador nunca
+# ve un segundo .play() para la transición, así que nunca dispara el
+# bloqueo de audio en 2do plano de Chrome. La diferencia es el alcance: con
+# pares (N=2), CADA cambio de pista es un momento de riesgo si la app está
+# profundamente en 2do plano (ver diagnóstico de la ronda 2 — Future World).
+# Con una ventana de N pistas, ese riesgo aparece una vez cada N-1
+# transiciones en vez de en cada una — mejor para sesiones largas con el
+# teléfono guardado.
 #
-# La alternativa real: que el navegador nunca vea una segunda pista. Acá se
-# combinan dos pistas consecutivas en un ÚNICO archivo (remuestreadas a una
-# tasa común, con un fundido corto en el borde para que no sea un corte seco)
-# y se sirve como si fuera una sola. El cliente reproduce ese único archivo de
-# punta a punta — nunca hay un segundo .play() para la transición A→B, así que
-# nunca se dispara la política que bloqueaba el crossfade anterior. Cuando el
-# reproductor cruza el punto exacto donde termina A y empieza B, sólo actualiza
-# la UI (título, artista, portada, metadata) en silencio; el audio nunca se
-# corta ni se reinicia.
-#
-# Alcance de esta primera versión: sólo PARES (pista actual + siguiente).
-# Encadenar 3+ pistas seguidas sin nunca volver a tocar .play() requeriría
-# combinar toda la cola por adelantado — mucho más caro y no compatible con
-# una cola que el usuario sigue modificando en vivo. Con pares alcanza para
-# resolver el caso confirmado (la 2da transición en 2do plano es la que
-# falla); si hiciera falta más, conviene medirlo antes de construir más.
-_PAIR_SAMPLE_RATE = 176400   # misma tasa universal que ya se usa para DSD
+# El costo es CPU/tiempo de transcode por ventana, que crece con N — por
+# eso cada armado de cadena deja una línea "[chain-build]" en este log con
+# cuánto tardó y qué tamaño terminó teniendo el archivo. La idea es medir
+# con sesiones reales si CHAIN_WINDOW_SIZE=3 alcanza o conviene ajustarlo,
+# en vez de adivinar el número correcto de entrada.
+_CHAIN_MAX_TRACKS = 6   # techo duro — más que esto por ventana no se probó y el costo de transcode crece con N; subir con cuidado mirando [chain-build] en el log
 
-def _pair_cache_path(path_a, path_b, fade_sec):
-    os.makedirs(_DSD_CACHE_DIR, exist_ok=True)   # mismo directorio de caché que ya usa DSD
-    try: mtime_a = os.path.getmtime(path_a)
-    except OSError: mtime_a = 0
-    try: mtime_b = os.path.getmtime(path_b)
-    except OSError: mtime_b = 0
-    key = hashlib.sha1(f'{path_a}:{mtime_a}|{path_b}:{mtime_b}|fade={fade_sec}'.encode('utf-8')).hexdigest()
-    return os.path.join(_DSD_CACHE_DIR, f'pair_{key}.flac')
+def _chain_cache_path(paths, fade_sec, fade_in_first, fade_out_last):
+    os.makedirs(_DSD_CACHE_DIR, exist_ok=True)   # mismo directorio de caché que ya usa DSD/pares
+    parts = []
+    for p in paths:
+        try: mtime = os.path.getmtime(p)
+        except OSError: mtime = 0
+        parts.append(f'{p}:{mtime}')
+    # fin/fout entran en el hash porque cambian el audio resultante (la
+    # primera/última pista de la ventana fadea distinto según si hay algo
+    # antes/después) — dos pedidos con los mismos ids pero fin/fout
+    # distintos son, de verdad, archivos distintos.
+    key = hashlib.sha1(
+        f'{"|".join(parts)}|fade={fade_sec}|fin={int(fade_in_first)}|fout={int(fade_out_last)}'.encode('utf-8')
+    ).hexdigest()
+    return os.path.join(_DSD_CACHE_DIR, f'chain_{key}.flac')
 
-def _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec):
+def _build_track_chain(paths, durations, cache_path, fade_sec, fade_in_first, fade_out_last):
     """
-    Concatena A+B en un solo FLAC, con un fundido secuencial en el borde
-    (A se apaga sobre sus últimos fade_sec segundos, B aparece desde
-    silencio sobre sus primeros fade_sec) en vez de un corte seco. No es un
-    mezclado superpuesto tipo DJ — eso es más complejo de armar bien y no
-    hacía falta para resolver el corte de fondo; queda como posible mejora
-    a futuro si se quiere una curva más suave.
+    Generaliza _build_track_pair (mismo método: fundido secuencial, no
+    mezclado superpuesto) a N pistas: cada borde INTERNO de la ventana
+    siempre tiene fundido — la pista de la izquierda se apaga sobre sus
+    últimos fade_sec segundos, la de la derecha aparece desde silencio
+    sobre sus primeros fade_sec. Los dos bordes EXTERNOS (antes de la
+    primera pista, después de la última) son ambiguos para el server por sí
+    solo — no sabe si esta ventana es el arranque de la sesión o la
+    continuación de una ventana anterior — por eso el cliente los indica
+    explícitamente con fade_in_first/fade_out_last (?fin=/&fout= — ver
+    buildTrackChainUrl en static/player.js). Devuelve la lista de bordes
+    internos (segundo acumulado donde empieza cada pista, salvo la primera)
+    o None si falló.
     """
+    n = len(paths)
     tmp_path = f'{cache_path}.{os.getpid()}.{threading.get_ident()}.tmp'
-    fade_sec = max(0.0, min(fade_sec, max(0.0, (duration_a or 0) - 0.5)))   # nunca más largo que casi toda A
-    fade_start_a = max(0.0, (duration_a or 0) - fade_sec)
-    filter_complex = (
-        f'[0:a]aresample={_PAIR_SAMPLE_RATE}'
-        + (f',afade=t=out:st={fade_start_a:.3f}:d={fade_sec:.3f}' if fade_sec > 0 else '')
-        + '[a0];'
-        f'[1:a]aresample={_PAIR_SAMPLE_RATE}'
-        + (f',afade=t=in:st=0:d={fade_sec:.3f}' if fade_sec > 0 else '')
-        + '[a1];'
-        '[a0][a1]concat=n=2:v=0:a=1[out]'
-    )
+    inputs, filter_parts, concat_labels, boundaries = [], [], [], []
+    cumulative = 0.0
+    for i, path in enumerate(paths):
+        inputs += ['-i', path]
+        dur = max(0.0, durations[i] or 0)
+        want_in  = fade_in_first if i == 0     else True
+        want_out = fade_out_last if i == n - 1 else True
+        # Nunca más largo que la mitad de la propia pista — evita que el
+        # fade-in y el fade-out de una pista intermedia muy corta se pisen.
+        this_fade = max(0.0, min(fade_sec, dur / 2 - 0.1)) if (want_in or want_out) and dur > 0 else 0.0
+        chain = f'[{i}:a]aresample={_PAIR_SAMPLE_RATE}'
+        if want_in and this_fade > 0:
+            chain += f',afade=t=in:st=0:d={this_fade:.3f}'
+        if want_out and this_fade > 0:
+            chain += f',afade=t=out:st={max(0.0, dur - this_fade):.3f}:d={this_fade:.3f}'
+        chain += f'[a{i}]'
+        filter_parts.append(chain)
+        concat_labels.append(f'[a{i}]')
+        if i > 0:
+            boundaries.append(cumulative)
+        cumulative += dur
+    filter_complex = ';'.join(filter_parts) + ';' + ''.join(concat_labels) + f'concat=n={n}:v=0:a=1[out]'
     cmd = [
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
-        '-i', path_a, '-i', path_b,
+        *inputs,
         '-filter_complex', filter_complex,
         '-map', '[out]',
         '-sample_fmt', 's32',
@@ -2989,76 +3007,116 @@ def _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec):
         '-f', 'flac',
         tmp_path,
     ]
+    t0 = time.time()
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=600)
+        result = subprocess.run(cmd, capture_output=True, timeout=max(600, 300 * n))
+        elapsed = time.time() - t0
+        names = [os.path.basename(p) for p in paths]
         if result.returncode != 0 or not os.path.isfile(tmp_path):
             app.logger.error(
-                f"[track-pair] ffmpeg failed for {path_a} + {path_b}: "
+                f"[chain-build] FAILED n={n} elapsed={elapsed:.1f}s tracks={names}: "
                 f"{result.stderr.decode(errors='replace')[:500]}"
             )
-            return False
+            return None
         os.replace(tmp_path, cache_path)
-        return True
+        size_mb = os.path.getsize(cache_path) / (1024 * 1024)
+        # Línea pensada para grep/medición — con "[chain-build] OK" alcanza
+        # para ver, por sesión real, cuánto tarda armar una ventana de N
+        # pistas y decidir si CHAIN_WINDOW_SIZE conviene subirlo o bajarlo.
+        app.logger.info(f"[chain-build] OK n={n} elapsed={elapsed:.1f}s size_mb={size_mb:.1f} tracks={names}")
+        return boundaries
     finally:
         if os.path.isfile(tmp_path):
             try: os.remove(tmp_path)
             except OSError: pass
 
-def _resolve_pair_tracks(track_a_id, track_b_id):
-    """Devuelve (path_a, path_b, duration_a) o None si algo no existe."""
+def _resolve_chain_tracks(track_ids):
+    """Devuelve ([paths], [durations]) o None si algo no existe / la
+    ventana pedida es inválida (muy corta o supera _CHAIN_MAX_TRACKS)."""
+    if not track_ids or len(track_ids) < 2 or len(track_ids) > _CHAIN_MAX_TRACKS:
+        return None
     conn = get_db_connection()
     try:
-        ta = conn.execute('SELECT file_path, duration FROM tracks WHERE id=?', (track_a_id,)).fetchone()
-        tb = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_b_id,)).fetchone()
+        rows = {}
+        for tid in track_ids:
+            r = conn.execute('SELECT file_path, duration FROM tracks WHERE id=?', (tid,)).fetchone()
+            if not r:
+                return None
+            rows[tid] = r
     finally:
         conn.close()
-    if not ta or not tb:
+    paths, durations = [], []
+    for tid in track_ids:
+        p = clean_db_path(rows[tid]['file_path'])
+        if not os.path.isfile(p):
+            return None
+        paths.append(p)
+        durations.append(rows[tid]['duration'] or 0)
+    return paths, durations
+
+def _parse_chain_ids(ids_str):
+    try:
+        ids = [int(x) for x in (ids_str or '').split(',') if x]
+    except ValueError:
         return None
-    path_a = clean_db_path(ta['file_path'])
-    path_b = clean_db_path(tb['file_path'])
-    if not os.path.isfile(path_a) or not os.path.isfile(path_b):
-        return None
-    return path_a, path_b, (ta['duration'] or 0)
+    return ids or None
 
 
-@app.route('/api/track-pair/<int:track_a_id>/<int:track_b_id>')
-def track_pair(track_a_id, track_b_id):
+@app.route('/api/track-chain/<ids>')
+def track_chain(ids):
     fade_sec = request.args.get('fade', 4.0, type=float)
-    resolved = _resolve_pair_tracks(track_a_id, track_b_id)
+    fade_in  = request.args.get('fin', 0, type=int) == 1
+    fade_out = request.args.get('fout', 0, type=int) == 1
+    track_ids = _parse_chain_ids(ids)
+    if not track_ids:
+        return "Invalid ids", 400
+    resolved = _resolve_chain_tracks(track_ids)
     if not resolved:
         return "Track not found", 404
-    path_a, path_b, duration_a = resolved
+    paths, durations = resolved
 
-    cache_path = _pair_cache_path(path_a, path_b, fade_sec)
+    cache_path = _chain_cache_path(paths, fade_sec, fade_in, fade_out)
     if not os.path.isfile(cache_path):
         lock = _dsd_transcode_lock(cache_path)   # mismo mecanismo de lock por ruta que ya usa DSD
         lock.acquire()
         try:
             if not os.path.isfile(cache_path):
-                if not _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec):
+                if _build_track_chain(paths, durations, cache_path, fade_sec, fade_in, fade_out) is None:
                     return "No se pudo combinar", 500
         finally:
             _dsd_transcode_lock_release(cache_path, lock)
 
+    boundaries_sec, cumulative = [], 0.0
+    for d in durations[:-1]:
+        cumulative += d
+        boundaries_sec.append(f'{cumulative:.3f}')
+
     resp = _serve_audio(cache_path)
-    resp.headers['Content-Type']        = 'audio/flac'
-    resp.headers['X-Pair-Boundary-Sec'] = f'{duration_a:.3f}'
+    resp.headers['Content-Type']           = 'audio/flac'
+    resp.headers['X-Chain-Size']           = str(len(track_ids))
+    resp.headers['X-Chain-Boundaries-Sec'] = ','.join(boundaries_sec)   # sólo diagnóstico — el cliente calcula los bordes por su cuenta con las mismas duraciones que ya tiene
     return resp
 
 
-@app.route('/api/prewarm-pair/<int:track_a_id>/<int:track_b_id>', methods=['POST'])
-def api_prewarm_pair(track_a_id, track_b_id):
-    """Arma el combo A+B en un hilo aparte, sin esperar — igual que
-    /api/prewarm-dsd. static/player.js lo llama apenas arranca A, si el
-    crossfade está activo, para que el combo ya esté listo en caché para
-    cuando currentTime cruce el borde de A."""
+@app.route('/api/prewarm-chain/<ids>', methods=['POST'])
+def api_prewarm_chain(ids):
+    """Arma la ventana de N pistas en un hilo aparte, sin esperar — igual
+    que /api/prewarm-dsd/-pair pero para toda la ventana. static/player.js
+    lo dispara apenas arranca a sonar CADA ventana (no cuando se acerca el
+    final) para maximizar el margen de anticipación antes de necesitarla —
+    ver _prewarmChainIfNeeded en player.js."""
     fade_sec = request.args.get('fade', 4.0, type=float)
-    resolved = _resolve_pair_tracks(track_a_id, track_b_id)
+    fade_in  = request.args.get('fin', 0, type=int) == 1
+    fade_out = request.args.get('fout', 0, type=int) == 1
+    track_ids = _parse_chain_ids(ids)
+    if not track_ids:
+        return jsonify({'status': 'error', 'message': 'Invalid ids'}), 400
+    resolved = _resolve_chain_tracks(track_ids)
     if not resolved:
         return jsonify({'status': 'error', 'message': 'Track not found'}), 404
-    path_a, path_b, duration_a = resolved
+    paths, durations = resolved
 
-    cache_path = _pair_cache_path(path_a, path_b, fade_sec)
+    cache_path = _chain_cache_path(paths, fade_sec, fade_in, fade_out)
     if os.path.isfile(cache_path):
         return jsonify({'status': 'already_cached'})
 
@@ -3066,15 +3124,13 @@ def api_prewarm_pair(track_a_id, track_b_id):
     if not lock.acquire(blocking=False):
         return jsonify({'status': 'already_in_progress'})
 
-    def _prewarm_pair_job():
+    def _prewarm_chain_job():
         try:
-            ok = _build_track_pair(path_a, path_b, duration_a, cache_path, fade_sec)
-            if ok:
-                app.logger.info(f"[prewarm-pair] cached: {os.path.basename(path_a)} + {os.path.basename(path_b)}")
+            _build_track_chain(paths, durations, cache_path, fade_sec, fade_in, fade_out)
         finally:
             _dsd_transcode_lock_release(cache_path, lock)
 
-    threading.Thread(target=_prewarm_pair_job, daemon=True).start()
+    threading.Thread(target=_prewarm_chain_job, daemon=True).start()
     return jsonify({'status': 'started'})
 
 
