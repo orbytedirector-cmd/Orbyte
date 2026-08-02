@@ -2131,6 +2131,12 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
   display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 0.5rem;
   max-height: 190px; overflow-y: auto; padding: 0.15rem;
 }
+/* El atributo [hidden] por sí solo NO alcanza acá: como .avatar-picker-grid
+   ya fija su propio "display", esa regla de autor le gana a la regla por
+   defecto del navegador "[hidden]{display:none}" (los estilos de autor
+   siempre pisan a los del user-agent). Sin esto, las 2 pestañas quedaban
+   visibles al mismo tiempo aunque el JS marcara [hidden] correctamente. */
+.avatar-picker-grid[hidden] { display: none; }
 .avatar-option {
   width: 52px; height: 52px; border-radius: 50%; padding: 0; overflow: hidden;
   border: 2px solid transparent; background: var(--bg-elevated); cursor: pointer; transition: border-color 0.15s;
