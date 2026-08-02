@@ -2941,6 +2941,7 @@ def api_prewarm_dsd():
 # con sesiones reales si CHAIN_WINDOW_SIZE=3 alcanza o conviene ajustarlo,
 # en vez de adivinar el número correcto de entrada.
 _CHAIN_MAX_TRACKS = 6   # techo duro — más que esto por ventana no se probó y el costo de transcode crece con N; subir con cuidado mirando [chain-build] en el log
+_CHAIN_SAMPLE_RATE = 176400   # misma tasa universal que ya se usa para DSD/pares
 
 def _chain_cache_path(paths, fade_sec, fade_in_first, fade_out_last):
     os.makedirs(_DSD_CACHE_DIR, exist_ok=True)   # mismo directorio de caché que ya usa DSD/pares
@@ -2985,7 +2986,7 @@ def _build_track_chain(paths, durations, cache_path, fade_sec, fade_in_first, fa
         # Nunca más largo que la mitad de la propia pista — evita que el
         # fade-in y el fade-out de una pista intermedia muy corta se pisen.
         this_fade = max(0.0, min(fade_sec, dur / 2 - 0.1)) if (want_in or want_out) and dur > 0 else 0.0
-        chain = f'[{i}:a]aresample={_PAIR_SAMPLE_RATE}'
+        chain = f'[{i}:a]aresample={_CHAIN_SAMPLE_RATE}'
         if want_in and this_fade > 0:
             chain += f',afade=t=in:st=0:d={this_fade:.3f}'
         if want_out and this_fade > 0:

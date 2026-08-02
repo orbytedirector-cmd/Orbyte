@@ -173,6 +173,23 @@ function _rlog(event, data) {
     } catch (e) { /* el diagnóstico nunca debe poder romper la reproducción */ }
 }
 
+// transition_gap_ms mide el silencio REAL que vive el que escucha en cada
+// cambio de pista: desde el instante en que se sabe que hace falta un
+// recurso de audio nuevo (playTrack de una pista fría, un swap de ventana,
+// o el arranque de una reconexión tras un error) hasta que el <audio>
+// realmente vuelve a sonar (evento 'playing'). Se guarda una sola vez por
+// hueco — si hay varios reintentos en el medio, el reloj arrancó en el
+// primero, no se reinicia en cada intento. Un cruce de borde DENTRO de una
+// ventana combinada nunca toca esto (nunca hay nada que esperar ahí, por
+// diseño) — por eso ese caso no aparece con este evento, lo cual ya es en
+// sí mismo la métrica: cuenta cuántas transiciones NO tuvieron hueco.
+// Este es el número pensado para comparar de igual a igual una sesión con
+// crossfade activado contra una sin activar.
+let _transitionGapStartedAt = null;
+function _markTransitionGapStart() {
+    if (_transitionGapStartedAt === null) _transitionGapStartedAt = performance.now();
+}
+
 // Engancha los listeners de diagnóstico a un <audio> recién creado. Puramente
 // aditivo — no reemplaza ni interfiere con los listeners reales ya existentes
 // (timeupdate/error/pause/onended), el DOM permite múltiples listeners para
@@ -188,6 +205,15 @@ function _attachDiagListeners(audio) {
             paused:      audio.paused,
             ended:       audio.ended,
         }));
+    });
+    audio.addEventListener('playing', () => {
+        if (_transitionGapStartedAt !== null) {
+            _rlog('transition_gap_ms', {
+                ms: Math.round(performance.now() - _transitionGapStartedAt),
+                crossfadeEnabled, chainWindowSize: crossfadeEnabled ? CHAIN_WINDOW_SIZE : null,
+            });
+            _transitionGapStartedAt = null;
+        }
     });
     audio.addEventListener('error', () => {
         const err = audio.error;
@@ -345,6 +371,7 @@ window.primeAudioForGesture = primeAudioForGesture;
 
 function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
+    _markTransitionGapStart();   // cualquier playTrack() implica pedir un recurso de audio nuevo — acá arranca a contar el posible silencio, hasta que 'playing' lo cierre
     _chainIndices = null;   // cambio manual de pista — lo que estuviera sonando de una ventana combinada ya no aplica
     _chainBoundaries = [];
     _chainOffsetSec = 0;
@@ -362,7 +389,7 @@ function playTrack(index) {
     const playBtn = document.getElementById('play-btn');
     if (playBtn) playBtn.removeAttribute('data-empty');
     const track = queue[currentIndex];
-    _rlog('playTrack_call', { toIndex: index, title: track && track.title, isDsd: !!(track && track.is_dsd) });
+    _rlog('playTrack_call', { toIndex: index, title: track && track.title, isDsd: !!(track && track.is_dsd), crossfadeEnabled });
 
     // Expose current track globally so base.html lyrics system can read track.id
     window._currentTrack = track;
@@ -926,6 +953,7 @@ function handleAudioError(e) {
     // da por perdida si ese reintento también agota el presupuesto o la
     // pista ya está por terminar.
     const wasChained = Array.isArray(_chainIndices) && _chainIndices.length > 1;
+    _markTransitionGapStart();   // si el error pasó a mitad de una pista ya sonando (no justo al arrancar), acá es donde arranca el silencio real
 
     const lastPos = currentAudio.currentTime || 0;
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
@@ -1635,6 +1663,7 @@ function _maybeSwapToNextChainWindow() {
     }
 
     _chainSwapInFlight = true;
+    _markTransitionGapStart();   // reasignar .src acá también puede cortar el audio un instante — se mide igual que cualquier otra transición
     const t0 = performance.now();
     _rlog('chain_swap_scheduled', { key, remaining, chainSizeFrom: _chainIndices.length, chainSizeTo: nextWindow.length });
     currentAudio.src = url;
@@ -1702,6 +1731,7 @@ function _updateCrossfadeButtons() {
 function toggleCrossfade() {
     crossfadeEnabled = !crossfadeEnabled;
     try { localStorage.setItem('orbyte_crossfade', crossfadeEnabled ? '1' : '0'); } catch (e) {}
+    _rlog('crossfade_toggle', { crossfadeEnabled, chainWindowSize: CHAIN_WINDOW_SIZE, fadeSec: crossfadeDurationSec });
     _updateCrossfadeButtons();
 }
 window.toggleCrossfade = toggleCrossfade;
