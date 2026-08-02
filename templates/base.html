@@ -126,6 +126,10 @@
               <span class="player-fmt-badge" id="np-badge"></span>
               <div class="player-led"  id="np-led"></div>
             </div>
+            <div class="np-collab-row" id="np-collab-row" style="display:none">
+              <span class="avatar-circle avatar-circle-sm" id="np-collab-avatar"></span>
+              <span class="np-collab-text">🎉 Agregada por <strong id="np-collab-name"></strong></span>
+            </div>
           </div>
 
           <!-- Progress -->
@@ -235,6 +239,10 @@
             <span class="player-fmt-badge" id="player-format"></span>
             <div class="player-led" id="player-led"></div>
             <span id="mpd-status" style="font-size:0.7rem;color:var(--led-green);"></span>
+            <span class="player-collab-badge" id="player-collab-badge" style="display:none">
+              <span class="avatar-circle avatar-circle-xs" id="player-collab-avatar"></span>
+              <span class="player-collab-name" id="player-collab-name"></span>
+            </span>
           </div>
         </div>
       </div><!-- /player-left -->
@@ -1328,6 +1336,8 @@
       const led = document.getElementById('np-led');
       led.innerHTML = _makeDiamondSVG(c, 'np');
       led.className = 'player-led led-d-' + c;
+      // Playlist colaborativa: badge "agregado por" (ver ticket)
+      _updateCollabBadge(t, 'np-collab-row', 'np-collab-avatar', 'np-collab-name');
       // Sync progress fill color to the track's LED color
       const fill = document.getElementById('np-progress-fill');
       if (fill) fill.style.setProperty('--np-led-color', `var(--led-${c})`);

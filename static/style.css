@@ -1608,6 +1608,8 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .player-tags { margin-top: 2px !important; gap: 3px !important; }
+  .player-collab-badge { padding: 0.06rem !important; max-width: none !important; }
+  .player-collab-name  { display: none !important; }
   .player-fmt-badge { font-size: 0.55rem !important; padding: 0.05rem 0.22rem !important; }
   .player-led { width: 6px !important; height: 6px !important; }
 
@@ -2116,6 +2118,29 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
 }
 .avatar-circle img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .avatar-circle-lg { width: 72px; height: 72px; font-size: 1.35rem; }
+.avatar-circle-sm { width: 28px; height: 28px; font-size: 0.72rem; }
+.avatar-circle-xs { width: 17px; height: 17px; font-size: 0.5rem; border-width: 1px; }
+
+/* Badge "agregado por" — player estándar (compacto, en la fila de tags) */
+.player-collab-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem; margin-left: 0.15rem;
+  padding: 0.06rem 0.5rem 0.06rem 0.06rem; border-radius: 999px;
+  background: var(--accent-dim); border: 1px solid var(--border-gold);
+  max-width: 130px;
+}
+.player-collab-name {
+  font-size: 0.68rem; color: var(--text-gold); font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Badge "agregado por" — overlay en primer plano (más festivo, TV-friendly) */
+.np-collab-row {
+  display: flex; align-items: center; gap: 0.55rem; margin: 0.6rem auto 0;
+  padding: 0.35rem 0.8rem 0.35rem 0.35rem; border-radius: 999px; width: fit-content;
+  background: var(--accent-dim); border: 1px solid var(--border-gold);
+}
+.np-collab-text { font-size: 0.85rem; color: var(--text-gold); white-space: nowrap; }
+.np-collab-text strong { color: var(--text-primary); }
 
 .avatar-picker { margin-top: 0.35rem; }
 .avatar-picker-preview { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }

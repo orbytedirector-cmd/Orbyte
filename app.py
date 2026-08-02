@@ -505,6 +505,23 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass  # Columna ya existe
+    # Lazy migration: avatar de invitado (ticket "playlist colaborativa —
+    # avatar en el player del admin"). Solo se guarda la REFERENCIA a un
+    # archivo que ya vive en static/avatares/ (categoria + nombre de
+    # archivo) — nunca la imagen. Ambas NULL significa "no eligió avatar":
+    # el admin arma el círculo de iniciales a partir de participants.name,
+    # que ya se guardaba de todos modos. Mismo criterio de "vive mientras
+    # la sesión colaborativa viva" que el resto de esta tabla.
+    try:
+        conn.execute("ALTER TABLE collab_participants ADD COLUMN avatar_category TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
+    try:
+        conn.execute("ALTER TABLE collab_participants ADD COLUMN avatar_file TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -907,19 +924,28 @@ def _collab_initials(name):
         return (w[:2] if len(w) >= 2 else w[0] * 2).upper()
     return (words[0][0] + words[-1][0]).upper()
 
-def _collab_resolve_avatar(form, name):
-    """A partir de lo que mandó el <form> de collab_join.html, decide el
-    avatar del invitado: la imagen elegida (validando que exista de verdad
-    en esa categoría, nunca confiar en el path que manda el cliente) o,
-    si no eligió ninguna, el círculo de iniciales. Se guarda en la sesión,
-    nunca en la base de datos (ver ticket)."""
+def _collab_resolve_avatar_ref(form):
+    """Valida lo que mandó el <form> de collab_join.html contra lo que
+    realmente existe en static/avatares/ — nunca confiar en el path que
+    manda el cliente. Devuelve (category, file) o (None, None) si no
+    eligió ninguno (avatar por iniciales)."""
     category = form.get('avatar_category') or ''
     fname = form.get('avatar_file') or ''
     if category in ('femeninos', 'masculinos') and fname:
         safe_fname = os.path.basename(fname)
         if safe_fname in _collab_list_avatar_files(category):
-            return {'type': 'image',
-                    'url': url_for('static', filename=f'avatares/{category}/{safe_fname}')}
+            return category, safe_fname
+    return None, None
+
+def _collab_avatar_display(category, fname, name):
+    """Arma el dict {'type': 'image'|'initials', ...} listo para renderizar,
+    a partir de la referencia guardada en collab_participants (avatar_category
+    + avatar_file). No depende de ninguna cookie de sesión — por eso sirve
+    tanto para el header del propio invitado como para el badge "agregado
+    por" en el player del admin (otro navegador — ver ticket)."""
+    if category and fname:
+        return {'type': 'image',
+                'url': url_for('static', filename=f'avatares/{category}/{fname}')}
     return {'type': 'initials', 'text': _collab_initials(name)}
 
 
@@ -947,11 +973,13 @@ def _collab_device_key():
     raw = f"{request.remote_addr}|{ua}"
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()[:32]
 
-def _collab_find_or_create_participant(conn, sess, name=None):
+def _collab_find_or_create_participant(conn, sess, name=None, avatar_category=None, avatar_file=None):
     """Busca un participante YA existente para este dispositivo en esta
     sesión (re-escaneo del QR, con o sin cookie de invitado vigente) y lo
     reutiliza — así su cupo de pistas sigue contando desde donde iba en vez
-    de resetearse. Si no existe, lo crea con el nombre dado."""
+    de resetearse. Si no existe, lo crea con el nombre y la referencia de
+    avatar dados (ver _collab_resolve_avatar_ref — solo category+file, la
+    imagen en sí sigue viviendo únicamente en static/avatares/)."""
     device_key = _collab_device_key()
     row = conn.execute(
         'SELECT * FROM collab_participants WHERE session_id=? AND device_key=?',
@@ -962,12 +990,15 @@ def _collab_find_or_create_participant(conn, sess, name=None):
         conn.commit()
         return dict(row), False
     cur = conn.execute(
-        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen) '
-        'VALUES (?, ?, ?, ?, ?)',
-        (sess['id'], device_key, name or 'Invitado', _utcnow_iso(), _utcnow_iso())
+        'INSERT INTO collab_participants '
+        '(session_id, device_key, name, joined_at, last_seen, avatar_category, avatar_file) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (sess['id'], device_key, name or 'Invitado', _utcnow_iso(), _utcnow_iso(),
+         avatar_category, avatar_file)
     )
     conn.commit()
-    return {'id': cur.lastrowid, 'name': name or 'Invitado'}, True
+    return {'id': cur.lastrowid, 'name': name or 'Invitado',
+            'avatar_category': avatar_category, 'avatar_file': avatar_file}, True
 
 def _collab_window_count(conn, session_row, participant_id):
     """Cuántas pistas agregó este participante dentro de la ventana de tiempo
@@ -1257,7 +1288,32 @@ def api_admin_collab_pull():
                 WHERE t.id IN ({placeholders})''', ids
         ).fetchall()
         by_id = {r['id']: r for r in rows}
-        result = [track_to_json(by_id[it['track_id']]) for it in ordered_items if it['track_id'] in by_id]
+
+        # Quién agregó cada pista (ver ticket "avatar en el player del
+        # admin") — se resuelve UNA query por participante involucrado, no
+        # por pista, y se arma acá porque track_to_json() no sabe nada de
+        # playlist colaborativa (sigue usándose para browse/álbum/etc. tal
+        # cual, sin este campo extra).
+        participant_ids = list({it['participant_id'] for it in ordered_items})
+        p_placeholders = ','.join('?' * len(participant_ids))
+        p_rows = conn.execute(
+            f'SELECT id, name, avatar_category, avatar_file FROM collab_participants '
+            f'WHERE id IN ({p_placeholders})', participant_ids
+        ).fetchall()
+        added_by_map = {
+            p['id']: {'name': p['name'],
+                      'avatar': _collab_avatar_display(p['avatar_category'], p['avatar_file'], p['name'])}
+            for p in p_rows
+        }
+
+        result = []
+        for it in ordered_items:
+            if it['track_id'] not in by_id:
+                continue
+            d = track_to_json(by_id[it['track_id']])
+            d['collab_added_by'] = added_by_map.get(it['participant_id'])
+            result.append(d)
+
         item_ids = [it['id'] for it in ordered_items]
         placeholders2 = ','.join('?' * len(item_ids))
         conn.execute(f'UPDATE collab_queue_items SET dispatched=1 WHERE id IN ({placeholders2})', item_ids)
@@ -1293,19 +1349,17 @@ def collab_join(token):
             conn.execute('UPDATE collab_participants SET last_seen=? WHERE id=?', (_utcnow_iso(), participant['id']))
             conn.commit()
             # Reconexión del mismo dispositivo (QR re-escaneado o cookie
-            # perdida) — no se le vuelve a pedir avatar. Si la cookie de
-            # sesión seguía viva y es la de este mismo participante, el
-            # avatar elegido se mantiene; si no (cookie perdida), como no se
-            # guarda en la base de datos (ver ticket) se recae en las
-            # iniciales de su nombre para no dejarlo sin avatar.
-            if session.get('collab_participant_id') == participant['id']:
-                avatar = session.get('collab_avatar')
-            else:
-                avatar = None
+            # perdida) — no se le vuelve a pedir avatar: ya quedó guardado
+            # en su fila (avatar_category/avatar_file) desde que se unió la
+            # primera vez, así que se reconstruye igual pase lo que pase con
+            # la cookie.
+            avatar = _collab_avatar_display(participant.get('avatar_category'),
+                                             participant.get('avatar_file'), participant['name'])
         elif request.method == 'POST':
             name = (request.form.get('name') or '').strip()[:40] or 'Invitado'
-            participant, _ = _collab_find_or_create_participant(conn, sess, name)
-            avatar = _collab_resolve_avatar(request.form, name)
+            avatar_category, avatar_file = _collab_resolve_avatar_ref(request.form)
+            participant, _ = _collab_find_or_create_participant(conn, sess, name, avatar_category, avatar_file)
+            avatar = _collab_avatar_display(avatar_category, avatar_file, name)
         else:
             return render_template('collab_join.html', error=None, collab_session=sess, token=token,
                                     avatar_catalog=_collab_avatar_catalog())

@@ -252,6 +252,32 @@ function playViaMPD(filepath, { silent = false } = {}) {
     .catch(() => { if (statusEl) statusEl.textContent = ''; });
 }
 
+// Playlist colaborativa: pinta (o esconde) un badge con avatar + nombre de
+// quién agregó la pista que está sonando — SOLO aparece cuando la pista
+// viene de la cola colaborativa (track.collab_added_by presente). Reusada
+// por el player estándar y por el overlay en primer plano (ver ticket
+// "avatar en el player del admin"), cada uno con sus propios ids de nodo.
+function _updateCollabBadge(track, wrapId, avatarId, nameId) {
+    const wrap = document.getElementById(wrapId);
+    if (!wrap) return;
+    const info = track && track.collab_added_by;
+    if (!info || !info.name) {
+        wrap.style.display = 'none';
+        return;
+    }
+    const av = info.avatar || { type: 'initials', text: '?' };
+    const avatarEl = document.getElementById(avatarId);
+    if (avatarEl) {
+        avatarEl.innerHTML = av.type === 'image'
+            ? `<img src="${av.url}" alt="">`
+            : `<span>${av.text}</span>`;
+    }
+    const nameEl = document.getElementById(nameId);
+    if (nameEl) nameEl.textContent = info.name;
+    wrap.title = `Agregada por ${info.name} · Playlist colaborativa`;
+    wrap.style.display = '';
+}
+
 function updatePlayerBar(track) {
     const cover  = document.getElementById('player-cover');
     const title  = document.getElementById('player-title');
@@ -318,6 +344,9 @@ function updatePlayerBar(track) {
     }
     // Media Session — CarPlay / lock screen
     updateMediaSession(track, true);
+
+    // Playlist colaborativa: badge "agregado por" (ver ticket)
+    _updateCollabBadge(track, 'player-collab-badge', 'player-collab-avatar', 'player-collab-name');
 
     // Tab title — refleja lo que está sonando ahora (ver sección "Tab title" más abajo)
     updateTabTitle();
@@ -1227,6 +1256,11 @@ function _normalizeTrack(t) {
         led_color:      t.led_color      || 'white',
         format_display: t.format_display || '',
         dsd_rate:       t.dsd_rate       || '',
+        // Playlist colaborativa: quién agregó esta pista (avatar + nombre),
+        // solo presente en pistas que vinieron de /api/admin/colaborativa/
+        // cola-pendiente (ver ticket "avatar en el player del admin").
+        // null en cualquier pista reproducida normalmente.
+        collab_added_by: t.collab_added_by || null,
     };
 }
 
