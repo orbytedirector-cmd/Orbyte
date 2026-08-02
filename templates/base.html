@@ -58,6 +58,13 @@
         </div>
         {% elif collab_guest %}
         <div class="header-user">
+          <span class="avatar-circle" title="{{ collab_guest.name }}">
+            {% if collab_guest.avatar.type == 'image' %}
+            <img src="{{ collab_guest.avatar.url }}" alt="">
+            {% else %}
+            <span>{{ collab_guest.avatar.text }}</span>
+            {% endif %}
+          </span>
           <span class="header-user-email" title="Invitado de la playlist colaborativa">🎉 {{ collab_guest.name }}</span>
           <button type="button" id="collab-guest-pull-btn" class="header-user-link" style="display:none"
                   onclick="collabRequestPull()" title="Pedirle al anfitrión que cargue las últimas pistas agregadas">

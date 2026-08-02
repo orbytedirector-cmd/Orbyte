@@ -345,7 +345,10 @@ def inject_globals():
     # nombre + cupo en su lugar.
     collab_guest = None
     if session.get('is_collab_guest'):
-        collab_guest = {'name': session.get('collab_name', 'Invitado')}
+        collab_guest = {'name': session.get('collab_name', 'Invitado'),
+                         'avatar': session.get('collab_avatar')
+                                    or {'type': 'initials',
+                                        'text': _collab_initials(session.get('collab_name', 'Invitado'))}}
     return {'MOOD_LABELS': MOOD_LABELS, 'LED_LABELS': LED_LABELS,
             'ADV_QUALITY_OPTIONS': QUALITY_OPTIONS,
             'ADV_POP_BUCKETS': POP_BUCKETS,
@@ -356,6 +359,9 @@ def inject_globals():
 
 MUSIC_ROOT = "/mnt/musica/"
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "music.db")
+# Avatares de invitado para la playlist colaborativa (ver ticket "playlist
+# colaborativa" — selección de avatar). Viven en static/avatares/<categoria>/.
+AVATAR_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "avatares")
 
 # ── LED color definitions (iFi Zen DAC V2) ───────────────────────────────────
 # Source of truth: tracks.led_color field in the DB. Never recompute.
@@ -858,6 +864,65 @@ COLLAB_ALBUM_WARNING_THRESHOLD = 3     # aviso (no bloqueo) al pasar 3 pistas de
 COLLAB_DEFAULT_MAX_TRACKS      = 20
 COLLAB_DEFAULT_WINDOW_HOURS    = 2
 
+def _collab_avatar_sort_key(fname):
+    """Orden natural (1, 2, ..., 10, 11) en vez del orden lexicográfico que
+    daría os.listdir (1, 10, 11, 2, ...). Los archivos que no empiezan con
+    un número (no debería haber, pero por las dudas) quedan al final."""
+    m = re.match(r'(\d+)', fname)
+    return (0, int(m.group(1)), fname) if m else (1, 0, fname)
+
+def _collab_list_avatar_files(category):
+    """Lista los archivos de static/avatares/<category>/ tal cual están en
+    disco — sin asumir extensión .png, porque no todos la tienen (ver
+    masculinos/13). Cualquier archivo regular no oculto sirve; el navegador
+    ya sabe mostrar un PNG sin extensión con Content-Type correcto porque lo
+    sirve la ruta estática de Flask, que detecta el tipo por contenido/ruta
+    de todas formas vía send_from_directory."""
+    folder = os.path.join(AVATAR_DIR, category)
+    if not os.path.isdir(folder):
+        return []
+    files = [f for f in os.listdir(folder)
+             if not f.startswith('.') and os.path.isfile(os.path.join(folder, f))]
+    files.sort(key=_collab_avatar_sort_key)
+    return files
+
+def _collab_avatar_catalog():
+    """Catálogo completo para renderizar las 2 pestañas (Femeninos/Masculinos)
+    en collab_join.html."""
+    return {
+        'femeninos':  _collab_list_avatar_files('femeninos'),
+        'masculinos': _collab_list_avatar_files('masculinos'),
+    }
+
+def _collab_initials(name):
+    """Iniciales para el avatar circular por defecto (estilo Microsoft Teams)
+    cuando el invitado no elige ninguna imagen. 'Natalia Torres' -> NT
+    (primera letra del nombre + primera del último token). Una sola palabra,
+    'Natalia' -> NA (sus 2 primeras letras). Ver ticket."""
+    words = [w for w in (name or '').strip().split() if w]
+    if not words:
+        return '?'
+    if len(words) == 1:
+        w = words[0]
+        return (w[:2] if len(w) >= 2 else w[0] * 2).upper()
+    return (words[0][0] + words[-1][0]).upper()
+
+def _collab_resolve_avatar(form, name):
+    """A partir de lo que mandó el <form> de collab_join.html, decide el
+    avatar del invitado: la imagen elegida (validando que exista de verdad
+    en esa categoría, nunca confiar en el path que manda el cliente) o,
+    si no eligió ninguna, el círculo de iniciales. Se guarda en la sesión,
+    nunca en la base de datos (ver ticket)."""
+    category = form.get('avatar_category') or ''
+    fname = form.get('avatar_file') or ''
+    if category in ('femeninos', 'masculinos') and fname:
+        safe_fname = os.path.basename(fname)
+        if safe_fname in _collab_list_avatar_files(category):
+            return {'type': 'image',
+                    'url': url_for('static', filename=f'avatares/{category}/{safe_fname}')}
+    return {'type': 'initials', 'text': _collab_initials(name)}
+
+
 def _collab_active_session(conn):
     row = conn.execute(
         'SELECT * FROM collab_sessions WHERE is_active=1 ORDER BY id DESC LIMIT 1'
@@ -1227,11 +1292,23 @@ def collab_join(token):
             participant = dict(existing_row)
             conn.execute('UPDATE collab_participants SET last_seen=? WHERE id=?', (_utcnow_iso(), participant['id']))
             conn.commit()
+            # Reconexión del mismo dispositivo (QR re-escaneado o cookie
+            # perdida) — no se le vuelve a pedir avatar. Si la cookie de
+            # sesión seguía viva y es la de este mismo participante, el
+            # avatar elegido se mantiene; si no (cookie perdida), como no se
+            # guarda en la base de datos (ver ticket) se recae en las
+            # iniciales de su nombre para no dejarlo sin avatar.
+            if session.get('collab_participant_id') == participant['id']:
+                avatar = session.get('collab_avatar')
+            else:
+                avatar = None
         elif request.method == 'POST':
             name = (request.form.get('name') or '').strip()[:40] or 'Invitado'
             participant, _ = _collab_find_or_create_participant(conn, sess, name)
+            avatar = _collab_resolve_avatar(request.form, name)
         else:
-            return render_template('collab_join.html', error=None, collab_session=sess, token=token)
+            return render_template('collab_join.html', error=None, collab_session=sess, token=token,
+                                    avatar_catalog=_collab_avatar_catalog())
 
         session.clear()
         session.permanent = True
@@ -1239,6 +1316,8 @@ def collab_join(token):
         session['collab_session_id']     = sess['id']
         session['collab_participant_id'] = participant['id']
         session['collab_name']           = participant['name']
+        session['collab_avatar']         = avatar or {'type': 'initials',
+                                                        'text': _collab_initials(participant['name'])}
         return redirect(url_for('home'))
     finally:
         conn.close()

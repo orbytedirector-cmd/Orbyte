@@ -32,14 +32,113 @@
         y añadir pistas a la cola — hasta
         {{ collab_session.max_tracks }} pistas cada {{ collab_session.window_hours }}h.
       </p>
-      <form method="POST" class="auth-form">
+      <form method="POST" class="auth-form" id="collab-join-form">
         <label class="auth-label" for="collab-name">¿Cómo te llamamos?</label>
         <input type="text" id="collab-name" name="name" class="auth-input" maxlength="40"
                placeholder="Tu nombre" required autofocus autocomplete="off">
+
+        <label class="auth-label">Elegí tu avatar (opcional)</label>
+        <div class="avatar-picker">
+          <div class="avatar-picker-preview">
+            <span class="avatar-circle avatar-circle-lg" id="avatar-preview"><span>?</span></span>
+            <button type="button" class="track-btn ghost avatar-picker-clear" id="avatar-clear-btn" style="display:none">
+              Usar iniciales
+            </button>
+          </div>
+          <div class="avatar-picker-tabs">
+            <button type="button" class="avatar-tab-btn active" data-tab="femeninos">Femeninos</button>
+            <button type="button" class="avatar-tab-btn" data-tab="masculinos">Masculinos</button>
+          </div>
+          <div class="avatar-picker-grid" data-tab-panel="femeninos">
+            {% for f in avatar_catalog.femeninos %}
+            <button type="button" class="avatar-option" data-category="femeninos" data-file="{{ f }}" aria-label="Avatar femenino {{ loop.index }}">
+              <img src="{{ url_for('static', filename='avatares/femeninos/' ~ f) }}" alt="" loading="lazy">
+            </button>
+            {% endfor %}
+          </div>
+          <div class="avatar-picker-grid" data-tab-panel="masculinos" hidden>
+            {% for f in avatar_catalog.masculinos %}
+            <button type="button" class="avatar-option" data-category="masculinos" data-file="{{ f }}" aria-label="Avatar masculino {{ loop.index }}">
+              <img src="{{ url_for('static', filename='avatares/masculinos/' ~ f) }}" alt="" loading="lazy">
+            </button>
+            {% endfor %}
+          </div>
+        </div>
+        <input type="hidden" name="avatar_category" id="avatar-category-input">
+        <input type="hidden" name="avatar_file" id="avatar-file-input">
+
         <button type="submit" class="track-btn primary auth-submit">Unirme</button>
       </form>
       {% endif %}
     </div>
   </div>
+
+  <script>
+  (function () {
+    'use strict';
+    var nameInput = document.getElementById('collab-name');
+    var preview   = document.getElementById('avatar-preview');
+    var clearBtn  = document.getElementById('avatar-clear-btn');
+    var catInput  = document.getElementById('avatar-category-input');
+    var fileInput = document.getElementById('avatar-file-input');
+    var tabBtns   = document.querySelectorAll('.avatar-tab-btn');
+    var panels    = document.querySelectorAll('[data-tab-panel]');
+    var options   = document.querySelectorAll('.avatar-option');
+    if (!nameInput || !preview) return; // pantalla de error (QR inválido) — no hay form
+
+    // Mismo criterio que _collab_initials() en app.py: nombre y apellido ->
+    // primera letra de cada uno; una sola palabra -> sus 2 primeras letras.
+    function computeInitials(name) {
+      var words = (name || '').trim().split(/\s+/).filter(Boolean);
+      if (!words.length) return '?';
+      if (words.length === 1) {
+        var w = words[0];
+        return (w.length >= 2 ? w.slice(0, 2) : w[0] + w[0]).toUpperCase();
+      }
+      return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+    }
+
+    function showInitials() {
+      preview.innerHTML = '<span>' + computeInitials(nameInput.value) + '</span>';
+      preview.classList.remove('has-image');
+      clearBtn.style.display = 'none';
+      catInput.value = '';
+      fileInput.value = '';
+      options.forEach(function (o) { o.classList.remove('is-selected'); });
+    }
+
+    function selectAvatar(opt) {
+      options.forEach(function (o) { o.classList.remove('is-selected'); });
+      opt.classList.add('is-selected');
+      preview.innerHTML = '<img src="' + opt.querySelector('img').src + '" alt="">';
+      preview.classList.add('has-image');
+      clearBtn.style.display = '';
+      catInput.value = opt.dataset.category;
+      fileInput.value = opt.dataset.file;
+    }
+
+    nameInput.addEventListener('input', function () {
+      if (!preview.classList.contains('has-image')) showInitials();
+    });
+
+    tabBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        tabBtns.forEach(function (b) { b.classList.remove('active'); });
+        btn.classList.add('active');
+        panels.forEach(function (p) { p.hidden = p.getAttribute('data-tab-panel') !== btn.dataset.tab; });
+      });
+    });
+
+    options.forEach(function (opt) {
+      opt.addEventListener('click', function () {
+        opt.classList.contains('is-selected') ? showInitials() : selectAvatar(opt);
+      });
+    });
+
+    clearBtn.addEventListener('click', showInitials);
+
+    showInitials();
+  })();
+  </script>
 </body>
 </html>

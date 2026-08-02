@@ -2102,6 +2102,43 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
 .collab-delegate-btn { padding: 0.25rem 0.6rem; font-size: 0.72rem; }
 .collab-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
 
+/* ── Avatar de invitado (playlist colaborativa) ───────────────────────────
+   object-fit:cover en TODOS los círculos (header, preview, grid del picker)
+   es lo que hace que se vean "de la misma escala" aunque los .png de origen
+   no midan exactamente 350x350 (ver ticket) — se recortan al cuadrado del
+   círculo en vez de deformarse o quedar más chicos/grandes entre sí. */
+.avatar-circle {
+  width: 34px; height: 34px; border-radius: 50%; overflow: hidden; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim); border: 1px solid var(--border-gold);
+  color: var(--text-gold); font-weight: 700; font-size: 0.78rem;
+  font-family: 'Orbitron', system-ui, sans-serif; letter-spacing: 0.02em;
+}
+.avatar-circle img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar-circle-lg { width: 72px; height: 72px; font-size: 1.35rem; }
+
+.avatar-picker { margin-top: 0.35rem; }
+.avatar-picker-preview { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+.avatar-picker-clear { padding: 0.3rem 0.65rem; font-size: 0.75rem; }
+.avatar-picker-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.5rem; }
+.avatar-tab-btn {
+  flex: 1; background: var(--bg-elevated); border: 1px solid var(--border-light);
+  color: var(--text-secondary); border-radius: 8px; padding: 0.45rem 0.5rem;
+  font-size: 0.8rem; font-weight: 600; cursor: pointer; transition: all 0.15s; font-family: inherit;
+}
+.avatar-tab-btn.active { border-color: var(--accent); color: var(--text-gold); background: var(--accent-dim); }
+.avatar-picker-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 0.5rem;
+  max-height: 190px; overflow-y: auto; padding: 0.15rem;
+}
+.avatar-option {
+  width: 52px; height: 52px; border-radius: 50%; padding: 0; overflow: hidden;
+  border: 2px solid transparent; background: var(--bg-elevated); cursor: pointer; transition: border-color 0.15s;
+}
+.avatar-option img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.avatar-option:hover { border-color: var(--border-gold); }
+.avatar-option.is-selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-dim); }
+
 /* ── "Reproducir en…" (UPnP/DLNA) — mismo patrón visual que .outputs-wrap,
    pero como componente propio para poder mostrarlo solo al admin sin pisar
    el botón de Salida (que es de MPD en el server, otro concepto). */
