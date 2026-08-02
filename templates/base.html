@@ -59,6 +59,10 @@
         {% elif collab_guest %}
         <div class="header-user">
           <span class="header-user-email" title="Invitado de la playlist colaborativa">🎉 {{ collab_guest.name }}</span>
+          <button type="button" id="collab-guest-pull-btn" class="header-user-link" style="display:none"
+                  onclick="collabRequestPull()" title="Pedirle al anfitrión que cargue las últimas pistas agregadas">
+            ⬆ Actualizar cola
+          </button>
           <a href="/colab/salir" class="header-user-link header-user-logout" title="Salir de la sesión">⏻ Salir</a>
         </div>
         {% endif %}
@@ -420,7 +424,7 @@
        etc. para que "reproducir/añadir" en cualquier página (album.html,
        browse.html, etc., sin tocarlas) mande la pista a la cola del server
        en vez de sonar acá. -->
-  <script src="{{ url_for('static', filename='collab_guest.js') }}?v=20260725"></script>
+  <script src="{{ url_for('static', filename='collab_guest.js') }}?v=20260801"></script>
   {% endif %}
   {% if current_user and current_user.is_admin %}
   <!-- "Reproducir en…" (UPnP/DLNA) — solo el admin lo puede usar. -->

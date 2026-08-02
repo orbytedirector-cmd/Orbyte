@@ -1998,6 +1998,8 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   transition: border-color 0.15s, color 0.15s;
 }
 .header-user-link:hover { color: var(--accent); border-color: var(--accent); }
+/* #collab-guest-pull-btn es un <button>, no un <a> — resetea el estilo nativo */
+button.header-user-link { background: none; font-family: inherit; cursor: pointer; }
 
 /* ══════════════════════════════════════════════════════════════════════════
    Admin — panel de usuarios
@@ -2092,9 +2094,12 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 }
 .collab-participant-list { list-style: none; margin: 0.5rem 0 0; padding: 0; }
 .collab-participant-list li {
-  display: flex; justify-content: space-between; padding: 0.4rem 0;
-  border-bottom: 1px solid rgba(200,146,10,0.12); font-size: 0.88rem;
+  display: flex; justify-content: space-between; align-items: center; padding: 0.4rem 0;
+  border-bottom: 1px solid rgba(200,146,10,0.12); font-size: 0.88rem; gap: 0.6rem;
 }
+.collab-participant-right { display: flex; align-items: center; gap: 0.6rem; flex-shrink: 0; }
+.collab-delegate-badge { color: var(--text-gold); font-size: 0.75rem; font-weight: 700; }
+.collab-delegate-btn { padding: 0.25rem 0.6rem; font-size: 0.72rem; }
 .collab-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.9rem; }
 
 /* ── "Reproducir en…" (UPnP/DLNA) — mismo patrón visual que .outputs-wrap,

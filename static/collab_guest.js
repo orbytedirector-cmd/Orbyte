@@ -89,4 +89,40 @@
   window.toggleFavorite = function () {
     notify('Los favoritos son de las cuentas de usuario — como invitado de la playlist colaborativa no podés usarlos.');
   };
+
+  // ── Delegado: pedirle al anfitrión que cargue lo último agregado ────────
+  // El admin puede asignar/quitar este permiso en cualquier momento (ver
+  // /admin/colaborativa), así que el botón se muestra/oculta consultando el
+  // servidor en vez de una sola vez al entrar — si no, un invitado que ya
+  // tenía la página abierta no vería aparecer el botón cuando se lo asignan.
+  async function refreshPermiso() {
+    let data;
+    try {
+      data = await fetch('/api/collab/mi-permiso').then((r) => r.json());
+    } catch (e) {
+      return;
+    }
+    const btn = document.getElementById('collab-guest-pull-btn');
+    if (btn) btn.style.display = data.can_pull ? '' : 'none';
+  }
+
+  window.collabRequestPull = async function () {
+    let r;
+    try {
+      r = await postJSON('/api/collab/solicitar-pull', {});
+    } catch (e) {
+      notify('No se pudo conectar con el servidor.');
+      return;
+    }
+    if (r.status === 'ok') {
+      notify('Listo — le avisamos al anfitrión para que cargue las últimas pistas.');
+    } else {
+      notify(r.message || 'No se pudo enviar el pedido.');
+    }
+  };
+
+  if (document.getElementById('collab-guest-pull-btn')) {
+    refreshPermiso();
+    setInterval(refreshPermiso, 10000);
+  }
 })();

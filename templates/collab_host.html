@@ -44,9 +44,23 @@
     </div>
 
     <h2 class="admin-section-title">Participantes (<span id="collab-participant-count">{{ participants|length }}</span>)</h2>
+    <p style="margin:0 0 0.4rem;color:var(--text-secondary);font-size:0.82rem">
+      Podés designar a un participante como delegado — va a poder pedir desde
+      su celular que se cargue lo último que agregaron, sin que vos tengas
+      que tocar el tuyo (ideal si vas manejando).
+    </p>
     <ul class="collab-participant-list" id="collab-participant-list">
       {% for p in participants %}
-      <li><span>{{ p.name }}</span><span style="color:var(--text-muted)">{{ p.joined_at }}</span></li>
+      <li>
+        <span>{{ p.name }}{% if p.can_pull %} <span class="collab-delegate-badge" title="Puede pedir la actualización de la cola remotamente">★ delegado</span>{% endif %}</span>
+        <span class="collab-participant-right">
+          <span style="color:var(--text-muted)">{{ p.joined_at }}</span>
+          <button type="button" class="track-btn ghost collab-delegate-btn"
+                  onclick="collabSetDelegate({{ p.id }}, {{ 'false' if p.can_pull else 'true' }})">
+            {{ 'Quitar permiso' if p.can_pull else 'Dar permiso' }}
+          </button>
+        </span>
+      </li>
       {% else %}
       <li style="color:var(--text-muted)">Todavía nadie se unió.</li>
       {% endfor %}
@@ -56,6 +70,7 @@
       Pistas pendientes de cargar a tu reproductor:
       <strong id="collab-pending-count" style="color:var(--text-gold)">{{ pending_count }}</strong>
     </p>
+    <p id="collab-pull-status" style="margin:0.3rem 0 0;font-size:0.82rem;color:var(--text-muted)"></p>
 
     <div class="collab-actions">
       <button type="button" class="track-btn primary" onclick="collabPullQueue()">⬇ Actualizar cola</button>
@@ -67,5 +82,5 @@
   </div>
   {% endif %}
 </div>
-<script src="{{ url_for('static', filename='collab_host.js') }}?v=20260725"></script>
+<script src="{{ url_for('static', filename='collab_host.js') }}?v=20260801"></script>
 {% endblock %}

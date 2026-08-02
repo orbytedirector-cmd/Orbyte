@@ -478,6 +478,27 @@ def get_db_connection():
         "CREATE INDEX IF NOT EXISTS idx_collab_queue_participant_added "
         "ON collab_queue_items (participant_id, added_at)"
     )
+    # Lazy migration: "delegado" de playlist colaborativa (ticket: el admin
+    # designa a UN participante que pueda pedir la actualización de la cola
+    # sin que el admin tenga que tocar su celular — pensado para manejar y
+    # no distraerse). can_pull vive en el participante (a quién se lo
+    # delegaron); pull_requested_at/by viven en la sesión (el pedido en sí,
+    # uno a la vez — ver _collab_set_delegate y /api/collab/solicitar-pull).
+    try:
+        conn.execute("ALTER TABLE collab_participants ADD COLUMN can_pull INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
+    try:
+        conn.execute("ALTER TABLE collab_sessions ADD COLUMN pull_requested_at TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
+    try:
+        conn.execute("ALTER TABLE collab_sessions ADD COLUMN pull_requested_by INTEGER")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -603,6 +624,7 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'admin_dashboard', 'admin_users', 'admin_users_estado', 'admin_approve_user',
     'admin_reject_user', 'admin_revoke_user',
     'admin_collab', 'admin_collab_crear', 'admin_collab_finalizar', 'admin_collab_qr',
+    'admin_collab_permiso',
     'api_admin_collab_estado', 'api_admin_collab_pull',
     'api_favorites_list', 'api_favorites_toggle', 'api_favorites_rebuild_cache', 'favorites_page',
     'audio_file', 'stream_dsd', 'api_heartbeat',
@@ -921,6 +943,25 @@ def _collab_fair_order(conn, session_id):
                 pending = True
     return result
 
+def _collab_set_delegate(conn, session_id, participant_id, enable):
+    """Asigna o quita el permiso de 'delegado' (puede pedir la actualización
+    remota de la cola). Solo puede haber UN delegado a la vez por sesión —
+    asignarlo a alguien se lo quita automáticamente a cualquier otro (mismo
+    criterio que collab_sessions.is_active: simple y sin ambigüedad sobre
+    quién tiene la posta)."""
+    if enable:
+        conn.execute('UPDATE collab_participants SET can_pull=0 WHERE session_id=?', (session_id,))
+        conn.execute(
+            'UPDATE collab_participants SET can_pull=1 WHERE id=? AND session_id=?',
+            (participant_id, session_id)
+        )
+    else:
+        conn.execute(
+            'UPDATE collab_participants SET can_pull=0 WHERE id=? AND session_id=?',
+            (participant_id, session_id)
+        )
+    conn.commit()
+
 def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
     """Un solo intento de agregar UNA pista — usado por /api/collab/add.
     Devuelve un dict con 'status': ok | limit | duplicate | album_warning |
@@ -1034,6 +1075,30 @@ def admin_collab_finalizar():
     return redirect(url_for('admin_collab'))
 
 
+@app.route('/admin/colaborativa/participante/<int:participant_id>/permiso', methods=['POST'])
+@admin_required
+def admin_collab_permiso(participant_id):
+    """Alterna el permiso de 'delegado' de un participante de la sesión
+    activa (ver _collab_set_delegate). Llamado por fetch() desde
+    collab_host.js, no por navegación — responde JSON."""
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify({'status': 'error', 'message': 'No hay sesión activa.'}), 404
+        row = conn.execute(
+            'SELECT * FROM collab_participants WHERE id=? AND session_id=?',
+            (participant_id, sess['id'])
+        ).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Participante no encontrado.'}), 404
+        enable = not bool(row['can_pull'])
+        _collab_set_delegate(conn, sess['id'], participant_id, enable)
+        return jsonify({'status': 'ok', 'can_pull': enable})
+    finally:
+        conn.close()
+
+
 @app.route('/admin/colaborativa/qr.png')
 @admin_required
 def admin_collab_qr():
@@ -1067,14 +1132,26 @@ def api_admin_collab_estado():
         if not sess:
             return jsonify({'active': False})
         participants = [dict(r) for r in conn.execute(
-            'SELECT id, name, joined_at FROM collab_participants WHERE session_id=? ORDER BY joined_at',
+            'SELECT id, name, joined_at, can_pull FROM collab_participants WHERE session_id=? ORDER BY joined_at',
             (sess['id'],)
         ).fetchall()]
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
         ).fetchone()[0]
+        # Pedido remoto de actualización (ver /api/collab/solicitar-pull): el
+        # delegado lo dispara desde su celular, este poll (cada 6s) es lo que
+        # se lo hace llegar al dispositivo del anfitrión sin que tenga que
+        # tocar nada — ver collab_host.js.
+        pull_requested = bool(sess.get('pull_requested_at'))
+        pull_requested_by_name = None
+        if pull_requested and sess.get('pull_requested_by'):
+            req = conn.execute(
+                'SELECT name FROM collab_participants WHERE id=?', (sess['pull_requested_by'],)
+            ).fetchone()
+            pull_requested_by_name = req['name'] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
-                        'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours']})
+                        'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
+                        'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name})
     finally:
         conn.close()
 
@@ -1094,7 +1171,15 @@ def api_admin_collab_pull():
         if not sess:
             return jsonify([])
         ordered_items = _collab_fair_order(conn, sess['id'])
+        # Se limpia el pedido remoto (si había uno) apenas se atiende el
+        # pull, haya o no pistas nuevas — así el delegado no queda con el
+        # pedido "trabado" si ya no había nada pendiente para cargar.
+        conn.execute(
+            'UPDATE collab_sessions SET pull_requested_at=NULL, pull_requested_by=NULL WHERE id=?',
+            (sess['id'],)
+        )
         if not ordered_items:
+            conn.commit()
             return jsonify([])
         ids = [it['track_id'] for it in ordered_items]
         placeholders = ','.join('?' * len(ids))
@@ -1180,6 +1265,56 @@ def api_collab_add():
             confirm_album=bool(data.get('confirm_album'))
         )
         return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/api/collab/mi-permiso')
+def api_collab_mi_permiso():
+    """Consultado en loop corto por collab_guest.js para mostrar/ocultar el
+    botón 'Actualizar cola' en el header del invitado — el admin puede
+    asignar/quitar el permiso en cualquier momento, así que no alcanza con
+    lo que ya quedó en la cookie de sesión al unirse (ver collab_join)."""
+    if not session.get('is_collab_guest'):
+        return jsonify({'can_pull': False})
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess or sess['id'] != session.get('collab_session_id'):
+            return jsonify({'can_pull': False})
+        row = conn.execute(
+            'SELECT can_pull FROM collab_participants WHERE id=?', (session['collab_participant_id'],)
+        ).fetchone()
+        return jsonify({'can_pull': bool(row['can_pull']) if row else False})
+    finally:
+        conn.close()
+
+
+@app.route('/api/collab/solicitar-pull', methods=['POST'])
+def api_collab_solicitar_pull():
+    """El delegado pide, desde SU celular, que el anfitrión cargue las
+    últimas pistas agregadas a la cola. No ejecuta el pull acá — solo dispara
+    la bandera que /api/admin/colaborativa/estado le hace llegar al
+    dispositivo del anfitrión (el único que tiene la playlist real, ver
+    ticket) en el próximo poll (máx. 6s, ver collab_host.js)."""
+    if not session.get('is_collab_guest'):
+        return jsonify({'status': 'error', 'message': 'No sos parte de una sesión colaborativa activa.'}), 403
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess or sess['id'] != session.get('collab_session_id'):
+            return jsonify({'status': 'error', 'message': 'La sesión colaborativa ya terminó.'}), 410
+        row = conn.execute(
+            'SELECT can_pull FROM collab_participants WHERE id=?', (session['collab_participant_id'],)
+        ).fetchone()
+        if not row or not row['can_pull']:
+            return jsonify({'status': 'error', 'message': 'No tenés permiso para actualizar la cola.'}), 403
+        conn.execute(
+            'UPDATE collab_sessions SET pull_requested_at=?, pull_requested_by=? WHERE id=?',
+            (_utcnow_iso(), session['collab_participant_id'], sess['id'])
+        )
+        conn.commit()
+        return jsonify({'status': 'ok'})
     finally:
         conn.close()
 
