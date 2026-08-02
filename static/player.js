@@ -345,8 +345,10 @@ window.primeAudioForGesture = primeAudioForGesture;
 
 function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
-    _pairedNextIndex = null;   // cambio manual de pista — lo que estuviera sonando de un combo ya no aplica
-    _pairOffsetSec = 0;
+    _chainIndices = null;   // cambio manual de pista — lo que estuviera sonando de una ventana combinada ya no aplica
+    _chainBoundaries = [];
+    _chainOffsetSec = 0;
+    _chainSwapInFlight = false;
     currentIndex = index;
     window.currentIndex = currentIndex;   // expose for np-overlay active-queue marker
     _reconnectAttempts = 0;               // fresh track — reset abrupt-stop retry budget
@@ -365,31 +367,37 @@ function playTrack(index) {
     // Expose current track globally so base.html lyrics system can read track.id
     window._currentTrack = track;
 
-    // Crossfade (pares combinados): si está activo y hay una pista
-    // siguiente, se pide el archivo A+B combinado en vez del archivo normal
-    // de A — la transición se maneja después en _checkPairBoundary(), sin
-    // volver a tocar .src/.play() nunca. Si el combo falló una vez para
-    // esta pista (_pairGaveUpForIndex), no se reintenta en bucle — se
-    // reproduce A normal y listo.
+    // Crossfade (ventana rodante de N pistas): si está activo, se pide el
+    // archivo combinado de la ventana actual (currentIndex + hasta
+    // CHAIN_WINDOW_SIZE-1 siguientes) en vez del archivo normal de una sola
+    // pista — la transición entre pistas DENTRO de la ventana se maneja
+    // después en _checkChainBoundary(), sin volver a tocar .src/.play()
+    // nunca; el paso a la SIGUIENTE ventana lo maneja
+    // _maybeSwapToNextChainWindow(). Si esta ventana ya falló una vez
+    // (_chainGaveUpKey), no se reintenta en bucle — se reproduce la pista
+    // sola y listo.
     let audioSrc = track.audio_url ||
         (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path));
-    let pairedTrackObj = null;
-    if (crossfadeEnabled && track.duration && currentIndex < queue.length - 1 && _pairGaveUpForIndex !== currentIndex) {
-        const nextTrackObj = queue[currentIndex + 1];
-        const pairUrl = buildTrackPairUrl(track, nextTrackObj, crossfadeDurationSec);
-        if (pairUrl) {
-            audioSrc = pairUrl;
-            pairedTrackObj = nextTrackObj;
-            _prewarmPairIfNeeded(track, nextTrackObj);
+    let chainWindow = null;
+    if (crossfadeEnabled && track.duration) {
+        const win = _computeChainWindow(currentIndex);
+        if (win.length > 1 && _chainWindowKey(win) !== _chainGaveUpKey) {
+            const chainUrl = buildTrackChainUrl(win, crossfadeDurationSec);
+            if (chainUrl) {
+                audioSrc = chainUrl;
+                chainWindow = win;
+                _prewarmChainIfNeeded(_computeChainWindow(win[win.length - 1] + 1));
+            }
         }
     }
-    if (pairedTrackObj) {
-        _pairedNextIndex = currentIndex + 1;
-        _pairBoundarySec = track.duration || 0;
+    if (chainWindow) {
+        _chainIndices    = chainWindow;
+        _chainBoundaries = _computeChainBoundaries(chainWindow);
     } else {
-        _pairedNextIndex = null;
+        _chainIndices    = null;
+        _chainBoundaries = [];
     }
-    _pairOffsetSec = 0;
+    _chainOffsetSec = 0;
 
     if (track.is_dsd) {
         // Play via ffmpeg stream in the browser; also attempt native DAC via MPD (silent on error)
@@ -584,12 +592,13 @@ function updateProgress() {
     const ct   = document.getElementById('current-time');
     const tt   = document.getElementById('total-time');
 
-    // Si se está reproduciendo un combo A+B, currentAudio.currentTime cuenta
-    // desde el principio del ARCHIVO combinado — _pairOffsetSec es 0
-    // mientras se escucha A, y pasa a valer la duración de A apenas se
-    // cruza el borde (ver _checkPairBoundary), para que lo que se MUESTRA
-    // siga reflejando la posición dentro de la pista visible, no del combo.
-    const displayTime = Math.max(0, currentAudio.currentTime - _pairOffsetSec);
+    // Si se está reproduciendo una ventana combinada, currentAudio.currentTime
+    // cuenta desde el principio del ARCHIVO combinado — _chainOffsetSec es 0
+    // mientras se escucha la primera pista de la ventana, y pasa a valer el
+    // borde correspondiente apenas se cruza (ver _checkChainBoundary), para
+    // que lo que se MUESTRA siga reflejando la posición dentro de la pista
+    // visible, no de la ventana entera.
+    const displayTime = Math.max(0, currentAudio.currentTime - _chainOffsetSec);
     const dur = currentAudio._trackDuration || 0;
     const pct  = dur ? (displayTime / dur) * 100 : 0;
     if (fill) {
@@ -618,10 +627,15 @@ function updateProgress() {
         _hiddenStallRetries = 0;
     }
 
-    // Si se está reproduciendo un combo, revisar si ya se cruzó el borde
-    // entre A y B — esto reemplaza por completo al mecanismo de fundido
-    // superpuesto anterior (ver comentario grande más arriba).
-    if (_pairedNextIndex !== null) _checkPairBoundary();
+    // Si se está reproduciendo una ventana combinada: revisar si ya se
+    // cruzó algún borde interno, y si falta poco para el final real del
+    // archivo, intentar pasar a la ventana siguiente. Esto reemplaza por
+    // completo al mecanismo de fundido superpuesto anterior (ver
+    // comentario grande más arriba).
+    if (_chainIndices) {
+        _checkChainBoundary();
+        _maybeSwapToNextChainWindow();
+    }
 }
 
 
@@ -858,12 +872,16 @@ function seekFromClick(event, bar) {
 function setVolume(v) { if (currentAudio) currentAudio.volume = v; }
 
 function _handleTrackEnded() {
-    // Si esto dispara mientras se reproducía un combo A+B, el borde ya se
-    // cruzó hace rato (ver _checkPairBoundary, llamado en cada timeupdate) —
-    // esto es simplemente el final real del archivo combinado. Se limpia
-    // el estado del combo por las dudas y se sigue el flujo normal.
-    _pairedNextIndex = null;
-    _pairOffsetSec = 0;
+    // Si esto dispara mientras se reproducía una ventana combinada, todos
+    // sus bordes internos ya se cruzaron hace rato (ver _checkChainBoundary,
+    // llamado en cada timeupdate) y el swap a la siguiente ventana o no
+    // hacía falta (fin de cola) o no llegó a tiempo — esto es simplemente
+    // el final real del archivo combinado. Se limpia el estado por las
+    // dudas y se sigue el flujo normal.
+    _chainIndices = null;
+    _chainBoundaries = [];
+    _chainOffsetSec = 0;
+    _chainSwapInFlight = false;
 
     // A stream that dies mid-song (ffmpeg pipe closed, network drop) can surface as a
     // normal 'ended' event instead of 'error' — don't treat it as a real end-of-track.
@@ -903,11 +921,11 @@ function handleAudioError(e) {
     // el combo, porque el combo mide A+B) y de ahí saltaba con un
     // nextTrack() normal — hard reload con su buffering, en vez de la
     // transición sin cortes que ya estaba sonando. Ahora la decisión de
-    // abandonar el combo se posterga hasta más abajo, después de intentar
-    // reconectar AL MISMO combo (ver bloque de reconexión) — sólo se lo da
-    // por perdido si ese reintento también agota el presupuesto o la pista
-    // ya está por terminar.
-    const wasPaired = _pairedNextIndex !== null;
+    // abandonar la ventana se posterga hasta más abajo, después de intentar
+    // reconectar A LA MISMA ventana (ver bloque de reconexión) — sólo se la
+    // da por perdida si ese reintento también agota el presupuesto o la
+    // pista ya está por terminar.
+    const wasChained = Array.isArray(_chainIndices) && _chainIndices.length > 1;
 
     const lastPos = currentAudio.currentTime || 0;
     const realDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
@@ -915,7 +933,8 @@ function handleAudioError(e) {
     const nearEnd = dur > 0 && lastPos >= dur - 1.5;
     _rlog('handleAudioError_call', {
         reason: e && e.type, lastPos, dur, realDur, nearEnd, reconnectAttempts: _reconnectAttempts,
-        networkState: currentAudio.networkState, readyState: currentAudio.readyState, wasPaired,
+        networkState: currentAudio.networkState, readyState: currentAudio.readyState, wasChained,
+        chainSize: wasChained ? _chainIndices.length : 1,
     });
 
     // Stream dropped (network/pipe hiccup) mid-track — auto-reconnect instead of
@@ -961,7 +980,7 @@ function handleAudioError(e) {
                 const audioRef    = currentAudio;
                 const indexAtCall = currentIndex;
                 _rlog('hidden_stall_retry_scheduled', {
-                    attempt, lastPos, dur, wasPaired, readyState: currentAudio.readyState,
+                    attempt, lastPos, dur, wasChained, readyState: currentAudio.readyState,
                     delayMs: HIDDEN_PAUSE_RETRY_DELAY_MS,
                 });
                 setTimeout(() => {
@@ -978,34 +997,36 @@ function handleAudioError(e) {
                 }, HIDDEN_PAUSE_RETRY_DELAY_MS);
             } else {
                 _rlog('reconnect_suppressed_hidden', {
-                    lastPos, dur, reconnectAttempts: _reconnectAttempts, wasPaired,
+                    lastPos, dur, reconnectAttempts: _reconnectAttempts, wasChained,
                     hiddenStallRetriesUsed: _hiddenStallRetries,
                 });
             }
             return;
         }
         _reconnectAttempts++;
-        // Si el drop pasó reproduciendo un combo A+B, reconectar AL MISMO
-        // combo en vez de degradar a la pista sola — es un FLAC servido con
-        // Range igual que cualquier otro (ver _serve_audio en el server), así
-        // que reconecta exactamente igual. _pairedNextIndex/_pairBoundarySec/
-        // _pairOffsetSec no se tocan, así que _checkPairBoundary() sigue
+        // Si el drop pasó reproduciendo una ventana combinada, reconectar A
+        // LA MISMA ventana en vez de degradar a la pista sola — es un FLAC
+        // servido con Range igual que cualquier otro (ver _serve_audio en
+        // el server), así que reconecta exactamente igual. _chainIndices/
+        // _chainBoundaries/_chainOffsetSec no se tocan, así que
+        // _checkChainBoundary()/_maybeSwapToNextChainWindow() siguen
         // funcionando normal después de esto.
-        const pairUrl = wasPaired ? buildTrackPairUrl(track, queue[_pairedNextIndex], crossfadeDurationSec) : null;
-        const reconnectSrc = pairUrl ||
+        const chainUrl = wasChained ? buildTrackChainUrl(_chainIndices, crossfadeDurationSec) : null;
+        const reconnectSrc = chainUrl ||
             (track.audio_url || (track.is_dsd ? buildDsdStreamUrl(track.file_path) : buildAudioUrl(track.file_path)));
         console.warn(`[player] Stream dropped at ${lastPos.toFixed(1)}s — reconnecting (intento ${_reconnectAttempts})…`);
-        _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos, wasPaired, toPairUrl: !!pairUrl });
+        _rlog('reconnect_attempt', { attempt: _reconnectAttempts, lastPos, wasChained, toChainUrl: !!chainUrl });
         currentAudio.src = reconnectSrc;
         currentAudio.addEventListener('loadedmetadata', function _seekOnce() {
             currentAudio.removeEventListener('loadedmetadata', _seekOnce);
             if (lastPos > 0) currentAudio.currentTime = lastPos;
         });
         // _trackDuration siempre representa la duración de la pista visible
-        // actual (track A cuando hay combo) — nunca la duración real del
-        // recurso cargado, que al reconectar A+B mide el combo entero (A+B) y
-        // pisaría el total/progreso mostrado con un valor mucho más largo que
-        // el de la pista que en realidad se está viendo/escuchando.
+        // actual (la primera del tramo aún no cruzado, cuando hay ventana)
+        // — nunca la duración real del recurso cargado, que al reconectar
+        // una ventana mide TODA la ventana y pisaría el total/progreso
+        // mostrado con un valor mucho más largo que el de la pista que en
+        // realidad se está viendo/escuchando.
         currentAudio._trackDuration = track.duration || currentAudio._trackDuration || 0;
         currentAudio.load();
         currentAudio.play().catch(() => {});
@@ -1014,12 +1035,15 @@ function handleAudioError(e) {
 
     // A partir de acá se da por perdido el intento actual (se agotó el
     // presupuesto de reconexión, o la pista ya está casi en su final real).
-    // Si era un combo, ahora sí se abandona para esta pista — el próximo
-    // playTrack() para el siguiente índice ya no lo va a volver a pedir.
-    if (wasPaired) {
-        _pairGaveUpForIndex = currentIndex;
-        _pairedNextIndex = null;
-        _pairOffsetSec = 0;
+    // Si era una ventana combinada, ahora sí se abandona para esta
+    // combinación — el próximo playTrack()/_maybeSwapToNextChainWindow()
+    // para este mismo punto de la cola ya no la va a volver a pedir.
+    if (wasChained) {
+        _chainGaveUpKey  = _chainWindowKey(_chainIndices);
+        _chainIndices    = null;
+        _chainBoundaries = [];
+        _chainOffsetSec  = 0;
+        _chainSwapInFlight = false;
     }
 
     console.error('Audio error:', e);
@@ -1028,7 +1052,7 @@ function handleAudioError(e) {
         // dead track for the rest of the session. Move on so the playlist
         // keeps going instead of appearing to have just "stopped".
         console.warn('[player] Giving up on current track after repeated stream drops — skipping to next.');
-        _rlog('handleAudioError_giving_up', { reconnectAttempts: _reconnectAttempts, lastPos, dur, wasPaired });
+        _rlog('handleAudioError_giving_up', { reconnectAttempts: _reconnectAttempts, lastPos, dur, wasChained });
         nextTrack();
         return;
     }
@@ -1046,7 +1070,7 @@ function dispatchPlayerState(playing) {
 // pasó a 'playing', totalmente desconectado del <audio> real. Eso es lo que
 // hacía que el lock screen mostrara un current time/tiempo restante que no
 // coincidía con lo que sonaba: cada avance automático de pista (nextTrack),
-// cada cruce de borde de un combo A+B (_checkPairBoundary — el título/
+// cada cruce de borde interno de una ventana combinada (_checkChainBoundary — el título/
 // portada cambian pero playbackState nunca se toca, así que el sistema ni
 // se entera de que "empezó una pista nueva") y cada reconexión por drop de
 // red dejaban al sistema con su propio reloj interno cada vez más
@@ -1082,7 +1106,7 @@ function updateMediaSession(track, playing) {
     // sobre todo al cruzar el borde de un combo, donde el título cambia pero
     // ningún evento 'play'/'pause' se dispara para avisarle al sistema.
     if (currentAudio) {
-        const displayTime = Math.max(0, currentAudio.currentTime - _pairOffsetSec);
+        const displayTime = Math.max(0, currentAudio.currentTime - _chainOffsetSec);
         const dur = currentAudio._trackDuration || track.duration || 0;
         _updateMediaSessionPosition(displayTime, dur);
     }
@@ -1412,7 +1436,7 @@ window.updateTabTitle = updateTabTitle;
 // A fast safety limiter sits after the gain stage purely to catch clipping on
 // unexpected transients; it does not add loudness on its own. Nothing here
 // touches the source stream, the transcode, or the bitrate/format.
-// ── Crossfade — pares combinados (2da versión) ───────────────────────────────
+// ── Crossfade — ventana rodante de N pistas (3ra versión) ─────────────────────
 // La 1ra versión (dos <audio> simultáneos superpuestos) quedó bloqueada por
 // Chrome en 2do plano: "The play() request was interrupted because
 // video-only background media was paused to save power" — Chrome sólo
@@ -1421,20 +1445,26 @@ window.updateTabTitle = updateTabTitle;
 // contenido no reclamado y se corta.
 //
 // Este mecanismo evita el problema de raíz en vez de pelearlo: el servidor
-// combina la pista actual + la siguiente en UN SOLO archivo (con un fundido
-// corto en el borde), y el navegador lo reproduce de punta a punta como si
-// fuera una sola pista. Nunca hay un segundo .play() para la transición —
-// así que nunca se dispara la política que bloqueaba la versión anterior.
-// Cuando currentTime cruza el punto exacto donde termina A y empieza B, sólo
-// se actualiza la UI (título, portada, metadata) en silencio; el audio
-// nunca se corta ni se reinicia.
+// combina varias pistas seguidas (CHAIN_WINDOW_SIZE) en UN SOLO archivo (con
+// un fundido corto en cada borde interno), y el navegador lo reproduce de
+// punta a punta como si fuera una sola pista. Nunca hay un segundo .play()
+// para las transiciones DENTRO de la ventana — así que nunca se dispara la
+// política que bloqueaba la 1ra versión. Cuando currentTime cruza uno de
+// esos bordes internos, sólo se actualiza la UI (título, portada, metadata)
+// en silencio; el audio nunca se corta ni se reinicia.
 //
-// Alcance: sólo PARES (pista actual + siguiente). Encadenar 3+ pistas
-// seguidas sin nunca volver a tocar .play() implicaría combinar toda la cola
-// por adelantado — mucho más caro, y no compatible con una cola que el
-// usuario sigue modificando en vivo. Con pares alcanza para el caso
-// confirmado (la 2da transición en 2do plano es la que falla); si hiciera
-// falta encadenar más, conviene medirlo antes de construir más.
+// La 2da versión (sólo pares — pista actual + siguiente) resolvió el caso
+// confirmado por log (la 2da transición automática en 2do plano es la que
+// más falla), pero cada cambio de pista seguía siendo un momento de riesgo
+// si la app llevaba un buen rato oculta — exactamente lo que rondas
+// posteriores de prueba (sesiones largas, transporte público, teléfono
+// bloqueado) volvieron a mostrar. Esta versión generaliza el mismo
+// mecanismo a una VENTANA de N pistas que se va renovando sola a medida que
+// avanza la sesión (ver _maybeSwapToNextChainWindow) — el riesgo de cada
+// cambio de ARCHIVO pasa a ser 1 cada CHAIN_WINDOW_SIZE-1 pistas en vez de
+// 1 en cada una. Sigue sin ser "toda la cola de una" (demasiado caro de
+// transcodificar por adelantado y no compatible con una cola que el usuario
+// sigue editando en vivo) — es una cinta transportadora, no un tramo fijo.
 let crossfadeEnabled = false;
 try { crossfadeEnabled = localStorage.getItem('orbyte_crossfade') === '1'; } catch (e) {}
 
@@ -1446,60 +1476,199 @@ try {
 const CROSSFADE_MIN_SEC = 1;
 const CROSSFADE_MAX_SEC = 10;
 
-// Si currentAudio está reproduciendo un combo A+B, acá se guarda en qué
-// índice de la cola "empieza B" y en qué segundo del combo está el borde —
-// null cuando no se está reproduciendo un combo.
-let _pairedNextIndex     = null;
-let _pairBoundarySec     = null;   // segundo del archivo combinado donde A termina y empieza B
-let _pairOffsetSec       = 0;      // cuánto restarle a currentAudio.currentTime para el tiempo "real" de la pista visible
-let _pairGaveUpForIndex  = -1;     // si el combo falló una vez para esta pista, no reintentar en bucle
+// Tamaño de la ventana rodante: cuántas pistas seguidas se combinan en un
+// solo archivo. Con 2 (el valor original), CADA cambio de pista es un
+// momento de riesgo si la app está profundamente en 2do plano — con esto
+// en 3+, ese riesgo aparece una vez cada CHAIN_WINDOW_SIZE-1 transiciones
+// en vez de en todas. Subirlo cuesta más CPU/tiempo de transcode por
+// ventana en el server (ver "[chain-build]" en su log) — arrancar en 3 y
+// ajustar con datos reales de sesiones largas antes de subirlo más.
+const CHAIN_WINDOW_SIZE = 3;
 
-function buildTrackPairUrl(trackA, trackB, fadeSec) {
-    if (!trackA || !trackB || !trackA.id || !trackB.id) return null;
-    return `/api/track-pair/${trackA.id}/${trackB.id}?fade=${fadeSec}`;
+// Cuánto antes del final REAL de la ventana actual se intenta el cambio a
+// la siguiente — bastante más que el propio fundido para tener margen de
+// reintento si el primer intento cae oculto (ver _maybeSwapToNextChainWindow).
+function _chainSwapLeadSec() { return Math.max(6, crossfadeDurationSec + 2); }
+
+// Si currentAudio está reproduciendo una ventana combinada, acá se guarda
+// qué índices de cola entraron (ej. [1,2,3]) y en qué segundo del archivo
+// combinado está cada borde interno — null/[] cuando se reproduce una
+// pista sola.
+let _chainIndices       = null;   // índices de queue[] incluidos en el archivo que se está reproduciendo AHORA
+let _chainBoundaries    = [];     // [{index, atSec}] — un elemento por cada borde interno restante por cruzar, en orden
+let _chainOffsetSec     = 0;      // cuánto restarle a currentAudio.currentTime para el tiempo "real" de la pista visible
+let _chainGaveUpKey     = null;   // key (índices unidos por '-') de la última ventana que falló y no hay que reintentar en bucle
+let _chainSwapInFlight  = false;  // ya se disparó un cambio de ventana y se está esperando a que resuelva — evita reasignar .src en cada tick mientras tanto
+let _nextChainPrewarmed = null;   // key de la última ventana para la que ya se pidió prewarm — evita pedirlo de nuevo en cada tick
+
+function _chainWindowKey(indices) { return (indices || []).join('-'); }
+
+// Ventana de hasta CHAIN_WINDOW_SIZE índices de cola arrancando en
+// startIndex. Si hay menos pistas que eso hasta el final de la cola y
+// repeatMode==='all', envuelve al principio (sin repetir la misma pista
+// dos veces dentro de la MISMA ventana — playlists más chicas que la
+// ventana simplemente quedan con una ventana más corta).
+function _computeChainWindow(startIndex) {
+    const out = [];
+    for (let i = startIndex; i < queue.length && out.length < CHAIN_WINDOW_SIZE; i++) out.push(i);
+    if (repeatMode === 'all' && queue.length) {
+        for (let i = 0; out.length < CHAIN_WINDOW_SIZE && i < queue.length; i++) {
+            if (out.includes(i)) break;
+            out.push(i);
+        }
+    }
+    return out;
 }
 
-function _prewarmPairIfNeeded(trackA, trackB) {
-    if (!crossfadeEnabled || !trackA || !trackB || !trackA.id || !trackB.id) return;
+function _computeChainBoundaries(indices) {
+    const boundaries = [];
+    let cumulative = 0;
+    for (let k = 0; k < indices.length; k++) {
+        if (k > 0) boundaries.push({ index: indices[k], atSec: cumulative });
+        cumulative += (queue[indices[k]] && queue[indices[k]].duration) || 0;
+    }
+    return boundaries;
+}
+
+// fin/fout resuelven la ambigüedad que el server no puede resolver solo:
+// ¿la primera pista de esta ventana viene de un fundido anterior (otra
+// ventana que ya venía sonando), y sigue algo después de la última como
+// para que valga la pena que se apague en vez de terminar seca? Ver
+// comentario grande en _build_track_chain (app.py).
+function buildTrackChainUrl(indices, fadeSec) {
+    if (!indices || indices.length < 2) return null;
+    const ids = indices.map(i => queue[i] && queue[i].id).filter(Boolean);
+    if (ids.length !== indices.length) return null;
+    const fadeInFirst = indices[0] > 0 ? 1 : 0;
+    const fadeOutLast = indices[indices.length - 1] < queue.length - 1 ? 1 : 0;
+    return `/api/track-chain/${ids.join(',')}?fade=${fadeSec}&fin=${fadeInFirst}&fout=${fadeOutLast}`;
+}
+
+function _prewarmChainIfNeeded(indices) {
+    if (!crossfadeEnabled || !indices || indices.length < 2) return;
+    const key = _chainWindowKey(indices);
+    if (_nextChainPrewarmed === key) return;   // ya pedido para esta misma ventana — no repetir en cada tick
+    const url = buildTrackChainUrl(indices, crossfadeDurationSec);
+    if (!url) return;
+    _nextChainPrewarmed = key;
+    const t0 = performance.now();
+    _rlog('chain_prewarm_requested', { key, n: indices.length, titles: indices.map(i => queue[i] && queue[i].title) });
     try {
-        fetch(`/api/prewarm-pair/${trackA.id}/${trackB.id}?fade=${crossfadeDurationSec}`, { method: 'POST' })
+        fetch(url.replace('/api/track-chain/', '/api/prewarm-chain/'), { method: 'POST' })
             .then(r => r.json())
-            .then(d => _rlog('prewarm_pair_response', { a: trackA.title, b: trackB.title, status: d.status }))
+            .then(d => _rlog('chain_prewarm_response', { key, status: d.status, elapsedMs: Math.round(performance.now() - t0) }))
             .catch(() => {});
     } catch (e) { /* el prewarm es sólo una optimización — nunca debe romper nada */ }
 }
 
 // Se llama desde updateProgress() en cada timeupdate mientras se reproduce
-// un combo — cuando currentTime cruza el borde, "cambia de pista" sin
-// tocar el audio para nada, sólo actualizando la UI.
-function _checkPairBoundary() {
-    if (_pairedNextIndex === null || !currentAudio) return;
-    if (currentAudio.currentTime < _pairBoundarySec) return;
+// una ventana combinada — cuando currentTime cruza un borde interno,
+// "cambia de pista" sin tocar el audio para nada, sólo actualizando la UI.
+// while() en vez de if() porque un salto grande de currentTime entre dos
+// ticks (típico tras un rato de throttling en 2do plano) puede cruzar más
+// de un borde de una sola vez.
+function _checkChainBoundary() {
+    if (!_chainIndices || !currentAudio || !_chainBoundaries.length) return;
+    while (_chainBoundaries.length && currentAudio.currentTime >= _chainBoundaries[0].atSec) {
+        const boundary = _chainBoundaries.shift();
+        const nextTrackObj = queue[boundary.index];
+        if (!nextTrackObj) continue;
+        _rlog('chain_boundary_crossed', {
+            newIndex: boundary.index, title: nextTrackObj.title, atTime: currentAudio.currentTime,
+            windowPos: _chainIndices.indexOf(boundary.index) + 1, chainSize: _chainIndices.length,
+        });
+        _chainOffsetSec = boundary.atSec;
+        currentIndex = boundary.index;
+        window.currentIndex = currentIndex;
+        window._currentTrack = nextTrackObj;
+        currentAudio._trackDuration = nextTrackObj.duration || 0;
+        _reconnectAttempts = 0;
+        _unexpectedPauseRetries = 0;
+        _hiddenStallRetries = 0;
+        _lastProgressPos = currentAudio.currentTime;
+        if (!document.hidden) _bgAutoAdvanceCount = 0;
 
-    const nextIndex = _pairedNextIndex;
-    const nextTrackObj = queue[nextIndex];
-    _pairedNextIndex = null;
-    if (!nextTrackObj) return;
+        updatePlayerBar(nextTrackObj);
+        updateVisualizer(nextTrackObj.led_color);
+        dispatchPlayerState(true);
+        clearSyncedLyrics();
+        _prewarmUpcomingDsd();
+        _persistQueueState();
+    }
+}
 
-    _rlog('pair_boundary_crossed', { newIndex: nextIndex, title: nextTrackObj.title, atTime: currentAudio.currentTime });
+// Se llama desde updateProgress() y desde el watchdog mientras se
+// reproduce una ventana — cuando falta poco para el final REAL del
+// archivo combinado actual, intenta pasar a la ventana siguiente sin
+// cortar audio: reasigna .src al próximo combo (que debería estar
+// cacheado — se pidió su prewarm apenas arrancó ESTA ventana, ver
+// _prewarmChainIfNeeded) y sigue reproduciendo. chain_swap_* queda en el
+// log de cada intento — con eso se puede medir qué tan seguido el prewarm
+// llega a tiempo y qué tan seguido el swap cae oculto (chain_swap_deferred_hidden)
+// para decidir si CHAIN_WINDOW_SIZE necesita subir.
+function _maybeSwapToNextChainWindow() {
+    if (!_chainIndices || _chainSwapInFlight || !currentAudio) return;
+    const totalDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
+    if (!totalDur) return;
+    const remaining = totalDur - currentAudio.currentTime;
+    if (remaining > _chainSwapLeadSec()) return;
 
-    _pairOffsetSec = _pairBoundarySec;
-    currentIndex = nextIndex;
+    const lastIndex   = _chainIndices[_chainIndices.length - 1];
+    const nextWindow  = _computeChainWindow(lastIndex + 1);
+    if (nextWindow.length < 2) return;   // fin de cola sin repeat, o queda una sola pista suelta — nada que encadenar; _handleTrackEnded()/nextTrack() se hacen cargo como siempre
+
+    const key = _chainWindowKey(nextWindow);
+    if (key === _chainGaveUpKey) return;   // esta combinación ya falló una vez — no insistir en bucle
+
+    const url = buildTrackChainUrl(nextWindow, crossfadeDurationSec);
+    if (!url) return;
+
+    if (document.hidden) {
+        // Mismo motivo que en handleAudioError: reasignar .src en 2do plano
+        // es justo lo que congelaba el hilo de JS en pruebas anteriores. Acá
+        // el riesgo es menor (el audio actual sigue sonando bien, no
+        // venimos de un error) pero se registra igual — si en la práctica
+        // estos swaps SÍ andan bien ocultos, se puede sacar esta restricción
+        // en una próxima vuelta con los datos de chain_swap_deferred_hidden.
+        _rlog('chain_swap_deferred_hidden', { key, remaining, chainSize: nextWindow.length });
+        return;   // se reintenta solo en el próximo tick mientras quede margen
+    }
+
+    _chainSwapInFlight = true;
+    const t0 = performance.now();
+    _rlog('chain_swap_scheduled', { key, remaining, chainSizeFrom: _chainIndices.length, chainSizeTo: nextWindow.length });
+    currentAudio.src = url;
+    currentAudio.load();
+    currentAudio.play().then(() => {
+        _chainSwapInFlight = false;
+        _rlog('chain_swap_resolved', { key, elapsedMs: Math.round(performance.now() - t0) });
+    }).catch(e => {
+        _chainSwapInFlight = false;
+        _rlog('chain_swap_rejected', { key, error: String(e), name: e && e.name, elapsedMs: Math.round(performance.now() - t0) });
+        // No se revierte el estado de la ventana — igual que en handleAudioError,
+        // se sigue adelante y se deja que el watchdog / _handleUnexpectedPause
+        // recuperen este mismo elemento si hace falta.
+    });
+
+    _chainIndices    = nextWindow;
+    _chainBoundaries = _computeChainBoundaries(nextWindow);
+    _chainOffsetSec  = 0;
+    currentIndex     = nextWindow[0];
     window.currentIndex = currentIndex;
-    window._currentTrack = nextTrackObj;
-    currentAudio._trackDuration = nextTrackObj.duration || 0;
-    _reconnectAttempts      = 0;
-    _unexpectedPauseRetries = 0;
-    _hiddenStallRetries     = 0;
-    _lastProgressPos        = currentAudio.currentTime;
+    const newFirstTrack = queue[currentIndex];
+    window._currentTrack = newFirstTrack;
+    currentAudio._trackDuration = (newFirstTrack && newFirstTrack.duration) || 0;
+    _reconnectAttempts = 0; _unexpectedPauseRetries = 0; _hiddenStallRetries = 0;
+    _lastProgressPos = 0;
     if (!document.hidden) _bgAutoAdvanceCount = 0;
-
-    updatePlayerBar(nextTrackObj);
-    updateVisualizer(nextTrackObj.led_color);
-    dispatchPlayerState(true);
+    if (newFirstTrack) {
+        updatePlayerBar(newFirstTrack);
+        updateVisualizer(newFirstTrack.led_color);
+    }
     clearSyncedLyrics();
-    _prewarmUpcomingDsd();
     _persistQueueState();
+
+    _prewarmChainIfNeeded(_computeChainWindow(nextWindow[nextWindow.length - 1] + 1));
 }
 
 // Aviso puntual, no invasivo: un toast chico que se muestra UNA sola vez en
@@ -1672,6 +1841,11 @@ setInterval(() => {
         stallTicks:   _watchdogStallTicks,
         audioCtxState: _audioCtx ? _audioCtx.state : null,
     });
+
+    // El watchdog corre en su propio setInterval, independiente de
+    // 'timeupdate' — le da al swap de ventana una segunda oportunidad de
+    // ejecutarse si 'timeupdate' viene throttled en 2do plano.
+    if (_chainIndices) _maybeSwapToNextChainWindow();
 
     // El 'ended' nunca llegó pero la pista ya terminó — avanzar igual.
     if (currentAudio.ended) { _rlog('watchdog_branch', { branch: 'ended' }); _handleTrackEnded(); return; }
