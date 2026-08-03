@@ -855,7 +855,15 @@ function toggleShuffle() {
 window.toggleShuffle = toggleShuffle;
 
 function cycleRepeat() {
-    repeatMode = repeatMode === 'off' ? 'all' : (repeatMode === 'all' ? 'one' : 'off');
+    // Mientras el crossfade está activo, 'off' no es una opción válida — ver
+    // _ensureRepeatForCrossfade. Si el usuario quiere que la cola termine de
+    // verdad, tiene que apagar el crossfade primero (ahí sí puede volver a
+    // 'off'); forzarlo de nuevo a 'all' en cuanto lo tocara habría sido pelear
+    // contra su propia acción explícita, así que en vez de eso directamente
+    // no se lo ofrecemos como paso del ciclo.
+    repeatMode = crossfadeEnabled
+        ? (repeatMode === 'all' ? 'one' : 'all')
+        : (repeatMode === 'off' ? 'all' : (repeatMode === 'all' ? 'one' : 'off'));
     try { localStorage.setItem('orbyte_repeat', repeatMode); } catch (e) {}
     _updateShuffleRepeatButtons();
 }
@@ -1002,7 +1010,28 @@ function handleAudioError(e) {
             // reasignar nada puede destrabarlo; si el stall es de verdad
             // (todavía sin buffer suficiente), esto no hace nada pero tampoco
             // puede empeorar nada.
-            if (currentAudio.readyState >= 3 && _hiddenStallRetries < MAX_HIDDEN_PAUSE_RETRIES) {
+            // BUG encontrado en una sesión real (pista "Perry Mason", 2026-08-02):
+            // con el techo de MAX_HIDDEN_PAUSE_RETRIES puesto acá iguales que en
+            // _handleUnexpectedPause, una vez agotados los 6 intentos esto caía
+            // para siempre en la rama de abajo (reconnect_suppressed_hidden) sin
+            // ningún otro recurso — el watchdog seguía detectando el mismo stall
+            // cada ~10s y este bloque lo único que hacía era loguearlo, en bucle,
+            // durante MINUTOS, sin volver a intentar nada. A diferencia de
+            // _handleUnexpectedPause (donde SÍ hay red de contención: en cuanto
+            // vuelve a primer plano, visibilitychange disparaotro camino de
+            // recuperación), acá agotar el cupo no lleva a ningún lado más que
+            // quedar mudo hasta que el usuario reabre la app a mano — exactamente
+            // lo que se supone que este mecanismo tiene que evitar. Por eso, a
+            // diferencia del cupo de _unexpectedPauseRetries (que si tiene una
+            // salida de emergencia y se deja limitado), acá NO hay techo: se
+            // sigue reintentando el mismo .play() barato cada vez que el
+            // watchdog vuelve a detectar el stall (~cada 10s), sin límite,
+            // mientras siga oculto y con buffer sano. Es una llamada muy barata
+            // (no toca red ni .src) — la única forma de que esto termine mal es
+            // que jamás se destrabe solo, en cuyo caso el usuario de todos modos
+            // ya está esperando; reintentar para siempre le da al menos una
+            // chance de recuperarse sin que haga falta abrir la app.
+            if (currentAudio.readyState >= 3) {
                 _hiddenStallRetries++;
                 const attempt     = _hiddenStallRetries;
                 const audioRef    = currentAudio;
@@ -1495,6 +1524,7 @@ window.updateTabTitle = updateTabTitle;
 // sigue editando en vivo) — es una cinta transportadora, no un tramo fijo.
 let crossfadeEnabled = false;
 try { crossfadeEnabled = localStorage.getItem('orbyte_crossfade') === '1'; } catch (e) {}
+_ensureRepeatForCrossfade(/* silent */ true);   // si ya venía activado de una sesión anterior, alinear repeatMode sin mostrar el toast de recién activado
 
 let crossfadeDurationSec = 4;
 try {
@@ -1708,9 +1738,42 @@ function _showCrossfadeHint() {
     if (crossfadeEnabled) return;
     try { if (localStorage.getItem('orbyte_crossfade_hint_shown') === '1') return; } catch (e) {}
     try { localStorage.setItem('orbyte_crossfade_hint_shown', '1'); } catch (e) {}
+    _showToast('💡 Si la reproducción se corta al cambiar de pista en 2do plano, probá activar "Crossfade" en el reproductor.');
+}
+
+// Por qué existe esto: _computeChainWindow() ya sabía envolver al principio
+// de la cola cuando repeatMode==='all' (lo usamos para el loop entre el
+// último y el primer álbum de una sesión) — pero por defecto repeatMode
+// suele estar en 'off', y ahí la ÚLTIMA pista de la cola queda sin nada con
+// qué combinarse: ninguna ventana puede protegerla, y confirmado en una
+// sesión real (Run To The Hills, 2026-08-02) es exactamente el tipo de
+// pista que un congelamiento del sistema puede dejar trabada sin ningún
+// recurso posible. La solución no es más reintentos — es que directamente
+// pueda armarse una ventana ahí también. Si el crossfade está pensado como
+// una sesión continua que no debería cortarse nunca, tiene sentido que
+// mientras esté activo la cola tampoco "se termine": se fuerza repeatMode a
+// 'all' (salvo que ya esté en 'one', que se respeta) para que la última
+// pista siempre tenga con qué encadenarse — el primer tramo de la cola,
+// dando la vuelta.
+function _ensureRepeatForCrossfade(silent) {
+    if (!crossfadeEnabled || repeatMode === 'all' || repeatMode === 'one') return;
+    repeatMode = 'all';
+    try { localStorage.setItem('orbyte_repeat', repeatMode); } catch (e) {}
+    _rlog('repeat_forced_by_crossfade', { repeatMode, silent: !!silent });
+    _updateShuffleRepeatButtons();
+    if (!silent) _showCrossfadeRepeatToast();
+}
+
+function _showCrossfadeRepeatToast() {
+    try { if (localStorage.getItem('orbyte_crossfade_repeat_hint_shown') === '1') return; } catch (e) {}
+    try { localStorage.setItem('orbyte_crossfade_repeat_hint_shown', '1'); } catch (e) {}
+    _showToast('🔁 Con crossfade activo, la lista se repite sola — así la última pista también puede combinarse con la primera, sin quedar desprotegida.');
+}
+
+function _showToast(text) {
     try {
         const toast = document.createElement('div');
-        toast.textContent = '💡 Si la reproducción se corta al cambiar de pista en 2do plano, probá activar "Crossfade" en el reproductor.';
+        toast.textContent = text;
         toast.style.cssText = 'position:fixed;left:50%;bottom:90px;transform:translateX(-50%);' +
             'max-width:90vw;background:rgba(20,20,24,0.94);color:#fff;padding:10px 16px;' +
             'border-radius:10px;font-size:13px;line-height:1.4;z-index:9999;' +
@@ -1732,6 +1795,7 @@ function toggleCrossfade() {
     crossfadeEnabled = !crossfadeEnabled;
     try { localStorage.setItem('orbyte_crossfade', crossfadeEnabled ? '1' : '0'); } catch (e) {}
     _rlog('crossfade_toggle', { crossfadeEnabled, chainWindowSize: CHAIN_WINDOW_SIZE, fadeSec: crossfadeDurationSec });
+    _ensureRepeatForCrossfade();
     _updateCrossfadeButtons();
 }
 window.toggleCrossfade = toggleCrossfade;
