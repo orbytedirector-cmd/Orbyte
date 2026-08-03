@@ -317,6 +317,19 @@ function _prewarmUpcomingDsd() {
 
 // ── Queue & playback ──────────────────────────────────────────────────────────
 
+// El botón principal de play (#play-btn) queda inhabilitado (data-empty="true",
+// pointer-events:none vía CSS) mientras no hay nada cargado. Antes solo
+// playTrack() lo rehabilitaba, así que armar una playlist con "➕ Playlist"
+// sin reproducir nada primero lo dejaba inerte — para retomarla había que
+// tocar el ▶ de cada item, incómodo en mobile. Se sincroniza acá según el
+// tamaño real de la cola, independiente de si ya se reprodujo algo.
+function _syncPlayBtnAvailability() {
+    const playBtn = document.getElementById('play-btn');
+    if (!playBtn) return;
+    if (queue.length > 0) playBtn.removeAttribute('data-empty');
+    else playBtn.setAttribute('data-empty', 'true');
+}
+
 function loadQueue(tracks) {
     queue = tracks.map(t => ({
         id:             t.id,
@@ -342,6 +355,7 @@ function loadQueue(tracks) {
     }));
     // Notify playlist panel so it reflects the current queue
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
+    _syncPlayBtnAvailability();
     _prewarmUpcomingDsd();
     _persistQueueState();
 }
@@ -2098,6 +2112,7 @@ function appendToQueue(track) {
     const normalized = _normalizeTrack(track);
     queue.push(normalized);
     document.dispatchEvent(new CustomEvent('queueLoaded', { detail: { tracks: queue } }));
+    _syncPlayBtnAvailability();
     _prewarmDsd(normalized);   // el push puede caer fuera de la ventana de lookahead — precalentar directo
     _persistQueueState();
 }
