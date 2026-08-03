@@ -385,6 +385,18 @@ window.primeAudioForGesture = primeAudioForGesture;
 
 function playTrack(index) {
     if (index < 0 || index >= queue.length) return;
+    // Antes de tirar todo abajo: si la pista pedida ya viene incluida en el
+    // archivo combinado que está sonando AHORA MISMO (por ej. le diste
+    // "siguiente" a una pista que el crossfade ya había prewarmeado junto
+    // con la actual), no hace falta pedir nada nuevo — sólo saltar adentro
+    // del mismo audio, igual que ya hace solo _checkChainBoundary() al
+    // cruzar un borde. Encontrado con un caso real (2026-08-03): "Yellow" ya
+    // estaba cargada junto con "Mr. Brightside", pero al apretar "siguiente"
+    // se pedía una ventana nueva de cero — que esta vez sí incluía una pista
+    // DSD y quedó pegada varios minutos en el auto sin sonar. Este atajo
+    // evita justamente ese pedido innecesario.
+    if (_trySeekWithinChain(index)) return;
+
     _markTransitionGapStart();   // cualquier playTrack() implica pedir un recurso de audio nuevo — acá arranca a contar el posible silencio, hasta que 'playing' lo cierre
     _chainIndices = null;   // cambio manual de pista — lo que estuviera sonando de una ventana combinada ya no aplica
     _chainBoundaries = [];
@@ -1600,6 +1612,55 @@ function _computeChainBoundaries(indices) {
         cumulative += (queue[indices[k]] && queue[indices[k]].duration) || 0;
     }
     return boundaries;
+}
+
+// En qué segundo del archivo combinado empieza targetIndex, si es que
+// targetIndex forma parte de la ventana indices — null si no está.
+function _findChainOffsetSec(indices, targetIndex) {
+    let cumulative = 0;
+    for (let k = 0; k < indices.length; k++) {
+        if (indices[k] === targetIndex) return cumulative;
+        cumulative += (queue[indices[k]] && queue[indices[k]].duration) || 0;
+    }
+    return null;
+}
+
+// Si targetIndex ya viene incluido en la ventana combinada que está sonando
+// ahora mismo, saltar directo ahí adentro del MISMO archivo — sin pedir
+// nada nuevo, sin tocar .src, sin ningún riesgo de red. Devuelve true si lo
+// pudo resolver así; false si targetIndex no está en la ventana actual (o no
+// hay ninguna ventana activa) y hay que seguir con el camino normal de
+// playTrack(). Sirve tanto para saltar hacia adelante (targetIndex todavía
+// no se cruzó) como hacia atrás (ya se cruzó y quedó afuera de
+// _chainBoundaries) — por eso recalcula los bordes desde cero con
+// _computeChainBoundaries() en vez de reusar lo que quedó en _chainBoundaries.
+function _trySeekWithinChain(targetIndex) {
+    if (!_chainIndices || !currentAudio) return false;
+    const offset = _findChainOffsetSec(_chainIndices, targetIndex);
+    if (offset === null) return false;
+    const targetTrack = queue[targetIndex];
+    if (!targetTrack) return false;
+
+    _rlog('chain_seek_within_call', { targetIndex, offset, chainSize: _chainIndices.length });
+    currentAudio.currentTime = offset;
+    _chainBoundaries = _computeChainBoundaries(_chainIndices).filter(b => b.atSec > offset);
+    _chainOffsetSec  = offset;
+    currentIndex     = targetIndex;
+    window.currentIndex = currentIndex;
+    window._currentTrack = targetTrack;
+    currentAudio._trackDuration = targetTrack.duration || 0;
+    _reconnectAttempts = 0; _unexpectedPauseRetries = 0; _hiddenStallRetries = 0;
+    _lastProgressPos = currentAudio.currentTime;
+    if (!document.hidden) _bgAutoAdvanceCount = 0;
+    _shouldBePlaying = true;
+    if (currentAudio.paused) currentAudio.play().catch(() => {});
+    updatePlayerBar(targetTrack);
+    updateVisualizer(targetTrack.led_color);
+    dispatchPlayerState(true);
+    clearSyncedLyrics();
+    _prewarmUpcomingDsd();
+    _persistQueueState();
+    return true;
 }
 
 // fin/fout resuelven la ambigüedad que el server no puede resolver solo:
