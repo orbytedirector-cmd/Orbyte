@@ -1737,8 +1737,38 @@ function _checkChainBoundary() {
 // cacheado — se pidió su prewarm apenas arrancó ESTA ventana, ver
 // _prewarmChainIfNeeded) y sigue reproduciendo. chain_swap_* queda en el
 // log de cada intento — con eso se puede medir qué tan seguido el prewarm
-// llega a tiempo y qué tan seguido el swap cae oculto (chain_swap_deferred_hidden)
-// para decidir si CHAIN_WINDOW_SIZE necesita subir.
+// llega a tiempo.
+//
+// Hasta 2026-08-03 esto se difería por completo mientras document.hidden
+// fuera true (mismo motivo que en handleAudioError: reasignar .src es la
+// operación que en pruebas anteriores dejaba el hilo de JS congelado en
+// 2do plano), reintentando en cada tick sin nunca hacer el swap. El bug:
+// diferir "para siempre" no evita esa reasignación de .src, sólo la
+// posterga hasta el peor momento posible — en cuanto currentAudio llega al
+// final real de la ventana y dispara 'ended', _handleTrackEnded() →
+// nextTrack() → playTrack() hacen la MISMA reasignación de .src, pero ahí
+// sin ningún guard de "oculto" (playTrack() nunca tuvo uno) y sin ningún
+// margen: el audio ya está mudo, no hay ningún prewarm fresco para ESE
+// instante puntual. Confirmado con log real (iPhone, 2026-08-03, Aces
+// High→Hallowed Be Thy Name, ambas DSD): el swap quedó en bucle de
+// chain_swap_deferred_hidden hasta remaining=0, y de ahí la pista quedó
+// muda ~8 minutos hasta volver a primer plano — exactamente el corte que
+// este mecanismo existe para evitar, sólo que reubicado en el peor punto
+// posible en vez de prevenido.
+//
+// A diferencia de esa reconexión de emergencia (destino no
+// necesariamente cacheado, dispara tras un drop ya en curso) y a
+// diferencia del cold-start de playTrack() (elemento recién creado, sin
+// nada sonando todavía), este swap apunta a una ventana prewarmeada
+// server-side desde que arrancó la ventana ACTUAL — para cuando se llega
+// acá (con _chainSwapLeadSec() de margen, varios segundos antes del
+// final real) ya tuvo toda la duración de la ventana actual para
+// terminar de transcodificar y quedar cacheada en disco (ver
+// /api/prewarm-chain en app.py), así que el fetch debería resolver casi
+// al instante — y se hace sobre un <audio> que en este mismo momento
+// sigue sonando, no uno que ya se quedó en silencio. Por eso ya no se
+// difiere: se intenta el swap también estando oculto, aprovechando ese
+// margen en vez de dejar que se agote solo.
 function _maybeSwapToNextChainWindow() {
     if (!_chainIndices || _chainSwapInFlight || !currentAudio) return;
     const totalDur = (currentAudio.duration && isFinite(currentAudio.duration)) ? currentAudio.duration : 0;
@@ -1755,17 +1785,6 @@ function _maybeSwapToNextChainWindow() {
 
     const url = buildTrackChainUrl(nextWindow, crossfadeDurationSec);
     if (!url) return;
-
-    if (document.hidden) {
-        // Mismo motivo que en handleAudioError: reasignar .src en 2do plano
-        // es justo lo que congelaba el hilo de JS en pruebas anteriores. Acá
-        // el riesgo es menor (el audio actual sigue sonando bien, no
-        // venimos de un error) pero se registra igual — si en la práctica
-        // estos swaps SÍ andan bien ocultos, se puede sacar esta restricción
-        // en una próxima vuelta con los datos de chain_swap_deferred_hidden.
-        _rlog('chain_swap_deferred_hidden', { key, remaining, chainSize: nextWindow.length });
-        return;   // se reintenta solo en el próximo tick mientras quede margen
-    }
 
     _chainSwapInFlight = true;
     _markTransitionGapStart();   // reasignar .src acá también puede cortar el audio un instante — se mide igual que cualquier otra transición
