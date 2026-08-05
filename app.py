@@ -2990,16 +2990,7 @@ def _build_track_chain(paths, durations, cache_path, fade_sec, fade_in_first, fa
         if want_in and this_fade > 0:
             chain += f',afade=t=in:st=0:d={this_fade:.3f}'
         if want_out and this_fade > 0:
-            # afade=t=out con st= absoluto depende de que `dur` (la
-            # columna duration de la DB) coincida con la duración REAL
-            # decodificada del archivo. Cuando la real es más corta que
-            # la guardada, st cae después del final real y ffmpeg nunca
-            # llega a aplicar el fade — la pista corta en seco justo en
-            # su final de verdad en vez de apagarse. areverse+afade=in+
-            # areverse aplica el fade sobre los últimos this_fade
-            # segundos que en verdad existen, sea cual sea su duración
-            # real — no depende de `dur` para nada.
-            chain += f',areverse,afade=t=in:st=0:d={this_fade:.3f},areverse'
+            chain += f',afade=t=out:st={max(0.0, dur - this_fade):.3f}:d={this_fade:.3f}'
         chain += f'[a{i}]'
         filter_parts.append(chain)
         concat_labels.append(f'[a{i}]')

@@ -1199,38 +1199,7 @@ function updateMediaSession(track, playing) {
     // por el bloqueo de pantalla, sin esto los botones del lock screen
     // "no hacen nada" (audio internamente sigue mudo aunque currentAudio
     // reporte estar reproduciendo).
-    navigator.mediaSession.setActionHandler('play',         () => {
-        _rlog('mediasession_action', { action: 'play' });
-        _shouldBePlaying = true;
-        _resumeAudioCtxIfNeeded();
-        if (currentAudio) {
-            currentAudio.play().then(() => {
-                _rlog('mediasession_play_resolved', { currentTime: currentAudio.currentTime });
-            }).catch(e => {
-                // Un .play() disparado desde el lock screen/CarPlay puede
-                // rechazarse en silencio si el stream quedó en un estado
-                // stale tras un rato pausado en 2do plano (readyState
-                // degradado, buffer vencido) — sin este manejo, la UI queda
-                // diciendo "reproduciendo" mientras el audio sigue mudo, y
-                // la única forma de notarlo era reabrir la app a mano (el
-                // botón de play del lock screen tocaba lo mismo una y otra
-                // vez sin que nada cambiara). Se revierte el estado optimista
-                // y se reusa el mismo camino de reconexión ya probado que
-                // usa cualquier otro drop de stream, en vez de inventar uno
-                // nuevo acá.
-                _rlog('mediasession_play_rejected', {
-                    error: String(e), name: e && e.name,
-                    readyState: currentAudio.readyState, networkState: currentAudio.networkState,
-                });
-                dispatchPlayerState(false);
-                const playBtn = document.getElementById('play-btn');
-                if (playBtn) playBtn.textContent = '▶';
-                navigator.mediaSession.playbackState = 'paused';
-                handleAudioError({ type: 'mediasession-play-rejected' });
-            });
-        }
-        dispatchPlayerState(true);
-    });
+    navigator.mediaSession.setActionHandler('play',         () => { _rlog('mediasession_action', { action: 'play' });  _shouldBePlaying = true;  _resumeAudioCtxIfNeeded(); currentAudio && currentAudio.play(); dispatchPlayerState(true);  });
     navigator.mediaSession.setActionHandler('pause',        () => { _rlog('mediasession_action', { action: 'pause' }); _shouldBePlaying = false; currentAudio && currentAudio.pause(); dispatchPlayerState(false); });
     navigator.mediaSession.setActionHandler('previoustrack',() => { _rlog('mediasession_action', { action: 'previoustrack' }); _resumeAudioCtxIfNeeded(); prevTrack(); });
     navigator.mediaSession.setActionHandler('nexttrack',    () => { _rlog('mediasession_action', { action: 'nexttrack' });     _resumeAudioCtxIfNeeded(); nextTrack(); });
@@ -1671,14 +1640,6 @@ function _trySeekWithinChain(targetIndex) {
     if (offset === null) return false;
     const targetTrack = queue[targetIndex];
     if (!targetTrack) return false;
-    // Sin metadata todavía (arranque en frío de esta misma ventana hace
-    // instantes, o un stall server-side todavía en curso) no hay nada
-    // confiable donde aplicar el seek — dejar que playTrack() lo maneje
-    // como arranque normal en vez de fijar currentTime a ciegas.
-    if (currentAudio.readyState < 1) {
-        _rlog('chain_seek_within_skip_not_ready', { targetIndex, offset, readyState: currentAudio.readyState });
-        return false;
-    }
 
     _rlog('chain_seek_within_call', { targetIndex, offset, chainSize: _chainIndices.length });
     currentAudio.currentTime = offset;
