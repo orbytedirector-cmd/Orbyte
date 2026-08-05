@@ -2289,7 +2289,7 @@ def api_meta_tracks():
     dir_       = request.args.get('dir',        'desc')
     intercalar = request.args.get('intercalar', '0') == '1'
 
-    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre'}
+    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre', 'led'}
     if field not in ALLOWED_FIELDS or not value:
         return jsonify({'error': 'invalid field or value'}), 400
 
@@ -2316,6 +2316,9 @@ def api_meta_tracks():
         if field == 'genre':
             base_where  = '(t.genre=? OR tm.genre_primary=?)'
             base_params = (value, value)
+        elif field == 'led':
+            base_where  = 't.led_color=?'
+            base_params = (value,)
         else:
             base_where  = f'tm.{field}=?'
             base_params = (value,)
@@ -2325,8 +2328,10 @@ def api_meta_tracks():
         # sus '?' necesitan su valor otra vez, en el mismo orden.
         full_params = base_params + base_params
 
-        if field == 'genre':
-            # Same match as browse_genre: classic tracks.genre OR track_meta.genre_primary
+        if field in ('genre', 'led'):
+            # genre: classic tracks.genre OR track_meta.genre_primary (browse_genre).
+            # led: t.led_color directo (browse_led) — ninguno de los dos depende
+            # de que exista fila en track_meta, así que no puede ser INNER JOIN.
             count = conn.execute(f'''
                 SELECT COUNT(*) FROM tracks t
                 LEFT JOIN track_meta tm ON tm.track_id=t.id
