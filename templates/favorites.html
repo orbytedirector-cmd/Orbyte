@@ -42,7 +42,14 @@
 {% endif %}
 
 <script>
-const FAV_TRACKS = {{ tracks_json|safe }};
+// window.FAV_TRACKS (no "const"): esta vista se re-renderiza vía SPA
+// (navigateTo() en base.html reinyecta y re-ejecuta este <script> cada vez
+// que se vuelve a /favorites sin recarga completa, p.ej. Home → Favoritos →
+// Álbum → Favoritos). Una segunda "const FAV_TRACKS" en el mismo scope
+// global tira SyntaxError y aborta todo el bloque — playFavorites/
+// playFavTrack/removeFav quedaban sin (re)definirse y sus botones no hacían
+// nada al pincharlos.
+window.FAV_TRACKS = {{ tracks_json|safe }};
 
 // Refresh _favIds from server data — covers tracks added in previous sessions
 // that the SPA navigation may not have included in the initial window._favIds

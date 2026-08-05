@@ -323,10 +323,18 @@
 
 <script>
 // ── Track data ────────────────────────────────────────────────────────────────
-const TRACK_DATA = {{ track|tojson }};
+// window.TRACK_DATA / window.TRACK_META / window.lyricsLoaded (no "const"/"let"):
+// esta vista se re-renderiza vía SPA (navigateTo() en base.html reinyecta y
+// re-ejecuta este <script> cada vez que se navega a otra pista sin recarga
+// completa) y, a diferencia de album.html/browse.html, este bloque no está
+// envuelto en un IIFE. Una segunda "const TRACK_DATA" en el mismo scope
+// global tira SyntaxError y aborta TODO el script en silencio — playThisTrack,
+// addThisToPlaylist, openTrackLyricsModal, etc. quedaban sin (re)definirse en
+// la pista de destino, así que sus botones no hacían nada al pincharlos.
+window.TRACK_DATA = {{ track|tojson }};
 TRACK_DATA.cover_url = '{{ track.cover_path|cover_url }}';
 TRACK_DATA.audio_url = '{{ track.file_path|audio_url }}';
-const TRACK_META = {{ track_meta|tojson }};
+window.TRACK_META = {{ track_meta|tojson }};
 
 // ── Top moods chips ───────────────────────────────────────────────────────────
 (function() {
@@ -394,7 +402,7 @@ function closeTrackLyricsModal() {
   document.body.style.overflow = '';
 }
 
-let lyricsLoaded = false;
+window.lyricsLoaded = false;
 
 async function fetchLyricsModal() {
   if (lyricsLoaded) return;
