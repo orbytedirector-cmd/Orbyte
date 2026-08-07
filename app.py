@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.parse import quote
-from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context, session, redirect, url_for
+from flask import Flask, render_template, request, send_file, jsonify, Response, stream_with_context, session, redirect, url_for, g
 # itsdangerous ya viene con Flask (lo usa internamente para firmar la cookie
 # de sesión) — no es una dependencia nueva. La usamos para los tokens de
 # /cast-audio: de corta duración y atados a una pista puntual, para que un
@@ -664,6 +664,11 @@ def _require_login():
     ep = request.endpoint
     if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio', 'cast_cover') or request.path.startswith('/static/'):
         return
+    # /api/v1/*: API del cliente nativo (Orbyte-iOS). Usa token Bearer propio
+    # en vez de la cookie de sesión — se protege endpoint por endpoint con
+    # @api_login_required, nunca por este gate de cookie/sesión.
+    if request.path.startswith('/api/v1/'):
+        return
     # Sesión de invitado de playlist colaborativa: autenticada pero acotada
     # a un subconjunto de la app — nunca pasa por el chequeo de user_id/
     # is_approved de abajo, que es exclusivo de cuentas reales.
@@ -762,6 +767,96 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for('login'))
+
+# ── API v1: autenticación del cliente nativo (Orbyte-iOS) ────────────────────
+# Cookie de sesión no sirve para un cliente nativo (no hay cookie jar
+# persistente entre lanzamientos de la app), así que emitimos un token
+# firmado con itsdangerous — mismo mecanismo que ya usa /cast-audio, sin
+# agregar ninguna dependencia nueva. El cliente lo guarda en el Keychain y lo
+# manda como 'Authorization: Bearer <token>' en cada request a /api/v1/*.
+_api_token_signer = URLSafeTimedSerializer(app.secret_key, salt='api-auth-v1')
+_API_TOKEN_MAX_AGE = 60 * 60 * 24 * 30  # 30 días
+
+def api_login_required(view):
+    """Como login_required, pero para /api/v1/*: exige el header Authorization
+    en vez de cookie de sesión, y SIEMPRE responde JSON — nunca redirige a
+    una página HTML de login, porque del otro lado no hay navegador."""
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        auth = request.headers.get('Authorization', '')
+        if not auth.startswith('Bearer '):
+            return jsonify({'error': 'not_authenticated'}), 401
+        token = auth[len('Bearer '):]
+        try:
+            user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+        except (BadSignature, SignatureExpired):
+            return jsonify({'error': 'invalid_token'}), 401
+        conn = get_db_connection()
+        try:
+            row = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+            user = dict(row) if row else None
+        finally:
+            conn.close()
+        if not user or not user['is_approved']:
+            return jsonify({'error': 'not_authenticated'}), 401
+        g.api_user = user
+        return view(*args, **kwargs)
+    return wrapped
+
+@app.route('/api/v1/auth/login', methods=['POST'])
+def api_v1_login():
+    """Login para el cliente nativo. Recibe JSON {email, password}, devuelve
+    un token Bearer de larga duración (30 días) si las credenciales son
+    válidas y la cuenta ya fue aprobada por el admin."""
+    data = request.get_json(silent=True) or {}
+    email    = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+        user = dict(row) if row else None
+    finally:
+        conn.close()
+    if not user or not check_password_hash(user['password_hash'], password):
+        return jsonify({'error': 'invalid_credentials'}), 401
+    if not user['is_approved']:
+        return jsonify({'error': 'account_not_approved'}), 403
+    _touch_user_activity(user['id'])
+    token = _api_token_signer.dumps(user['id'])
+    return jsonify({
+        'token': token,
+        'user': {
+            'id': user['id'],
+            'email': user['email'],
+            'is_admin': bool(user['is_admin']),
+        }
+    })
+
+@app.route('/api/v1/auth/me')
+@api_login_required
+def api_v1_me():
+    """Perfil del usuario autenticado — mismos campos que ya existen en la
+    tabla users, para la pantalla de Cuenta del cliente nativo."""
+    user = g.api_user
+    return jsonify({
+        'id':           user['id'],
+        'email':        user['email'],
+        'is_admin':     bool(user['is_admin']),
+        'is_approved':  bool(user['is_approved']),
+        'created_at':   user['created_at'],
+        'last_seen':    user['last_seen'],
+        'last_device':  user['last_device'],
+        'last_ip':      user['last_ip'],
+    })
+
+@app.route('/api/v1/auth/logout', methods=['POST'])
+@api_login_required
+def api_v1_logout():
+    """No hay estado server-side que revocar con tokens itsdangerous — el
+    logout real ocurre cuando el cliente borra el token del Keychain. Este
+    endpoint solo registra la actividad y da un cierre prolijo a la API."""
+    _touch_user_activity(g.api_user['id'])
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/heartbeat', methods=['POST'])
 @login_required
