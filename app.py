@@ -662,7 +662,10 @@ def _require_login():
     """Protege toda la plataforma: sin sesión válida, redirige a /login (o
     devuelve 401 JSON para rutas /api/ para no romper el JS del cliente)."""
     ep = request.endpoint
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio', 'cast_cover') or request.path.startswith('/static/'):
+    # 'cover': mismo criterio que 'cast_cover' (ya exento arriba) — una
+    # carátula de álbum no es información sensible, y el cliente nativo no
+    # maneja cookies de sesión persistentes entre lanzamientos de la app.
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio', 'cast_cover', 'cover_file') or request.path.startswith('/static/'):
         return
     # /api/v1/*: API del cliente nativo (Orbyte-iOS). Usa token Bearer propio
     # en vez de la cookie de sesión — se protege endpoint por endpoint con
@@ -857,6 +860,52 @@ def api_v1_logout():
     endpoint solo registra la actividad y da un cierre prolijo a la API."""
     _touch_user_activity(g.api_user['id'])
     return jsonify({'status': 'ok'})
+
+@app.route('/api/v1/albums')
+@api_login_required
+def api_v1_albums():
+    """Listado paginado de álbumes para la pantalla Home del cliente nativo.
+    Reusa cover_url_filter (la misma función que ya usan los templates de la
+    PWA) — así el cliente nativo y la web resuelven portadas exactamente
+    igual, sin duplicar lógica de encoding de rutas."""
+    try:
+        limit = max(1, min(int(request.args.get('limit', 50)), 200))
+    except ValueError:
+        limit = 50
+    try:
+        offset = max(0, int(request.args.get('offset', 0)))
+    except ValueError:
+        offset = 0
+
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            '''SELECT al.id, al.name, al.year, al.cover_path, al.track_count,
+                      al.total_duration, ar.id as artist_id, ar.name as artist_name
+               FROM albums al
+               LEFT JOIN artists ar ON ar.id = al.artist_id
+               ORDER BY al.created_at DESC
+               LIMIT ? OFFSET ?''',
+            (limit, offset)
+        ).fetchall()
+        total = conn.execute('SELECT COUNT(*) as c FROM albums').fetchone()['c']
+    finally:
+        conn.close()
+
+    albums = []
+    for r in rows:
+        d = dict(r)
+        albums.append({
+            'id':             d['id'],
+            'name':           d['name'],
+            'year':           d['year'],
+            'track_count':    d['track_count'],
+            'total_duration': d['total_duration'],
+            'artist_id':      d['artist_id'],
+            'artist_name':    d['artist_name'],
+            'cover_url':      cover_url_filter(d['cover_path']),
+        })
+    return jsonify({'albums': albums, 'total': total, 'limit': limit, 'offset': offset})
 
 @app.route('/api/heartbeat', methods=['POST'])
 @login_required
