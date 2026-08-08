@@ -900,6 +900,109 @@ def api_v1_logout():
     _touch_user_activity(g.api_user['id'])
     return jsonify({'status': 'ok'})
 
+def api_admin_required(view):
+    """Como api_login_required, pero además exige is_admin=1 (403 si no).
+    Envuelve api_login_required en vez de reimplementar la validación del
+    token, para no duplicar esa lógica."""
+    @api_login_required
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if not g.api_user['is_admin']:
+            return jsonify({'error': 'not_admin'}), 403
+        return view(*args, **kwargs)
+    return wrapped
+
+@app.route('/api/v1/admin/users')
+@api_admin_required
+def api_v1_admin_users():
+    """Espejo de admin_users (web) en JSON — mismo orden, mismo criterio de
+    'online' (ONLINE_WINDOW_MINUTES), para la pantalla de administración
+    del cliente nativo."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            'SELECT * FROM users ORDER BY is_approved ASC, created_at DESC'
+        ).fetchall()
+        users = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+              - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+
+    def _shape(u):
+        return {
+            'id':           u['id'],
+            'email':        u['email'],
+            'is_admin':     bool(u['is_admin']),
+            'is_approved':  bool(u['is_approved']),
+            'created_at':   u['created_at'],
+            'approved_at':  u['approved_at'],
+            'last_seen':    u['last_seen'],
+            'last_device':  u['last_device'],
+            'last_ip':      u['last_ip'],
+            'online':       bool(u['last_seen'] and u['last_seen'] >= cutoff),
+        }
+
+    shaped = [_shape(u) for u in users]
+    pending = [u for u in shaped if not u['is_approved']]
+    approved = [u for u in shaped if u['is_approved']]
+    return jsonify({
+        'pending': pending,
+        'approved': approved,
+        'online_count': sum(1 for u in shaped if u['online']),
+    })
+
+@app.route('/api/v1/admin/users/<int:user_id>/approve', methods=['POST'])
+@api_admin_required
+def api_v1_admin_approve(user_id):
+    """Idéntico a admin_approve_user (web), en JSON."""
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE users SET is_approved=1, approved_at=? WHERE id=?',
+                     (_utcnow_iso(), user_id))
+        conn.commit()
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+    finally:
+        conn.close()
+    if row:
+        _send_account_approved_email(row['email'])
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/v1/admin/users/<int:user_id>/reject', methods=['POST'])
+@api_admin_required
+def api_v1_admin_reject(user_id):
+    """Idéntico a admin_reject_user (web): BORRA al usuario, no es un
+    estado. Protege la cuenta de administrador igual que la web."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+        if row and row['email'] == ADMIN_EMAIL:
+            return jsonify({'error': 'cannot_modify_admin'}), 400
+        conn.execute('DELETE FROM users WHERE id=?', (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    if row:
+        _send_account_rejected_email(row['email'])
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/v1/admin/users/<int:user_id>/revoke', methods=['POST'])
+@api_admin_required
+def api_v1_admin_revoke(user_id):
+    """Idéntico a admin_revoke_user (web). Protege la cuenta de
+    administrador igual que la web."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+        if row and row['email'] == ADMIN_EMAIL:
+            return jsonify({'error': 'cannot_modify_admin'}), 400
+        conn.execute('UPDATE users SET is_approved=0, approved_at=NULL WHERE id=?', (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok'})
+
 @app.route('/api/v1/albums')
 @api_login_required
 def api_v1_albums():
