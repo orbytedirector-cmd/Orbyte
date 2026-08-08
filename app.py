@@ -835,6 +835,45 @@ def api_v1_login():
         }
     })
 
+@app.route('/api/v1/auth/signup', methods=['POST'])
+def api_v1_signup():
+    """Signup del cliente nativo — mismas reglas de validación y mismo mail
+    HTML de 'pendiente de aprobación' que /signup (web). A propósito NO
+    devuelve token: igual que la web, el usuario recién creado tiene que
+    pasar por /api/v1/auth/login después (y si no es el admin, esperar
+    aprobación) — no hay auto-login para mantener el mismo comportamiento."""
+    data = request.get_json(silent=True) or {}
+    email    = (data.get('email') or '').strip().lower()
+    password = data.get('password') or ''
+
+    if not email or '@' not in email or '.' not in email.split('@')[-1]:
+        return jsonify({'error': 'invalid_email'}), 400
+    if len(password) < 8:
+        return jsonify({'error': 'weak_password'}), 400
+
+    conn = get_db_connection()
+    try:
+        if conn.execute('SELECT id FROM users WHERE email=?', (email,)).fetchone():
+            return jsonify({'error': 'email_taken'}), 409
+
+        is_admin_email = (email == ADMIN_EMAIL)
+        now = _utcnow_iso()
+        conn.execute(
+            'INSERT INTO users (email, password_hash, is_admin, is_approved, created_at, approved_at) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (email, generate_password_hash(password),
+             1 if is_admin_email else 0, 1 if is_admin_email else 0,
+             now, now if is_admin_email else None)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    if not is_admin_email:
+        _send_signup_pending_email(email)
+
+    return jsonify({'status': 'admin_created' if is_admin_email else 'pending'})
+
 @app.route('/api/v1/auth/me')
 @api_login_required
 def api_v1_me():
