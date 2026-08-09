@@ -791,7 +791,10 @@ def login():
             error = 'Tu cuenta aún no ha sido aprobada por el administrador.'
         else:
             session.clear()
-            session.permanent  = True
+            # 'Recordarme': tildado por defecto en el HTML — si se desmarca,
+            # la sesión no es permanente y expira al cerrar el navegador en
+            # vez de durar PERMANENT_SESSION_LIFETIME (30 días).
+            session.permanent       = (request.form.get('remember') == 'on')
             session['user_id']     = user['id']
             session['user_email']  = user['email']
             session['is_admin']    = bool(user['is_admin'])
