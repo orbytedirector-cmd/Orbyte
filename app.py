@@ -426,6 +426,37 @@ def get_db_connection():
             last_ip       TEXT
         )
     ''')
+    # Lazy migration: perfil extendido (Ticket 05, Lote D) — avatar (reusa
+    # los mismos assets de static/avatares/ que ya usa la playlist
+    # colaborativa), bio libre, géneros favoritos como JSON (mismo patrón
+    # que similar_artists_json/similar_tracks_json ya existentes).
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN bio TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN favorite_genres_json TEXT")
+        conn.commit()
+    except Exception:
+        pass
+    # Lazy migration: bandas favoritas del usuario (máximo 5, reforzado en
+    # el endpoint, no acá). FK a artists real — a diferencia de los géneros,
+    # una banda favorita sí necesita referenciar un id real del catálogo
+    # para poder mostrarla con datos reales (portada, nombre correcto).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS user_favorite_artists (
+            user_id     INTEGER NOT NULL,
+            artist_id   INTEGER NOT NULL,
+            added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, artist_id)
+        )
+    ''')
     # Lazy migration: Playlist colaborativa (QR + invitados + cola). Igual
     # que arriba, CREATE TABLE IF NOT EXISTS es prácticamente gratis una vez
     # creadas. Solo puede haber UNA sesión activa a la vez (is_active=1) —
@@ -931,6 +962,144 @@ def api_v1_change_password():
     if err == 'weak_password':
         return jsonify({'error': 'weak_password'}), 400
     return jsonify({'status': 'ok'})
+
+AVATARES_DIR = os.path.join(app.root_path, 'static', 'avatares')
+
+@app.route('/api/v1/avatars')
+@api_login_required
+def api_v1_avatars():
+    """Lista los avatares reales disponibles en static/avatares/ — los
+    mismos que ya usa la playlist colaborativa, no assets nuevos."""
+    avatars = []
+    for category in ('femeninos', 'masculinos'):
+        folder = os.path.join(AVATARES_DIR, category)
+        if not os.path.isdir(folder):
+            continue
+        for filename in sorted(os.listdir(folder)):
+            if filename.lower().endswith('.png'):
+                avatars.append(f'{category}/{filename}')
+    return jsonify({'avatars': avatars})
+
+@app.route('/api/v1/genres')
+@api_login_required
+def api_v1_genres():
+    """Géneros reales del catálogo (no texto libre) — para que 'géneros
+    favoritos' sirva de verdad para sugerencias/notificaciones futuras."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT genre_primary FROM album_meta "
+            "WHERE genre_primary IS NOT NULL AND genre_primary != '' "
+            "ORDER BY genre_primary"
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify({'genres': [r['genre_primary'] for r in rows]})
+
+@app.route('/api/v1/artists/search')
+@api_login_required
+def api_v1_artists_search():
+    """Buscador de bandas para elegir favoritas — reusa la tabla artists
+    existente, no hay catálogo separado que mantener."""
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify({'artists': []})
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            'SELECT id, name FROM artists WHERE name LIKE ? ORDER BY name LIMIT 20',
+            (f'%{q}%',)
+        ).fetchall()
+    finally:
+        conn.close()
+    return jsonify({'artists': [{'id': r['id'], 'name': r['name']} for r in rows]})
+
+def _profile_payload(user_id):
+    """Arma el JSON de perfil extendido — usado tanto por GET como después
+    de cada PUT/POST/DELETE, para no duplicar el shape de la respuesta."""
+    conn = get_db_connection()
+    try:
+        user = conn.execute(
+            'SELECT avatar, bio, favorite_genres_json FROM users WHERE id=?', (user_id,)
+        ).fetchone()
+        favorites = conn.execute(
+            '''SELECT a.id, a.name FROM user_favorite_artists ufa
+               JOIN artists a ON a.id = ufa.artist_id
+               WHERE ufa.user_id=? ORDER BY ufa.added_at''',
+            (user_id,)
+        ).fetchall()
+    finally:
+        conn.close()
+    genres = json.loads(user['favorite_genres_json']) if user and user['favorite_genres_json'] else []
+    return {
+        'avatar': user['avatar'] if user else None,
+        'bio': user['bio'] if user else None,
+        'favorite_genres': genres,
+        'favorite_artists': [{'id': r['id'], 'name': r['name']} for r in favorites],
+    }
+
+@app.route('/api/v1/profile')
+@api_login_required
+def api_v1_profile_get():
+    return jsonify(_profile_payload(g.api_user['id']))
+
+@app.route('/api/v1/profile', methods=['PUT'])
+@api_login_required
+def api_v1_profile_update():
+    data = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        if 'avatar' in data:
+            conn.execute('UPDATE users SET avatar=? WHERE id=?', (data['avatar'], g.api_user['id']))
+        if 'bio' in data:
+            conn.execute('UPDATE users SET bio=? WHERE id=?', ((data['bio'] or '')[:500], g.api_user['id']))
+        if 'favorite_genres' in data:
+            genres = data['favorite_genres'] if isinstance(data['favorite_genres'], list) else []
+            conn.execute('UPDATE users SET favorite_genres_json=? WHERE id=?',
+                         (json.dumps(genres), g.api_user['id']))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(_profile_payload(g.api_user['id']))
+
+@app.route('/api/v1/profile/favorite-artists', methods=['POST'])
+@api_login_required
+def api_v1_profile_add_favorite_artist():
+    data = request.get_json(silent=True) or {}
+    artist_id = data.get('artist_id')
+    if not artist_id:
+        return jsonify({'error': 'missing_artist_id'}), 400
+    conn = get_db_connection()
+    try:
+        count = conn.execute(
+            'SELECT COUNT(*) as c FROM user_favorite_artists WHERE user_id=?', (g.api_user['id'],)
+        ).fetchone()['c']
+        if count >= 5:
+            return jsonify({'error': 'max_favorites_reached'}), 400
+        if not conn.execute('SELECT id FROM artists WHERE id=?', (artist_id,)).fetchone():
+            return jsonify({'error': 'artist_not_found'}), 404
+        conn.execute(
+            'INSERT OR IGNORE INTO user_favorite_artists (user_id, artist_id) VALUES (?, ?)',
+            (g.api_user['id'], artist_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(_profile_payload(g.api_user['id']))
+
+@app.route('/api/v1/profile/favorite-artists/<int:artist_id>', methods=['DELETE'])
+@api_login_required
+def api_v1_profile_remove_favorite_artist(artist_id):
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            'DELETE FROM user_favorite_artists WHERE user_id=? AND artist_id=?',
+            (g.api_user['id'], artist_id)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(_profile_payload(g.api_user['id']))
 
 @app.route('/api/v1/auth/me')
 @api_login_required
