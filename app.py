@@ -854,25 +854,34 @@ _api_token_signer = URLSafeTimedSerializer(app.secret_key, salt='api-auth-v1')
 _API_TOKEN_MAX_AGE = 60 * 60 * 24 * 30  # 30 días
 
 def api_login_required(view):
-    """Como login_required, pero para /api/v1/*: exige el header Authorization
-    en vez de cookie de sesión, y SIEMPRE responde JSON — nunca redirige a
-    una página HTML de login, porque del otro lado no hay navegador."""
+    """Para /api/v1/*: acepta token Bearer (cliente nativo) O cookie de
+    sesión activa (fetch() same-origin desde la propia web) — así la web
+    puede reusar estos mismos endpoints para el perfil extendido sin que
+    tengamos que duplicar cada ruta en una versión 'web' y otra 'nativa'.
+    Siempre responde JSON, nunca redirige a una página HTML de login."""
     @wraps(view)
     def wrapped(*args, **kwargs):
         auth = request.headers.get('Authorization', '')
-        if not auth.startswith('Bearer '):
-            return jsonify({'error': 'not_authenticated'}), 401
-        token = auth[len('Bearer '):]
-        try:
-            user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
-        except (BadSignature, SignatureExpired):
-            return jsonify({'error': 'invalid_token'}), 401
-        conn = get_db_connection()
-        try:
-            row = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
-            user = dict(row) if row else None
-        finally:
-            conn.close()
+        user = None
+        if auth.startswith('Bearer '):
+            token = auth[len('Bearer '):]
+            try:
+                user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+            except (BadSignature, SignatureExpired):
+                return jsonify({'error': 'invalid_token'}), 401
+            conn = get_db_connection()
+            try:
+                row = conn.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+                user = dict(row) if row else None
+            finally:
+                conn.close()
+        elif session.get('user_id'):
+            conn = get_db_connection()
+            try:
+                row = conn.execute('SELECT * FROM users WHERE id=?', (session['user_id'],)).fetchone()
+                user = dict(row) if row else None
+            finally:
+                conn.close()
         if not user or not user['is_approved']:
             return jsonify({'error': 'not_authenticated'}), 401
         g.api_user = user
