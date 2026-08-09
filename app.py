@@ -953,6 +953,28 @@ def api_v1_admin_users():
         'online_count': sum(1 for u in shaped if u['online']),
     })
 
+@app.route('/api/v1/admin/users/status')
+@api_admin_required
+def api_v1_admin_users_status():
+    """Espejo de admin_users_estado (web) — JSON liviano para refrescar
+    online/last_seen/last_device sin traer la lista completa de nuevo.
+    Pensado para pollearse cada 15s, igual que hace la web."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT id, last_seen, last_device FROM users').fetchall()
+    finally:
+        conn.close()
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+              - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+    users = {}
+    for r in rows:
+        users[str(r['id'])] = {
+            'online':      bool(r['last_seen'] and r['last_seen'] >= cutoff),
+            'last_seen':   r['last_seen'],
+            'last_device': r['last_device'],
+        }
+    return jsonify({'users': users, 'online_count': sum(1 for u in users.values() if u['online'])})
+
 @app.route('/api/v1/admin/users/<int:user_id>/approve', methods=['POST'])
 @api_admin_required
 def api_v1_admin_approve(user_id):
