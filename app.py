@@ -731,6 +731,45 @@ def signup():
                 conn.close()
     return render_template('signup.html', error=error)
 
+def _change_user_password(user_id, current_password, new_password):
+    """Valida y aplica un cambio de contraseña. Devuelve None si OK, o un
+    código de error — compartido entre la ruta web (/account) y la API
+    nativa (/api/v1/auth/change-password) para no duplicar la validación."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT password_hash FROM users WHERE id=?', (user_id,)).fetchone()
+        if not row or not check_password_hash(row['password_hash'], current_password):
+            return 'wrong_current_password'
+        if len(new_password) < 8:
+            return 'weak_password'
+        conn.execute('UPDATE users SET password_hash=? WHERE id=?',
+                     (generate_password_hash(new_password), user_id))
+        conn.commit()
+        return None
+    finally:
+        conn.close()
+
+@app.route('/account', methods=['GET', 'POST'])
+@login_required
+def account():
+    error = None
+    success = None
+    if request.method == 'POST':
+        current_password = request.form.get('current_password', '')
+        new_password     = request.form.get('new_password', '')
+        new_password2    = request.form.get('new_password2', '')
+        if new_password != new_password2:
+            error = 'Las contraseñas nuevas no coinciden.'
+        else:
+            err = _change_user_password(session['user_id'], current_password, new_password)
+            if err == 'wrong_current_password':
+                error = 'La contraseña actual es incorrecta.'
+            elif err == 'weak_password':
+                error = 'La nueva contraseña debe tener al menos 8 caracteres.'
+            else:
+                success = 'Contraseña actualizada correctamente.'
+    return render_template('account.html', error=error, success=success)
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if session.get('user_id'):
@@ -873,6 +912,22 @@ def api_v1_signup():
         _send_signup_pending_email(email)
 
     return jsonify({'status': 'admin_created' if is_admin_email else 'pending'})
+
+@app.route('/api/v1/auth/change-password', methods=['POST'])
+@api_login_required
+def api_v1_change_password():
+    """Espejo de /account (web), en JSON, para el cliente nativo. Reusa
+    _change_user_password — misma validación en los dos lados."""
+    data = request.get_json(silent=True) or {}
+    current_password = data.get('current_password') or ''
+    new_password     = data.get('new_password') or ''
+
+    err = _change_user_password(g.api_user['id'], current_password, new_password)
+    if err == 'wrong_current_password':
+        return jsonify({'error': 'wrong_current_password'}), 401
+    if err == 'weak_password':
+        return jsonify({'error': 'weak_password'}), 400
+    return jsonify({'status': 'ok'})
 
 @app.route('/api/v1/auth/me')
 @api_login_required

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="auth-wrap" style="min-height:auto; padding-top:2.5rem;">
+  <div class="auth-card">
+    <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
+    <p class="auth-subtitle">{{ current_user.email }}</p>
+
+    {% if success %}
+    <div class="auth-notice auth-notice-ok">✓ {{ success }}</div>
+    {% endif %}
+    {% if error %}
+    <div class="auth-notice auth-notice-error">{{ error }}</div>
+    {% endif %}
+
+    <form method="POST" class="auth-form">
+      <label class="auth-label" for="current_password">Contraseña actual</label>
+      <input type="password" id="current_password" name="current_password" class="auth-input"
+             required autocomplete="current-password">
+
+      <label class="auth-label" for="new_password">Contraseña nueva</label>
+      <input type="password" id="new_password" name="new_password" class="auth-input"
+             required autocomplete="new-password" minlength="8">
+      <span class="auth-hint">Mínimo 8 caracteres.</span>
+
+      <label class="auth-label" for="new_password2">Repetir contraseña nueva</label>
+      <input type="password" id="new_password2" name="new_password2" class="auth-input"
+             required autocomplete="new-password" minlength="8">
+
+      <button type="submit" class="track-btn primary auth-submit">Actualizar contraseña</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
