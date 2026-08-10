@@ -1410,14 +1410,32 @@ def api_v1_album_tracks(album_id):
         conn.close()
 
 @app.route('/api/v1/stream/<int:track_id>')
-@api_login_required
 def api_v1_stream(track_id):
     """Streaming para el cliente nativo — a propósito NO reusa /audio/<path>
     (esa ruta depende de la cookie de sesión, no de token, y es tu
     biblioteca completa: mejor un endpoint dedicado que tocar ese gate
-    global). Reusa _serve_audio tal cual, range requests incluidos."""
+    global). Reusa _serve_audio tal cual, range requests incluidos.
+
+    A propósito NO usa @api_login_required tal cual (solo header): AVURLAsset
+    en iOS no tiene una forma soportada de mandar headers HTTP custom
+    (AVURLAssetHTTPHeaderFieldsKey nunca fue una API pública de Apple, ver
+    AGENTS.md — Ticket 07, Lote D). Este endpoint puntual acepta el token
+    también como ?token=... en la URL, solo para streaming de audio — el
+    resto de /api/v1/* sigue exigiendo el header, esto no se generaliza."""
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
+    if not token:
+        return jsonify({'error': 'not_authenticated'}), 401
+    try:
+        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return jsonify({'error': 'invalid_token'}), 401
+
     conn = get_db_connection()
     try:
+        user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        if not user or not user['is_approved']:
+            return jsonify({'error': 'not_authenticated'}), 401
         row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
     finally:
         conn.close()
