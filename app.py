@@ -339,6 +339,15 @@ def inject_globals():
     current_user = None
     if session.get('user_id'):
         current_user = {'email': session.get('user_email', ''), 'is_admin': bool(session.get('is_admin'))}
+        # El avatar no vive en la sesión (cambia más seguido que el resto y
+        # no vale la pena mantenerlo sincronizado ahí) — una consulta chica
+        # a users, aceptable en una app de este tamaño.
+        conn = get_db_connection()
+        try:
+            row = conn.execute('SELECT avatar FROM users WHERE id=?', (session['user_id'],)).fetchone()
+            current_user['avatar'] = row['avatar'] if row else None
+        finally:
+            conn.close()
     # Playlist colaborativa: un invitado nunca tiene current_user (no pasó
     # por /login) — collab_guest es su equivalente acotado, usado por
     # base.html para ocultar reproductor/favoritos/panel admin y mostrar el
@@ -976,22 +985,14 @@ def api_v1_change_password():
         return jsonify({'error': 'weak_password'}), 400
     return jsonify({'status': 'ok'})
 
-AVATARES_DIR = os.path.join(app.root_path, 'static', 'avatares')
-
 @app.route('/api/v1/avatars')
 @api_login_required
 def api_v1_avatars():
-    """Lista los avatares reales disponibles en static/avatares/ — los
-    mismos que ya usa la playlist colaborativa, no assets nuevos."""
-    avatars = []
-    for category in ('femeninos', 'masculinos'):
-        folder = os.path.join(AVATARES_DIR, category)
-        if not os.path.isdir(folder):
-            continue
-        for filename in sorted(os.listdir(folder)):
-            if filename.lower().endswith('.png'):
-                avatars.append(f'{category}/{filename}')
-    return jsonify({'avatars': avatars})
+    """Mismo catálogo que ya arma _collab_avatar_catalog() para la playlist
+    colaborativa — reusado tal cual, sin duplicar el escaneo de carpetas.
+    Devuelve {'femeninos': [...], 'masculinos': [...]} para poder armar las
+    2 pestañas del selector igual que en collab_join.html."""
+    return jsonify(_collab_avatar_catalog())
 
 @app.route('/api/v1/genres')
 @api_login_required

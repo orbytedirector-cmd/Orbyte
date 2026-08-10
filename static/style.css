@@ -1992,24 +1992,14 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .auth-notice-warn  { background: rgba(245,197,24,0.1); border: 1px solid rgba(245,197,24,0.3);  color: var(--led-yellow); }
 .auth-notice-error { background: rgba(255,34,68,0.1);  border: 1px solid rgba(255,34,68,0.3);   color: var(--led-red); }
 
-/* Perfil extendido (Ticket 05, Lote D) — avatar/bio/géneros/bandas favoritas */
-.profile-card { margin-top: 1.25rem; }
-.avatar-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr));
-  gap: 0.5rem; margin: 0.5rem 0 1rem;
+/* Perfil extendido (Ticket 05 Lote D, revisado en Ticket 06 Lote D) */
+.account-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start; max-width: 900px; margin: 0 auto; }
+@media (max-width: 768px) {
+  .account-columns { grid-template-columns: 1fr; max-width: 480px; }
 }
-.avatar-option {
-  width: 52px; height: 52px; border-radius: 50%; object-fit: cover; cursor: pointer;
-  border: 2px solid transparent; opacity: 0.6; transition: opacity 0.15s, border-color 0.15s;
-}
-.avatar-option:hover { opacity: 0.9; }
-.avatar-selected { border-color: var(--accent); opacity: 1; }
+.profile-card { margin-top: 0; }
 .genre-chip-list { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.5rem 0; }
-.genre-chip {
-  background: var(--bg-elevated); border: 1px solid var(--border-light); color: var(--text-secondary);
-  border-radius: 999px; padding: 0.3rem 0.75rem; font-size: 0.78rem; cursor: pointer;
-}
-.genre-chip-active { background: var(--accent); border-color: var(--accent); color: #0a0a0a; font-weight: 600; }
+.genre-search-results { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.4rem; }
 .artist-search-results { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.4rem; }
 .artist-search-result {
   text-align: left; background: var(--bg-elevated); border: 1px solid var(--border-light);
@@ -2022,11 +2012,11 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
   border-radius: 999px; padding: 0.3rem 0.5rem 0.3rem 0.75rem; font-size: 0.8rem;
   display: inline-flex; align-items: center; gap: 0.4rem;
 }
-.favorite-artist-remove {
+.favorite-artist-remove, .genre-remove {
   background: none; border: none; color: var(--text-secondary); cursor: pointer;
   font-size: 0.75rem; padding: 0 0.15rem;
 }
-.favorite-artist-remove:hover { color: var(--led-red); }
+.favorite-artist-remove:hover, .genre-remove:hover { color: var(--led-red); }
 
 /* ══════════════════════════════════════════════════════════════════════════
    Header — menú de usuario (correo / admin / salir)

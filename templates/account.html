@@ -1,58 +1,74 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="auth-wrap" style="min-height:auto; padding-top:2.5rem;">
-  <div class="auth-card">
-    <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
-    <p class="auth-subtitle">{{ current_user.email }}</p>
-    <p class="auth-hint" style="margin-top:0.25rem;">
-      Miembro desde {{ account_details.created_at or '—' }} · Última conexión {{ account_details.last_seen or '—' }}
-    </p>
+  <div class="account-columns">
+    <div class="auth-card">
+      <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
+      <p class="auth-subtitle">{{ current_user.email }}</p>
+      <p class="auth-hint" style="margin-top:0.25rem;">
+        Miembro desde {{ account_details.created_at or '—' }} · Última conexión {{ account_details.last_seen or '—' }}
+      </p>
 
-    {% if success %}
-    <div class="auth-notice auth-notice-ok">✓ {{ success }}</div>
-    {% endif %}
-    {% if error %}
-    <div class="auth-notice auth-notice-error">{{ error }}</div>
-    {% endif %}
+      {% if success %}
+      <div class="auth-notice auth-notice-ok">✓ {{ success }}</div>
+      {% endif %}
+      {% if error %}
+      <div class="auth-notice auth-notice-error">{{ error }}</div>
+      {% endif %}
 
-    <form method="POST" class="auth-form">
-      <label class="auth-label" for="current_password">Contraseña actual</label>
-      <input type="password" id="current_password" name="current_password" class="auth-input"
-             required autocomplete="current-password">
+      <form method="POST" class="auth-form">
+        <label class="auth-label" for="current_password">Contraseña actual</label>
+        <input type="password" id="current_password" name="current_password" class="auth-input"
+               required autocomplete="current-password">
 
-      <label class="auth-label" for="new_password">Contraseña nueva</label>
-      <input type="password" id="new_password" name="new_password" class="auth-input"
-             required autocomplete="new-password" minlength="8">
-      <span class="auth-hint">Mínimo 8 caracteres.</span>
+        <label class="auth-label" for="new_password">Contraseña nueva</label>
+        <input type="password" id="new_password" name="new_password" class="auth-input"
+               required autocomplete="new-password" minlength="8">
+        <span class="auth-hint">Mínimo 8 caracteres.</span>
 
-      <label class="auth-label" for="new_password2">Repetir contraseña nueva</label>
-      <input type="password" id="new_password2" name="new_password2" class="auth-input"
-             required autocomplete="new-password" minlength="8">
+        <label class="auth-label" for="new_password2">Repetir contraseña nueva</label>
+        <input type="password" id="new_password2" name="new_password2" class="auth-input"
+               required autocomplete="new-password" minlength="8">
 
-      <button type="submit" class="track-btn primary auth-submit">Actualizar contraseña</button>
-    </form>
-  </div>
+        <button type="submit" class="track-btn primary auth-submit">Actualizar contraseña</button>
+      </form>
+    </div>
 
-  <div class="auth-card profile-card">
-    <h2 style="color:var(--text-primary); font-size:1.1rem; margin-bottom:1rem;">Perfil</h2>
+    <div class="auth-card profile-card">
+      <h2 style="color:var(--text-primary); font-size:1.1rem; margin-bottom:1rem;">Perfil</h2>
 
-    <label class="auth-label">Avatar</label>
-    <div class="avatar-grid" id="avatar-grid"></div>
+      <label class="auth-label">Avatar</label>
+      <div class="avatar-picker">
+        <div class="avatar-picker-preview">
+          <span class="avatar-circle avatar-circle-lg" id="avatar-preview">
+            <span>{{ current_user.email[0]|upper }}</span>
+          </span>
+        </div>
+        <div class="avatar-picker-tabs">
+          <button type="button" class="avatar-tab-btn active" data-tab="femeninos">Femeninos</button>
+          <button type="button" class="avatar-tab-btn" data-tab="masculinos">Masculinos</button>
+        </div>
+        <div class="avatar-picker-grid" data-tab-panel="femeninos" id="avatar-grid-femeninos"></div>
+        <div class="avatar-picker-grid" data-tab-panel="masculinos" hidden id="avatar-grid-masculinos"></div>
+      </div>
 
-    <label class="auth-label" for="bio-input">Biografía</label>
-    <textarea id="bio-input" class="auth-input" rows="3" maxlength="500"
-              placeholder="Gustos musicales, lo que quieras contar..."></textarea>
-    <button type="button" class="track-btn ghost admin-btn-sm" id="save-bio-btn" style="margin-top:0.5rem;">Guardar biografía</button>
+      <label class="auth-label" for="bio-input">Biografía</label>
+      <textarea id="bio-input" class="auth-input" rows="3" maxlength="500"
+                placeholder="Gustos musicales, lo que quieras contar..."></textarea>
+      <button type="button" class="track-btn ghost admin-btn-sm" id="save-bio-btn" style="margin-top:0.5rem;">Guardar biografía</button>
 
-    <label class="auth-label" style="margin-top:1.25rem;">Géneros favoritos</label>
-    <div class="genre-chip-list" id="genre-list"></div>
+      <label class="auth-label" style="margin-top:1.25rem;">Géneros favoritos</label>
+      <input type="text" id="genre-search-input" class="auth-input" placeholder="Buscar género (rock, jazz, metal...)">
+      <div class="genre-search-results" id="genre-search-results"></div>
+      <div class="genre-chip-list" id="selected-genre-list"></div>
 
-    <label class="auth-label" style="margin-top:1.25rem;">Bandas favoritas (máximo 5)</label>
-    <input type="text" id="artist-search-input" class="auth-input" placeholder="Buscar banda en tu biblioteca...">
-    <div class="artist-search-results" id="artist-search-results"></div>
-    <div class="favorite-artists-list" id="favorite-artists-list"></div>
+      <label class="auth-label" style="margin-top:1.25rem;">Bandas favoritas (máximo 5)</label>
+      <input type="text" id="artist-search-input" class="auth-input" placeholder="Buscar banda en tu biblioteca...">
+      <div class="artist-search-results" id="artist-search-results"></div>
+      <div class="favorite-artists-list" id="favorite-artists-list"></div>
 
-    <div id="profile-status" class="auth-notice auth-notice-ok" style="display:none; margin-top:1rem;"></div>
+      <div id="profile-status" class="auth-notice auth-notice-ok" style="display:none; margin-top:1rem;"></div>
+    </div>
   </div>
 </div>
 
@@ -66,7 +82,7 @@
   }
 
   let profile = { avatar: null, bio: '', favorite_genres: [], favorite_artists: [] };
-  let allAvatars = [];
+  let avatarCatalog = { femeninos: [], masculinos: [] };
   let allGenres = [];
 
   async function loadAll() {
@@ -75,65 +91,112 @@
         fetch('/api/v1/profile'), fetch('/api/v1/avatars'), fetch('/api/v1/genres')
       ]);
       profile = await profileRes.json();
-      allAvatars = (await avatarsRes.json()).avatars;
+      avatarCatalog = await avatarsRes.json();
       allGenres = (await genresRes.json()).genres;
       document.getElementById('bio-input').value = profile.bio || '';
-      renderAvatars();
-      renderGenres();
+      renderAvatarGrids();
+      renderAvatarPreview();
+      renderSelectedGenres();
       renderFavoriteArtists();
     } catch (err) {
       showStatus('No se pudo cargar el perfil — recargá la página.');
     }
   }
 
-  function renderAvatars() {
-    const grid = document.getElementById('avatar-grid');
-    grid.innerHTML = allAvatars.map(a => `
-      <img src="/static/avatares/${a}" class="avatar-option ${a === profile.avatar ? 'avatar-selected' : ''}"
-           data-avatar="${a}" alt="avatar">
-    `).join('');
+  // ---- Avatar: pestañas Femeninos/Masculinos, calcado de collab_join.html ----
+  function renderAvatarGrids() {
+    ['femeninos', 'masculinos'].forEach(cat => {
+      document.getElementById(`avatar-grid-${cat}`).innerHTML = avatarCatalog[cat].map(f => `
+        <button type="button" class="avatar-option" data-category="${cat}" data-file="${f}" aria-label="Avatar ${cat} ${f}">
+          <img src="/static/avatares/${cat}/${f}" alt="" loading="lazy">
+        </button>
+      `).join('');
+    });
   }
 
-  // Delegación de eventos: UN solo listener por contenedor, adjuntado una
-  // sola vez acá abajo — sobrevive a que innerHTML se regenere en cada
-  // render, a diferencia de adjuntar listeners elemento por elemento
-  // dentro de cada función de render (más robusto, menos superficie para
-  // que un click deje de registrarse).
-  document.getElementById('avatar-grid').addEventListener('click', async (e) => {
-    const img = e.target.closest('.avatar-option');
-    if (!img) return;
+  function renderAvatarPreview() {
+    const preview = document.getElementById('avatar-preview');
+    if (profile.avatar) {
+      preview.innerHTML = `<img src="/static/avatares/${profile.avatar}" alt="">`;
+    } else {
+      preview.innerHTML = `<span>{{ current_user.email[0]|upper }}</span>`;
+    }
+  }
+
+  document.querySelectorAll('.avatar-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.avatar-tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      document.querySelectorAll('[data-tab-panel]').forEach(p => {
+        p.hidden = p.getAttribute('data-tab-panel') !== btn.dataset.tab;
+      });
+    });
+  });
+
+  document.querySelector('.avatar-picker').addEventListener('click', async (e) => {
+    const opt = e.target.closest('.avatar-option');
+    if (!opt) return;
+    const avatarPath = `${opt.dataset.category}/${opt.dataset.file}`;
     const res = await fetch('/api/v1/profile', {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({avatar: img.dataset.avatar})
+      body: JSON.stringify({avatar: avatarPath})
     });
     profile = await res.json();
-    renderAvatars();
+    renderAvatarPreview();
     showStatus('Avatar actualizado.');
   });
 
-  function renderGenres() {
-    const list = document.getElementById('genre-list');
-    list.innerHTML = allGenres.map(g => `
-      <button type="button" class="genre-chip ${profile.favorite_genres.includes(g) ? 'genre-chip-active' : ''}"
-              data-genre="${g}">${g}</button>
-    `).join('');
-  }
+  // ---- Géneros: buscador en vivo en vez de mostrar todos los chips ----
+  let genreSearchTimer;
+  document.getElementById('genre-search-input').addEventListener('input', (e) => {
+    clearTimeout(genreSearchTimer);
+    const q = e.target.value.trim().toLowerCase();
+    const resultsEl = document.getElementById('genre-search-results');
+    if (q.length < 1) { resultsEl.innerHTML = ''; return; }
+    genreSearchTimer = setTimeout(() => {
+      const matches = allGenres.filter(g => g.toLowerCase().includes(q) && !profile.favorite_genres.includes(g)).slice(0, 15);
+      resultsEl.innerHTML = matches.map(g => `
+        <button type="button" class="artist-search-result" data-genre="${g}">${g}</button>
+      `).join('') || '<span class="auth-hint">Sin resultados.</span>';
+    }, 150);
+  });
 
-  document.getElementById('genre-list').addEventListener('click', async (e) => {
-    const btn = e.target.closest('.genre-chip');
+  document.getElementById('genre-search-results').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.artist-search-result');
     if (!btn) return;
-    const g = btn.dataset.genre;
-    const idx = profile.favorite_genres.indexOf(g);
-    const genres = [...profile.favorite_genres];
-    if (idx === -1) genres.push(g); else genres.splice(idx, 1);
+    const genres = [...profile.favorite_genres, btn.dataset.genre];
     const res = await fetch('/api/v1/profile', {
       method: 'PUT', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({favorite_genres: genres})
     });
     profile = await res.json();
-    renderGenres();
+    renderSelectedGenres();
+    document.getElementById('genre-search-input').value = '';
+    document.getElementById('genre-search-results').innerHTML = '';
   });
 
+  function renderSelectedGenres() {
+    const list = document.getElementById('selected-genre-list');
+    list.innerHTML = profile.favorite_genres.map(g => `
+      <span class="favorite-artist-pill">${g}
+        <button type="button" data-genre="${g}" class="genre-remove">✕</button>
+      </span>
+    `).join('') || '<span class="auth-hint">Ninguno todavía — buscá arriba para agregar.</span>';
+  }
+
+  document.getElementById('selected-genre-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.genre-remove');
+    if (!btn) return;
+    const genres = profile.favorite_genres.filter(g => g !== btn.dataset.genre);
+    const res = await fetch('/api/v1/profile', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({favorite_genres: genres})
+    });
+    profile = await res.json();
+    renderSelectedGenres();
+  });
+
+  // ---- Bandas favoritas ----
   function renderFavoriteArtists() {
     const list = document.getElementById('favorite-artists-list');
     list.innerHTML = profile.favorite_artists.map(a => `
@@ -151,13 +214,13 @@
     renderFavoriteArtists();
   });
 
-  let searchTimer;
+  let artistSearchTimer;
   document.getElementById('artist-search-input').addEventListener('input', (e) => {
-    clearTimeout(searchTimer);
+    clearTimeout(artistSearchTimer);
     const q = e.target.value.trim();
     const resultsEl = document.getElementById('artist-search-results');
     if (q.length < 2) { resultsEl.innerHTML = ''; return; }
-    searchTimer = setTimeout(async () => {
+    artistSearchTimer = setTimeout(async () => {
       const res = await fetch(`/api/v1/artists/search?q=${encodeURIComponent(q)}`);
       const { artists } = await res.json();
       resultsEl.innerHTML = artists.map(a => `
@@ -168,7 +231,7 @@
 
   document.getElementById('artist-search-results').addEventListener('click', async (e) => {
     const btn = e.target.closest('.artist-search-result');
-    if (!btn) return;
+    if (!btn || !btn.dataset.artistId) return;
     if (profile.favorite_artists.length >= 5) { showStatus('Ya tenés 5 bandas favoritas — quitá una primero.'); return; }
     const res = await fetch('/api/v1/profile/favorite-artists', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
