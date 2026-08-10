@@ -799,7 +799,11 @@ def account():
                 error = 'La nueva contraseña debe tener al menos 8 caracteres.'
             else:
                 success = 'Contraseña actualizada correctamente.'
-    return render_template('account.html', error=error, success=success)
+    # current_user (inyectado por el context processor) solo trae email/
+    # is_admin — para "Miembro desde"/"Última conexión" hace falta el
+    # registro completo, que get_current_user() ya sabe traer.
+    account_details = get_current_user()
+    return render_template('account.html', error=error, success=success, account_details=account_details)
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():

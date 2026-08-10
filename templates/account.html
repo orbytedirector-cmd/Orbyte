@@ -4,6 +4,9 @@
   <div class="auth-card">
     <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
     <p class="auth-subtitle">{{ current_user.email }}</p>
+    <p class="auth-hint" style="margin-top:0.25rem;">
+      Miembro desde {{ account_details.created_at or '—' }} · Última conexión {{ account_details.last_seen or '—' }}
+    </p>
 
     {% if success %}
     <div class="auth-notice auth-notice-ok">✓ {{ success }}</div>
@@ -67,16 +70,20 @@
   let allGenres = [];
 
   async function loadAll() {
-    const [profileRes, avatarsRes, genresRes] = await Promise.all([
-      fetch('/api/v1/profile'), fetch('/api/v1/avatars'), fetch('/api/v1/genres')
-    ]);
-    profile = await profileRes.json();
-    allAvatars = (await avatarsRes.json()).avatars;
-    allGenres = (await genresRes.json()).genres;
-    document.getElementById('bio-input').value = profile.bio || '';
-    renderAvatars();
-    renderGenres();
-    renderFavoriteArtists();
+    try {
+      const [profileRes, avatarsRes, genresRes] = await Promise.all([
+        fetch('/api/v1/profile'), fetch('/api/v1/avatars'), fetch('/api/v1/genres')
+      ]);
+      profile = await profileRes.json();
+      allAvatars = (await avatarsRes.json()).avatars;
+      allGenres = (await genresRes.json()).genres;
+      document.getElementById('bio-input').value = profile.bio || '';
+      renderAvatars();
+      renderGenres();
+      renderFavoriteArtists();
+    } catch (err) {
+      showStatus('No se pudo cargar el perfil — recargá la página.');
+    }
   }
 
   function renderAvatars() {
@@ -85,18 +92,24 @@
       <img src="/static/avatares/${a}" class="avatar-option ${a === profile.avatar ? 'avatar-selected' : ''}"
            data-avatar="${a}" alt="avatar">
     `).join('');
-    grid.querySelectorAll('.avatar-option').forEach(img => {
-      img.addEventListener('click', async () => {
-        await fetch('/api/v1/profile', {
-          method: 'PUT', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({avatar: img.dataset.avatar})
-        });
-        profile.avatar = img.dataset.avatar;
-        renderAvatars();
-        showStatus('Avatar actualizado.');
-      });
-    });
   }
+
+  // Delegación de eventos: UN solo listener por contenedor, adjuntado una
+  // sola vez acá abajo — sobrevive a que innerHTML se regenere en cada
+  // render, a diferencia de adjuntar listeners elemento por elemento
+  // dentro de cada función de render (más robusto, menos superficie para
+  // que un click deje de registrarse).
+  document.getElementById('avatar-grid').addEventListener('click', async (e) => {
+    const img = e.target.closest('.avatar-option');
+    if (!img) return;
+    const res = await fetch('/api/v1/profile', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({avatar: img.dataset.avatar})
+    });
+    profile = await res.json();
+    renderAvatars();
+    showStatus('Avatar actualizado.');
+  });
 
   function renderGenres() {
     const list = document.getElementById('genre-list');
@@ -104,20 +117,22 @@
       <button type="button" class="genre-chip ${profile.favorite_genres.includes(g) ? 'genre-chip-active' : ''}"
               data-genre="${g}">${g}</button>
     `).join('');
-    list.querySelectorAll('.genre-chip').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const g = btn.dataset.genre;
-        const idx = profile.favorite_genres.indexOf(g);
-        if (idx === -1) profile.favorite_genres.push(g);
-        else profile.favorite_genres.splice(idx, 1);
-        await fetch('/api/v1/profile', {
-          method: 'PUT', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({favorite_genres: profile.favorite_genres})
-        });
-        renderGenres();
-      });
-    });
   }
+
+  document.getElementById('genre-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.genre-chip');
+    if (!btn) return;
+    const g = btn.dataset.genre;
+    const idx = profile.favorite_genres.indexOf(g);
+    const genres = [...profile.favorite_genres];
+    if (idx === -1) genres.push(g); else genres.splice(idx, 1);
+    const res = await fetch('/api/v1/profile', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({favorite_genres: genres})
+    });
+    profile = await res.json();
+    renderGenres();
+  });
 
   function renderFavoriteArtists() {
     const list = document.getElementById('favorite-artists-list');
@@ -126,14 +141,15 @@
         <button type="button" data-artist-id="${a.id}" class="favorite-artist-remove">✕</button>
       </span>
     `).join('');
-    list.querySelectorAll('.favorite-artist-remove').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const res = await fetch(`/api/v1/profile/favorite-artists/${btn.dataset.artistId}`, {method: 'DELETE'});
-        profile = await res.json();
-        renderFavoriteArtists();
-      });
-    });
   }
+
+  document.getElementById('favorite-artists-list').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.favorite-artist-remove');
+    if (!btn) return;
+    const res = await fetch(`/api/v1/profile/favorite-artists/${btn.dataset.artistId}`, {method: 'DELETE'});
+    profile = await res.json();
+    renderFavoriteArtists();
+  });
 
   let searchTimer;
   document.getElementById('artist-search-input').addEventListener('input', (e) => {
@@ -147,20 +163,21 @@
       resultsEl.innerHTML = artists.map(a => `
         <button type="button" class="artist-search-result" data-artist-id="${a.id}">${a.name}</button>
       `).join('') || '<span class="auth-hint">Sin resultados.</span>';
-      resultsEl.querySelectorAll('.artist-search-result').forEach(btn => {
-        btn.addEventListener('click', async () => {
-          if (profile.favorite_artists.length >= 5) { showStatus('Ya tenés 5 bandas favoritas — quitá una primero.'); return; }
-          const res = await fetch('/api/v1/profile/favorite-artists', {
-            method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({artist_id: parseInt(btn.dataset.artistId, 10)})
-          });
-          profile = await res.json();
-          renderFavoriteArtists();
-          document.getElementById('artist-search-input').value = '';
-          resultsEl.innerHTML = '';
-        });
-      });
     }, 300);
+  });
+
+  document.getElementById('artist-search-results').addEventListener('click', async (e) => {
+    const btn = e.target.closest('.artist-search-result');
+    if (!btn) return;
+    if (profile.favorite_artists.length >= 5) { showStatus('Ya tenés 5 bandas favoritas — quitá una primero.'); return; }
+    const res = await fetch('/api/v1/profile/favorite-artists', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({artist_id: parseInt(btn.dataset.artistId, 10)})
+    });
+    profile = await res.json();
+    renderFavoriteArtists();
+    document.getElementById('artist-search-input').value = '';
+    document.getElementById('artist-search-results').innerHTML = '';
   });
 
   document.getElementById('save-bio-btn').addEventListener('click', async () => {
