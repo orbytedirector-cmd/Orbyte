@@ -1266,6 +1266,168 @@ def api_v1_admin_revoke(user_id):
         conn.close()
     return jsonify({'status': 'ok'})
 
+def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_):
+    """Despacha al mismo helper que ya usan las rutas web (/mood/, /genre/,
+    /led/, etc.) — así el resultado que ve el cliente nativo es idéntico al
+    de la web, sin reimplementar cada tipo de filtro."""
+    order = _album_order(sort, dir_)
+    if filter_type in ('mood', 'idioma', 'momento', 'era', 'tier', 'tema_lirico'):
+        return _meta_browse(conn, filter_type, filter_value, page, '', filter_type, sort, dir_)
+    if filter_type == 'genre':
+        count_sql = '''SELECT COUNT(DISTINCT al.id) FROM albums al
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       WHERE t.genre=? OR tm.genre_primary=?'''
+        data_sql = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                              al.track_count, al.total_duration, al.artist_id,
+                              ar.name as artist_name, 'yellow' as album_led,
+                              COALESCE(apc.pop_score, 0) as pop_score
+                       FROM albums al
+                       LEFT JOIN artists ar ON al.artist_id=ar.id
+                       LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN track_meta tm ON tm.track_id=t.id
+                       WHERE t.genre=? OR tm.genre_primary=?'''
+        return _paginate(conn, count_sql, [filter_value, filter_value], data_sql, [filter_value, filter_value], page, order)
+    if filter_type == 'led':
+        count_sql = '''SELECT COUNT(DISTINCT al.id)
+                       FROM albums al JOIN tracks t ON t.album_id=al.id
+                       WHERE t.led_color=?'''
+        data_sql = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                              al.track_count, al.total_duration, al.artist_id,
+                              ar.name as artist_name, ? as album_led,
+                              COALESCE(apc.pop_score, 0) as pop_score
+                       FROM albums al
+                       JOIN artists ar ON al.artist_id=ar.id
+                       JOIN tracks t ON t.album_id=al.id
+                       LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+                       WHERE t.led_color=?'''
+        return _paginate(conn, count_sql, [filter_value], data_sql, [filter_value, filter_value], page, order)
+    return [], 0, 1
+
+@app.route('/api/v1/home/facets')
+@api_login_required
+def api_v1_home_facets():
+    """Un solo request para las 8 secciones del Home — mismo cálculo que
+    hace '/' (web) pero devuelto como JSON, sin duplicar las queries."""
+    conn = get_db_connection()
+    try:
+        total_artists  = conn.execute('SELECT COUNT(*) FROM artists a WHERE EXISTS (SELECT 1 FROM albums al WHERE al.artist_id=a.id)').fetchone()[0]
+        total_albums   = conn.execute('SELECT COUNT(*) FROM albums').fetchone()[0]
+        total_tracks   = conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0]
+        total_duration = conn.execute('SELECT COALESCE(SUM(duration),0) FROM tracks').fetchone()[0]
+        total_size     = conn.execute('SELECT COALESCE(SUM(file_size),0) FROM tracks').fetchone()[0]
+
+        led_rows = conn.execute(
+            'SELECT led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY led_color ORDER BY c DESC'
+        ).fetchall()
+        mood_rows = conn.execute(
+            'SELECT mood, COUNT(*) as c FROM track_meta WHERE mood IS NOT NULL GROUP BY mood ORDER BY c DESC LIMIT 14'
+        ).fetchall()
+        momento_rows = conn.execute(
+            'SELECT momento, COUNT(*) as c FROM track_meta WHERE momento IS NOT NULL GROUP BY momento ORDER BY c DESC'
+        ).fetchall()
+        era_order = [
+            'early_rock_era', 'british_invasion_era', 'classic_rock_era',
+            'nwobhm_synth_era', 'grunge_alternative_era', 'post_millennial_era',
+            'streaming_era', 'current_era'
+        ]
+        era_raw  = conn.execute('SELECT era, COUNT(*) as c FROM track_meta WHERE era IS NOT NULL GROUP BY era').fetchall()
+        era_dict = {r['era']: r['c'] for r in era_raw}
+        temas_rows = conn.execute(
+            'SELECT tema_lirico, COUNT(*) as c FROM track_meta WHERE tema_lirico IS NOT NULL GROUP BY tema_lirico ORDER BY c DESC LIMIT 10'
+        ).fetchall()
+        genre_rows = conn.execute(
+            'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" GROUP BY genre ORDER BY c DESC LIMIT 8'
+        ).fetchall()
+        lang_rows = conn.execute(
+            'SELECT idioma, COUNT(*) as c FROM track_meta WHERE idioma IS NOT NULL AND idioma!="" GROUP BY idioma ORDER BY c DESC LIMIT 12'
+        ).fetchall()
+        recent_raw = conn.execute('''
+            SELECT al.id, al.name, al.cover_path, al.year, al.track_count, al.total_duration,
+                   al.artist_id, ar.name as artist_name
+            FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
+            ORDER BY al.created_at DESC LIMIT 20
+        ''').fetchall()
+        recent = []
+        for a in recent_raw:
+            d = dict(a)
+            d['cover_url'] = cover_url_filter(d.pop('cover_path'))
+            recent.append(d)
+
+        return jsonify({
+            'stats': {
+                'artists': total_artists, 'albums': total_albums, 'tracks': total_tracks,
+                'duration_hours': total_duration / 3600, 'size_tb': total_size / (1024**4),
+            },
+            'led':      [{'value': r['led_color'], 'count': r['c']} for r in led_rows],
+            'mood':     [{'value': r['mood'], 'count': r['c']} for r in mood_rows],
+            'momento':  [{'value': r['momento'], 'count': r['c']} for r in momento_rows],
+            'era':      [{'value': e, 'count': era_dict[e]} for e in era_order if e in era_dict],
+            'tema':     [{'value': r['tema_lirico'], 'count': r['c']} for r in temas_rows],
+            'genre':    [{'value': r['genre'], 'count': r['c']} for r in genre_rows],
+            'idioma':   [{'value': r['idioma'], 'count': r['c']} for r in lang_rows],
+            'recent_albums': recent,
+        })
+    finally:
+        conn.close()
+
+@app.route('/api/v1/albums/<int:album_id>/tracks')
+@api_login_required
+def api_v1_album_tracks(album_id):
+    """Espejo de /api/album/<id>/tracks (web) — misma query, protegido con
+    token en vez de cookie de sesión."""
+    conn = get_db_connection()
+    try:
+        alb = conn.execute('SELECT name, cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        album_cover     = clean_db_path(alb['cover_path']) if alb else None
+        album_artist_id = alb['artist_id'] if alb else None
+        album_name      = alb['name'] if alb else None
+        tracks = conn.execute(
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            (album_id,)
+        ).fetchall()
+        result = []
+        for t in tracks:
+            d = dict(t)
+            fmt, led = _fmt_format(d)
+            result.append({
+                'id': d['id'],
+                'title': d.get('title'),
+                'track_number': d.get('track_number'),
+                'disc_number': d.get('disc_number'),
+                'duration': d.get('duration'),
+                'duration_fmt': _fmt_seconds(d.get('duration')),
+                'format_display': fmt,
+                'format_color': led,
+                'artist_id': album_artist_id,
+                'album_name': album_name,
+                'cover_url': cover_url_filter(album_cover),
+                'stream_url': f'/api/v1/stream/{d["id"]}',
+            })
+        return jsonify({'tracks': result})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/stream/<int:track_id>')
+@api_login_required
+def api_v1_stream(track_id):
+    """Streaming para el cliente nativo — a propósito NO reusa /audio/<path>
+    (esa ruta depende de la cookie de sesión, no de token, y es tu
+    biblioteca completa: mejor un endpoint dedicado que tocar ese gate
+    global). Reusa _serve_audio tal cual, range requests incluidos."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return jsonify({'error': 'track_not_found'}), 404
+    absolute_path = os.path.join(MUSIC_ROOT, clean_db_path(row['file_path']).lstrip('/'))
+    if not os.path.isfile(absolute_path):
+        return jsonify({'error': 'file_not_found'}), 404
+    return _serve_audio(absolute_path)
+
 @app.route('/api/v1/albums')
 @api_login_required
 def api_v1_albums():
@@ -1273,6 +1435,31 @@ def api_v1_albums():
     Reusa cover_url_filter (la misma función que ya usan los templates de la
     PWA) — así el cliente nativo y la web resuelven portadas exactamente
     igual, sin duplicar lógica de encoding de rutas."""
+    filter_type  = request.args.get('filter_type')
+    filter_value = request.args.get('filter_value')
+
+    if filter_type and filter_value:
+        # Modo filtrado: reusa exactamente la misma lógica que /genre/,
+        # /mood/, /led/, etc. de la web, para que los resultados coincidan.
+        try:
+            page = max(1, int(request.args.get('page', 1)))
+        except ValueError:
+            page = 1
+        sort = request.args.get('sort', 'popularidad')
+        dir_ = request.args.get('dir', 'desc')
+        conn = get_db_connection()
+        try:
+            albums_raw, total, total_pages = _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_)
+        finally:
+            conn.close()
+        albums = [{
+            'id': a['id'], 'name': a['name'], 'year': a.get('year'),
+            'track_count': a.get('track_count'), 'total_duration': a.get('total_duration'),
+            'artist_id': a.get('artist_id'), 'artist_name': a.get('artist_name'),
+            'cover_url': cover_url_filter(a.get('cover_path')),
+        } for a in albums_raw]
+        return jsonify({'albums': albums, 'total': total, 'page': page, 'total_pages': total_pages})
+
     try:
         limit = max(1, min(int(request.args.get('limit', 50)), 200))
     except ValueError:
