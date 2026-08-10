@@ -368,18 +368,6 @@
         </div>
         {% endif %}
 
-        <!-- AirPlay 2 (transmitir a un dispositivo de red) — distinto del panel
-             "Salida" de arriba, que es para los outputs de MPD EN el propio
-             servidor. Esto usa el picker nativo de Safari/WebKit para un
-             <audio>; no hace falta ninguna librería. Se oculta solo si el
-             navegador no lo soporta (Android/Chrome no tienen esta API). -->
-        <button class="icon-btn" id="airplay-btn" onclick="airplayPicker()" title="Transmitir por AirPlay" style="display:none">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 16.5V6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10.5"/>
-            <path d="M12 15l5 6H7l5-6z"/>
-          </svg>
-        </button>
-
         <button class="icon-btn playlist-icon-btn" onclick="togglePlaylist()" title="Playlist">
           ☰ <span id="playlist-count" class="pl-badge">0</span>
         </button>
@@ -992,23 +980,6 @@
     // liviana" para casos casuales, NO el camino principal para la
     // librería hi-res (eso lo cubre UPnP/DLNA + YXC, que preservan FLAC/DSD
     // sin pérdida — ver /tools/cast_discovery.py).
-    function _airplaySupported() {
-      return !!(window.WebKitPlaybackTargetAvailabilityEvent
-        || (document.createElement('audio').webkitShowPlaybackTargetPicker));
-    }
-    function airplayPicker() {
-      const audio = window.currentAudio;
-      if (!audio || typeof audio.webkitShowPlaybackTargetPicker !== 'function') {
-        alert('Reproducí algo primero, o tu navegador no soporta AirPlay (es exclusivo de Safari/iOS/macOS).');
-        return;
-      }
-      audio.webkitShowPlaybackTargetPicker();
-    }
-    document.addEventListener('DOMContentLoaded', () => {
-      const btn = document.getElementById('airplay-btn');
-      if (btn && _airplaySupported()) btn.style.display = '';
-    });
-
     // ── Audio outputs ─────────────────────────────────────────────────────────
     function toggleOutputsPanel() {
       const panel = document.getElementById('outputs-panel');

@@ -190,12 +190,6 @@
       body: 'Sube automáticamente el volumen de pistas silenciosas o en DSD, sin recodificar el audio.'
     },
     {
-      id: 'airplay', target: '#airplay-btn',
-      title: '📡 AirPlay',
-      body: 'Transmite lo que estás escuchando a bocinas, un Apple TV o un HomePod compatibles con AirPlay 2, usando el selector nativo del sistema.',
-      fallbackBody: 'En Safari/iOS/macOS aparece acá un botón de AirPlay para transmitir el audio a bocinas o un Apple TV compatibles, usando el selector nativo del sistema — no está disponible en este navegador.'
-    },
-    {
       id: 'repeat', target: '#repeat-btn',
       title: '🔁 Repetir',
       body: 'Alterna entre repetir toda la cola, repetir solo la pista actual, o desactivar la repetición.'

@@ -2086,10 +2086,15 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
 .admin-dot-on  { background: var(--led-green); box-shadow: 0 0 6px var(--led-green); }
 .admin-dot-off { background: var(--text-muted); }
 
-/* Mobile — header user menu compacto (arriba a la derecha del header, no
-   agrega una fila nueva al layout de 2 filas ya establecido en mobile) */
+/* Mobile — header user menu como su propia fila, debajo del logo (antes
+   iba con position:absolute arriba a la derecha para no sumar una fila,
+   pero eso empezó a chocar con el logo grande y centrado de esta misma
+   vista apenas el avatar del header creció). */
 @media (max-width: 768px) and (orientation: portrait) {
-  .header-user { position: absolute; top: 10px; right: 10px; gap: 0.35rem; }
+  .header-user {
+    position: static; justify-content: center;
+    flex-wrap: wrap; padding: 4px 0 6px; width: 100%;
+  }
   .header-user-email { display: none; }
   .header-user-link { padding: 0.2rem 0.45rem; font-size: 0.7rem; }
 
