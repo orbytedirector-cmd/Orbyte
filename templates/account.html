@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="auth-wrap" style="min-height:auto; padding-top:2.5rem;">
+<div class="account-wrap">
   <div class="account-single">
     <div class="auth-card">
       <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
@@ -110,6 +110,10 @@
       renderAvatarPreview();
       renderSelectedGenres();
       renderFavoriteArtists();
+      // Punto 4 del feedback: si ya hay un avatar masculino elegido, abrir
+      // en esa pestaña (no siempre en "Femeninos" por defecto).
+      const currentCategory = profile.avatar ? profile.avatar.split('/')[0] : null;
+      if (currentCategory === 'masculinos') activateAvatarTab('masculinos');
     } catch (err) {
       showStatus('No se pudo cargar el perfil — recargá la página.');
     }
@@ -137,14 +141,15 @@
     if (headerAvatar) headerAvatar.innerHTML = html;
   }
 
-  document.querySelectorAll('.avatar-tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.avatar-tab-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      document.querySelectorAll('[data-tab-panel]').forEach(p => {
-        p.hidden = p.getAttribute('data-tab-panel') !== btn.dataset.tab;
-      });
+  function activateAvatarTab(tab) {
+    document.querySelectorAll('.avatar-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.querySelectorAll('[data-tab-panel]').forEach(p => {
+      p.hidden = p.getAttribute('data-tab-panel') !== tab;
     });
+  }
+
+  document.querySelectorAll('.avatar-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => activateAvatarTab(btn.dataset.tab));
   });
 
   document.querySelector('.avatar-picker').addEventListener('click', async (e) => {

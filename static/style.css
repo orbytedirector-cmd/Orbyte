@@ -1967,6 +1967,12 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .auth-logo { height: 64px; width: auto; object-fit: contain; margin: 0 auto 1.25rem; display: block; }
 .auth-subtitle { text-align: center; color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.25rem; }
 .auth-form { display: flex; flex-direction: column; gap: 0.35rem; }
+/* Mismo motivo que .avatar-picker-grid[hidden] más abajo: .auth-form ya
+   fija su propio display, así que la regla por defecto del navegador para
+   [hidden] pierde contra esta regla de autor. Sin esto, el botón de
+   "Cambiar contraseña" tildaba el atributo pero el formulario seguía
+   visible igual. */
+#password-form[hidden] { display: none; }
 .auth-label { font-size: 0.78rem; color: var(--text-secondary); margin-top: 0.6rem; }
 .auth-input {
   width: 100%;
@@ -1993,9 +1999,14 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .auth-notice-error { background: rgba(255,34,68,0.1);  border: 1px solid rgba(255,34,68,0.3);   color: var(--led-red); }
 
 /* Perfil extendido (Ticket 05 Lote D, revisado en Ticket 06 Lotes D) */
+/* account.html NO usa .auth-wrap como contenedor externo — esa clase tiene
+   max-width:380px fijo (pensado para el card angosto de login/signup), y
+   .account-single quedaba atrapado adentro sin poder crecer aunque tuviera
+   su propio max-width más grande. Wrapper propio, sin ese límite heredado. */
+.account-wrap { width: 100%; display: flex; justify-content: center; padding: 2.5rem 1.5rem; }
 .account-single {
   display: flex; flex-direction: column; gap: 1.5rem;
-  max-width: 760px; margin: 0 auto;
+  width: 100%; max-width: 900px; /* pensado para 1920x1080 de escritorio */
 }
 .profile-card { margin-top: 0; }
 /* .avatar-picker-grid comparte clase con collab_join.html (misma pestaña
@@ -2161,6 +2172,10 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
 .avatar-circle-lg { width: 72px; height: 72px; font-size: 1.35rem; }
 .avatar-circle-sm { width: 28px; height: 28px; font-size: 0.72rem; }
 .avatar-circle-xs { width: 17px; height: 17px; font-size: 0.5rem; border-width: 1px; }
+/* +15% puntual solo para el avatar del header (id, no la clase -sm
+   compartida) — esa clase también la usa np-collab-avatar en otro
+   contexto, y agrandarla ahí no correspondía. */
+#header-avatar { width: 32px; height: 32px; font-size: 0.82rem; }
 
 /* Badge "agregado por" — player estándar (compacto, en la fila de tags) */
 .player-collab-badge {
