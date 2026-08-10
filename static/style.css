@@ -1993,20 +1993,17 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .auth-notice-error { background: rgba(255,34,68,0.1);  border: 1px solid rgba(255,34,68,0.3);   color: var(--led-red); }
 
 /* Perfil extendido (Ticket 05 Lote D, revisado en Ticket 06 Lotes D) */
-.account-columns {
-  display: grid; grid-template-columns: minmax(340px, 420px) minmax(480px, 1fr);
-  gap: 2rem; align-items: start; max-width: 1280px; margin: 0 auto;
-}
-@media (max-width: 768px) {
-  .account-columns { grid-template-columns: 1fr; max-width: 480px; }
+.account-single {
+  display: flex; flex-direction: column; gap: 1.5rem;
+  max-width: 760px; margin: 0 auto;
 }
 .profile-card { margin-top: 0; }
 /* .avatar-picker-grid comparte clase con collab_join.html (misma pestaña
    Femeninos/Masculinos), pero ahí el max-height:190px con scroll interno
    tenía sentido (popup chico). Acá hay mucho más ancho disponible — se
-   pisa solo dentro de .account-columns, sin tocar el comportamiento del
+   pisa solo dentro de .account-single, sin tocar el comportamiento del
    picker en la playlist colaborativa. */
-.account-columns .avatar-picker-grid {
+.account-single .avatar-picker-grid {
   max-height: none; overflow-y: visible;
   grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
 }

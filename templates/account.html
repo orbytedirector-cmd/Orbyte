@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="auth-wrap" style="min-height:auto; padding-top:2.5rem;">
-  <div class="account-columns">
+  <div class="account-single">
     <div class="auth-card">
       <h1 style="color:var(--text-primary); font-size:1.3rem; margin-bottom:0.25rem;">Mi cuenta</h1>
       <p class="auth-subtitle">{{ current_user.email }}</p>
@@ -16,7 +16,11 @@
       <div class="auth-notice auth-notice-error">{{ error }}</div>
       {% endif %}
 
-      <form method="POST" class="auth-form">
+      <button type="button" id="toggle-password-btn" class="track-btn ghost admin-btn-sm" style="margin-top:0.75rem;">
+        Cambiar contraseña
+      </button>
+
+      <form method="POST" class="auth-form" id="password-form" {% if not error and not success %}hidden{% endif %} style="margin-top:1rem;">
         <label class="auth-label" for="current_password">Contraseña actual</label>
         <input type="password" id="current_password" name="current_password" class="auth-input"
                required autocomplete="current-password">
@@ -81,6 +85,14 @@
     setTimeout(() => { statusEl.style.display = 'none'; }, 2500);
   }
 
+  const toggleBtn = document.getElementById('toggle-password-btn');
+  const passwordForm = document.getElementById('password-form');
+  toggleBtn.addEventListener('click', () => {
+    passwordForm.hidden = !passwordForm.hidden;
+    toggleBtn.textContent = passwordForm.hidden ? 'Cambiar contraseña' : 'Ocultar';
+  });
+  if (!passwordForm.hidden) toggleBtn.textContent = 'Ocultar';
+
   let profile = { avatar: null, bio: '', favorite_genres: [], favorite_artists: [] };
   let avatarCatalog = { femeninos: [], masculinos: [] };
   let allGenres = [];
@@ -115,12 +127,14 @@
   }
 
   function renderAvatarPreview() {
-    const preview = document.getElementById('avatar-preview');
-    if (profile.avatar) {
-      preview.innerHTML = `<img src="/static/avatares/${profile.avatar}" alt="">`;
-    } else {
-      preview.innerHTML = `<span>{{ current_user.email[0]|upper }}</span>`;
-    }
+    const html = profile.avatar
+      ? `<img src="/static/avatares/${profile.avatar}" alt="">`
+      : `<span>{{ current_user.email[0]|upper }}</span>`;
+    document.getElementById('avatar-preview').innerHTML = html;
+    // Punto 3 del feedback: guardar el avatar debe reflejarse también en
+    // el header, no solo acá — mismo contenido, dos lugares.
+    const headerAvatar = document.getElementById('header-avatar');
+    if (headerAvatar) headerAvatar.innerHTML = html;
   }
 
   document.querySelectorAll('.avatar-tab-btn').forEach(btn => {

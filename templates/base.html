@@ -55,7 +55,7 @@
           {% endif %}
           <a href="/account" class="header-user-link" title="Mi cuenta">👤 Cuenta</a>
           <a href="/account" title="Mi cuenta">
-            <span class="avatar-circle avatar-circle-xs">
+            <span class="avatar-circle avatar-circle-sm" id="header-avatar">
               {% if current_user.avatar %}
               <img src="{{ url_for('static', filename='avatares/' ~ current_user.avatar) }}" alt="">
               {% else %}
