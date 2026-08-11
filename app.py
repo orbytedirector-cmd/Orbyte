@@ -1565,6 +1565,144 @@ def api_v1_albums():
         })
     return jsonify({'albums': albums, 'total': total, 'limit': limit, 'offset': offset})
 
+@app.route('/api/v1/search')
+@api_login_required
+def api_v1_search():
+    """Espejo nativo de /search (web) — Ticket 08, Lote A §4.1. Calca las
+    mismas tres queries (artistas/álbumes/pistas por LIKE) tal cual, no
+    reinventa el criterio de búsqueda. Protegido por token en vez de cookie
+    de sesión, como el resto de /api/v1/*.
+
+    A diferencia de /search, esta ruta nunca redirige a home() cuando la
+    query viene vacía (no tiene sentido en una API JSON) — devuelve listas
+    vacías en su lugar, así el cliente nativo no necesita distinguir ese
+    caso especial.
+
+    Enriquecido respecto de /search para consumo nativo: cover_url en vez
+    de cover_path crudo, stream_url por pista (?token=... vía
+    /api/v1/stream, ver esa ruta) en vez de audio_url (que depende de la
+    cookie de sesión y no sirve acá), y un JOIN adicional a artists en la
+    query de pistas para exponer artist_name — no cambia qué filas matchean
+    el WHERE (misma cardinalidad, JOIN por primary key), solo agrega una
+    columna de salida."""
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'artists': [], 'albums': [], 'tracks': [], 'query': query})
+    conn = get_db_connection()
+    try:
+        like = f'%{query}%'
+        artists = conn.execute(
+            '''SELECT a.id, a.name, a.nationality, a.letter,
+                      a.lastfm_listeners,
+                      COUNT(DISTINCT al.id)                          AS album_count,
+                      COALESCE(MAX(apc.pop_score), 0)                AS pop_score,
+                      (SELECT t.genre FROM tracks t JOIN albums al2 ON t.album_id=al2.id
+                       WHERE al2.artist_id=a.id AND t.genre IS NOT NULL AND t.genre != ""
+                       GROUP BY t.genre ORDER BY COUNT(*) DESC LIMIT 1) AS most_common_genre
+               FROM artists a
+               LEFT JOIN albums al  ON al.artist_id=a.id
+               LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
+               WHERE a.name LIKE ?
+                 AND EXISTS (SELECT 1 FROM albums al2 WHERE al2.artist_id=a.id)
+               GROUP BY a.id
+               ORDER BY a.name LIMIT 10''',
+            (like,)
+        ).fetchall()
+        albums = conn.execute(
+            '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
+                      al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
+                      (SELECT led_color FROM tracks WHERE album_id=al.id
+                       ORDER BY CASE led_color
+                         WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                         WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                         ELSE 6 END LIMIT 1) as album_led
+               FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
+               WHERE al.name LIKE ? OR ar.name LIKE ? ORDER BY al.name LIMIT 20''',
+            (like, like)
+        ).fetchall()
+        tracks = conn.execute(
+            '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa,
+                      t.codec, t.duration, t.sample_rate_real,
+                      a.id as album_id, a.name as album_name, a.cover_path,
+                      ar.name as artist_name,
+                      tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
+               FROM tracks t
+               LEFT JOIN albums a ON t.album_id=a.id
+               LEFT JOIN artists ar ON ar.id=a.artist_id
+               LEFT JOIN track_meta tm ON tm.track_id=t.id
+               WHERE t.title LIKE ? OR t.artist LIKE ? OR t.genre LIKE ?
+               ORDER BY t.title LIMIT 50''',
+            (like, like, like)
+        ).fetchall()
+
+        artists_out = [dict(a) for a in artists]
+
+        albums_out = []
+        for a in albums:
+            d = dict(a)
+            d['cover_url'] = cover_url_filter(d.pop('cover_path'))
+            albums_out.append(d)
+
+        tracks_out = []
+        for t in tracks:
+            d = dict(t)
+            fmt, led = _fmt_format(d)
+            d['format_display'] = fmt
+            d['format_color']   = led
+            d['duration_fmt']   = _fmt_seconds(d.get('duration'))
+            d['cover_url']      = cover_url_filter(d.pop('cover_path'))
+            d['stream_url']     = f'/api/v1/stream/{d["id"]}'
+            tracks_out.append(d)
+
+        return jsonify({'artists': artists_out, 'albums': albums_out, 'tracks': tracks_out, 'query': query})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/search/advanced/options')
+@api_login_required
+def api_v1_search_advanced_options():
+    """Opciones de filtro para la pantalla de Búsqueda Avanzada nativa —
+    mismos datos que ya arma _advanced_search_options() para
+    _advanced_search_modal.html (web), más las constantes de Calidad/
+    Popularidad/Energía/Bailabilidad que la web tiene hardcodeadas en el
+    template (QUALITY_OPTIONS, POP_BUCKETS, ENERGY_BUCKETS, BAIL_BUCKETS),
+    para que el nativo no tenga que duplicarlas a mano.
+
+    Deliberadamente separado de /api/v1/home/facets: éste trae las listas
+    SIN LIMIT (adv_genres_primary, all_genres, available_years,
+    nationalities) que Home no necesita en cada carga — agrandarían ese
+    payload sin motivo. Se pide una sola vez al abrir la pantalla de
+    Búsqueda Avanzada, no en cada apertura de Home (Ticket 08, Lote A §4.2).
+
+    Decisión técnica a validar con el PO: género se expone en dos listas
+    separadas — genres_primary (adv_genres_primary, RichMetaPro, sin
+    límite) y genres_classic (all_genres, tracks.genre clásico, sin
+    límite) — porque _build_adv_filters matchea el parámetro `genero`
+    contra AMBAS fuentes a la vez (am.genre_primary/genre_secondary o
+    t.genre/tm.genre_primary/genre_secondary, ver esa función). Cómo
+    fusionar o presentar ambas listas en un solo picker queda para el
+    Lote D (nativo) — ver §7 del ticket, decisión de diseño delegada."""
+    conn = get_db_connection()
+    try:
+        opts = _advanced_search_options(conn)
+    finally:
+        conn.close()
+    return jsonify({
+        'moods':            [{'value': v, 'count': c} for v, c in opts['moods']],
+        'momentos':         [{'value': v, 'count': c} for v, c in opts['momentos']],
+        'eras':             [{'value': v, 'count': c} for v, c in opts['eras']],
+        'temas':            [{'value': v, 'count': c} for v, c in opts['temas']],
+        'genres_primary':   [{'value': v, 'count': c} for v, c in opts['adv_genres_primary']],
+        'genres_classic':   [{'value': v, 'count': c} for v, c in opts['all_genres']],
+        'languages':        [{'value': v, 'count': c} for v, c in opts['languages']],
+        'available_years':  opts['available_years'],
+        'nationalities':    [{'value': v, 'count': c} for v, c in opts['nationalities']],
+        'quality_options':      QUALITY_OPTIONS,
+        'popularity_buckets':   sorted(POP_BUCKETS.keys()),
+        'energy_buckets':       list(ENERGY_BUCKETS.keys()),
+        'danceability_buckets': list(BAIL_BUCKETS.keys()),
+    })
+
 @app.route('/api/heartbeat', methods=['POST'])
 @login_required
 def api_heartbeat():
@@ -3386,23 +3524,31 @@ def advanced_search_page():
     # that race entirely.
     return render_template('advanced_search.html', initial_query=request.query_string.decode('utf-8'), **opts)
 
-@app.route('/api/search/advanced')
-def api_search_advanced():
+def _api_search_advanced_payload(args):
     """
     Multi-filter search across every RichMetaPro + technical field at once.
     ?view=albums (default) or ?view=tracks selects which result set to return;
     the front end calls this twice (lazily, only when the user switches tabs)
     rather than computing both server-side on every request.
+
+    Extraído de la ruta web a una función compartida (Ticket 08, Lote A) para
+    que /api/search/advanced (web) y /api/v1/search/advanced (nativo, con
+    @api_login_required) no mantengan dos copias de las mismas ~120 líneas
+    de SQL con riesgo de divergir con el tiempo — mismo criterio que ya usa
+    el propio código en varios comentarios de este archivo. Agrega
+    'stream_url' por pista incondicionalmente (para ambos): el JS de la web
+    ya ignora campos extra que no usa, y así el cliente nativo puede
+    reproducir sin un segundo request a /api/v1/albums/<id>/tracks.
     """
-    page = max(1, request.args.get('page', 1, type=int))
-    sort = request.args.get('sort', 'popularidad')
-    dir_ = request.args.get('dir', 'desc')
-    view = request.args.get('view', 'albums')
+    page = max(1, args.get('page', 1, type=int))
+    sort = args.get('sort', 'popularidad')
+    dir_ = args.get('dir', 'desc')
+    view = args.get('view', 'albums')
 
     conn = get_db_connection()
     try:
         if view == 'tracks':
-            clauses, params = _build_adv_filters(request.args, pop_alias='tpc', for_albums=False)
+            clauses, params = _build_adv_filters(args, pop_alias='tpc', for_albums=False)
             # Colapsa duplicados (misma canción en distintos álbumes) — ver
             # _track_dedupe_condition. Se le pasan los filtros YA activos
             # (extra_where) para que la comparación quede acotada a "otras
@@ -3462,13 +3608,14 @@ def api_search_advanced():
                 d['bailabilidad']  = r['bailabilidad']
                 d['tier']          = r['tier']
                 d['pop_score']     = r['pop_score']
+                d['stream_url']    = f'/api/v1/stream/{d["id"]}'
                 tracks.append(d)
 
             total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-            return jsonify({'tracks': tracks, 'total': total, 'total_pages': total_pages, 'page': page})
+            return {'tracks': tracks, 'total': total, 'total_pages': total_pages, 'page': page}
 
         # view == 'albums'
-        clauses, params = _build_adv_filters(request.args, pop_alias='apc', for_albums=True)
+        clauses, params = _build_adv_filters(args, pop_alias='apc', for_albums=True)
         where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
         count_sql = f'''SELECT COUNT(DISTINCT al.id) FROM albums al
@@ -3504,9 +3651,21 @@ def api_search_advanced():
         for a in albums:
             a['cover_url'] = cover_url_filter(a.get('cover_path'))
             a['duration_fmt'] = _fmt_seconds(a.get('total_duration'))
-        return jsonify({'albums': albums, 'total': total, 'total_pages': total_pages, 'page': page})
+        return {'albums': albums, 'total': total, 'total_pages': total_pages, 'page': page}
     finally:
         conn.close()
+
+@app.route('/api/search/advanced')
+def api_search_advanced():
+    return jsonify(_api_search_advanced_payload(request.args))
+
+@app.route('/api/v1/search/advanced')
+@api_login_required
+def api_v1_search_advanced():
+    """Espejo nativo de /api/search/advanced — Ticket 08, Lote A §4.2. Misma
+    lógica exacta vía _api_search_advanced_payload (ver comentario ahí),
+    protegido por token en vez de cookie de sesión."""
+    return jsonify(_api_search_advanced_payload(request.args))
 
 # ── Format browse ──────────────────────────────────────────────────────────────
 
@@ -4299,18 +4458,25 @@ def api_lyrics():
         return _empty(str(e))
 
 
-@app.route('/api/meta/tracks')
-def api_meta_tracks():
-    field      = request.args.get('field',      '').strip()
-    value      = request.args.get('value',      '').strip()
-    page       = max(1, request.args.get('page', 1, type=int))
-    sort       = request.args.get('sort',       'popularidad')
-    dir_       = request.args.get('dir',        'desc')
-    intercalar = request.args.get('intercalar', '0') == '1'
+def _api_meta_tracks_payload(args):
+    """Cuerpo compartido de /api/meta/tracks (web) y /api/v1/meta/tracks
+    (nativo, con @api_login_required) — Ticket 08, Lote A §4.3. Extraído de
+    la ruta web al agregar el mirror nativo, mismo criterio que
+    _api_search_advanced_payload (no mantener dos copias de la misma
+    lógica de dedupe/paginación). Devuelve (payload_dict, status_code) para
+    que ambas rutas puedan propagar el 400 de 'field/value inválido' sin
+    duplicar esa validación. Agrega 'stream_url' por pista
+    incondicionalmente, igual que en _api_search_advanced_payload."""
+    field      = args.get('field',      '').strip()
+    value      = args.get('value',      '').strip()
+    page       = max(1, args.get('page', 1, type=int))
+    sort       = args.get('sort',       'popularidad')
+    dir_       = args.get('dir',        'desc')
+    intercalar = args.get('intercalar', '0') == '1'
 
     ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre'}
     if field not in ALLOWED_FIELDS or not value:
-        return jsonify({'error': 'invalid field or value'}), 400
+        return {'error': 'invalid field or value'}, 400
 
     conn = get_db_connection()
     try:
@@ -4403,21 +4569,36 @@ def api_meta_tracks():
             d['cover_url']  = cover_url_filter(d['cover_path'])
             d['file_path']  = clean_db_path(d.get('file_path'))
             d['audio_url']  = audio_url_filter(d['file_path'])
+            d['stream_url'] = f'/api/v1/stream/{d["id"]}'
             fmt, _ = _fmt_format(d)
             d['format_display'] = fmt
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
             result.append(d)
 
         total_pages = 1 if intercalar else max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
-        return jsonify({
+        return {
             'tracks':      result,
             'total':       count,
             'page':        page,
             'total_pages': total_pages,
             'intercalar':  intercalar,
-        })
+        }, 200
     finally:
         conn.close()
+
+@app.route('/api/meta/tracks')
+def api_meta_tracks():
+    payload, status = _api_meta_tracks_payload(request.args)
+    return jsonify(payload), status
+
+@app.route('/api/v1/meta/tracks')
+@api_login_required
+def api_v1_meta_tracks():
+    """Espejo nativo de /api/meta/tracks — Ticket 08, Lote A §4.3. Misma
+    lógica exacta vía _api_meta_tracks_payload (ver comentario ahí),
+    protegido por token en vez de cookie de sesión."""
+    payload, status = _api_meta_tracks_payload(request.args)
+    return jsonify(payload), status
 
 
 @app.route('/api/debug/tags/<int:track_id>')
