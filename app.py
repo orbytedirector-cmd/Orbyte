@@ -1340,6 +1340,12 @@ def api_v1_home_facets():
         genre_rows = conn.execute(
             'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" GROUP BY genre ORDER BY c DESC LIMIT 8'
         ).fetchall()
+        # Mismo query sin LIMIT que ya usa home() (web) para el panel
+        # "ver todos los géneros" — se manda acá también para que el
+        # cliente nativo no necesite un segundo request aparte.
+        all_genre_rows = conn.execute(
+            'SELECT genre, COUNT(*) as c FROM tracks WHERE genre IS NOT NULL AND genre!="" GROUP BY genre ORDER BY c DESC'
+        ).fetchall()
         lang_rows = conn.execute(
             'SELECT idioma, COUNT(*) as c FROM track_meta WHERE idioma IS NOT NULL AND idioma!="" GROUP BY idioma ORDER BY c DESC LIMIT 12'
         ).fetchall()
@@ -1366,6 +1372,7 @@ def api_v1_home_facets():
             'era':      [{'value': e, 'count': era_dict[e]} for e in era_order if e in era_dict],
             'tema':     [{'value': r['tema_lirico'], 'count': r['c']} for r in temas_rows],
             'genre':    [{'value': r['genre'], 'count': r['c']} for r in genre_rows],
+            'all_genres': [{'value': r['genre'], 'count': r['c']} for r in all_genre_rows],
             'idioma':   [{'value': r['idioma'], 'count': r['c']} for r in lang_rows],
             'recent_albums': recent,
         })
