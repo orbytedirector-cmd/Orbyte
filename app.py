@@ -4570,8 +4570,20 @@ def _api_meta_tracks_payload(args):
             d['file_path']  = clean_db_path(d.get('file_path'))
             d['audio_url']  = audio_url_filter(d['file_path'])
             d['stream_url'] = f'/api/v1/stream/{d["id"]}'
-            fmt, _ = _fmt_format(d)
+            # Bug preexistente encontrado al construir Lote B (nativo): esta
+            # función descartaba el segundo valor de _fmt_format() (el color
+            # LED), a diferencia de track_to_json() y de la enriquecida en
+            # api_v1_search(), que sí lo exponen como 'format_color'. El
+            # nativo lo necesita para pintar el punto de color junto al
+            # badge de formato (FacetDisplay.ledColor(_:), MixedTrackRow) —
+            # sin este campo, esa vista queda sin el punto de color pero por
+            # lo demás funciona igual. Se corrige acá porque esta función es
+            # compartida (/api/meta/tracks web + /api/v1/meta/tracks
+            # nativo): el campo extra no le cambia nada al JS de la web,
+            # que ya lo ignora, mismo criterio que 'stream_url'.
+            fmt, led = _fmt_format(d)
             d['format_display'] = fmt
+            d['format_color']   = led
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
             result.append(d)
 

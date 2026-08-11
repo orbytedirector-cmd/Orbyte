@@ -1,0 +1,14 @@
+Ticket 08, Lote A (fix): format_color faltante en /api/v1/meta/tracks
+
+_api_meta_tracks_payload() descartaba el color LED que devuelve
+_fmt_format() (fmt, _ = _fmt_format(d)) en vez de exponerlo como
+'format_color' — a diferencia de track_to_json() y de la enriquecida en
+api_v1_search(), que sí lo hacen. Encontrado al construir el Lote B
+nativo: MixedTrackRow queda sin el punto de color junto al badge de
+formato para pistas que vienen de /api/v1/meta/tracks (no rompe nada,
+solo un detalle visual ausente).
+
+Como _api_meta_tracks_payload() es compartida entre /api/meta/tracks
+(web) y /api/v1/meta/tracks (nativo), el fix aplica a ambas rutas. Campo
+extra en la respuesta web, que su JS ya ignora — mismo criterio que
+'stream_url'.
