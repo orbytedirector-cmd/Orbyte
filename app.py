@@ -146,6 +146,23 @@ def lang_label(code):
 app = Flask(__name__)
 CORS(app)
 
+# ── Diagnóstico: 404 sin ruta ─────────────────────────────────────────────
+# Agregado para poder depurar el cliente nativo (iOS) sin consola de Xcode
+# conectada: el access log default de Werkzeug ya muestra el path+query de
+# cada request, pero queda perdido entre el resto del tráfico. Este
+# warning puntual es mucho más fácil de encontrar/grepear. Para paths bajo
+# /api/ devuelve JSON en vez del HTML default de Flask — no cambia nada
+# para el resto de la web (se re-lanza la excepción tal cual).
+@app.errorhandler(404)
+def _handle_404(e):
+    app.logger.warning(
+        f"404 sin ruta: {request.method} {request.full_path} "
+        f"UA={request.headers.get('User-Agent', '?')}"
+    )
+    if request.path.startswith('/api/'):
+        return jsonify({'error': 'not_found', 'path': request.path}), 404
+    return e
+
 # ── Auth: secret key + session cookie config ─────────────────────────────────
 # El correo del administrador (dueño de la plataforma). Cualquier signup con
 # este correo queda auto-aprobado y con permisos de admin.
@@ -1432,25 +1449,34 @@ def api_v1_stream(track_id):
     auth_header = request.headers.get('Authorization', '')
     token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
     if not token:
+        app.logger.warning(f"[api/v1/stream] track={track_id}: sin token (ni header ni query)")
         return jsonify({'error': 'not_authenticated'}), 401
     try:
         user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
-    except (BadSignature, SignatureExpired):
+    except (BadSignature, SignatureExpired) as e:
+        app.logger.warning(f"[api/v1/stream] track={track_id}: token inválido ({e.__class__.__name__})")
         return jsonify({'error': 'invalid_token'}), 401
 
     conn = get_db_connection()
     try:
         user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
         if not user or not user['is_approved']:
+            app.logger.warning(f"[api/v1/stream] track={track_id}: user={user_id} no aprobado o inexistente")
             return jsonify({'error': 'not_authenticated'}), 401
         row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
     finally:
         conn.close()
     if not row:
+        app.logger.warning(f"[api/v1/stream] track={track_id}: no existe en la DB")
         return jsonify({'error': 'track_not_found'}), 404
     absolute_path = os.path.join(MUSIC_ROOT, clean_db_path(row['file_path']).lstrip('/'))
     if not os.path.isfile(absolute_path):
+        app.logger.warning(f"[api/v1/stream] track={track_id}: archivo no encontrado en disco: {absolute_path}")
         return jsonify({'error': 'file_not_found'}), 404
+    app.logger.info(
+        f"[api/v1/stream] track={track_id}: sirviendo {os.path.basename(absolute_path)} "
+        f"(range={request.headers.get('Range', '-')})"
+    )
     return _serve_audio(absolute_path)
 
 @app.route('/api/v1/albums')
