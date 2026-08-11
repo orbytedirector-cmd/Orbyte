@@ -1469,7 +1469,22 @@ def api_v1_stream(track_id):
     if not row:
         app.logger.warning(f"[api/v1/stream] track={track_id}: no existe en la DB")
         return jsonify({'error': 'track_not_found'}), 404
-    absolute_path = os.path.join(MUSIC_ROOT, clean_db_path(row['file_path']).lstrip('/'))
+    # file_path en la DB ya viene con el prefijo de MUSIC_ROOT incluido
+    # (ej: "mnt/musica/S/System Of A Down/..."), tal cual lo maneja
+    # audio_url_filter() para las URLs /audio/ de la web — hay que
+    # sacárselo antes de volver a anteponer MUSIC_ROOT, si no queda
+    # duplicado ("/mnt/musica/mnt/musica/...") y el archivo nunca se
+    # encuentra. audio_url_filter() no sufre esto porque construye la URL
+    # relativa ANTES de mandarla al cliente; este endpoint, al recibir
+    # solo el id, tiene que volver a armar la ruta desde el file_path
+    # crudo de la DB, así que necesita el mismo paso de limpieza acá.
+    relative_path = clean_db_path(row['file_path']).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if relative_path.startswith(root + '/'):
+        relative_path = relative_path[len(root) + 1:]
+    elif relative_path.startswith(root):
+        relative_path = relative_path[len(root):]
+    absolute_path = os.path.join(MUSIC_ROOT, relative_path)
     if not os.path.isfile(absolute_path):
         app.logger.warning(f"[api/v1/stream] track={track_id}: archivo no encontrado en disco: {absolute_path}")
         return jsonify({'error': 'file_not_found'}), 404
