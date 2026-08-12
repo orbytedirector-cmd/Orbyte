@@ -877,13 +877,13 @@ async function toggleFavorite(trackId) {
     _updateFavUI(tid, wasAdded);
 
     try {
-        const d = await fetch('/api/favorites/toggle', {
+        const d = await fetch('/api/v1/favorites/toggle', {
             method:  'POST',
             headers: {'Content-Type': 'application/json'},
-            body:    JSON.stringify({track_id: tid})
+            body:    JSON.stringify({item_type: 'track', item_id: tid})
         }).then(r => r.json());
 
-        if (!d.action) {
+        if (typeof d.is_favorite !== 'boolean') {
             // Server error — revert optimistic update
             if (wasAdded) window._favIds.delete(tid);
             else          window._favIds.add(tid);
@@ -891,12 +891,12 @@ async function toggleFavorite(trackId) {
             console.error('[Fav] Server error:', d);
             return;
         }
-        const isFav = d.action === 'added';
+        const isFav = d.is_favorite;
         // Ensure state matches server
         if (isFav) window._favIds.add(tid);
         else       window._favIds.delete(tid);
         _updateFavUI(tid, isFav);
-        console.debug('[Fav]', d.action, 'track', tid, '| total:', d.total);
+        console.debug('[Fav]', isFav ? 'added' : 'removed', 'track', tid);
     } catch(e) {
         console.error('[Fav] fetch error:', e);
     }

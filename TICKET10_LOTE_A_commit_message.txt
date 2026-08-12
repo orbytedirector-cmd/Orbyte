@@ -1,0 +1,62 @@
+Ticket 10, Lote A: Playlists + Favoritos generales (backend) + migración web
+
+Reemplaza el viejo sistema de favoritos (tabla `favorites`, global, sin
+user_id, solo pistas) por un esquema per-usuario y de tres tipos, y agrega
+Playlists desde cero. Incluye info enriquecida de Artist/Album/Track para
+que el cliente nativo no tenga que resolver `is_favorite` con una llamada
+aparte.
+
+Alcance ampliado sobre el diseño original del ticket, confirmado por el PO:
+- Favoritos viejos: se dropea la tabla directo, sin migrar datos.
+- Playlists: "editar" incluye renombrar y reordenar en este mismo lote
+  (originalmente quedaban fuera de alcance en el ticket).
+
+Schema (lazy migration en get_db_connection(), mismo patrón que
+user_favorite_artists/collab_sessions):
+- DROP TABLE IF EXISTS favorites
+- user_item_favorites (user_id, item_type, item_id) — nombre a propósito
+  distinto de user_favorite_artists (showcase de perfil, tope 5, no se toca)
+- playlists (id, user_id, name, created_at, updated_at)
+- playlist_tracks (id, playlist_id, track_id, position, added_at)
+
+Endpoints nuevos (todos /api/v1/*, @api_login_required, Bearer o cookie):
+- GET/POST   /api/v1/favorites, /api/v1/favorites/toggle
+- GET/POST   /api/v1/playlists
+- GET/PATCH/DELETE /api/v1/playlists/<id>
+- POST/DELETE      /api/v1/playlists/<id>/tracks[/<track_id>]
+- PUT        /api/v1/playlists/<id>/tracks/reorder
+- GET        /api/v1/artist/<id>, /api/v1/album/<id>, /api/v1/track/<id>
+
+Endpoints removidos: /api/favorites, /api/favorites/toggle (reemplazados
+por /api/v1/favorites*). /api/favorites/rebuild-cache NO se toca — pese al
+nombre, es el rebuild de track_pop_cache/album_pop_cache, feature aparte.
+
+Migración del lado web (para no dejar la UI existente rota al dropear la
+tabla vieja):
+- artist()/album()/favorites_page(): fav_ids ahora se resuelve per-usuario
+  contra user_item_favorites en vez del set global _favorites_set.
+- static/player.js (toggleFavorite), templates/favorites.html (removeFav),
+  templates/home.html (badge de conteo): apuntan a /api/v1/favorites* con
+  el shape {item_type, item_id} en vez de {track_id}.
+- Limpieza: entradas muertas en _COLLAB_GUEST_BLOCKED_ENDPOINTS
+  (api_favorites_list/api_favorites_toggle ya no existen). No afecta
+  seguridad: /api/v1/* está exento de ese gate y @api_login_required ya
+  bloquea invitados de la playlist colaborativa (nunca tienen
+  session['user_id']).
+
+Validado:
+- HEAD real confirmado antes de generar el diff (f06722e1134e1815ae6078ea
+  7fe3fc68d0b3be0d, rama feature/login-sessions).
+- py_compile sobre app.py, antes y después de aplicar el patch contra un
+  checkout fresco.
+- Sintaxis Jinja2 de las 5 plantillas tocadas (home/favorites/album/
+  artist/base).
+- Sintaxis JS de player.js (node --check).
+- git apply --check limpio contra HEAD.
+
+Pendiente (no es parte de este lote):
+- Lote B: sin dependencia con este — puede ir en paralelo.
+- Lote C/D/E (iOS): dependen de A+B.
+- UI de cola visible (respuesta del PO a la pregunta 3 del ticket): es
+  trabajo 100% nativo (motor de audio + pantalla), no toca este backend —
+  entra en Lote C/D.

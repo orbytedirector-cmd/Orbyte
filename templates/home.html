@@ -20,9 +20,10 @@
   <a href="/favorites" class="track-btn ghost fav-banner-cta">Ver favoritos →</a>
 </div>
 <script>
-  fetch('/api/favorites').then(r=>r.json()).then(d=>{
+  fetch('/api/v1/favorites?type=track').then(r=>r.json()).then(d=>{
     const el = document.getElementById('fav-count-home');
-    if (el) el.textContent = d.length ? `${d.length} pista${d.length!==1?'s':''} guardada${d.length!==1?'s':''}` : 'Sin favoritos aún';
+    const n = (d.favorites || []).length;
+    if (el) el.textContent = n ? `${n} pista${n!==1?'s':''} guardada${n!==1?'s':''}` : 'Sin favoritos aún';
   }).catch(()=>{});
 </script>
 

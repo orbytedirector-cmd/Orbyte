@@ -59,18 +59,24 @@ try:
 except ImportError:
     _MPD_AVAILABLE = False
 
-# ── Favorites (persisted in DB favorites table) ────────────────────────────────
-_favorites_set: set = set()   # in-memory cache of track_id ints
+# ── Favorites (Ticket 10 §3.3) ──────────────────────────────────────────────
+# Reemplaza la vieja tabla `favorites` (global, sin user_id, solo pistas — ver
+# AGENTS.md / Ticket 10 §2.2). El PO confirmó que no hace falta migrar datos
+# viejos (se dropea la tabla directo, ver lazy migration en get_db_connection).
+# A diferencia del viejo _favorites_set global, esto ya no puede vivir en un
+# cache en memoria de proceso — es por-usuario, así que se resuelve por
+# request contra user_item_favorites.
 
-def _load_favorites():
-    global _favorites_set
-    try:
-        conn = get_db_connection()
-        rows = conn.execute('SELECT track_id FROM favorites').fetchall()
-        _favorites_set = {r[0] for r in rows}
-        conn.close()
-    except Exception as e:
-        app.logger.warning(f'Could not load favorites: {e}')
+def _user_fav_track_ids(conn, user_id):
+    """Set de track_id favoritos del usuario logueado, para las vistas HTML
+    (artist.html/album.html/favorites.html) que pintan el corazón por fila."""
+    if not user_id:
+        return set()
+    rows = conn.execute(
+        "SELECT item_id FROM user_item_favorites WHERE user_id=? AND item_type='track'",
+        (user_id,)
+    ).fetchall()
+    return {r[0] for r in rows}
 
 # ── Nationality / Language → ISO 3166-1 alpha-2 country code ─────────────────
 # Used to build flagcdn.com image URLs — works on all OS/browser combos,
@@ -342,7 +348,6 @@ def diamond_svg(led_color, size='sm'):
 app.jinja_env.globals['nationality_flag'] = nationality_flag
 app.jinja_env.globals['lang_flag']        = lang_flag
 app.jinja_env.globals['lang_label']       = lang_label
-app.jinja_env.globals['favorites_set']    = lambda: _favorites_set
 app.jinja_env.globals['diamond_svg']      = diamond_svg
 
 # Make MOOD_LABELS available in all templates
@@ -605,6 +610,52 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass  # La columna ya existe
+    # Lazy migration (Ticket 10 §2.2/§3.3): se reemplaza la vieja `favorites`
+    # (global, sin user_id, solo pistas) por `user_item_favorites` (per-user,
+    # tres tipos). El PO confirmó que no hace falta migrar los datos viejos —
+    # se dropea directo. DROP TABLE IF EXISTS es tan barato como el CREATE
+    # TABLE IF NOT EXISTS de acá arriba una vez que la tabla ya no existe, así
+    # que es seguro dejarlo acá corriendo en cada conexión, mismo criterio.
+    conn.execute("DROP TABLE IF EXISTS favorites")
+    # Nombre `user_item_favorites` a propósito, para no confundirlo con
+    # `user_favorite_artists` (el showcase de perfil, tope 5 — Ticket 05
+    # Lote D) al leer el código de corrido. Ilimitado, tres tipos.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS user_item_favorites (
+            user_id     INTEGER NOT NULL,
+            item_type   TEXT NOT NULL CHECK (item_type IN ('artist', 'album', 'track')),
+            item_id     INTEGER NOT NULL,
+            added_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (user_id, item_type, item_id)
+        )
+    ''')
+    # Lazy migration (Ticket 10 §3.1): Playlists. user_id desde el día uno
+    # (a diferencia de la vieja `favorites`). `position` explícito en
+    # playlist_tracks deja la puerta abierta a reordenar (§3.2, reorder
+    # endpoint) sin reescribir toda la tabla.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS playlists (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            name        TEXT NOT NULL,
+            created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS playlist_tracks (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            playlist_id  INTEGER NOT NULL,
+            track_id     INTEGER NOT NULL,
+            position     INTEGER NOT NULL,
+            added_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (playlist_id, track_id)
+        )
+    ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist "
+        "ON playlist_tracks (playlist_id, position)"
+    )
     conn.commit()
     return conn
 
@@ -706,7 +757,7 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'admin_collab', 'admin_collab_crear', 'admin_collab_finalizar', 'admin_collab_qr',
     'admin_collab_permiso',
     'api_admin_collab_estado', 'api_admin_collab_pull',
-    'api_favorites_list', 'api_favorites_toggle', 'api_favorites_rebuild_cache', 'favorites_page',
+    'api_favorites_rebuild_cache', 'favorites_page',
     'audio_file', 'stream_dsd', 'api_heartbeat',
     # "Reproducir en…" — un invitado NUNCA debe poder redirigir el audio del
     # anfitrión a otro dispositivo de la casa.
@@ -1432,6 +1483,499 @@ def api_v1_album_tracks(album_id):
         return jsonify({'tracks': result})
     finally:
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Ticket 10 — Favoritos generales, Playlists, e info enriquecida
+# (Artist/Album/Track). Ver TICKET10_PLAYLISTS_COLA_ACCIONES_CONTEXTUALES.md
+# §3.2/§3.3/§3.4 para el diseño completo.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── Favoritos generales (§3.3) ───────────────────────────────────────────────
+
+@app.route('/api/v1/favorites', methods=['GET'])
+@api_login_required
+def api_v1_favorites_list():
+    """Lista los favoritos del usuario. `type` opcional (artist|album|track);
+    sin filtro devuelve los tres tipos mezclados."""
+    item_type = request.args.get('type')
+    if item_type and item_type not in ('artist', 'album', 'track'):
+        return jsonify({'error': 'invalid_type'}), 400
+    conn = get_db_connection()
+    try:
+        if item_type:
+            rows = conn.execute(
+                'SELECT item_type, item_id, added_at FROM user_item_favorites '
+                'WHERE user_id=? AND item_type=? ORDER BY added_at DESC',
+                (g.api_user['id'], item_type)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                'SELECT item_type, item_id, added_at FROM user_item_favorites '
+                'WHERE user_id=? ORDER BY added_at DESC',
+                (g.api_user['id'],)
+            ).fetchall()
+        return jsonify({'favorites': [dict(r) for r in rows]})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/favorites/toggle', methods=['POST'])
+@api_login_required
+def api_v1_favorites_toggle():
+    """Agrega o saca un favorito. {item_type, item_id}. Reemplaza al viejo
+    /api/favorites/toggle (solo pistas, sin user_id) — la web (base.html/
+    player.js/favorites.html) también apunta acá ahora, vía cookie de
+    sesión (api_login_required acepta Bearer O cookie)."""
+    data = request.get_json(silent=True) or {}
+    item_type = data.get('item_type')
+    item_id   = data.get('item_id')
+    if item_type not in ('artist', 'album', 'track') or not item_id:
+        return jsonify({'error': 'missing_or_invalid_fields'}), 400
+    conn = get_db_connection()
+    try:
+        existing = conn.execute(
+            'SELECT 1 FROM user_item_favorites WHERE user_id=? AND item_type=? AND item_id=?',
+            (g.api_user['id'], item_type, item_id)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                'DELETE FROM user_item_favorites WHERE user_id=? AND item_type=? AND item_id=?',
+                (g.api_user['id'], item_type, item_id)
+            )
+            is_favorite = False
+        else:
+            conn.execute(
+                'INSERT OR IGNORE INTO user_item_favorites (user_id, item_type, item_id) VALUES (?, ?, ?)',
+                (g.api_user['id'], item_type, item_id)
+            )
+            is_favorite = True
+        conn.commit()
+        return jsonify({'item_type': item_type, 'item_id': item_id, 'is_favorite': is_favorite})
+    finally:
+        conn.close()
+
+
+# ── Playlists (§3.1/§3.2) ────────────────────────────────────────────────────
+
+def _playlist_owned_or_404(conn, playlist_id, user_id):
+    """Fila de playlist si existe Y pertenece a user_id, si no None. 404 (no
+    403) a propósito en los callers — no delatar que existe una playlist
+    ajena con ese id."""
+    return conn.execute(
+        'SELECT * FROM playlists WHERE id=? AND user_id=?', (playlist_id, user_id)
+    ).fetchone()
+
+@app.route('/api/v1/playlists', methods=['GET'])
+@api_login_required
+def api_v1_playlists_list():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('''
+            SELECT p.id, p.name, p.created_at, p.updated_at,
+                   COUNT(pt.id) as track_count
+            FROM playlists p
+            LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+            WHERE p.user_id = ?
+            GROUP BY p.id
+            ORDER BY p.updated_at DESC
+        ''', (g.api_user['id'],)).fetchall()
+        return jsonify({'playlists': [dict(r) for r in rows]})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists', methods=['POST'])
+@api_login_required
+def api_v1_playlists_create():
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'missing_name'}), 400
+    conn = get_db_connection()
+    try:
+        cur = conn.execute(
+            'INSERT INTO playlists (user_id, name) VALUES (?, ?)',
+            (g.api_user['id'], name)
+        )
+        conn.commit()
+        return jsonify({'id': cur.lastrowid, 'name': name, 'track_count': 0}), 201
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>', methods=['GET'])
+@api_login_required
+def api_v1_playlist_detail(playlist_id):
+    """Detalle con las pistas ya resueltas — mismo shape que
+    /api/v1/albums/<id>/tracks, para armar PlayableTrack sin otra llamada."""
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        rows = conn.execute('''
+            SELECT t.*, pt.position, al.name as album_name, al.cover_path, al.artist_id
+            FROM playlist_tracks pt
+            JOIN tracks t ON t.id = pt.track_id
+            LEFT JOIN albums al ON al.id = t.album_id
+            WHERE pt.playlist_id = ?
+            ORDER BY pt.position
+        ''', (playlist_id,)).fetchall()
+        tracks = []
+        for r in rows:
+            d = dict(r)
+            fmt, led = _fmt_format(d)
+            cover = clean_db_path(d.get('cover_path'))
+            tracks.append({
+                'id':             d['id'],
+                'title':          d.get('title'),
+                'track_number':   d.get('track_number'),
+                'disc_number':    d.get('disc_number'),
+                'duration':       d.get('duration'),
+                'duration_fmt':   _fmt_seconds(d.get('duration')),
+                'format_display': fmt,
+                'format_color':   led,
+                'artist_id':      d.get('artist_id'),
+                'album_name':     d.get('album_name'),
+                'cover_url':      cover_url_filter(cover),
+                'stream_url':     f'/api/v1/stream/{d["id"]}',
+                'position':       d.get('position'),
+            })
+        return jsonify({
+            'id': pl['id'], 'name': pl['name'],
+            'created_at': pl['created_at'], 'updated_at': pl['updated_at'],
+            'tracks': tracks,
+        })
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>', methods=['PATCH'])
+@api_login_required
+def api_v1_playlist_rename(playlist_id):
+    """Renombrar (alcance sumado a este ticket a pedido del PO — ver §5)."""
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'missing_name'}), 400
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        conn.execute(
+            "UPDATE playlists SET name=?, updated_at=datetime('now') WHERE id=?",
+            (name, playlist_id)
+        )
+        conn.commit()
+        return jsonify({'id': playlist_id, 'name': name})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>', methods=['DELETE'])
+@api_login_required
+def api_v1_playlist_delete(playlist_id):
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        conn.execute('DELETE FROM playlist_tracks WHERE playlist_id=?', (playlist_id,))
+        conn.execute('DELETE FROM playlists WHERE id=?', (playlist_id,))
+        conn.commit()
+        return jsonify({'deleted': True})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>/tracks', methods=['POST'])
+@api_login_required
+def api_v1_playlist_add_track(playlist_id):
+    """Idempotente: si ya está, no falla ni duplica (UNIQUE + INSERT OR IGNORE)."""
+    data = request.get_json(silent=True) or {}
+    track_id = data.get('track_id')
+    if not track_id:
+        return jsonify({'error': 'missing_track_id'}), 400
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        if not conn.execute('SELECT id FROM tracks WHERE id=?', (track_id,)).fetchone():
+            return jsonify({'error': 'track_not_found'}), 404
+        next_pos = conn.execute(
+            'SELECT COALESCE(MAX(position), -1) + 1 as p FROM playlist_tracks WHERE playlist_id=?',
+            (playlist_id,)
+        ).fetchone()['p']
+        conn.execute(
+            'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)',
+            (playlist_id, track_id, next_pos)
+        )
+        conn.execute("UPDATE playlists SET updated_at=datetime('now') WHERE id=?", (playlist_id,))
+        conn.commit()
+        return jsonify({'added': True, 'track_id': track_id})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>/tracks/<int:track_id>', methods=['DELETE'])
+@api_login_required
+def api_v1_playlist_remove_track(playlist_id, track_id):
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        conn.execute(
+            'DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?',
+            (playlist_id, track_id)
+        )
+        conn.execute("UPDATE playlists SET updated_at=datetime('now') WHERE id=?", (playlist_id,))
+        conn.commit()
+        return jsonify({'removed': True, 'track_id': track_id})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>/tracks/reorder', methods=['PUT'])
+@api_login_required
+def api_v1_playlist_reorder(playlist_id):
+    """Reordenar (alcance sumado a este ticket a pedido del PO — ver §5).
+    Recibe la lista COMPLETA de track_ids en el orden final deseado (no un
+    par from/to) — más simple para el cliente nativo, que ya arma la lista
+    completa localmente durante el drag & drop. Valida que sea exactamente
+    el mismo set de pistas que ya tiene la playlist, ni más ni menos."""
+    data = request.get_json(silent=True) or {}
+    track_ids = data.get('track_ids')
+    if not isinstance(track_ids, list) or not track_ids:
+        return jsonify({'error': 'missing_track_ids'}), 400
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        existing_ids = {
+            r['track_id'] for r in conn.execute(
+                'SELECT track_id FROM playlist_tracks WHERE playlist_id=?', (playlist_id,)
+            ).fetchall()
+        }
+        if set(track_ids) != existing_ids:
+            return jsonify({'error': 'track_id_set_mismatch'}), 400
+        for pos, tid in enumerate(track_ids):
+            conn.execute(
+                'UPDATE playlist_tracks SET position=? WHERE playlist_id=? AND track_id=?',
+                (pos, playlist_id, tid)
+            )
+        conn.execute("UPDATE playlists SET updated_at=datetime('now') WHERE id=?", (playlist_id,))
+        conn.commit()
+        return jsonify({'reordered': True})
+    finally:
+        conn.close()
+
+
+# ── Info enriquecida: Artist / Album / Track (§2.5/§3.4) ────────────────────
+# No hay JSON existente que espejar para artist/album (a diferencia de
+# track) — se arman desde cero tomando como base exactamente los mismos
+# queries que ya arman artist()/album() para el HTML, así no se reinventa
+# qué datos importan.
+
+@app.route('/api/v1/artist/<int:artist_id>')
+@api_login_required
+def api_v1_artist_detail(artist_id):
+    conn = get_db_connection()
+    try:
+        ar = conn.execute('SELECT * FROM artists WHERE id=?', (artist_id,)).fetchone()
+        if not ar:
+            return jsonify({'error': 'not_found'}), 404
+        albums_raw = conn.execute(
+            'SELECT *, artist_id FROM albums WHERE artist_id=? ORDER BY year, name', (artist_id,)
+        ).fetchall()
+        total_tracks = sum(a['track_count'] or 0 for a in albums_raw)
+        albums = []
+        for a in albums_raw:
+            d = dict(a)
+            d['cover_path'] = clean_db_path(d.get('cover_path'))
+            d['cover_url']  = cover_url_filter(d['cover_path'])
+            led_row = conn.execute(
+                '''SELECT led_color FROM tracks
+                   WHERE album_id=? AND led_color IS NOT NULL
+                   GROUP BY led_color
+                   ORDER BY CASE led_color
+                     WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                     WHEN 'red'     THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
+                     ELSE 6 END
+                   LIMIT 1''',
+                (a['id'],)
+            ).fetchone()
+            d['album_led'] = led_row['led_color'] if led_row else 'yellow'
+            albums.append(d)
+
+        ar_data = dict(ar)
+        ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
+
+        genre_row = conn.execute('''
+            SELECT COALESCE(tm.genre_primary, t.genre) as g, COUNT(*) as c
+            FROM tracks t
+            JOIN albums al ON al.id=t.album_id
+            LEFT JOIN track_meta tm ON tm.track_id=t.id
+            WHERE al.artist_id=?
+              AND COALESCE(tm.genre_primary, t.genre) IS NOT NULL
+              AND COALESCE(tm.genre_primary, t.genre) != ''
+            GROUP BY g ORDER BY c DESC LIMIT 5
+        ''', (artist_id,)).fetchall()
+        genres = [r['g'] for r in genre_row]
+
+        similar_artists = build_similar_artists(conn, ar_data.get('similar_artists_json'), limit=12)
+
+        top_tracks_raw = conn.execute(
+            '''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
+                      COALESCE(tpc.pop_score, 0) as pop_score
+               FROM tracks t
+               JOIN albums al ON al.id = t.album_id
+               LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
+               WHERE al.artist_id = ?
+               ORDER BY pop_score DESC, t.title
+               LIMIT 10''',
+            (artist_id,)
+        ).fetchall()
+        top_tracks = []
+        for t in top_tracks_raw:
+            d = dict(t)
+            cover = clean_db_path(d.get('album_cover'))
+            fmt, led = _fmt_format(d)
+            top_tracks.append({
+                'id': d['id'], 'title': d.get('title'),
+                'duration': d.get('duration'), 'duration_fmt': _fmt_seconds(d.get('duration')),
+                'format_display': fmt, 'format_color': led,
+                'album_id': d.get('album_id'), 'album_name': d.get('album_name'),
+                'cover_url': cover_url_filter(cover),
+                'stream_url': f'/api/v1/stream/{d["id"]}',
+            })
+
+        is_favorite = bool(conn.execute(
+            "SELECT 1 FROM user_item_favorites WHERE user_id=? AND item_type='artist' AND item_id=?",
+            (g.api_user['id'], artist_id)
+        ).fetchone())
+
+        return jsonify({
+            'id': ar_data['id'], 'name': ar_data.get('name'),
+            'bio': ar_data.get('bio'), 'nationality': ar_data.get('nationality'),
+            'flag': ar_data.get('flag'), 'genres': genres,
+            'total_tracks': total_tracks, 'albums': albums,
+            'similar_artists': similar_artists, 'top_tracks': top_tracks,
+            'is_favorite': is_favorite,
+        })
+    finally:
+        conn.close()
+
+@app.route('/api/v1/album/<int:album_id>')
+@api_login_required
+def api_v1_album_detail(album_id):
+    conn = get_db_connection()
+    try:
+        alb = conn.execute(
+            'SELECT al.*, ar.name as artist_name FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id WHERE al.id=?',
+            (album_id,)
+        ).fetchone()
+        if not alb:
+            return jsonify({'error': 'not_found'}), 404
+        tracks = conn.execute(
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            (album_id,)
+        ).fetchall()
+        alb = dict(alb)
+        alb['cover_path'] = clean_db_path(alb.get('cover_path'))
+        alb['cover_url']  = cover_url_filter(alb['cover_path'])
+
+        fp = conn.execute(
+            'SELECT publisher FROM tracks WHERE album_id=? AND publisher IS NOT NULL AND publisher!="" LIMIT 1',
+            (album_id,)
+        ).fetchone()
+        alb['publisher'] = fp['publisher'] if fp else None
+
+        am = conn.execute('SELECT * FROM album_meta WHERE album_id=?', (album_id,)).fetchone()
+        _AM_DEFAULTS = {
+            'mood_predominante': None, 'momento_predominante': None, 'era': None,
+            'idioma_principal': None, 'avg_energy': None, 'avg_valence': None,
+            'avg_tension': None, 'avg_depth': None, 'avg_bailabilidad': None,
+            'tracks_con_letra': None, 'tracks_sincronizados': None,
+            'genre_primary': None, 'genre_secondary': None,
+            'lastfm_listeners': None, 'lastfm_playcount': None,
+        }
+        album_meta = {**_AM_DEFAULTS, **(dict(am) if am else {})}
+
+        track_list = []
+        for t in tracks:
+            d = dict(t)
+            fmt, led = _fmt_format(d)
+            track_list.append({
+                'id': d['id'], 'title': d.get('title'),
+                'track_number': d.get('track_number'), 'disc_number': d.get('disc_number'),
+                'duration': d.get('duration'), 'duration_fmt': _fmt_seconds(d.get('duration')),
+                'format_display': fmt, 'format_color': led,
+                'artist_id': alb.get('artist_id'), 'album_name': alb.get('name'),
+                'cover_url': alb['cover_url'],
+                'stream_url': f'/api/v1/stream/{d["id"]}',
+            })
+
+        if not album_meta.get('genre_primary'):
+            row = conn.execute(
+                '''SELECT COALESCE(tm.genre_primary, t.genre) as g, COUNT(*) as c
+                   FROM tracks t LEFT JOIN track_meta tm ON tm.track_id=t.id
+                   WHERE t.album_id=? AND COALESCE(tm.genre_primary, t.genre) IS NOT NULL
+                   GROUP BY g ORDER BY c DESC LIMIT 1''',
+                (album_id,)
+            ).fetchone()
+            if row:
+                album_meta['genre_primary'] = row['g']
+
+        artist_row = conn.execute(
+            'SELECT nationality FROM artists WHERE id=?', (alb.get('artist_id'),)
+        ).fetchone()
+        artist_nationality = artist_row['nationality'] if artist_row and artist_row['nationality'] else ''
+        artist_flag = nationality_flag(artist_nationality) if artist_nationality else ''
+
+        is_favorite = bool(conn.execute(
+            "SELECT 1 FROM user_item_favorites WHERE user_id=? AND item_type='album' AND item_id=?",
+            (g.api_user['id'], album_id)
+        ).fetchone())
+
+        return jsonify({
+            'id': alb['id'], 'name': alb.get('name'), 'year': alb.get('year'),
+            'artist_id': alb.get('artist_id'), 'artist_name': alb.get('artist_name'),
+            'cover_url': alb['cover_url'], 'publisher': alb.get('publisher'),
+            'primary_format': alb.get('primary_format') or 'Unknown',
+            'artist_nationality': artist_nationality, 'artist_flag': artist_flag,
+            'album_meta': album_meta, 'tracks': track_list,
+            'is_favorite': is_favorite,
+        })
+    finally:
+        conn.close()
+
+@app.route('/api/v1/track/<int:track_id>')
+@api_login_required
+def api_v1_track_detail(track_id):
+    """Espejo Bearer-friendly de /api/track/<id> — reusa track_to_json() tal
+    cual (§2.5), suma is_favorite."""
+    conn = get_db_connection()
+    try:
+        t = conn.execute('''
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            FROM tracks t
+            LEFT JOIN albums a ON t.album_id=a.id
+            LEFT JOIN artists ar ON a.artist_id=ar.id
+            WHERE t.id=?
+        ''', (track_id,)).fetchone()
+        if not t:
+            return jsonify({'error': 'not_found'}), 404
+        result = track_to_json(t)
+        tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (track_id,)).fetchone()
+        if tm:
+            for k in tm.keys():
+                if k != 'track_id':
+                    result[f'meta_{k}'] = tm[k]
+        result['is_favorite'] = bool(conn.execute(
+            "SELECT 1 FROM user_item_favorites WHERE user_id=? AND item_type='track' AND item_id=?",
+            (g.api_user['id'], track_id)
+        ).fetchone())
+        return jsonify(result)
+    finally:
+        conn.close()
+
 
 @app.route('/api/v1/stream/<int:track_id>')
 def api_v1_stream(track_id):
@@ -2818,7 +3362,8 @@ def artist(artist_id):
             top_tracks.append(d)
 
         return render_template('artist.html', artist=ar_data, albums=albums,
-                               total_tracks=total_tracks, fav_ids=_favorites_set,
+                               total_tracks=total_tracks,
+                               fav_ids=_user_fav_track_ids(conn, session.get('user_id')),
                                genres=genres, similar_artists=similar_artists,
                                top_tracks=top_tracks,
                                artist_nationality=ar_data.get('nationality', ''))
@@ -2971,8 +3516,8 @@ def album(album_id):
             artist_nationality = artist_row['nationality']
             artist_flag        = nationality_flag(artist_nationality)
 
-        # Favorites set for this page
-        fav_ids = _favorites_set
+        # Favorites set for this page — per-usuario (Ticket 10 §2.2)
+        fav_ids = _user_fav_track_ids(conn, session.get('user_id'))
 
         return render_template('album.html', album=alb, tracks=track_list,
                                primary_format=alb.get('primary_format') or 'Unknown',
@@ -5589,51 +6134,6 @@ def stream_dsd(filepath):
     return resp
 
 
-@app.route('/api/favorites', methods=['GET'])
-def api_favorites_list():
-    """Return all favorited tracks with full metadata."""
-    try:
-        conn = get_db_connection()
-        rows = conn.execute('''
-            SELECT t.id, t.title, t.artist, t.duration, t.led_color, t.file_path,
-                   t.codec, t.is_dsd, t.dsd_rate, t.is_mqa, t.sample_rate_real,
-                   al.name as album_name, al.cover_path,
-                   tm.tier, f.added_at
-            FROM favorites f
-            JOIN tracks t ON t.id=f.track_id
-            JOIN albums al ON al.id=t.album_id
-            LEFT JOIN track_meta tm ON tm.track_id=t.id
-            ORDER BY f.added_at DESC
-        ''').fetchall()
-        conn.close()
-        return jsonify([dict(r) for r in rows])
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/api/favorites/toggle', methods=['POST'])
-def api_favorites_toggle():
-    """Add or remove a track from favorites."""
-    global _favorites_set
-    data = request.get_json() or {}
-    tid  = data.get('track_id')
-    if not tid:
-        return jsonify({'error': 'track_id required'}), 400
-    try:
-        conn = get_db_connection()
-        if tid in _favorites_set:
-            conn.execute('DELETE FROM favorites WHERE track_id=?', (tid,))
-            _favorites_set.discard(tid)
-            action = 'removed'
-        else:
-            conn.execute('INSERT OR IGNORE INTO favorites (track_id) VALUES (?)', (tid,))
-            _favorites_set.add(tid)
-            action = 'added'
-        conn.commit()
-        conn.close()
-        return jsonify({'action': action, 'track_id': tid, 'total': len(_favorites_set)})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/favorites/rebuild-cache', methods=['POST'])
 def api_rebuild_pop_cache():
     """Rebuild popularity cache — call after bulk metadata updates."""
@@ -5670,8 +6170,11 @@ def api_rebuild_pop_cache():
 
 @app.route('/favorites')
 def favorites_page():
-    """Favorites page — shows all bookmarked tracks."""
+    """Favorites page — shows all bookmarked tracks (Ticket 10: ahora
+    per-usuario, contra user_item_favorites en vez de la vieja tabla
+    global `favorites`)."""
     try:
+        user_id = session.get('user_id')
         conn = get_db_connection()
         rows = conn.execute('''
             SELECT t.id, t.title, t.artist, t.duration, t.led_color, t.file_path,
@@ -5681,12 +6184,13 @@ def favorites_page():
                    CASE WHEN t.is_dsd=1 THEN COALESCE(t.dsd_rate,'DSD')
                         WHEN t.is_mqa=1 THEN 'MQA'
                         ELSE UPPER(COALESCE(t.codec,'FLAC')) END as format_display,
-                   f.added_at
-            FROM favorites f
-            JOIN tracks t ON t.id=f.track_id
+                   uif.added_at
+            FROM user_item_favorites uif
+            JOIN tracks t ON t.id=uif.item_id
             JOIN albums al ON al.id=t.album_id
-            ORDER BY f.added_at DESC
-        ''').fetchall()
+            WHERE uif.user_id=? AND uif.item_type='track'
+            ORDER BY uif.added_at DESC
+        ''', (user_id,)).fetchall()
         conn.close()
         tracks = [dict(r) for r in rows]
         # Build audio_url for each track
@@ -5696,7 +6200,7 @@ def favorites_page():
         return render_template('favorites.html',
                                tracks=tracks,
                                tracks_json=json.dumps(tracks),
-                               fav_ids=_favorites_set)
+                               fav_ids={t['id'] for t in tracks})
     except Exception as e:
         app.logger.error(f'favorites_page error: {e}')
         return render_template('favorites.html', tracks=[], tracks_json='[]', fav_ids=set())
@@ -5730,7 +6234,6 @@ def api_debug_dsd():
 
 
 if __name__ == '__main__':
-    _load_favorites()
     # threaded=True: sin esto, el server de desarrollo de Flask atiende UN
     # solo pedido HTTP a la vez. Con "Reproducir en…" activo hay como mínimo
     # DOS clientes pidiendo streams de audio en simultáneo — el navegador

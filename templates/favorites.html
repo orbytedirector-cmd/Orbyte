@@ -64,12 +64,12 @@ function playFavTrack(idx) {
   }
 }
 async function removeFav(trackId, btn) {
-  const d = await fetch('/api/favorites/toggle', {
+  const d = await fetch('/api/v1/favorites/toggle', {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({track_id: trackId})
+    body: JSON.stringify({item_type: 'track', item_id: trackId})
   }).then(r => r.json());
-  if (d.action === 'removed') {
+  if (d.is_favorite === false) {
     const row = document.getElementById('fav-row-' + trackId);
     if (row) { row.style.opacity='0'; row.style.transition='opacity 0.3s'; setTimeout(()=>row.remove(), 300); }
     if (window._favIds) window._favIds.delete(trackId);
