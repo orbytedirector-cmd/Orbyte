@@ -1857,6 +1857,8 @@ def api_v1_artist_detail(artist_id):
             'flag': ar_data.get('flag'), 'genres': genres,
             'total_tracks': total_tracks, 'albums': albums,
             'similar_artists': similar_artists, 'top_tracks': top_tracks,
+            'lastfm_listeners': ar_data.get('lastfm_listeners'),
+            'lastfm_playcount': ar_data.get('lastfm_playcount'),
             'is_favorite': is_favorite,
         })
     finally:
@@ -2168,7 +2170,7 @@ def api_v1_search():
             '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa,
                       t.codec, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
-                      ar.name as artist_name,
+                      ar.id as artist_id, ar.name as artist_name,
                       tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
                FROM tracks t
                LEFT JOIN albums a ON t.album_id=a.id
@@ -3371,62 +3373,88 @@ def artist(artist_id):
         conn.close()
 
 
+def _lookup_artist_website(conn, artist_id):
+    """Busca (y cachea) la URL del sitio oficial de un artista vía
+    MusicBrainz. Extraído a función compartida (Ticket 10, Lote G) para
+    que /api/artist/<id>/website (web) y /api/v1/artist/<id>/website
+    (nativo, @api_login_required — la ruta web no sirve para el cliente
+    nativo, queda detrás de _require_login que exige cookie de sesión, no
+    Bearer) no dupliquen las mismas ~35 líneas de lookup+caché."""
+    row = conn.execute(
+        'SELECT name, website_url FROM artists WHERE id=?', (artist_id,)
+    ).fetchone()
+    if not row:
+        return None
+
+    # Return cached value if present
+    if row['website_url']:
+        # '-' means "looked up, nothing found" — don't retry
+        return None if row['website_url'] == '-' else row['website_url']
+
+    # MusicBrainz search — no auth required, rate limit is 1 req/s
+    import urllib.request, urllib.parse
+    query = urllib.parse.quote(row['name'])
+    mb_url = (
+        f'https://musicbrainz.org/ws/2/artist/?query=artist:"{query}"'
+        f'&limit=1&fmt=json'
+    )
+    req = urllib.request.Request(mb_url, headers={
+        'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
+    })
+    with urllib.request.urlopen(req, timeout=4) as resp:
+        data = json.loads(resp.read())
+
+    artists_mb = data.get('artists', [])
+    official_url = None
+    if artists_mb:
+        mbid = artists_mb[0].get('id', '')
+        if mbid:
+            rel_url = f'https://musicbrainz.org/ws/2/artist/{mbid}?inc=url-rels&fmt=json'
+            rel_req = urllib.request.Request(rel_url, headers={
+                'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
+            })
+            with urllib.request.urlopen(rel_req, timeout=4) as rr:
+                rdata = json.loads(rr.read())
+            for rel in rdata.get('relations', []):
+                if rel.get('type') in ('official homepage', 'streaming', 'social network'):
+                    if rel.get('type') == 'official homepage':
+                        official_url = rel.get('url', {}).get('resource')
+                        break
+                    elif not official_url:
+                        official_url = rel.get('url', {}).get('resource')
+
+    # Store sentinel '-' when no URL found, to avoid re-querying MusicBrainz on every visit
+    store_val = official_url if official_url else '-'
+    conn.execute(
+        'UPDATE artists SET website_url=? WHERE id=?', (store_val, artist_id)
+    )
+    conn.commit()
+    return official_url
+
 @app.route('/api/artist/<int:artist_id>/website')
 def api_artist_website(artist_id):
     """Return (and cache) the official website URL for an artist via MusicBrainz."""
     conn = get_db_connection()
     try:
-        row = conn.execute(
-            'SELECT name, website_url FROM artists WHERE id=?', (artist_id,)
-        ).fetchone()
-        if not row:
-            return jsonify({'url': None})
+        return jsonify({'url': _lookup_artist_website(conn, artist_id)})
+    except Exception as e:
+        app.logger.debug(f'[website lookup] artist {artist_id}: {e}')
+        return jsonify({'url': None})
+    finally:
+        conn.close()
 
-        # Return cached value if present
-        if row['website_url']:
-            # '-' means "looked up, nothing found" — don't retry
-            return jsonify({'url': None if row['website_url'] == '-' else row['website_url']})
-
-        # MusicBrainz search — no auth required, rate limit is 1 req/s
-        import urllib.request, urllib.parse
-        query = urllib.parse.quote(row['name'])
-        mb_url = (
-            f'https://musicbrainz.org/ws/2/artist/?query=artist:"{query}"'
-            f'&limit=1&fmt=json'
-        )
-        req = urllib.request.Request(mb_url, headers={
-            'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
-        })
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read())
-
-        artists_mb = data.get('artists', [])
-        official_url = None
-        if artists_mb:
-            mbid = artists_mb[0].get('id', '')
-            if mbid:
-                rel_url = f'https://musicbrainz.org/ws/2/artist/{mbid}?inc=url-rels&fmt=json'
-                rel_req = urllib.request.Request(rel_url, headers={
-                    'User-Agent': 'Orbyte/1.0 (music-browser; contact@orbyte.local)'
-                })
-                with urllib.request.urlopen(rel_req, timeout=4) as rr:
-                    rdata = json.loads(rr.read())
-                for rel in rdata.get('relations', []):
-                    if rel.get('type') in ('official homepage', 'streaming', 'social network'):
-                        if rel.get('type') == 'official homepage':
-                            official_url = rel.get('url', {}).get('resource')
-                            break
-                        elif not official_url:
-                            official_url = rel.get('url', {}).get('resource')
-
-        # Store sentinel '-' when no URL found, to avoid re-querying MusicBrainz on every visit
-        store_val = official_url if official_url else '-'
-        conn.execute(
-            'UPDATE artists SET website_url=? WHERE id=?', (store_val, artist_id)
-        )
-        conn.commit()
-
-        return jsonify({'url': official_url})
+@app.route('/api/v1/artist/<int:artist_id>/website')
+@api_login_required
+def api_v1_artist_website(artist_id):
+    """Espejo nativo de /api/artist/<id>/website (Ticket 10, Lote G) —
+    separado del resto de /api/v1/artist/<id> a propósito, mismo criterio
+    que el JS de la web (loadDrawerPopularity/artist-website-link): no
+    bloquear la carga principal de la pantalla por un lookup externo a
+    MusicBrainz que puede demorar (timeout de 4s x 2 requests en el peor
+    caso, la primera vez que se consulta un artista)."""
+    conn = get_db_connection()
+    try:
+        return jsonify({'url': _lookup_artist_website(conn, artist_id)})
     except Exception as e:
         app.logger.debug(f'[website lookup] artist {artist_id}: {e}')
         return jsonify({'url': None})
@@ -4122,7 +4150,7 @@ def _api_search_advanced_payload(args):
             offset = (page - 1) * PAGE_SIZE
             data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                                   al.year as album_year, al.cover_path,
-                                  ar.name as artist_name,
+                                  ar.id as artist_id, ar.name as artist_name,
                                   tm.mood, tm.momento, tm.era, tm.tema_lirico, tm.idioma,
                                   tm.genre_primary, tm.genre_secondary, tm.bpm, tm.energy,
                                   tm.bailabilidad, tm.tier, COALESCE(tpc.pop_score,0) as pop_score
@@ -4141,6 +4169,7 @@ def _api_search_advanced_payload(args):
                 d['album_id']      = r['album_id']
                 d['album_name']    = r['album_name']
                 d['album_year']    = r['album_year']
+                d['artist_id']     = r['artist_id']
                 d['artist_name']   = r['artist_name']
                 d['mood']          = r['mood']
                 d['momento']       = r['momento']
@@ -5091,7 +5120,7 @@ def _api_meta_tracks_payload(args):
             SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa, t.codec,
                    t.duration, t.track_number, t.file_path,
                    a.id as album_id, a.name as album_name, a.cover_path, a.year as album_year,
-                   ar.name as artist_name,
+                   ar.id as artist_id, ar.name as artist_name,
                    tm.mood, tm.momento, tm.tier, tm.bpm, tm.tonalidad,
                    tm.energy, tm.bailabilidad, tm.lrclib_id, tm.has_lyrics, tm.has_synced_lrc,
                    tm.tema_lirico, tm.idioma, tm.genre_primary,

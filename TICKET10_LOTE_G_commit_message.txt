@@ -1,0 +1,52 @@
+Ticket 10, Lote G (fix post-build): artist_id faltante en listas de
+pistas + info de artista incompleta
+
+Corrige el punto 5 y parte del punto 2 del review de Niko sobre el build
+compilado (Lotes A-F).
+
+1. artist_id faltante en /api/v1/search, /api/v1/meta/tracks y
+   /api/v1/search/advanced (vista pistas) — root cause del "Esta pista
+   no tiene artista asociado" al tocar "Go to Artist" desde resultados
+   de búsqueda (Artist-Info-IOS.png). Las tres queries ya seleccionaban
+   `ar.name as artist_name` para mostrar el nombre del artista en la
+   fila, pero nunca `ar.id as artist_id` — el dato para navegar
+   simplemente no viajaba en el JSON, no era un bug del cliente. Se
+   agrega `ar.id as artist_id` a las tres (y `d['artist_id'] = r['artist_id']`
+   en _api_search_advanced_payload, que reconstruye el dict a mano en
+   vez de pasar la Row directo como las otras dos).
+
+2. /api/v1/artist/<id> ahora incluye lastfm_listeners/lastfm_playcount
+   — el dato ya estaba en `ar_data` (dict completo de la fila de
+   artists, misma fuente que usa artist.html en la web), simplemente
+   nunca se incluía en el JSON de salida. Cero cambios de query.
+
+3. Nuevo /api/v1/artist/<id>/website (@api_login_required) — mismo
+   lookup+caché contra MusicBrainz que ya tenía /api/artist/<id>/website
+   para la web, extraído a un helper compartido (_lookup_artist_website)
+   para no duplicar las ~35 líneas de esa lógica. La ruta web NO sirve
+   para el cliente nativo: vive detrás de _require_login, que exige
+   cookie de sesión de navegador, no Bearer token. Separado de
+   /api/v1/artist/<id> a propósito (no inline) — mismo criterio que el
+   JS de la web (carga el link del sitio web de forma asíncrona,
+   después de lo principal): un lookup a MusicBrainz puede demorar hasta
+   ~8s la primera vez que se consulta un artista (2 requests x 4s de
+   timeout cada uno), no vale la pena bloquear la carga del resto de la
+   pantalla por eso.
+
+Validado:
+- HEAD real confirmado antes de generar el diff:
+  0ca96ea3bc9a2a1a21181bb05ebb8f648d1ee68b (Lote A, vigente — no hubo
+  más cambios de backend desde entonces).
+- py_compile antes y después de aplicar el patch contra un checkout
+  fresco.
+- git apply --check limpio.
+- Búsqueda exhaustiva de todo lugar que seleccione `ar.name as
+  artist_name` en app.py para confirmar que estos eran los tres únicos
+  lugares afectados (hay otras queries que sí traían `ar.id as
+  artist_id` de antes — no se tocaron, ya estaban bien).
+
+Pendiente (Lote H, iOS): consumir lastfm_listeners/lastfm_playcount/
+website en ArtistDetailView, restylear los tabs General/Populares/
+Similares, y el resto de los puntos del review (Album Info que no
+carga, Song Info incompleto, cola sin "vaciar"/"guardar como playlist",
+pantalla de Mis Playlists).
