@@ -472,6 +472,15 @@ input:checked + .toggle-track:before { transform:translateX(16px); }
 .track-number { font-size:0.75rem; color:var(--text-secondary); }
 .track-title-btn { background:none; border:none; color:var(--text-primary); cursor:pointer; text-align:left; font-size:0.85rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; transition:color 0.15s; }
 .track-title-btn:hover { color:var(--accent); }
+/* Fix responsive (títulos largos sin puntos de corte, ej. "You Know My
+   Name (From "Casino Royale" Soundtrack)"): .track-title es el ítem real
+   del grid (columna 1fr) y no tenía ninguna regla propia — por default
+   un grid item tiene min-width:auto, que se calcula según el contenido
+   SIN wrap (el botón de adentro tiene white-space:nowrap), así que un
+   título largo empujaba la columna entera más allá de lo previsto y
+   pisaba la fila de al lado. min-width:0 fuerza a que el min-content se
+   ignore y el max-width:100% del botón de adentro sí pueda truncar. */
+.track-title { min-width: 0; overflow: hidden; }
 .track-duration { font-size:0.77rem; color:var(--text-secondary); }
 .track-quality  { font-size:0.72rem; color:var(--text-secondary); }
 .track-led  { display:inline-flex; align-items:center; justify-content:center; }

@@ -1,0 +1,21 @@
+Fix responsive: titulo largo desbordaba la fila en detalle de album
+
+.track-title (el span que envuelve el boton del titulo + chips de
+mood/tema) es el item real del grid de .album-track-row (columna 1fr)
+y no tenia ninguna regla CSS propia en ningun lado. Por default un
+grid item tiene min-width:auto, calculado segun el contenido SIN wrap
+(el boton de adentro ya usa white-space:nowrap) -- asi que un titulo
+largo sin puntos de corte naturales cerca del final (ej. "You Know My
+Name (From "Casino Royale" Soundtrack)") empujaba la columna entera
+mas alla de lo previsto, pisando la fila de al lado. Confirmado con
+capturas del PO.
+
+Fix: min-width:0 + overflow:hidden en .track-title, para que el
+max-width:100% + ellipsis que YA tenia .track-title-btn pueda
+truncar de verdad.
+
+Nota: el mismo patron en Populares de artista (.att-title-wrap,
+artist.html) YA tenia min-width:0 -- ese caso no tenia el bug, solo
+faltaba en album.html.
+
+Solo CSS/backend, sin riesgo, sin build de iOS.
