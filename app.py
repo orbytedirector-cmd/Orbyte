@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import random
 import tempfile
 import hashlib
 import socket
@@ -4849,31 +4850,31 @@ def _get_file_duration(file_path):
     return None
 
 
-@app.route('/api/lyrics')
-def api_lyrics():
-    artist   = request.args.get('artist',   '').strip()
-    title    = request.args.get('title',    '').strip()
-    track_id = request.args.get('track_id', None, type=int)
-    version  = request.args.get('version',  None)
-
+def _lyrics_payload(artist, title, track_id, version):
+    """Core de resolución de letras (fallback en cascada: tags embebidos ->
+    cache local por lrclib_id -> búsqueda en vivo contra lrclib.net).
+    Devuelve un dict plano (no jsonify) para que /api/lyrics (web) y
+    /api/v1/lyrics (nativo, Ticket 11 Lote A) lo compartan sin duplicar
+    esta lógica — mismo criterio que _lookup_artist_website (Ticket 10
+    Lote G)."""
     import sys
 
     def _log(msg):
         print(f"[lyrics] {msg}", file=sys.stderr, flush=True)
 
     def _empty(msg=''):
-        return jsonify({'has_lyrics': False, 'has_synced': False,
-                        'lyrics': '', 'synced': '', 'alternatives': [], 'error': msg})
+        return {'has_lyrics': False, 'has_synced': False,
+                'lyrics': '', 'synced': '', 'alternatives': [], 'error': msg}
 
     def _ok_file(synced, plain, source):
-        return jsonify({
+        return {
             'has_lyrics': bool(synced or plain),
             'has_synced': bool(synced),
             'lyrics':     plain  or '',
             'synced':     synced or '',
             'alternatives': [],
             'source': source,
-        })
+        }
 
     def _fmt_lrc(data):
         return {
@@ -4944,7 +4945,7 @@ def api_lyrics():
                 if r.status_code == 200:
                     data = r.json()
                     if data.get('plainLyrics') or data.get('syncedLyrics'):
-                        return jsonify({**_fmt_lrc(data), 'alternatives': [], 'source': 'lrclib_id'})
+                        return {**_fmt_lrc(data), 'alternatives': [], 'source': 'lrclib_id'}
             else:
                 _log(f"No lrclib_id in track_meta — track_id={track_id}")
         except Exception as e:
@@ -4962,7 +4963,7 @@ def api_lyrics():
         if version:
             r = req_lib.get(f"https://lrclib.net/api/get/{version}", timeout=6)
             if r.status_code == 200:
-                return jsonify({**_fmt_lrc(r.json()), 'alternatives': []})
+                return {**_fmt_lrc(r.json()), 'alternatives': []}
 
         # ── 5. lrclib.net search — scored by duration + synced + name match ───
         # Strategy: try album+artist+title first, then artist+title, then title alone
@@ -5022,7 +5023,7 @@ def api_lyrics():
                  'has_synced': bool(x.get('syncedLyrics')), 'duration': x.get('duration', 0)}
                 for x in candidates[:8]
             ]
-            return jsonify({**_fmt_lrc(best), 'alternatives': alts, 'source': 'lrclib_search'})
+            return {**_fmt_lrc(best), 'alternatives': alts, 'source': 'lrclib_search'}
 
         _log(f"No lyrics found for artist='{artist}' title='{title}'")
         return _empty()
@@ -5030,6 +5031,235 @@ def api_lyrics():
     except Exception as e:
         _log(f"Unexpected error: {e}")
         return _empty(str(e))
+
+
+@app.route('/api/lyrics')
+def api_lyrics():
+    artist   = request.args.get('artist',   '').strip()
+    title    = request.args.get('title',    '').strip()
+    track_id = request.args.get('track_id', None, type=int)
+    version  = request.args.get('version',  None)
+    return jsonify(_lyrics_payload(artist, title, track_id, version))
+
+
+@app.route('/api/v1/lyrics')
+@api_login_required
+def api_v1_lyrics():
+    """Espejo nativo de /api/lyrics (Ticket 11, Lote A) — mismo patrón que
+    /api/v1/artist/<id>/website (Ticket 10, Lote G): la ruta web vive
+    detrás del gate de sesión-cookie (_require_login implícito por no
+    tener @api_login_required), así que este mirror expone el mismo
+    contrato JSON bajo Bearer token sin duplicar el fallback en cascada."""
+    artist   = request.args.get('artist',   '').strip()
+    title    = request.args.get('title',    '').strip()
+    track_id = request.args.get('track_id', None, type=int)
+    version  = request.args.get('version',  None)
+    return jsonify(_lyrics_payload(artist, title, track_id, version))
+
+
+def _radio_candidate_rows(conn, seed_artist_ids, related_artist_ids, seed_genres,
+                           favorited_artist_ids, favorited_album_ids,
+                           exclude_track_ids, over_fetch):
+    """Una pasada del query de candidatos de 'Infinite' (Ticket 11 §4.7.3).
+    Separada de _radio_next_tracks para poder reintentar con sets vacíos
+    (relajación en cascada del caso borde de biblioteca chica) sin
+    duplicar el SQL."""
+    seed_artists_ph    = ','.join('?' for _ in seed_artist_ids)    or 'NULL'
+    related_artists_ph = ','.join('?' for _ in related_artist_ids) or 'NULL'
+    genres_ph_a         = ','.join('?' for _ in seed_genres)        or 'NULL'
+    genres_ph_b         = ','.join('?' for _ in seed_genres)        or 'NULL'
+    fav_artists_ph      = ','.join('?' for _ in favorited_artist_ids) or 'NULL'
+    fav_albums_ph       = ','.join('?' for _ in favorited_album_ids)  or 'NULL'
+
+    sql = f'''
+        SELECT t.id,
+               ( CASE WHEN al.artist_id IN ({seed_artists_ph}) THEN 40 ELSE 0 END )
+             + ( CASE WHEN al.artist_id IN ({related_artists_ph}) THEN 20 ELSE 0 END )
+             + ( CASE WHEN tm.genre_primary IN ({genres_ph_a}) THEN 25 ELSE 0 END )
+             + ( CASE WHEN tm.genre_secondary IN ({genres_ph_b}) THEN 10 ELSE 0 END )
+             + ( CASE WHEN al.artist_id IN ({fav_artists_ph}) THEN 15 ELSE 0 END )
+             + ( CASE WHEN al.id IN ({fav_albums_ph}) THEN 10 ELSE 0 END )
+             + MIN(COALESCE(tpc.pop_score, 0), 20)
+             + (ABS(RANDOM()) % 20)
+               AS score
+        FROM tracks t
+        JOIN albums al ON al.id = t.album_id
+        LEFT JOIN track_meta tm ON tm.track_id = t.id
+        LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
+    '''
+    params = (list(seed_artist_ids) + list(related_artist_ids) + list(seed_genres)
+              + list(seed_genres) + list(favorited_artist_ids) + list(favorited_album_ids))
+    if exclude_track_ids:
+        sql += f' WHERE t.id NOT IN ({",".join("?" for _ in exclude_track_ids)})'
+        params += list(exclude_track_ids)
+    sql += ' ORDER BY score DESC LIMIT ?'
+    params.append(over_fetch)
+    return conn.execute(sql, params).fetchall()
+
+
+def _radio_next_tracks(conn, user_id, seed_track_ids, exclude_track_ids, limit=5):
+    """Core del algoritmo de 'Infinite' (Ticket 11 §4.7). Semilla = pistas
+    ya reproducidas en la cola actual (§4.7.1, confirmado con el PO: sin
+    historial persistente para la v1). Sobre-pide candidatos y hace un
+    muestreo aleatorio ponderado por score en vez de devolver el top-N
+    directo, para que la 'radio' no se sienta siempre idéntica con la
+    misma semilla — mismo approach descripto por Spotify/Apple Music en
+    sus blogs técnicos (ponderado + no-determinístico, no ranking fijo)."""
+    if not seed_track_ids:
+        return []
+
+    seed_ph = ','.join('?' for _ in seed_track_ids)
+    seed_rows = conn.execute(
+        f'''SELECT al.artist_id, tm.genre_primary, tm.genre_secondary
+            FROM tracks t
+            LEFT JOIN albums al ON al.id = t.album_id
+            LEFT JOIN track_meta tm ON tm.track_id = t.id
+            WHERE t.id IN ({seed_ph})''',
+        list(seed_track_ids)
+    ).fetchall()
+
+    seed_artist_ids = {r['artist_id'] for r in seed_rows if r['artist_id']}
+    seed_genres = {r['genre_primary'] for r in seed_rows if r['genre_primary']}
+    seed_genres |= {r['genre_secondary'] for r in seed_rows if r['genre_secondary']}
+
+    # Expandir artistas semilla con sus similares (reusa build_similar_artists,
+    # que ya resuelve nombre -> id local; nos quedamos solo con los que
+    # existen en la biblioteca).
+    related_artist_ids = set()
+    for artist_id in seed_artist_ids:
+        row = conn.execute(
+            'SELECT similar_artists_json FROM artists WHERE id=?', (artist_id,)
+        ).fetchone()
+        if row and row['similar_artists_json']:
+            for sim in build_similar_artists(conn, row['similar_artists_json'], limit=12):
+                if sim['id'] and sim['id'] not in seed_artist_ids:
+                    related_artist_ids.add(sim['id'])
+
+    favorited_artist_ids = {
+        r['item_id'] for r in conn.execute(
+            "SELECT item_id FROM user_item_favorites WHERE user_id=? AND item_type='artist'",
+            (user_id,)
+        ).fetchall()
+    }
+    favorited_album_ids = {
+        r['item_id'] for r in conn.execute(
+            "SELECT item_id FROM user_item_favorites WHERE user_id=? AND item_type='album'",
+            (user_id,)
+        ).fetchall()
+    }
+
+    over_fetch = max(limit * 6, 30)
+    candidates = _radio_candidate_rows(
+        conn, seed_artist_ids, related_artist_ids, seed_genres,
+        favorited_artist_ids, favorited_album_ids, exclude_track_ids, over_fetch
+    )
+
+    # Caso borde §4.7.3: biblioteca chica o semilla sin género/artista
+    # resoluble — relajar en cascada. Paso 1: solo artistas+géneros (sin
+    # favoritos, que ya están implícitos en el score si aplican). Si
+    # tampoco alcanza, paso 2: cualquier cosa ordenada por pop_score+jitter.
+    if len(candidates) < limit and (seed_artist_ids or related_artist_ids or seed_genres):
+        candidates = _radio_candidate_rows(
+            conn, seed_artist_ids, related_artist_ids, seed_genres,
+            set(), set(), exclude_track_ids, over_fetch
+        )
+    if len(candidates) < limit:
+        candidates = _radio_candidate_rows(
+            conn, set(), set(), set(), set(), set(), exclude_track_ids, over_fetch
+        )
+
+    if not candidates:
+        return []
+
+    # Muestreo ponderado por score sobre el pool sobre-pedido (no
+    # determinístico a propósito, ver docstring).
+    pool = list(candidates)
+    weights = [max(1, p['score']) for p in pool]
+    chosen_ids = []
+    n = min(limit, len(pool))
+    for _ in range(n):
+        total = sum(weights)
+        pick = random.uniform(0, total)
+        upto = 0.0
+        for i, w in enumerate(weights):
+            upto += w
+            if upto >= pick:
+                chosen_ids.append(pool[i]['id'])
+                del pool[i]
+                del weights[i]
+                break
+
+    if not chosen_ids:
+        return []
+
+    chosen_ph = ','.join('?' for _ in chosen_ids)
+    rows = conn.execute(
+        f'''SELECT t.*, al.name as album_name, al.cover_path, al.artist_id
+            FROM tracks t
+            LEFT JOIN albums al ON al.id = t.album_id
+            WHERE t.id IN ({chosen_ph})''',
+        chosen_ids
+    ).fetchall()
+    by_id = {r['id']: r for r in rows}
+
+    tracks = []
+    for tid in chosen_ids:
+        r = by_id.get(tid)
+        if not r:
+            continue
+        d = dict(r)
+        fmt, led = _fmt_format(d)
+        cover = clean_db_path(d.get('cover_path'))
+        tracks.append({
+            'id':             d['id'],
+            'title':          d.get('title'),
+            'track_number':   d.get('track_number'),
+            'disc_number':    d.get('disc_number'),
+            'duration':       d.get('duration'),
+            'duration_fmt':   _fmt_seconds(d.get('duration')),
+            'format_display': fmt,
+            'format_color':   led,
+            'artist_id':      d.get('artist_id'),
+            'album_name':     d.get('album_name'),
+            'cover_url':      cover_url_filter(cover),
+            'stream_url':     f'/api/v1/stream/{d["id"]}',
+        })
+    return tracks
+
+
+@app.route('/api/v1/radio/next', methods=['POST'])
+@api_login_required
+def api_v1_radio_next():
+    """'Infinite' (Ticket 11 §4.7): dado lo ya reproducido en la cola
+    actual (seed_track_ids) y toda la cola actual como exclusión
+    (exclude_track_ids), devuelve hasta `limit` pistas nuevas relacionadas.
+    Semilla = solo cola actual, sin historial persistente (confirmado con
+    el PO, §4.7.1 — no existe tabla de historial en el schema actual)."""
+    data = request.get_json(silent=True) or {}
+
+    def _int_list(key):
+        raw = data.get(key) or []
+        out = []
+        for x in raw:
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    seed_track_ids    = _int_list('seed_track_ids')
+    exclude_track_ids = _int_list('exclude_track_ids')
+    try:
+        limit = max(1, min(int(data.get('limit', 5)), 20))
+    except (TypeError, ValueError):
+        limit = 5
+
+    conn = get_db_connection()
+    try:
+        tracks = _radio_next_tracks(conn, g.api_user['id'], seed_track_ids, exclude_track_ids, limit)
+        return jsonify({'tracks': tracks})
+    finally:
+        conn.close()
 
 
 def _api_meta_tracks_payload(args):

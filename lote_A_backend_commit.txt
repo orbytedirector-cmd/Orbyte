@@ -1,0 +1,46 @@
+Ticket 11, Lote A (backend): /api/v1/lyrics + /api/v1/radio/next
+
+Dos endpoints nuevos, sin tocar nada existente:
+
+1. /api/v1/lyrics — espejo nativo de /api/lyrics (que vive detrás del
+   gate de sesión-cookie, no bajo /api/v1/). Se extrajo el core de
+   api_lyrics() a _lyrics_payload(), que ahora devuelve un dict plano en
+   vez de jsonify(...), y ambas rutas (web y nativa) lo comparten. Mismo
+   patrón que _lookup_artist_website / /api/v1/artist/<id>/website
+   (Ticket 10, Lote G) — cero duplicación del fallback en cascada
+   (tags embebidos -> cache local por lrclib_id -> búsqueda en vivo
+   contra lrclib.net).
+
+2. /api/v1/radio/next (POST) — algoritmo de "Infinite" (Ticket 11 §4.7).
+   Recibe seed_track_ids (lo reproducido en la cola actual) y
+   exclude_track_ids (toda la cola actual), devuelve hasta `limit`
+   pistas nuevas relacionadas por artista/artistas similares/género,
+   con boost por favoritos y popularidad, más jitter aleatorio. No
+   devuelve el top-N directo: sobre-pide candidatos (limit*6, mínimo 30)
+   y hace un muestreo ponderado por score en Python, para que la "radio"
+   no se sienta siempre idéntica con la misma semilla. Cascada de
+   relajación si no hay pool suficiente (biblioteca chica). Semilla =
+   solo la cola actual, sin historial persistente — confirmado con el
+   PO, no existe tabla de historial en el schema actual (§4.7.1).
+   Response con el mismo shape de track que /api/v1/playlists/<id>, para
+   que el cliente nativo decodifique sin modelo nuevo.
+
+Columnas de track_meta confirmadas por uso real en queries existentes
+antes de escribir el SQL nuevo (genre_primary, genre_secondary, bpm,
+energy, bailabilidad, tier — NO existen valence/tension a nivel de
+track, solo avg_valence/avg_tension en album_meta, como ya sospechaba
+el ticket).
+
+Validado: py_compile limpio antes y después de aplicar el diff contra
+un checkout fresco de feature/login-sessions @ 34334dd8; git apply
+--check limpio; smoke test del SQL de radio/next corrido contra una
+SQLite en memoria con el schema real (tracks/albums/track_meta/
+track_pop_cache/artists/user_item_favorites) para atrapar errores de
+sintaxis antes de esta entrega.
+
+Requiere `import random` nuevo a nivel de módulo (usado por el muestreo
+ponderado de radio/next).
+
+No incluye cambios de iOS — ese lado depende de este backend y va en un
+lote separado (Lote E: lyrics sincronizadas, Lote F: orquestación de
+Infinite), mismo criterio de todo el proyecto.
