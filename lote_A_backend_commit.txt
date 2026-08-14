@@ -1,0 +1,10 @@
+Ticket 13 Lote A: limites y paginacion en backend
+
+- PAGE_SIZE 30 -> 20 (afecta /api/v1/albums, /api/v1/search/advanced,
+  /api/v1/meta/tracks via _paginate())
+- /api/v1/favorites: limit/offset opcionales, default 200 (no rompe el
+  consumo actual de resolucion de estado de favorito)
+- /api/v1/artist/<id>: LIMIT 100 en la query de albums, techo de
+  seguridad para bibliotecas con discografias muy grandes
+
+Bajo riesgo, solo backend Flask/SQLite.

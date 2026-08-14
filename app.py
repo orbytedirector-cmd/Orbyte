@@ -1498,23 +1498,39 @@ def api_v1_album_tracks(album_id):
 @api_login_required
 def api_v1_favorites_list():
     """Lista los favoritos del usuario. `type` opcional (artist|album|track);
-    sin filtro devuelve los tres tipos mezclados."""
+    sin filtro devuelve los tres tipos mezclados.
+
+    `limit`/`offset` opcionales (Ticket 13 §3 Lote A) — default alto (200)
+    para no romper el único consumo actual (resolución de estado ♥, que
+    necesita la lista completa), pero disponibles si el día de mañana se
+    arma una pantalla "Mis Favoritos" paginada."""
     item_type = request.args.get('type')
     if item_type and item_type not in ('artist', 'album', 'track'):
         return jsonify({'error': 'invalid_type'}), 400
+    try:
+        limit = int(request.args.get('limit', 200))
+        offset = int(request.args.get('offset', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid_pagination'}), 400
+    if limit < 1 or limit > 500:
+        return jsonify({'error': 'invalid_pagination'}), 400
+    if offset < 0:
+        return jsonify({'error': 'invalid_pagination'}), 400
     conn = get_db_connection()
     try:
         if item_type:
             rows = conn.execute(
                 'SELECT item_type, item_id, added_at FROM user_item_favorites '
-                'WHERE user_id=? AND item_type=? ORDER BY added_at DESC',
-                (g.api_user['id'], item_type)
+                'WHERE user_id=? AND item_type=? ORDER BY added_at DESC '
+                'LIMIT ? OFFSET ?',
+                (g.api_user['id'], item_type, limit, offset)
             ).fetchall()
         else:
             rows = conn.execute(
                 'SELECT item_type, item_id, added_at FROM user_item_favorites '
-                'WHERE user_id=? ORDER BY added_at DESC',
-                (g.api_user['id'],)
+                'WHERE user_id=? ORDER BY added_at DESC '
+                'LIMIT ? OFFSET ?',
+                (g.api_user['id'], limit, offset)
             ).fetchall()
         return jsonify({'favorites': [dict(r) for r in rows]})
     finally:
@@ -1782,8 +1798,12 @@ def api_v1_artist_detail(artist_id):
         ar = conn.execute('SELECT * FROM artists WHERE id=?', (artist_id,)).fetchone()
         if not ar:
             return jsonify({'error': 'not_found'}), 404
+        # Ticket 13 §3 Lote A: LIMIT 100 como techo de seguridad (no
+        # paginación real) — ningún artista real de una biblioteca personal
+        # debería superarlo.
         albums_raw = conn.execute(
-            'SELECT *, artist_id FROM albums WHERE artist_id=? ORDER BY year, name', (artist_id,)
+            'SELECT *, artist_id FROM albums WHERE artist_id=? ORDER BY year, name LIMIT 100',
+            (artist_id,)
         ).fetchall()
         total_tracks = sum(a['track_count'] or 0 for a in albums_raw)
         albums = []
@@ -3675,7 +3695,7 @@ def search():
 
 # ── Pagination helper ──────────────────────────────────────────────────────────
 
-PAGE_SIZE = 30
+PAGE_SIZE = 20
 
 # ── album_meta field mapping for api_meta_tracks ───────────────────────────────
 # Maps the 'field' param values to their column names in the album_meta table.
