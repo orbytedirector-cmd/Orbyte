@@ -1,0 +1,39 @@
+Ticket 12 (fixes, ronda 2) — backend: Populares del artista, dedupe +
+límite ampliado
+
+Aplicar sobre feature/login-sessions @ e5457bbd (mismo HEAD del Lote A
+de Ticket 11 — nada más tocó el backend desde entonces).
+
+/api/v1/artist/<id> — top_tracks:
+
+1. Dedupe por mejor calidad: reusa `_track_dedupe_condition()`, la
+   misma función que ya usan las vistas generales de pistas (Ticket 09)
+   — no se reinventó nada. Una canción que aparece en el álbum original
+   Y en un recopilatorio/reedición del mismo artista ya no sale
+   duplicada en "Populares"; se queda solo la copia de mejor calidad
+   (score = calidad_audio*0.7 + pop_score*0.3, empate resuelto por id
+   menor). Acotado a `al.artist_id = ?` — compara solo contra el
+   catálogo de ESE artista, no la biblioteca entera.
+2. LIMIT 10 -> 15.
+
+Pendiente de decisión del PO, NO incluido en este diff: la métrica de
+"popularidad" real (reproducciones mensuales/scrobbles) que pidió en el
+punto 1 de este fix. Investigado antes de escribir nada: `pop_score`
+(que sigue ordenando el resultado) es una métrica de CALIDAD de
+metadata (formato de audio, tier, si tiene letra sincronizada) —
+confirmado leyendo `api_rebuild_pop_cache()`, no tiene relación con
+reproducciones reales. Existen `lastfm_listeners`/`lastfm_playcount` a
+nivel de ARTISTA en el schema, pero no hay ninguna pista con datos de
+Last.fm, y no hay código en este repo que llame a la API de Last.fm
+para poblar ni siquiera esos campos de artista (deben cargarse por
+fuera, con algún script que no vive acá). Traer popularidad real a
+nivel de pista requeriría una llamada a Last.fm (track.getInfo) por
+cada pista de la biblioteca — day trabajo de backfill no trivial y
+sujeto a rate limits de esa API. Ticket aparte si se quiere esa
+inversión.
+
+Validado: py_compile limpio antes y después de aplicar contra checkout
+fresco; smoke test real del SQL contra una SQLite en memoria simulando
+una pista duplicada en dos álbumes del mismo artista con distinta
+calidad — confirmado que se excluye la copia peor y se conserva la
+mejor.

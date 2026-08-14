@@ -1822,16 +1822,29 @@ def api_v1_artist_detail(artist_id):
 
         similar_artists = build_similar_artists(conn, ar_data.get('similar_artists_json'), limit=12)
 
+        # Ticket 12 (fixes): dos correcciones sobre "Populares" —
+        # 1) Dedupe: reusa `_track_dedupe_condition` (mismo helper que ya
+        #    usan las vistas de pistas generales, Ticket 09) en vez de
+        #    reinventar la lógica — una canción que aparece en el álbum
+        #    original Y en un recopilatorio/reedición del mismo artista
+        #    ya no sale duplicada, se queda solo la copia de mejor
+        #    calidad (score = calidad*0.7 + pop_score*0.3, empate
+        #    resuelto por id menor). Acotado a `al.artist_id = ?` (mismo
+        #    criterio que el WHERE exterior — no compara contra la
+        #    biblioteca entera, solo contra el catálogo de este artista).
+        # 2) LIMIT 10 -> 15, pedido explícito del PO.
+        dedupe_clause = _track_dedupe_condition(extra_where='al.artist_id = ?', track_alias='t', pop_alias='tpc')
         top_tracks_raw = conn.execute(
-            '''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
+            f'''SELECT t.*, al.name as album_name, al.cover_path as album_cover,
                       COALESCE(tpc.pop_score, 0) as pop_score
                FROM tracks t
                JOIN albums al ON al.id = t.album_id
                LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
                WHERE al.artist_id = ?
+                 AND {dedupe_clause}
                ORDER BY pop_score DESC, t.title
-               LIMIT 10''',
-            (artist_id,)
+               LIMIT 15''',
+            (artist_id, artist_id)
         ).fetchall()
         top_tracks = []
         for t in top_tracks_raw:
