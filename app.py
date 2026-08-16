@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import random
 import tempfile
 import hashlib
@@ -27,6 +28,7 @@ from flask import Flask, render_template, request, send_file, jsonify, Response,
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from genre_similarity import genre_similarity as _genre_similarity_fn
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -423,6 +425,33 @@ def clean_db_path(path):
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # Ticket 14: funciones SQL custom para el scoring de Infinite.
+    # genre_similarity: envuelve el modulo genre_similarity/ (taxonomia +
+    # excepciones) — devuelve 0.0 si algun genero viene NULL en vez de
+    # tirar excepcion (puede pasar, no todos los tracks tienen
+    # genre_secondary). No se registra "una sola vez" a nivel modulo
+    # porque cada request abre su propia conexion (mismo patron que el
+    # resto de esta funcion) — registrar un callback Python es barato
+    # (no hace I/O), así que hacerlo en cada conexion no es un problema
+    # de performance real.
+    def _genre_similarity_sql(g1, g2):
+        if not g1 or not g2:
+            return 0.0
+        return _genre_similarity_fn(g1, g2)
+    conn.create_function("genre_similarity", 2, _genre_similarity_sql)
+
+    def _popularity_score_sql(listeners, playcount):
+        """0.0-1.0, escala logaritmica -- lastfm_listeners/playcount son
+        muy dispersos (de 0 a millones), una escala lineal quedaria
+        dominada por outliers. Usa el mayor de los dos (playcount suele
+        ser ~10x listeners, se escala para poder compararlos). Cap en 1M
+        "equivalente a listeners" como techo de "muy popular" — evita
+        tener que hacer un MAX() de toda la tabla en cada consulta."""
+        value = max(listeners or 0, (playcount or 0) / 10.0)
+        if value <= 0:
+            return 0.0
+        return min(1.0, math.log(value + 1) / math.log(1_000_001))
+    conn.create_function("popularity_score", 2, _popularity_score_sql)
     # Lazy migration: add website_url column if it doesn't exist yet
     try:
         conn.execute("ALTER TABLE artists ADD COLUMN website_url TEXT")
@@ -3844,6 +3873,52 @@ def _track_dedupe_condition(extra_where='', track_alias='t', pop_alias='tpc'):
                OR ({score_other} = {score_self} AND dup_t.id < {track_alias}.id))
     )"""
 
+
+# Ticket 14: dedupe de "casi-duplicados" para Infinite -- distinto de
+# _track_dedupe_condition de arriba (esa colapsa copias EXACTAS de
+# Título+Artista entre distintas ediciones/calidades). Esta es para el
+# caso "Headknocker" y "Headknocker (2008 Remaster)" apareciendo
+# consecutivos en la cola de Infinite: mismo tema, pero el título NO es
+# idéntico (tiene un sufijo de versión), así que _track_dedupe_condition
+# no lo agarra. Se aplica en Python (no SQL) sobre el pool de candidatos
+# ya traído, comparando (artista, título-sin-sufijo) contra lo que ya
+# está en la cola.
+_RADIO_DEDUPE_SUFFIX_RE = re.compile(
+    r'''\s*[\(\[]\s*(?:\d{4}\s*)?
+        (?:re-?master(?:ed)?
+          |deluxe(?:\s+edition)?
+          |live(?:\s+at\s+[^)\]]*)?
+          |acoustic
+          |radio\s+edit
+          |bonus\s+track
+          |demo
+          |mono(?:\s+mix)?
+          |stereo(?:\s+mix)?
+          |extended(?:\s+mix)?
+          |single\s+version
+          |album\s+version
+          |remix
+        )
+        \s*[\)\]]\s*$''',
+    re.IGNORECASE | re.VERBOSE
+)
+
+
+def _normalize_title_for_radio_dedupe(title):
+    """Pela sufijos de version (remaster/live/deluxe/acoustic/etc) del
+    final de un titulo, repitiendo por si hay mas de uno encadenado (ej.
+    "Track (Live) (Remastered)"). Case-insensitive. Usado solo para
+    Infinite, no toca la base ni el dedupe general de la app."""
+    if not title:
+        return ''
+    normalized = title.strip()
+    prev = None
+    while prev != normalized:
+        prev = normalized
+        normalized = _RADIO_DEDUPE_SUFFIX_RE.sub('', normalized).strip()
+    return normalized.lower()
+
+
 def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
               order_by='al.name ASC'):
     """Run paginated query with dynamic ORDER BY."""
@@ -5090,38 +5165,162 @@ def api_v1_lyrics():
     return jsonify(_lyrics_payload(artist, title, track_id, version))
 
 
-def _radio_candidate_rows(conn, seed_artist_ids, related_artist_ids, seed_genres,
-                           favorited_artist_ids, favorited_album_ids,
-                           exclude_track_ids, over_fetch):
-    """Una pasada del query de candidatos de 'Infinite' (Ticket 11 §4.7.3).
-    Separada de _radio_next_tracks para poder reintentar con sets vacíos
-    (relajación en cascada del caso borde de biblioteca chica) sin
-    duplicar el SQL."""
-    seed_artists_ph    = ','.join('?' for _ in seed_artist_ids)    or 'NULL'
-    related_artists_ph = ','.join('?' for _ in related_artist_ids) or 'NULL'
-    genres_ph_a         = ','.join('?' for _ in seed_genres)        or 'NULL'
-    genres_ph_b         = ','.join('?' for _ in seed_genres)        or 'NULL'
-    fav_artists_ph      = ','.join('?' for _ in favorited_artist_ids) or 'NULL'
-    fav_albums_ph       = ','.join('?' for _ in favorited_album_ids)  or 'NULL'
+def _radio_candidate_rows(conn, seed, exclude_track_ids, over_fetch):
+    """Una pasada del query de candidatos de 'Infinite' (Ticket 11 §4.7.3,
+    rediseñado en Ticket 14 con 10 niveles de señal en vez de los 6
+    originales). Separada de _radio_next_tracks para poder reintentar con
+    un `seed` relajado (cascada del caso borde de biblioteca chica) sin
+    duplicar el SQL.
+
+    `seed` es el dict armado en _radio_next_tracks con todas las señales
+    de las pistas semilla (artistas, albumes, generos, mood, tema
+    lirico, momento, idioma, nacionalidad, energy/bpm promedio, tracks
+    similares, favoritos). Pasar un dict con sets/valores vacios para la
+    relajacion en cascada (mismo patron que antes, ahora con más campos).
+
+    Niveles (ver Ticket 14, tabla de pesos acordada con el PO):
+      1) Misma pista/album semilla + popularidad Last.fm      -> hasta 60
+      2) Mismo artista (otro album) + popularidad Last.fm      -> hasta 50
+      3) Artista similar (MusicBrainz) + popularidad + bonus si
+         similar_tracks_json de alguna semilla apunta a esta pista -> hasta 47
+      4) Favorito (artista/album/pista) relacionado con la semilla
+         (similar-artista O genero compartido; graduado: +18 si cumple
+         una condicion, +28 si cumple las dos)
+      5) Mismo genero primario/secundario                      -> +25/+10
+      6) Genero cercano (mapa de similitud, genre_similarity()) -> hasta +12
+         (solo si NO es ya un match exacto del nivel 5, para no duplicar)
+      7) Mood/tema lirico/bpm/energia                          -> +15/+10/hasta10/hasta10
+      8) Momento/decada/idioma/nacionalidad del artista          -> +8/+5/+5/+4
+      +) Calidad de audio (LED, "fuente de verdad, nunca recalcular")
+                                                                 -> hasta +15
+      +) Ruido aleatorio (variedad, sin esto la cola se siente repetitiva)
+                                                                 -> +0 a 19
+    """
+    def ph(values):
+        return ','.join('?' for _ in values) or 'NULL'
+
+    album_ph          = ph(seed['album_ids'])
+    artist_ph         = ph(seed['artist_ids'])
+    related_artist_ph = ph(seed['related_artist_ids'])
+    genres_ph_1        = ph(seed['genres'])
+    genres_ph_2        = ph(seed['genres'])
+    genres_ph_3        = ph(seed['genres'])   # nivel 4 (favoritos relacionados)
+    genres_ph_4        = ph(seed['genres'])
+    genres_ph_5        = ph(seed['genres'])   # nivel 6 (genero cercano, exclusion de match exacto)
+    genres_ph_6        = ph(seed['genres'])
+    fav_artist_ph      = ph(seed['favorited_artist_ids'])
+    fav_album_ph       = ph(seed['favorited_album_ids'])
+    fav_track_ph       = ph(seed['favorited_track_ids'])
+    fav_artist_ph_2    = ph(seed['favorited_artist_ids'])
+    similar_track_ph   = ph(seed['similar_track_ids'])
+    moods_ph           = ph(seed['moods'])
+    temas_ph           = ph(seed['temas'])
+    momentos_ph        = ph(seed['momentos'])
+    idiomas_ph         = ph(seed['idiomas'])
+    nationalities_ph   = ph(seed['nationalities'])
+    decadas_ph         = ph(seed['decadas'])
+
+    # Nivel 6: genero cercano vía el mapa de similitud (genre_similarity,
+    # registrada como funcion SQL en get_db_connection). MAX(...) escalar
+    # de SQLite (no agregado) entre todas las combinaciones
+    # candidato-campo x semilla-genero -- toma la mejor similitud
+    # encontrada. Si no hay generos semilla, el termino es simplemente 0.
+    genre_sim_terms = []
+    genre_sim_params = []
+    if seed['genres']:
+        for cand_field in ('tm.genre_primary', 'tm.genre_secondary'):
+            for g in seed['genres']:
+                genre_sim_terms.append(f"genre_similarity({cand_field}, ?)")
+                genre_sim_params.append(g)
+        genre_sim_expr = f"MAX({', '.join(genre_sim_terms)})"
+    else:
+        genre_sim_expr = "0"
+
+    # Nivel 7 continuo: energy (-1..1) y bpm (rango asumido 40-220, ver
+    # Ticket 14) -- similitud 1 - distancia_normalizada, NUNCA negativo
+    # (MAX con 0 por las dudas de que la resta de un valor NULL rompa el
+    # calculo -- COALESCE ya cubre eso, pero MAX(...,0) es la red de
+    # seguridad final).
+    energy_expr = "0"
+    if seed['avg_energy'] is not None:
+        energy_expr = (
+            f"MAX(0, 1 - ABS(COALESCE(tm.energy, {seed['avg_energy']}) "
+            f"- ({seed['avg_energy']})) / 2.0)"
+        )
+    bpm_expr = "0"
+    if seed['avg_bpm'] is not None:
+        bpm_expr = (
+            f"MAX(0, 1 - MIN(ABS(COALESCE(tm.bpm, {seed['avg_bpm']}) "
+            f"- ({seed['avg_bpm']})), 60) / 60.0)"
+        )
 
     sql = f'''
-        SELECT t.id,
-               ( CASE WHEN al.artist_id IN ({seed_artists_ph}) THEN 40 ELSE 0 END )
-             + ( CASE WHEN al.artist_id IN ({related_artists_ph}) THEN 20 ELSE 0 END )
-             + ( CASE WHEN tm.genre_primary IN ({genres_ph_a}) THEN 25 ELSE 0 END )
-             + ( CASE WHEN tm.genre_secondary IN ({genres_ph_b}) THEN 10 ELSE 0 END )
-             + ( CASE WHEN al.artist_id IN ({fav_artists_ph}) THEN 15 ELSE 0 END )
-             + ( CASE WHEN al.id IN ({fav_albums_ph}) THEN 10 ELSE 0 END )
-             + MIN(COALESCE(tpc.pop_score, 0), 20)
+        SELECT t.id, t.title, t.artist,
+               -- Niveles 1/2/3: mutuamente excluyentes por prioridad
+               ( CASE
+                   WHEN al.id IN ({album_ph}) THEN
+                       45 + popularity_score(tm.lastfm_listeners, tm.lastfm_playcount) * 15
+                   WHEN al.artist_id IN ({artist_ph}) THEN
+                       35 + popularity_score(tm.lastfm_listeners, tm.lastfm_playcount) * 15
+                   WHEN al.artist_id IN ({related_artist_ph}) THEN
+                       25 + popularity_score(tm.lastfm_listeners, tm.lastfm_playcount) * 12
+                          + ( CASE WHEN t.id IN ({similar_track_ph}) THEN 10 ELSE 0 END )
+                   ELSE 0
+                 END )
+               -- Nivel 4: favorito relacionado con la semilla, graduado
+             + ( CASE (
+                   CASE WHEN al.artist_id IN ({fav_artist_ph}) OR al.id IN ({fav_album_ph})
+                             OR t.id IN ({fav_track_ph}) THEN
+                     ( CASE WHEN al.artist_id IN ({artist_ph}) OR al.artist_id IN ({related_artist_ph})
+                            THEN 1 ELSE 0 END )
+                   + ( CASE WHEN tm.genre_primary IN ({genres_ph_1}) OR tm.genre_secondary IN ({genres_ph_2})
+                            THEN 1 ELSE 0 END )
+                   ELSE -1
+                 END )
+                 WHEN 2 THEN 28 WHEN 1 THEN 18 ELSE 0
+               END )
+               -- Nivel 5: mismo genero (existente, sin cambios)
+             + ( CASE WHEN tm.genre_primary IN ({genres_ph_3}) THEN 25 ELSE 0 END )
+             + ( CASE WHEN tm.genre_secondary IN ({genres_ph_4}) THEN 10 ELSE 0 END )
+               -- Nivel 6: genero cercano (mapa), solo si NO es ya match exacto del nivel 5
+             + ( CASE WHEN tm.genre_primary IN ({genres_ph_5}) OR tm.genre_secondary IN ({genres_ph_6})
+                      THEN 0 ELSE {genre_sim_expr} * 12 END )
+               -- Nivel 7: mood / tema lirico / bpm / energia
+             + ( CASE WHEN tm.mood IN ({moods_ph}) THEN 15 ELSE 0 END )
+             + ( CASE WHEN tm.tema_lirico IN ({temas_ph}) THEN 10 ELSE 0 END )
+             + ( {bpm_expr} ) * 10
+             + ( {energy_expr} ) * 10
+               -- Nivel 8: momento / decada / idioma / nacionalidad del artista
+             + ( CASE WHEN tm.momento IN ({momentos_ph}) THEN 8 ELSE 0 END )
+             + ( CASE WHEN tm.decada IN ({decadas_ph}) THEN 5 ELSE 0 END )
+             + ( CASE WHEN tm.idioma IN ({idiomas_ph}) THEN 5 ELSE 0 END )
+             + ( CASE WHEN ar.nationality IN ({nationalities_ph}) THEN 4 ELSE 0 END )
+               -- Calidad de audio (LED, fuente de verdad ya establecida — ver LED_LABELS/LED_ORDER)
+             + ( (6 - CASE t.led_color
+                        WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
+                        WHEN 'red'     THEN 3 WHEN 'cyan'  THEN 4 WHEN 'white' THEN 5
+                        ELSE 6 END) / 6.0 * 15 )
+               -- Ruido aleatorio (variedad, existente, sin cambios)
              + (ABS(RANDOM()) % 20)
                AS score
         FROM tracks t
         JOIN albums al ON al.id = t.album_id
+        LEFT JOIN artists ar ON ar.id = al.artist_id
         LEFT JOIN track_meta tm ON tm.track_id = t.id
-        LEFT JOIN track_pop_cache tpc ON tpc.track_id = t.id
     '''
-    params = (list(seed_artist_ids) + list(related_artist_ids) + list(seed_genres)
-              + list(seed_genres) + list(favorited_artist_ids) + list(favorited_album_ids))
+    params = (
+        list(seed['album_ids']) + list(seed['artist_ids'])
+        + list(seed['related_artist_ids']) + list(seed['similar_track_ids'])
+        + list(seed['favorited_artist_ids']) + list(seed['favorited_album_ids']) + list(seed['favorited_track_ids'])
+        + list(seed['artist_ids']) + list(seed['related_artist_ids'])
+        + list(seed['genres']) + list(seed['genres'])
+        + list(seed['genres']) + list(seed['genres'])
+        + list(seed['genres']) + list(seed['genres']) + genre_sim_params
+        + list(seed['moods']) + list(seed['temas'])
+        + list(seed['momentos'])
+        + list(seed['decadas'])
+        + list(seed['idiomas']) + list(seed['nationalities'])
+    )
     if exclude_track_ids:
         sql += f' WHERE t.id NOT IN ({",".join("?" for _ in exclude_track_ids)})'
         params += list(exclude_track_ids)
@@ -5130,30 +5329,86 @@ def _radio_candidate_rows(conn, seed_artist_ids, related_artist_ids, seed_genres
     return conn.execute(sql, params).fetchall()
 
 
+def _empty_radio_seed(keep_core_from=None):
+    """Dict vacio con todas las claves que espera _radio_candidate_rows --
+    usado tal cual para la relajacion final de la cascada del caso borde
+    de biblioteca chica, o parcialmente poblado (keep_core_from) para
+    conservar artista/album/genero en un paso intermedio."""
+    seed = {
+        'artist_ids': set(), 'album_ids': set(), 'related_artist_ids': set(),
+        'genres': set(), 'moods': set(), 'temas': set(), 'momentos': set(),
+        'idiomas': set(), 'nationalities': set(), 'decadas': set(),
+        'avg_energy': None, 'avg_bpm': None,
+        'similar_track_ids': set(),
+        'favorited_artist_ids': set(), 'favorited_album_ids': set(),
+        'favorited_track_ids': set(),
+    }
+    if keep_core_from:
+        for key in ('artist_ids', 'album_ids', 'related_artist_ids', 'genres'):
+            seed[key] = keep_core_from[key]
+    return seed
+
+
 def _radio_next_tracks(conn, user_id, seed_track_ids, exclude_track_ids, limit=5):
-    """Core del algoritmo de 'Infinite' (Ticket 11 §4.7). Semilla = pistas
-    ya reproducidas en la cola actual (§4.7.1, confirmado con el PO: sin
-    historial persistente para la v1). Sobre-pide candidatos y hace un
-    muestreo aleatorio ponderado por score en vez de devolver el top-N
-    directo, para que la 'radio' no se sienta siempre idéntica con la
-    misma semilla — mismo approach descripto por Spotify/Apple Music en
-    sus blogs técnicos (ponderado + no-determinístico, no ranking fijo)."""
+    """Core del algoritmo de 'Infinite' (Ticket 11 §4.7, rediseñado en
+    Ticket 14 con 10 niveles de señal). Semilla = pistas ya reproducidas
+    en la cola actual (§4.7.1, confirmado con el PO: sin historial
+    persistente para la v1). Sobre-pide candidatos y hace un muestreo
+    aleatorio ponderado por score en vez de devolver el top-N directo,
+    para que la 'radio' no se sienta siempre idéntica con la misma
+    semilla — mismo approach descripto por Spotify/Apple Music en sus
+    blogs técnicos (ponderado + no-determinístico, no ranking fijo)."""
     if not seed_track_ids:
         return []
 
     seed_ph = ','.join('?' for _ in seed_track_ids)
     seed_rows = conn.execute(
-        f'''SELECT al.artist_id, tm.genre_primary, tm.genre_secondary
+        f'''SELECT al.id AS album_id, al.artist_id, ar.nationality,
+                   tm.genre_primary, tm.genre_secondary, tm.mood, tm.tema_lirico,
+                   tm.momento, tm.idioma, tm.decada, tm.energy, tm.bpm,
+                   tm.similar_tracks_json
             FROM tracks t
             LEFT JOIN albums al ON al.id = t.album_id
+            LEFT JOIN artists ar ON ar.id = al.artist_id
             LEFT JOIN track_meta tm ON tm.track_id = t.id
             WHERE t.id IN ({seed_ph})''',
         list(seed_track_ids)
     ).fetchall()
 
     seed_artist_ids = {r['artist_id'] for r in seed_rows if r['artist_id']}
+    seed_album_ids  = {r['album_id']  for r in seed_rows if r['album_id']}
     seed_genres = {r['genre_primary'] for r in seed_rows if r['genre_primary']}
     seed_genres |= {r['genre_secondary'] for r in seed_rows if r['genre_secondary']}
+    seed_moods      = {r['mood']        for r in seed_rows if r['mood']}
+    seed_temas      = {r['tema_lirico'] for r in seed_rows if r['tema_lirico']}
+    seed_momentos   = {r['momento']     for r in seed_rows if r['momento']}
+    seed_idiomas    = {r['idioma']      for r in seed_rows if r['idioma']}
+    seed_decadas    = {r['decada']      for r in seed_rows if r['decada']}
+    seed_nationalities = {r['nationality'] for r in seed_rows if r['nationality']}
+
+    energy_vals = [r['energy'] for r in seed_rows if r['energy'] is not None]
+    bpm_vals    = [r['bpm']    for r in seed_rows if r['bpm']    is not None]
+    avg_energy = sum(energy_vals) / len(energy_vals) if energy_vals else None
+    avg_bpm    = sum(bpm_vals)    / len(bpm_vals)    if bpm_vals    else None
+
+    # similar_tracks_json de cada pista semilla -> pool de tracks
+    # "recomendados como parecidos" (Nivel 3). Mismo formato que ya usa
+    # /api/track/<id>/similar: lista de {"track_id":..,"score":..}.
+    similar_track_ids = set()
+    for r in seed_rows:
+        raw = r['similar_tracks_json']
+        if not raw:
+            continue
+        try:
+            items = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if isinstance(item, dict) and item.get('track_id'):
+                similar_track_ids.add(item['track_id'])
+    similar_track_ids -= set(seed_track_ids)  # no recomendar la semilla misma
 
     # Expandir artistas semilla con sus similares (reusa build_similar_artists,
     # que ya resuelve nombre -> id local; nos quedamos solo con los que
@@ -5180,46 +5435,98 @@ def _radio_next_tracks(conn, user_id, seed_track_ids, exclude_track_ids, limit=5
             (user_id,)
         ).fetchall()
     }
+    favorited_track_ids = {
+        r['item_id'] for r in conn.execute(
+            "SELECT item_id FROM user_item_favorites WHERE user_id=? AND item_type='track'",
+            (user_id,)
+        ).fetchall()
+    }
+
+    seed = {
+        'artist_ids': seed_artist_ids, 'album_ids': seed_album_ids,
+        'related_artist_ids': related_artist_ids, 'genres': seed_genres,
+        'moods': seed_moods, 'temas': seed_temas, 'momentos': seed_momentos,
+        'idiomas': seed_idiomas, 'nationalities': seed_nationalities,
+        'decadas': seed_decadas, 'avg_energy': avg_energy, 'avg_bpm': avg_bpm,
+        'similar_track_ids': similar_track_ids,
+        'favorited_artist_ids': favorited_artist_ids,
+        'favorited_album_ids': favorited_album_ids,
+        'favorited_track_ids': favorited_track_ids,
+    }
 
     over_fetch = max(limit * 6, 30)
-    candidates = _radio_candidate_rows(
-        conn, seed_artist_ids, related_artist_ids, seed_genres,
-        favorited_artist_ids, favorited_album_ids, exclude_track_ids, over_fetch
-    )
+    candidates = _radio_candidate_rows(conn, seed, exclude_track_ids, over_fetch)
 
-    # Caso borde §4.7.3: biblioteca chica o semilla sin género/artista
-    # resoluble — relajar en cascada. Paso 1: solo artistas+géneros (sin
-    # favoritos, que ya están implícitos en el score si aplican). Si
-    # tampoco alcanza, paso 2: cualquier cosa ordenada por pop_score+jitter.
+    # Caso borde §4.7.3: biblioteca chica o semilla sin señal resoluble —
+    # relajar en cascada. Paso 1: solo artista/album/genero (la señal mas
+    # fuerte), todo lo demas (mood/tema/momento/idioma/nacionalidad/
+    # favoritos/decada) vacio -- son señales mas especificas/raras, mas
+    # propensas a no encontrar nada en una biblioteca chica. Paso 2: todo
+    # vacio, orden por calidad de audio + jitter nomas.
     if len(candidates) < limit and (seed_artist_ids or related_artist_ids or seed_genres):
         candidates = _radio_candidate_rows(
-            conn, seed_artist_ids, related_artist_ids, seed_genres,
-            set(), set(), exclude_track_ids, over_fetch
+            conn, _empty_radio_seed(keep_core_from=seed), exclude_track_ids, over_fetch
         )
     if len(candidates) < limit:
         candidates = _radio_candidate_rows(
-            conn, set(), set(), set(), set(), set(), exclude_track_ids, over_fetch
+            conn, _empty_radio_seed(), exclude_track_ids, over_fetch
         )
 
     if not candidates:
         return []
 
+    # Dedupe de "casi-duplicados" (Ticket 14): mismo tema con distinto
+    # sufijo de version (remaster/live/deluxe/acoustic/etc) no deberia
+    # aparecer dos veces seguidas en la cola. Se arma el set de
+    # (artista, titulo-normalizado) YA presentes en la cola actual
+    # (exclude_track_ids) para no repetir con lo que ya sonó, y se va
+    # sumando lo que se elige en este batch para no repetir tampoco
+    # dentro del mismo batch.
+    already_playing_keys = set()
+    if exclude_track_ids:
+        excl_ph = ','.join('?' for _ in exclude_track_ids)
+        for r in conn.execute(
+            f'SELECT artist, title FROM tracks WHERE id IN ({excl_ph})',
+            list(exclude_track_ids)
+        ).fetchall():
+            already_playing_keys.add((
+                (r['artist'] or '').strip().lower(),
+                _normalize_title_for_radio_dedupe(r['title']),
+            ))
+
     # Muestreo ponderado por score sobre el pool sobre-pedido (no
-    # determinístico a propósito, ver docstring).
+    # determinístico a propósito, ver docstring), saltando candidatos
+    # cuyo (artista, titulo-normalizado) ya está en la cola o ya se
+    # eligió en este mismo batch.
     pool = list(candidates)
     weights = [max(1, p['score']) for p in pool]
     chosen_ids = []
-    n = min(limit, len(pool))
-    for _ in range(n):
+    chosen_keys = set(already_playing_keys)
+    target = min(limit, len(pool))
+    # Límite de intentos generoso (no infinito) por si el pool queda sin
+    # nada nuevo que ofrecer tras descartar duplicados -- evita loop
+    # eterno en una biblioteca muy chica con muchas versiones del mismo tema.
+    max_attempts = len(pool) * 2
+    attempts = 0
+    while len(chosen_ids) < target and pool and attempts < max_attempts:
+        attempts += 1
         total = sum(weights)
         pick = random.uniform(0, total)
         upto = 0.0
         for i, w in enumerate(weights):
             upto += w
             if upto >= pick:
-                chosen_ids.append(pool[i]['id'])
+                candidate = pool[i]
+                key = (
+                    (candidate['artist'] or '').strip().lower(),
+                    _normalize_title_for_radio_dedupe(candidate['title']),
+                )
                 del pool[i]
                 del weights[i]
+                if key in chosen_keys:
+                    break  # descartado por duplicado, sigue el while con el pool ya mas chico
+                chosen_keys.add(key)
+                chosen_ids.append(candidate['id'])
                 break
 
     if not chosen_ids:

@@ -1,0 +1,93 @@
+Ticket 14: rediseno completo del algoritmo de Infinite (10 niveles)
+
+Reemplaza el score de 6 factores de _radio_candidate_rows por el
+esquema de 10 niveles acordado con el PO, con popularidad real
+(Last.fm) en vez de solo calidad de metadata, favoritos filtrados por
+relacion real con la semilla, el mapa de cercania de generos, y
+dimensiones de metadata (mood/tema/momento/idioma/nacionalidad/bpm/
+energia) que antes no se usaban para nada en Infinite.
+
+Nuevo paquete genre_similarity/ (taxonomia de 236 generos limpios +
+distancia por familia/subfamilia + excepciones puntuales de la familia
+regional, ej. Sudamerica-España). 27 tests unitarios propios, mas
+validado contra la lista real de generos post-limpieza (236/236 sin
+duplicados/inventados/faltantes).
+
+Niveles (ver Ticket 14 para el detalle completo acordado con el PO):
+  1) Misma pista/album semilla + popularidad Last.fm      -> hasta 60
+  2) Mismo artista (otro album) + popularidad Last.fm      -> hasta 50
+  3) Artista similar (MusicBrainz) + popularidad + bonus si
+     similar_tracks_json de alguna semilla apunta a la pista -> hasta 47
+  4) Favorito (artista/album/pista) RELACIONADO con la semilla
+     (similar-artista O genero compartido; +18 si una condicion,
+     +28 si las dos) -- un favorito sin relacion (ej. Camilo Sesto en
+     una sesion de Iron Maiden) NO se infla, validado con test
+  5) Mismo genero primario/secundario (existente, sin cambios) -> +25/+10
+  6) Genero cercano (mapa de similitud) -> hasta +12, excluye match
+     exacto para no duplicar con el nivel 5
+  7) Mood/tema lirico/bpm/energia         -> +15/+10/hasta10/hasta10
+  8) Momento/decada/idioma/nacionalidad    -> +8/+5/+5/+4
+  +) Calidad de audio (LED, fuente de verdad ya establecida en el
+     proyecto -- magenta > blue > green > red > cyan > white > yellow)
+                                           -> hasta +15
+  +) Ruido aleatorio (existente, sin cambios) -> +0 a 19
+
+Se DESCARTA pop_score (calidad de metadata) del score de Infinite por
+decision explicita del PO -- un sistema pensado para audiofilos separa
+"que tan bien tageada esta la pista" de "que tan buena es la fuente de
+audio", y la segunda es la relevante aca. track_pop_cache deja de
+usarse en esta funcion (sigue usandose en el resto de la app, sin
+tocar).
+
+Nuevo: dedupe de "casi-duplicados" en la cola de Infinite
+(_normalize_title_for_radio_dedupe) -- pela sufijos de version
+(remaster/live/deluxe/acoustic/radio edit/etc) del titulo antes de
+comparar contra lo que ya esta en la cola, para que "Headknocker" y
+"Headknocker (2008 Remaster)" no aparezcan consecutivos. Validado con
+un test especifico. Distinto del dedupe general de la app
+(_track_dedupe_condition), que sigue intacto.
+
+Dos funciones SQL custom nuevas, registradas en get_db_connection():
+- genre_similarity(g1, g2): envuelve genre_similarity/genre_distance.py
+- popularity_score(listeners, playcount): escala logaritmica 0-1 (los
+  numeros de Last.fm son muy dispersos), funcion Python propia en vez
+  de LN() nativo de SQLite -- no se puede asumir que el SQLite del
+  server tenga la extension matematica compilada.
+
+Cascada de biblioteca chica (§4.7.3, ya existente) actualizada al
+nuevo formato de seed (dict en vez de lista de argumentos sueltos) --
+mismo criterio de relajacion en 2 pasos, ahora relajando primero las
+señales mas especificas/raras (mood/tema/momento/idioma/nacionalidad/
+favoritos/decada) y dejando artista/album/genero para el ultimo paso
+antes de caer a calidad+jitter puro.
+
+VALIDACION (sin toolchain de Python real en el entorno del agente mas
+alla de sqlite3/stdlib, pero SI se corrio el codigo real, no solo
+sintaxis):
+- Instalado flask/flask-cors/itsdangerous/werkzeug en el sandbox para
+  poder importar app.py de verdad.
+- DB SQLite sintetica completa (schema real: artists/albums/tracks/
+  track_meta con generos/mood/tema/momento/idioma/nacionalidad/bpm/
+  energia/similar_tracks_json/lastfm, mas favoritos de usuario).
+- _radio_candidate_rows corrida de verdad (no simulada): encontro y
+  corrigio un bug real de un parametro duplicado que desfasaba todos
+  los placeholders siguientes (los tests de sintaxis/py_compile NO lo
+  hubieran detectado).
+- 4 escenarios validados con asserts automaticos SOBRE UN CLON FRESCO
+  con el diff ya aplicado (no solo en la copia de trabajo del agente):
+  orden de scores por nivel (incluye Camilo Sesto ultimo), pipeline
+  completo _radio_next_tracks, dedupe de remaster, cascada de
+  biblioteca chica con semilla aislada.
+
+Nota honesta: la prueba real con la biblioteca del PO (miles de pistas,
+datos reales de Last.fm/mood/etc, con el server corriendo Flask de
+verdad) queda pendiente -- lo que se valido acá es que el algoritmo
+ejecuta sin errores y produce el comportamiento relativo esperado
+sobre datos sinteticos control, no que los numeros de peso "se sientan
+bien" en uso real. Eso solo se puede confirmar escuchando.
+
+DEPENDE DE: nada de Ticket 13 ni del CSV de generos (aplicar sobre
+HEAD limpio de feature/login-sessions). SI depende de que los scripts
+de normalizacion de generos ya se hayan corrido sobre la base real del
+PO -- el mapa de generos asume la lista canonica de 236, no los ~400+
+valores sucios de antes.
