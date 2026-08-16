@@ -1565,6 +1565,128 @@ def api_v1_favorites_list():
     finally:
         conn.close()
 
+
+@app.route('/api/v1/favorites/detailed', methods=['GET'])
+@api_login_required
+def api_v1_favorites_detailed():
+    """Ticket 15 §2 — favoritos con datos completos para mostrar (nombre,
+    portada, artista), para la pantalla nativa "Mis Favoritos".
+
+    A diferencia de /api/v1/favorites (arriba), acá `type` es
+    OBLIGATORIO — la UI son 3 pestañas (Artistas/Álbumes/Pistas), una
+    consulta por pestaña, nunca una lista mezclada. No se toca el
+    endpoint liviano existente: otras pantallas ya dependen de su forma
+    actual (item_type/item_id/added_at únicamente) para resolver el
+    estado del corazón ♥, y agregarle los JOINs de acá sería trabajo
+    desperdiciado en cada una de esas llamadas.
+
+    Paginación por página (no limit/offset) — mismo criterio que
+    /api/v1/albums en modo filtrado y /api/v1/meta/tracks, mismo
+    PAGE_SIZE (Ticket 13 §3 Lote A) — para que esta pantalla pagine
+    igual que el resto de la app. No se reusa _paginate() tal cual: esa
+    función post-procesa cada fila asumiendo columnas de álbum
+    (cover_path -> cover_path limpio sin resolver a URL, más un
+    'album_led' con default 'yellow' que no aplica ni a artistas ni a
+    pistas) —Forzarla acá ensuciaría las 2 de los 3 shapes con un campo
+    que no les corresponde. Se repite a mano el mismo patrón de
+    page/PAGE_SIZE/total_pages en vez de eso.
+    """
+    item_type = request.args.get('type')
+    if item_type not in ('artist', 'album', 'track'):
+        return jsonify({'error': 'invalid_type'}), 400
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+    except (TypeError, ValueError):
+        page = 1
+    offset = (page - 1) * PAGE_SIZE
+
+    conn = get_db_connection()
+    try:
+        if item_type == 'artist':
+            total = conn.execute(
+                'SELECT COUNT(*) FROM user_item_favorites WHERE user_id=? AND item_type=?',
+                (g.api_user['id'], item_type)
+            ).fetchone()[0]
+            rows = conn.execute(
+                '''SELECT uif.item_id AS id, uif.added_at, ar.name, ar.nationality,
+                          (SELECT COUNT(*) FROM albums al2 WHERE al2.artist_id = ar.id) AS album_count
+                   FROM user_item_favorites uif
+                   JOIN artists ar ON ar.id = uif.item_id
+                   WHERE uif.user_id=? AND uif.item_type='artist'
+                   ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
+                (g.api_user['id'], PAGE_SIZE, offset)
+            ).fetchall()
+            items = [dict(r) for r in rows]
+
+        elif item_type == 'album':
+            total = conn.execute(
+                'SELECT COUNT(*) FROM user_item_favorites WHERE user_id=? AND item_type=?',
+                (g.api_user['id'], item_type)
+            ).fetchone()[0]
+            rows = conn.execute(
+                '''SELECT uif.item_id AS id, uif.added_at, al.name, al.year,
+                          al.track_count, al.total_duration, al.cover_path,
+                          ar.id AS artist_id, ar.name AS artist_name
+                   FROM user_item_favorites uif
+                   JOIN albums al ON al.id = uif.item_id
+                   LEFT JOIN artists ar ON ar.id = al.artist_id
+                   WHERE uif.user_id=? AND uif.item_type='album'
+                   ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
+                (g.api_user['id'], PAGE_SIZE, offset)
+            ).fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                d['cover_url'] = cover_url_filter(d.get('cover_path'))
+                items.append(d)
+
+        else:  # track
+            total = conn.execute(
+                'SELECT COUNT(*) FROM user_item_favorites WHERE user_id=? AND item_type=?',
+                (g.api_user['id'], item_type)
+            ).fetchone()[0]
+            # Mismo patrón de columnas/joins que _api_meta_tracks_payload()
+            # (app.py, /api/v1/meta/tracks) para que el nativo decodifique
+            # esto en el mismo modelo `OrbyteTrack` sin cambios — la
+            # diferencia es la fuente (favoritos del usuario, no un filtro
+            # de campo) y que acá no hacen falta los joins de track_meta/
+            # pop_score (no se muestran en esta lista).
+            rows = conn.execute(
+                '''SELECT uif.added_at, t.*, a.name as album_name, a.cover_path,
+                          a.year as album_year, ar.id as artist_id, ar.name as artist_name
+                   FROM user_item_favorites uif
+                   JOIN tracks t ON t.id = uif.item_id
+                   LEFT JOIN albums a ON a.id = t.album_id
+                   LEFT JOIN artists ar ON ar.id = a.artist_id
+                   WHERE uif.user_id=? AND uif.item_type='track'
+                   ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
+                (g.api_user['id'], PAGE_SIZE, offset)
+            ).fetchall()
+            items = []
+            for r in rows:
+                d = dict(r)
+                d['cover_path']  = clean_db_path(d.get('cover_path'))
+                d['cover_url']   = cover_url_filter(d['cover_path'])
+                d['file_path']   = clean_db_path(d.get('file_path'))
+                d['audio_url']   = audio_url_filter(d['file_path'])
+                d['stream_url']  = f'/api/v1/stream/{d["id"]}'
+                fmt, led = _fmt_format(d)
+                d['format_display'] = fmt
+                d['format_color']   = led
+                d['duration_fmt']   = _fmt_seconds(d.get('duration'))
+                items.append(d)
+
+        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        return jsonify({
+            'favorites':   items,
+            'total':       total,
+            'page':        page,
+            'total_pages': total_pages,
+        })
+    finally:
+        conn.close()
+
+
 @app.route('/api/v1/favorites/toggle', methods=['POST'])
 @api_login_required
 def api_v1_favorites_toggle():
