@@ -1509,6 +1509,10 @@ def api_v1_album_tracks(album_id):
                 'album_name': album_name,
                 'cover_url': cover_url_filter(album_cover),
                 'stream_url': f'/api/v1/stream/{d["id"]}',
+                'is_dsd': d.get('is_dsd'),
+                'dsd_rate': d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'),
+                'bit_depth': d.get('bit_depth'),
             })
         return jsonify({'tracks': result})
     finally:
@@ -1805,6 +1809,10 @@ def api_v1_playlist_detail(playlist_id):
                 'album_name':     d.get('album_name'),
                 'cover_url':      cover_url_filter(cover),
                 'stream_url':     f'/api/v1/stream/{d["id"]}',
+                'is_dsd':         d.get('is_dsd'),
+                'dsd_rate':       d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'),
+                'bit_depth':      d.get('bit_depth'),
                 'position':       d.get('position'),
             })
         return jsonify({
@@ -2097,6 +2105,10 @@ def api_v1_album_detail(album_id):
                 'artist_id': alb.get('artist_id'), 'album_name': alb.get('name'),
                 'cover_url': alb['cover_url'],
                 'stream_url': f'/api/v1/stream/{d["id"]}',
+                'is_dsd': d.get('is_dsd'),
+                'dsd_rate': d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'),
+                'bit_depth': d.get('bit_depth'),
             })
 
         if not album_meta.get('genre_primary'):
@@ -2352,7 +2364,8 @@ def api_v1_search():
             (like, like)
         ).fetchall()
         tracks = conn.execute(
-            '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa,
+            '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate,
+                      t.bit_depth, t.is_mqa,
                       t.codec, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
                       ar.id as artist_id, ar.name as artist_name,
@@ -5809,7 +5822,8 @@ def _api_meta_tracks_payload(args):
         where_params = full_params
 
         rows = conn.execute(f'''
-            SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa, t.codec,
+            SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate,
+                   t.sample_rate_real, t.bit_depth, t.is_mqa, t.codec,
                    t.duration, t.track_number, t.file_path,
                    a.id as album_id, a.name as album_name, a.cover_path, a.year as album_year,
                    ar.id as artist_id, ar.name as artist_name,
