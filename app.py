@@ -1513,6 +1513,7 @@ def api_v1_album_tracks(album_id):
                 'dsd_rate': d.get('dsd_rate'),
                 'sample_rate_real': d.get('sample_rate_real'),
                 'bit_depth': d.get('bit_depth'),
+                'container_ext': _container_ext(d),
             })
         return jsonify({'tracks': result})
     finally:
@@ -1813,6 +1814,7 @@ def api_v1_playlist_detail(playlist_id):
                 'dsd_rate':       d.get('dsd_rate'),
                 'sample_rate_real': d.get('sample_rate_real'),
                 'bit_depth':      d.get('bit_depth'),
+                'container_ext':  _container_ext(d),
                 'position':       d.get('position'),
             })
         return jsonify({
@@ -2109,6 +2111,7 @@ def api_v1_album_detail(album_id):
                 'dsd_rate': d.get('dsd_rate'),
                 'sample_rate_real': d.get('sample_rate_real'),
                 'bit_depth': d.get('bit_depth'),
+                'container_ext': _container_ext(d),
             })
 
         if not album_meta.get('genre_primary'):
@@ -2365,7 +2368,7 @@ def api_v1_search():
         ).fetchall()
         tracks = conn.execute(
             '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate,
-                      t.bit_depth, t.is_mqa,
+                      t.bit_depth, t.is_mqa, t.file_path,
                       t.codec, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
                       ar.id as artist_id, ar.name as artist_name,
@@ -2396,6 +2399,8 @@ def api_v1_search():
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
             d['cover_url']      = cover_url_filter(d.pop('cover_path'))
             d['stream_url']     = f'/api/v1/stream/{d["id"]}'
+            d['container_ext']  = _container_ext(d)
+            d.pop('file_path', None)
             tracks_out.append(d)
 
         return jsonify({'artists': artists_out, 'albums': albums_out, 'tracks': tracks_out, 'query': query})
@@ -3160,6 +3165,18 @@ def _fmt_bitrate(bps):
     else:
         tag = "Hi-Res"
     return f"{label} · {tag}"
+
+def _container_ext(track):
+    """Ticket 16 Lote 3 — extensión real del contenedor ('dsf'/'dff'/'flac'/
+    etc, sin punto, minúscula), a partir de file_path. El cliente iOS la
+    necesita para elegir el decoder correcto de SFBAudioEngine en pistas
+    DSD (DSF vs DFF no son intercambiables) — antes de esto no había forma
+    de saberlo del lado nativo. Mismo criterio que ya usa el resto del
+    proyecto (audio_url_filter, _serve_audio, etc): os.path.splitext.
+    """
+    file_path = track.get('file_path') or ''
+    ext = os.path.splitext(file_path)[1].lower().lstrip('.')
+    return ext or None
 
 def _dsd_label(track):
     """Return clean DSD label: DSD64, DSD128, DSD256 etc."""
@@ -5865,6 +5882,7 @@ def _api_meta_tracks_payload(args):
             d['format_display'] = fmt
             d['format_color']   = led
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
+            d['container_ext']  = _container_ext(d)
             result.append(d)
 
         total_pages = 1 if intercalar else max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
