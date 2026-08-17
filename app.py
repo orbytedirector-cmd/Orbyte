@@ -2240,6 +2240,109 @@ def api_v1_stream(track_id):
     )
     return _serve_audio(absolute_path)
 
+@app.route('/api/v1/stream-pcm/<int:track_id>')
+def api_v1_stream_pcm(track_id):
+    """Ticket 16 Lote 3e — fallback PCM para pistas DSD que SFBAudioEngine
+    no puede convertir on-device (todo lo que no sea DSD64 exacto —
+    confirmado leyendo el código fuente real de la librería,
+    SFBDSDPCMDecoder rechaza cualquier otra tasa). El PO fue explícito:
+    sin DAC, TODO tiene que poder sonar, sea la tasa que sea, sin
+    interrumpir la reproducción, con la mejor calidad posible.
+
+    Dedicado a iOS, mismo criterio que /api/v1/stream/<id>: NO reusa
+    /stream-dsd (esa es de la PWA, no tocar lo que la afecta). SÍ reusa
+    la lógica de caché ya probada y en producción de
+    _dsd_cache_path/_dsd_cache_cleanup — transcodifica el archivo
+    COMPLETO a disco antes de servir nada (nunca en vivo/streaming, ese
+    fue justo el origen de los cortes que ya conocías) y lo sirve con el
+    mismo _serve_audio() de siempre, Range requests incluidos. Mismo
+    comando de ffmpeg que /stream-dsd ya tiene probado: 176.4kHz/32-bit
+    FLAC — la resolución real de cualquier tasa DSD, sin recortar nada
+    (176.4kHz porque es el estándar profesional para masterización DSD,
+    equivalente a DXD). Si el mismo archivo ya se transcodificó antes
+    para la PWA (misma absolute_path+mtime), esta ruta reusa esa misma
+    caché — menos CPU, menos espera.
+
+    Mismo auth que /api/v1/stream/<id>: token también como ?token=...
+    en la URL (AVURLAsset no puede mandar headers custom).
+    """
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
+    if not token:
+        app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: sin token (ni header ni query)")
+        return jsonify({'error': 'not_authenticated'}), 401
+    try:
+        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired) as e:
+        app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: token inválido ({e.__class__.__name__})")
+        return jsonify({'error': 'invalid_token'}), 401
+
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        if not user or not user['is_approved']:
+            app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: user={user_id} no aprobado o inexistente")
+            return jsonify({'error': 'not_authenticated'}), 401
+        row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: no existe en la DB")
+        return jsonify({'error': 'track_not_found'}), 404
+
+    # Mismo criterio de limpieza de path que /api/v1/stream/<id> — ver ese
+    # endpoint para el porqué del doble MUSIC_ROOT si no se hace así.
+    relative_path = clean_db_path(row['file_path']).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if relative_path.startswith(root + '/'):
+        relative_path = relative_path[len(root) + 1:]
+    elif relative_path.startswith(root):
+        relative_path = relative_path[len(root):]
+    absolute_path = os.path.join(MUSIC_ROOT, relative_path)
+    if not os.path.isfile(absolute_path):
+        app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: archivo no encontrado en disco: {absolute_path}")
+        return jsonify({'error': 'file_not_found'}), 404
+
+    _dsd_cache_cleanup()
+    cache_path = _dsd_cache_path(absolute_path)
+    cache_hit  = os.path.isfile(cache_path)
+
+    if not cache_hit:
+        tmp_path = f'{cache_path}.{os.getpid()}.tmp'
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+            '-i', absolute_path,
+            '-vn',                        # sin portada embebida (DSF la trae)
+            '-ar', '176400',              # 176.4 kHz — mismo estándar que /stream-dsd
+            '-sample_fmt', 's32',         # 32-bit, rango dinámico completo
+            '-c:a', 'flac',
+            '-compression_level', '0',    # encode más rápido
+            '-f', 'flac',                 # explícito — tmp_path termina en .tmp
+            tmp_path,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode != 0 or not os.path.isfile(tmp_path):
+                app.logger.error(
+                    f"[api/v1/stream-pcm] ffmpeg failed for {absolute_path}: "
+                    f"{result.stderr.decode(errors='replace')[:500]}"
+                )
+                return jsonify({'error': 'transcode_failed'}), 500
+            os.replace(tmp_path, cache_path)
+        finally:
+            if os.path.isfile(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+
+    app.logger.info(
+        f"[api/v1/stream-pcm] track={track_id}: sirviendo {os.path.basename(cache_path)} "
+        f"(cache={'hit' if cache_hit else 'miss'}, range={request.headers.get('Range', '-')})"
+    )
+    resp = _serve_audio(cache_path)
+    resp.headers['Content-Type']      = 'audio/flac'
+    resp.headers['X-Transcode-Cache'] = 'hit' if cache_hit else 'miss'
+    return resp
+
 @app.route('/api/v1/albums')
 @api_login_required
 def api_v1_albums():

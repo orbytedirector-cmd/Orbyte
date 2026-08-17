@@ -1,0 +1,37 @@
+Ticket 16 Lote 3e (backend): endpoint /api/v1/stream-pcm/<id> —
+fallback PCM para DSD128/256/512, dedicado a iOS
+
+Requisito explícito del PO: sin DAC, CUALQUIER tasa DSD tiene que
+poder sonar, sin interrumpir la reproducción, con la mejor calidad
+posible. SFBAudioEngine (cliente iOS) solo puede convertir DSD64 a PCM
+on-device — confirmado en su código fuente, no es una limitación que
+se pueda evitar desde el cliente. Para todo lo demás hace falta un
+camino server-side.
+
+Nuevo endpoint /api/v1/stream-pcm/<int:track_id>, dedicado a iOS
+(mismo criterio que /api/v1/stream/<id>: NO afecta a la PWA, no
+reusa /stream-dsd). SÍ reusa la lógica de caché ya probada y en
+producción de _dsd_cache_path/_dsd_cache_cleanup — mismo comando de
+ffmpeg que /stream-dsd ya tiene funcionando (176.4kHz/32-bit FLAC,
+estándar profesional para DSD, equivalente a DXD). Si el mismo
+archivo ya se transcodificó antes para la PWA, este endpoint reusa
+esa misma caché en disco — menos CPU, menos espera, sin duplicar
+trabajo entre los dos endpoints.
+
+Transcodifica el archivo COMPLETO a disco antes de servir nada —
+nunca en vivo/streaming. Esa es la diferencia real con el
+comportamiento viejo (ya documentado en los comentarios de
+_DSD_CACHE_DIR) que causaba cortes: un pipe en vivo con reconexión.
+Acá se espera a que ffmpeg termine el archivo completo, se cachea, y
+recién ahí se sirve con el mismo _serve_audio() de siempre (Range
+requests reales, igual que cualquier otro archivo de la biblioteca).
+La primera vez que se pide una pista nunca transcodificada, la
+respuesta tarda lo que tarda ffmpeg (timeout de 300s del lado del
+subprocess); de ahí en adelante sale al toque, cacheada.
+
+Auth: mismo criterio que /api/v1/stream/<id> — token también como
+?token=... en la URL (AVURLAsset no puede mandar headers custom).
+
+Validado: app.py parsea sin errores de sintaxis (ast.parse), y
+git apply --check contra un clon 100% fresco de feature/login-sessions
+antes de entregar este diff.
