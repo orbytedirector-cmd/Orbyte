@@ -2941,40 +2941,87 @@ def admin_collab():
         conn.close()
 
 
-@app.route('/admin/colaborativa/crear', methods=['POST'])
-@admin_required
-def admin_collab_crear():
-    max_tracks   = request.form.get('max_tracks', COLLAB_DEFAULT_MAX_TRACKS, type=int) or COLLAB_DEFAULT_MAX_TRACKS
-    window_hours = request.form.get('window_hours', COLLAB_DEFAULT_WINDOW_HOURS, type=float) or COLLAB_DEFAULT_WINDOW_HOURS
+def _collab_start_session(admin_user_id, max_tracks=None, window_hours=None):
+    """Crea una sesión colaborativa nueva, cerrando cualquier otra activa
+    (una sola sesión a la vez — mismo QR viejo deja de servir solo).
+    Ticket 18 Lote 1: factorizado para no duplicar la lógica entre la ruta
+    web (/admin/colaborativa/crear, form-encoded) y la API nativa
+    (/api/v1/admin/collab/crear, JSON). Acepta max_tracks/window_hours en
+    cualquier tipo parseable (o None) y cae a los defaults del proyecto."""
+    try:
+        max_tracks = int(max_tracks)
+    except (TypeError, ValueError):
+        max_tracks = COLLAB_DEFAULT_MAX_TRACKS
+    try:
+        window_hours = float(window_hours)
+    except (TypeError, ValueError):
+        window_hours = COLLAB_DEFAULT_WINDOW_HOURS
     max_tracks   = max(1, max_tracks)
     window_hours = max(0.5, window_hours)
     conn = get_db_connection()
     try:
-        # Solo puede haber una sesión activa: cerrar cualquier otra antes de
-        # abrir la nueva (mismo QR viejo deja de servir automáticamente).
         conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
         token = secrets.token_urlsafe(16)
         conn.execute(
             'INSERT INTO collab_sessions (token, created_by, max_tracks, window_hours, is_active, created_at) '
             'VALUES (?, ?, ?, ?, 1, ?)',
-            (token, session['user_id'], max_tracks, window_hours, _utcnow_iso())
+            (token, admin_user_id, max_tracks, window_hours, _utcnow_iso())
         )
         conn.commit()
     finally:
         conn.close()
+    return {'token': token, 'max_tracks': max_tracks, 'window_hours': window_hours,
+            'join_url': url_for('collab_join', token=token, _external=True)}
+
+
+def _collab_stop_active_session():
+    """Cierra la sesión colaborativa activa, si hay una. Ticket 18 Lote 1:
+    factorizado, mismo motivo que _collab_start_session."""
+    conn = get_db_connection()
+    try:
+        conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@app.route('/admin/colaborativa/crear', methods=['POST'])
+@admin_required
+def admin_collab_crear():
+    _collab_start_session(
+        session['user_id'],
+        request.form.get('max_tracks', type=int),
+        request.form.get('window_hours', type=float),
+    )
     return redirect(url_for('admin_collab'))
 
 
 @app.route('/admin/colaborativa/finalizar', methods=['POST'])
 @admin_required
 def admin_collab_finalizar():
-    conn = get_db_connection()
-    try:
-        conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
-        conn.commit()
-    finally:
-        conn.close()
+    _collab_stop_active_session()
     return redirect(url_for('admin_collab'))
+
+
+@app.route('/api/v1/admin/collab/crear', methods=['POST'])
+@api_admin_required
+def api_v1_admin_collab_crear():
+    """Ticket 18 Lote 1: versión JSON de admin_collab_crear para la app
+    nativa (Bearer, via api_admin_required) — misma lógica que la ruta web,
+    factorizada en _collab_start_session. Body esperado: {max_tracks?,
+    window_hours?} — ambos opcionales, caen a los defaults del proyecto si
+    faltan o vienen con un tipo no parseable."""
+    data = request.get_json(silent=True) or {}
+    result = _collab_start_session(g.api_user['id'], data.get('max_tracks'), data.get('window_hours'))
+    return jsonify({'status': 'ok', **result})
+
+
+@app.route('/api/v1/admin/collab/finalizar', methods=['POST'])
+@api_admin_required
+def api_v1_admin_collab_finalizar():
+    """Ticket 18 Lote 1: versión JSON de admin_collab_finalizar."""
+    _collab_stop_active_session()
+    return jsonify({'status': 'ok'})
 
 
 @app.route('/admin/colaborativa/participante/<int:participant_id>/permiso', methods=['POST'])
