@@ -1,0 +1,7 @@
+Ticket 18 Lote 1b (backend): token/join_url en /api/v1/admin/collab/estado
+
+Sin esto, la app nativa solo conoce el join_url de la sesion en el momento
+exacto de crearla (respuesta de /crear) - si la pantalla de admin se
+reabre con una sesion ya activa (creada antes, incluso desde el panel
+web), no habia forma de reconstruir el QR. Se agrega a la respuesta de
+'estado' (ya polleada cada ~6s) cuando active=true.

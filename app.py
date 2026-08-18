@@ -3102,7 +3102,9 @@ def api_admin_collab_estado():
             pull_requested_by_name = req['name'] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
-                        'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name})
+                        'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
+                        'token': sess['token'],
+                        'join_url': url_for('collab_join', token=sess['token'], _external=True)})
     finally:
         conn.close()
 
