@@ -1,0 +1,14 @@
+Ticket 18 Lote 1 (backend): crear/finalizar sesion colaborativa via JSON (iOS)
+
+Factoriza la creacion/cierre de sesion colaborativa en dos helpers
+(_collab_start_session, _collab_stop_active_session) compartidos entre la
+ruta web existente (form-encoded, redirect, sin cambios de comportamiento)
+y dos rutas nuevas para la app nativa:
+
+  POST /api/v1/admin/collab/crear      (api_admin_required, body JSON
+                                         opcional {max_tracks, window_hours})
+  POST /api/v1/admin/collab/finalizar  (api_admin_required)
+
+Sin campo de "modo" (home/away) - away mode queda fuera de alcance del MVP
+(los dispositivos de confianza se suman directo al tailnet de Niko en vez
+de exponer por Funnel). Aplica sobre el Lote 0 (requiere api_admin_required).

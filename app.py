@@ -999,6 +999,20 @@ def api_login_required(view):
         return view(*args, **kwargs)
     return wrapped
 
+def api_admin_required(view):
+    """Como api_login_required (Bearer o cookie, siempre JSON, nunca
+    redirige) más el chequeo de is_admin. Compone api_login_required en vez
+    de duplicar la extracción de token/cookie — Ticket 18 §2. Para uso en
+    /api/v1/admin/collab/*: el gate global _require_login solo exime rutas
+    bajo /api/v1/, así que un endpoint admin fuera de ese prefijo nunca
+    llegaría a este decorator con un token Bearer sin cookie de sesión."""
+    @wraps(view)
+    def _check_admin(*args, **kwargs):
+        if not g.api_user.get('is_admin'):
+            return jsonify({'error': 'not_authorized_admin'}), 403
+        return view(*args, **kwargs)
+    return api_login_required(_check_admin)
+
 @app.route('/api/v1/auth/login', methods=['POST'])
 def api_v1_login():
     """Login para el cliente nativo. Recibe JSON {email, password}, devuelve
@@ -2964,7 +2978,8 @@ def admin_collab_finalizar():
 
 
 @app.route('/admin/colaborativa/participante/<int:participant_id>/permiso', methods=['POST'])
-@admin_required
+@app.route('/api/v1/admin/collab/participante/<int:participant_id>/permiso', methods=['POST'])
+@api_admin_required
 def admin_collab_permiso(participant_id):
     """Alterna el permiso de 'delegado' de un participante de la sesión
     activa (ver _collab_set_delegate). Llamado por fetch() desde
@@ -3010,7 +3025,8 @@ def admin_collab_qr():
 
 
 @app.route('/api/admin/colaborativa/estado')
-@admin_required
+@app.route('/api/v1/admin/collab/estado')
+@api_admin_required
 def api_admin_collab_estado():
     """JSON liviano para refrescar en vivo el panel /admin/colaborativa
     (participantes + cola pendiente) — mismo patrón que /admin/usuarios/estado."""
@@ -3045,7 +3061,8 @@ def api_admin_collab_estado():
 
 
 @app.route('/api/admin/colaborativa/cola-pendiente')
-@admin_required
+@app.route('/api/v1/admin/collab/cola-pendiente')
+@api_admin_required
 def api_admin_collab_pull():
     """Devuelve — y marca como entregadas — las pistas todavía no
     despachadas, ya intercaladas en orden justo (_collab_fair_order). El
