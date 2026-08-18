@@ -5884,6 +5884,21 @@ def _radio_next_tracks(conn, user_id, seed_track_ids, exclude_track_ids, limit=5
             'album_name':     d.get('album_name'),
             'cover_url':      cover_url_filter(cover),
             'stream_url':     f'/api/v1/stream/{d["id"]}',
+            # Ticket 16 (fix, 18/08): faltaban acá — 'format_display' ya
+            # salía bien ('DSD128' etc, via _fmt_format que sí tiene
+            # 'is_dsd' disponible en `d`), pero el cliente nativo decide
+            # QUÉ MOTOR usar mirando estos campos crudos, no el badge. Sin
+            # ellos, is_dsd llega None -> isDSDTrack=false -> la app manda
+            # una pista DSD real por el streaming genérico (AVPlayer no
+            # puede abrir un contenedor DSD crudo, "Cannot Open" en
+            # dispositivo). Mismos 5 campos que ya mandan album/playlist/
+            # album-detail (comparar contra esos tres bloques) — este
+            # bloque (Infinite/radio) se armó aparte y quedó desalineado.
+            'is_dsd': d.get('is_dsd'),
+            'dsd_rate': d.get('dsd_rate'),
+            'sample_rate_real': d.get('sample_rate_real'),
+            'bit_depth': d.get('bit_depth'),
+            'container_ext': _container_ext(d),
         })
     return tracks
 
