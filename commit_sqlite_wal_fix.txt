@@ -1,0 +1,44 @@
+Fix (backend): SQLite en modo WAL + busy_timeout más generoso — para uso simultáneo real con distintas cuentas
+
+Pregunta directa del PO: ¿hay riesgo de problemas con uso simultáneo
+de cuentas distintas (el escenario real que motivó todo este
+incidente — su esposa usando la app mientras él también la usaba)?
+
+Auditado `get_db_connection()` (único punto donde se abre conexión a
+SQLite en todo el backend, confirmado por grep): sin
+`journal_mode=WAL`, SQLite queda en su modo de journal por default
+(rollback journal) — permite un solo escritor a la vez, y con el
+timeout default de Python sqlite3 (5s) dos escrituras que coincidan
+entre cuentas distintas (ej: heartbeat de una cuenta + acción de la
+otra al mismo tiempo) pueden terminar en "database is locked" — un
+500 real. Baja probabilidad con el uso actual (dos personas, tráfico
+liviano), pero es un gap real y el fix es de riesgo cero.
+
+También auditado en busca de estado compartido en memoria del
+proceso que pudiera filtrarse entre cuentas (fuente más seria de
+bugs de concurrencia que un lock de SQLite): el único global mutable
+real es `_cast_active_target` ("Reproducir en…") — intencional, no
+un bug: es una sola casa con un solo set de parlantes físicos, tiene
+sentido que sea compartido entre todas las cuentas. Nada más
+apareció. El resto del estado por-request vive en `session`/`g` de
+Flask (aislados correctamente por Flask entre threads) o en la base,
+naturalmente separado por `user_id` en cada query.
+
+Fix: `PRAGMA journal_mode=WAL` + `PRAGMA busy_timeout=10000` en cada
+conexión. WAL permite lectores concurrentes sin bloquearse con un
+escritor (el caso común); el busy_timeout más generoso le da margen
+a las pocas escrituras que sí compiten para esperar en cola en vez
+de fallar en el acto. `journal_mode=WAL` es una propiedad persistente
+del archivo (no hace falta repetirla en cada conexión para que
+"quede" activada), pero correrla en cada conexión es inofensiva
+(no-op si ya está activada) y garantiza que quede así sin depender
+de un paso manual aparte.
+
+Nota para el PO: WAL crea dos archivos auxiliares junto al .db
+(`-wal` y `-shm`) — normal, SQLite los maneja solo, no hace falta
+tocarlos ni son señal de nada raro si los ves aparecer.
+
+Validado con git apply --check contra un clon 100% fresco e
+independiente del HEAD real de Orbyte (feature/login-sessions,
+4f3cab5) y con `ast.parse()` confirmando sintaxis válida antes y
+después de aplicar.

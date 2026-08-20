@@ -425,6 +425,24 @@ def clean_db_path(path):
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    # Fix (19/08, pregunta del PO sobre uso simultáneo con cuentas
+    # distintas): sin esto, SQLite queda en su modo de journal por
+    # default (rollback journal) — permite un solo escritor a la vez, y
+    # con el timeout default de sqlite3 (5s) dos escrituras que
+    # coincidan entre dos cuentas distintas (ej: heartbeat de una +
+    # aprobar/favorito de la otra, al mismo tiempo) pueden terminar en
+    # "database is locked" — un 500 real, aunque de baja probabilidad
+    # con el uso actual. WAL permite lectores concurrentes con un solo
+    # escritor sin bloquearse entre sí (el caso común), y el
+    # busy_timeout más generoso le da margen a las pocas escrituras que
+    # sí compiten para esperar en cola en vez de fallar en el acto.
+    # `journal_mode=WAL` es una propiedad persistente del archivo de la
+    # base (no hace falta en cada conexión para que "quede" activada),
+    # pero correrlo acá es inofensivo si ya está en WAL (no-op) y
+    # garantiza que quede activada sin depender de un paso manual
+    # aparte.
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.execute('PRAGMA busy_timeout=10000')
     # Ticket 14: funciones SQL custom para el scoring de Infinite.
     # genre_similarity: envuelve el modulo genre_similarity/ (taxonomia +
     # excepciones) — devuelve 0.0 si algun genero viene NULL en vez de
