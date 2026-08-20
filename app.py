@@ -32,6 +32,14 @@ from genre_similarity import genre_similarity as _genre_similarity_fn
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+# Ticket 19, Feature 4 — adjuntos (captura de pantalla + log) en el mail
+# de reporte de errores. base64 para decodificar la captura que manda el
+# cliente; MIMEBase/encoders para el patrón estándar de adjunto genérico
+# (funciona igual para la imagen que para el .txt del log, no hace falta
+# MIMEImage aparte).
+import base64
+from email.mime.base import MIMEBase
+from email import encoders
 import sqlite3
 import mimetypes
 import subprocess
@@ -231,9 +239,22 @@ SMTP_FROM_EMAIL = os.environ.get('SMTP_FROM_EMAIL', SMTP_USER)
 SMTP_FROM_NAME  = os.environ.get('SMTP_FROM_NAME', 'Orbyte')
 SMTP_USE_TLS    = os.environ.get('SMTP_USE_TLS', '1') == '1'
 
-def _send_email(to_addr, subject, html_body):
-    """Envía un correo HTML. Nunca lanza excepción — si falla, solo lo deja
-    registrado en el log para no interrumpir signup/aprobación/rechazo."""
+def _send_email(to_addr, subject, html_body, attachments=None):
+    """Envía un correo HTML, opcionalmente con adjuntos. Nunca lanza
+    excepción — si falla, solo lo deja registrado en el log para no
+    interrumpir signup/aprobación/rechazo (ni el reporte de errores,
+    Ticket 19 §4).
+
+    `attachments`, si viene, es una lista de tuplas
+    (filename: str, content: bytes, mime_type: str) — Ticket 19 §4, para
+    la captura de pantalla y el log de /api/v1/report-issue. Con
+    adjuntos, el mensaje pasa a ser MIMEMultipart('mixed') con un
+    MIMEMultipart('alternative') anidado adentro (el HTML) más un
+    MIMEBase por adjunto — estructura estándar para HTML + adjuntos.
+    Sin adjuntos (el caso de siempre: mails de aprobación/rechazo), el
+    mensaje queda idéntico al de antes de este cambio —
+    MIMEMultipart('alternative') solo, mismo comportamiento exacto.
+    """
     if not SMTP_HOST:
         app.logger.warning(
             f'SMTP no configurado — se omite el envío de "{subject}" a {to_addr}. '
@@ -243,11 +264,27 @@ def _send_email(to_addr, subject, html_body):
         )
         return False
     try:
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>'
-        msg['To'] = to_addr
-        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+        if attachments:
+            msg = MIMEMultipart('mixed')
+            msg['Subject'] = subject
+            msg['From'] = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>'
+            msg['To'] = to_addr
+            alt = MIMEMultipart('alternative')
+            alt.attach(MIMEText(html_body, 'html', 'utf-8'))
+            msg.attach(alt)
+            for filename, content, mime_type in attachments:
+                maintype, _, subtype = (mime_type or 'application/octet-stream').partition('/')
+                part = MIMEBase(maintype or 'application', subtype or 'octet-stream')
+                part.set_payload(content)
+                encoders.encode_base64(part)
+                part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+                msg.attach(part)
+        else:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>'
+            msg['To'] = to_addr
+            msg.attach(MIMEText(html_body, 'html', 'utf-8'))
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
             if SMTP_USE_TLS:
                 server.starttls()
@@ -1283,6 +1320,77 @@ def api_v1_me():
         # así que la columna ya está ahí una vez migrada.
         'nickname':     user['nickname'],
     })
+
+@app.route('/api/v1/report-issue', methods=['POST'])
+@api_login_required
+def api_v1_report_issue():
+    """Ticket 19, Feature 4 — reporte de errores de la beta. Disponible
+    para CUALQUIER usuario autenticado, no solo admin (confirmado con el
+    PO, Ticket 19 §4 pregunta 1: el objetivo declarado es justamente que
+    el pequeño grupo de la beta pueda reportar) — por eso
+    @api_login_required acá, no @api_admin_required.
+
+    El email del usuario NO se toma del body — se resuelve de
+    `g.api_user` (la sesión ya autenticada), igual que el resto de
+    endpoints protegidos por este mismo decorator. Evita que el cliente
+    pueda falsear qué usuario está reportando.
+
+    `screenshot_base64` y `log_content` son opcionales — un usuario
+    puede reportar sin captura (ej: el bug no es visual) o sin log
+    disponible; ninguno de los dos bloquea el envío del reporte en sí,
+    mismo criterio "nunca romper el flujo" que ya tiene `_send_email`.
+    """
+    data = request.get_json(silent=True) or {}
+    description = (data.get('description') or '').strip()
+    if not description:
+        return jsonify({'error': 'description_required'}), 400
+
+    screen = (data.get('screen') or '').strip()
+    app_version = (data.get('app_version') or '').strip()
+    log_content = data.get('log_content') or ''
+    screenshot_b64 = data.get('screenshot_base64')
+
+    attachments = []
+    if screenshot_b64:
+        try:
+            # Acepta tanto un data URI completo
+            # ("data:image/png;base64,...") como el base64 pelado —
+            # ImageRenderer en iOS da PNG típicamente, pero no se asume
+            # el formato exacto del prefijo del lado del cliente.
+            raw_b64 = screenshot_b64.split(',', 1)[-1] if ',' in screenshot_b64 else screenshot_b64
+            screenshot_bytes = base64.b64decode(raw_b64, validate=False)
+            attachments.append(('captura.png', screenshot_bytes, 'image/png'))
+        except Exception as e:
+            app.logger.warning(f'report-issue: no se pudo decodificar la captura: {e}')
+
+    if log_content:
+        attachments.append(('log.txt', log_content.encode('utf-8', errors='replace'), 'text/plain'))
+
+    user_email = g.api_user['email']
+    reported_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+    extra_rows = ''
+    if screen:
+        extra_rows += f'<p><strong style="color:#EFEFEF;">Pantalla:</strong> {_xml_escape(screen)}</p>'
+    if app_version:
+        extra_rows += f'<p><strong style="color:#EFEFEF;">Versión:</strong> {_xml_escape(app_version)}</p>'
+
+    body_html = _email_wrapper('Nuevo reporte de la beta', f'''
+        <p><strong style="color:#EFEFEF;">Usuario:</strong> {_xml_escape(user_email)}</p>
+        {extra_rows}
+        <p><strong style="color:#EFEFEF;">Reportado:</strong> {reported_at}</p>
+        <p style="margin-top:20px;"><strong style="color:#EFEFEF;">Descripción:</strong></p>
+        <p style="white-space:pre-wrap;">{_xml_escape(description)}</p>
+        {'<p style="color:#666;font-size:12px;margin-top:16px;">Captura y/o log adjuntos.</p>' if attachments else ''}
+    ''')
+
+    sent = _send_email(
+        ADMIN_EMAIL,
+        f'[Orbyte] Reporte de {user_email}',
+        body_html,
+        attachments=attachments or None
+    )
+    return jsonify({'sent': sent})
 
 @app.route('/api/v1/auth/logout', methods=['POST'])
 @api_login_required

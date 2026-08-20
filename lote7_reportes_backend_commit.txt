@@ -1,0 +1,38 @@
+Feature (backend): /api/v1/report-issue + adjuntos en _send_email
+
+Ticket 19, Feature 4. Reporte de errores de la beta: cualquier usuario
+autenticado (no solo admin — confirmado con el PO, Ticket 19 §4
+pregunta 1) puede mandar una descripción + captura de pantalla + log,
+todo por mail a ADMIN_EMAIL.
+
+_send_email(to_addr, subject, html_body, attachments=None):
+- `attachments` nuevo, opcional, lista de (filename, content bytes,
+  mime_type). Sin adjuntos el comportamiento es idéntico al de
+  antes de este cambio (MIMEMultipart('alternative') solo) — los 3
+  call sites existentes (signup pendiente/aprobado/rechazado) no se
+  tocan y siguen funcionando exactamente igual.
+- Con adjuntos: MIMEMultipart('mixed') con un
+  MIMEMultipart('alternative') anidado (el HTML) más un MIMEBase por
+  adjunto — estructura estándar RFC 2046, verificada con un test de
+  sanity local (construcción del mensaje sin SMTP real: top-level
+  multipart/mixed, con multipart/alternative + text/html + image/png
+  + text/plain como partes, tal como se espera).
+
+POST /api/v1/report-issue (@api_login_required, no @api_admin_required
+— disponible para todos):
+- Body JSON: description (obligatorio), screen/app_version
+  (opcionales, contexto), screenshot_base64 (opcional — acepta tanto
+  data URI completo como base64 pelado), log_content (opcional, texto
+  plano).
+- El email del usuario se resuelve de g.api_user (sesión ya
+  autenticada), nunca del body — evita que el cliente falsee quién
+  reporta.
+- screenshot_base64 se adjunta como captura.png; log_content como
+  log.txt. Ninguno de los dos es obligatorio ni bloquea el envío si
+  falta o si la captura no decodifica (log de warning, mismo criterio
+  "nunca romper el flujo" que ya tiene _send_email).
+- Devuelve {"sent": true/false} — refleja el resultado real de
+  _send_email (false si SMTP no está configurado, sin romper la
+  request).
+
+Nuevos imports: base64, email.mime.base.MIMEBase, email.encoders.
