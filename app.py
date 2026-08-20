@@ -1334,13 +1334,21 @@ def api_v1_admin_approve(user_id):
     """Idéntico a admin_approve_user (web), en JSON."""
     conn = get_db_connection()
     try:
+        row = conn.execute('SELECT email, is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        already_approved = bool(row and row['is_approved'])
         conn.execute('UPDATE users SET is_approved=1, approved_at=? WHERE id=?',
                      (_utcnow_iso(), user_id))
         conn.commit()
-        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
     finally:
         conn.close()
-    if row:
+    # Fix (19/08): no era idempotente — mandaba el mail de "cuenta
+    # aprobada" en CADA llamada, sin chequear el estado previo. Un
+    # reintento del cliente ante un timeout (ver fix de timeout de
+    # Tailscale, mismo incidente real) terminaba mandando el mismo mail
+    # varias veces al mismo usuario. El UPDATE de arriba sigue siendo
+    # idempotente a propósito (approved_at se refresca igual, inofensivo)
+    # — solo el mail se manda una única vez, la primera.
+    if row and not already_approved:
         _send_account_approved_email(row['email'])
     return jsonify({'status': 'ok'})
 
@@ -2634,13 +2642,16 @@ def admin_users_estado():
 def admin_approve_user(user_id):
     conn = get_db_connection()
     try:
+        row = conn.execute('SELECT email, is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        already_approved = bool(row and row['is_approved'])
         conn.execute('UPDATE users SET is_approved=1, approved_at=? WHERE id=?',
                      (_utcnow_iso(), user_id))
         conn.commit()
-        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
     finally:
         conn.close()
-    if row:
+    # Fix (19/08): mismo problema que api_v1_admin_approve — ver ese
+    # comentario. No era idempotente, mandaba el mail en cada click.
+    if row and not already_approved:
         _send_account_approved_email(row['email'])
     return redirect(url_for('admin_users'))
 
