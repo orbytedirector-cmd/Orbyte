@@ -1,0 +1,15 @@
+Feature (backend): parámetro limit en /api/v1/favorites/detailed
+
+Ticket 19, Feature 3. Preparación para "Reproducir Todo" en el
+cliente nativo: agrega un `limit` opcional que, cuando viene,
+reemplaza PAGE_SIZE=20 para ese request puntual (siempre offset 0,
+page se ignora) — así el cliente puede traer todos los favoritos
+hasta el tope acordado con el PO (20 artistas / 50 álbumes / 500
+pistas) en un solo request en vez de paginar a mano.
+
+Tope duro de 500 del lado del servidor sea cual sea el valor pedido
+en el query param, para no habilitar ?limit=999999.
+
+Sin `limit`, el comportamiento es exactamente el de antes — la
+paginación normal que ya usa la pantalla de Favoritos al scrollear no
+se toca.

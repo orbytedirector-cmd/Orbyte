@@ -1665,7 +1665,24 @@ def api_v1_favorites_detailed():
         page = max(1, int(request.args.get('page', 1)))
     except (TypeError, ValueError):
         page = 1
+    # Ticket 19, Feature 3: "Reproducir Todo" necesita TODOS los
+    # favoritos hasta el tope acordado con el PO (20 artistas / 50
+    # álbumes / 500 pistas) en un solo request, no 25 páginas
+    # secuenciales de a PAGE_SIZE=20. `limit`, si viene, reemplaza
+    # PAGE_SIZE para ese request puntual — page se ignora en ese caso
+    # (siempre offset 0), es un pedido de "dame todo de una", no una
+    # página más. Tope duro de 500 del lado del servidor pase lo que
+    # pase en el query param, para no habilitar un abuso tipo
+    # ?limit=999999.
+    limit_param = request.args.get('limit')
+    page_size = PAGE_SIZE
     offset = (page - 1) * PAGE_SIZE
+    if limit_param is not None:
+        try:
+            page_size = max(1, min(500, int(limit_param)))
+        except (TypeError, ValueError):
+            page_size = PAGE_SIZE
+        offset = 0
 
     conn = get_db_connection()
     try:
@@ -1681,7 +1698,7 @@ def api_v1_favorites_detailed():
                    JOIN artists ar ON ar.id = uif.item_id
                    WHERE uif.user_id=? AND uif.item_type='artist'
                    ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
-                (g.api_user['id'], PAGE_SIZE, offset)
+                (g.api_user['id'], page_size, offset)
             ).fetchall()
             items = [dict(r) for r in rows]
 
@@ -1699,7 +1716,7 @@ def api_v1_favorites_detailed():
                    LEFT JOIN artists ar ON ar.id = al.artist_id
                    WHERE uif.user_id=? AND uif.item_type='album'
                    ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
-                (g.api_user['id'], PAGE_SIZE, offset)
+                (g.api_user['id'], page_size, offset)
             ).fetchall()
             items = []
             for r in rows:
@@ -1727,7 +1744,7 @@ def api_v1_favorites_detailed():
                    LEFT JOIN artists ar ON ar.id = a.artist_id
                    WHERE uif.user_id=? AND uif.item_type='track'
                    ORDER BY uif.added_at DESC LIMIT ? OFFSET ?''',
-                (g.api_user['id'], PAGE_SIZE, offset)
+                (g.api_user['id'], page_size, offset)
             ).fetchall()
             items = []
             for r in rows:
@@ -1743,7 +1760,7 @@ def api_v1_favorites_detailed():
                 d['duration_fmt']   = _fmt_seconds(d.get('duration'))
                 items.append(d)
 
-        total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        total_pages = max(1, (total + page_size - 1) // page_size)
         return jsonify({
             'favorites':   items,
             'total':       total,
