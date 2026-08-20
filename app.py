@@ -524,6 +524,15 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass
+    # Lazy migration: Ticket 19, Feature 5 — nickname opcional que
+    # reemplaza al email en el Header del cliente nativo cuando está
+    # seteado. NULL/vacío = se sigue mostrando el email (fallback resuelto
+    # del lado del cliente, acá solo se persiste el valor tal cual).
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN nickname TEXT")
+        conn.commit()
+    except Exception:
+        pass
     # Lazy migration: bandas favoritas del usuario (máximo 5, reforzado en
     # el endpoint, no acá). FK a artists real — a diferencia de los géneros,
     # una banda favorita sí necesita referenciar un id real del catálogo
@@ -1164,7 +1173,7 @@ def _profile_payload(user_id):
     conn = get_db_connection()
     try:
         user = conn.execute(
-            'SELECT avatar, bio, favorite_genres_json FROM users WHERE id=?', (user_id,)
+            'SELECT avatar, bio, favorite_genres_json, nickname FROM users WHERE id=?', (user_id,)
         ).fetchone()
         favorites = conn.execute(
             '''SELECT a.id, a.name FROM user_favorite_artists ufa
@@ -1178,6 +1187,7 @@ def _profile_payload(user_id):
     return {
         'avatar': user['avatar'] if user else None,
         'bio': user['bio'] if user else None,
+        'nickname': user['nickname'] if user else None,
         'favorite_genres': genres,
         'favorite_artists': [{'id': r['id'], 'name': r['name']} for r in favorites],
     }
@@ -1197,6 +1207,14 @@ def api_v1_profile_update():
             conn.execute('UPDATE users SET avatar=? WHERE id=?', (data['avatar'], g.api_user['id']))
         if 'bio' in data:
             conn.execute('UPDATE users SET bio=? WHERE id=?', ((data['bio'] or '')[:500], g.api_user['id']))
+        if 'nickname' in data:
+            # Ticket 19, Feature 5: tope de 40 caracteres (es lo que se
+            # muestra en el Header, no una bio). String vacío/solo
+            # espacios se persiste como NULL — el cliente ya sabe caer al
+            # email cuando nickname es None, no hace falta duplicar esa
+            # lógica de fallback acá.
+            nickname = (data['nickname'] or '').strip()[:40]
+            conn.execute('UPDATE users SET nickname=? WHERE id=?', (nickname or None, g.api_user['id']))
         if 'favorite_genres' in data:
             genres = data['favorite_genres'] if isinstance(data['favorite_genres'], list) else []
             conn.execute('UPDATE users SET favorite_genres_json=? WHERE id=?',
@@ -1260,6 +1278,10 @@ def api_v1_me():
         'last_seen':    user['last_seen'],
         'last_device':  user['last_device'],
         'last_ip':      user['last_ip'],
+        # Ticket 19, Feature 5 — nickname a mostrar en el Header en vez
+        # del email cuando está seteado. g.api_user viene de SELECT *,
+        # así que la columna ya está ahí una vez migrada.
+        'nickname':     user['nickname'],
     })
 
 @app.route('/api/v1/auth/logout', methods=['POST'])
