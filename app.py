@@ -1582,6 +1582,72 @@ def api_v1_album_tracks(album_id):
         conn.close()
 
 
+@app.route('/api/v1/artist/<int:artist_id>/tracks')
+@api_login_required
+def api_v1_artist_tracks(artist_id):
+    """Ticket 19, Feature 3 — discografía COMPLETA de un artista en un
+    solo request, para "Reproducir Todo" en la pestaña Artistas de
+    Favoritos del cliente nativo: todos los álbumes disponibles del
+    artista en la biblioteca, no solo lo marcado favorito (confirmado
+    con el PO, Ticket 19 §3.1 — a diferencia de la pestaña Álbumes, que
+    sí se limita a lo favorito).
+
+    Mismo shape de pista que /api/v1/albums/<id>/tracks de acá arriba
+    (mismos helpers: _fmt_format/_fmt_seconds/_container_ext/
+    cover_url_filter/clean_db_path) para que el cliente lo decodifique
+    en el mismo modelo OrbyteTrack sin cambios — con artist_name
+    agregado (constante en todas las filas, pero así el cliente arma el
+    PlayableTrack sin tener que pasarlo aparte desde afuera, como sí
+    hace con un álbum individual vía playAlbum()).
+
+    LIMIT 2000 como techo de seguridad (no paginación real) — mismo
+    criterio que el LIMIT 100 de álbumes en /api/v1/artist/<id>, ninguna
+    discografía real de una biblioteca personal debería acercarse a ese
+    número de pistas.
+    """
+    conn = get_db_connection()
+    try:
+        artist = conn.execute('SELECT name FROM artists WHERE id=?', (artist_id,)).fetchone()
+        if not artist:
+            return jsonify({'error': 'not_found'}), 404
+        rows = conn.execute(
+            '''SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year
+               FROM tracks t
+               JOIN albums al ON al.id = t.album_id
+               WHERE al.artist_id=?
+               ORDER BY al.year, al.name, t.disc_number, CAST(t.track_number AS INTEGER)
+               LIMIT 2000''',
+            (artist_id,)
+        ).fetchall()
+        result = []
+        for t in rows:
+            d = dict(t)
+            fmt, led = _fmt_format(d)
+            result.append({
+                'id': d['id'],
+                'title': d.get('title'),
+                'track_number': d.get('track_number'),
+                'disc_number': d.get('disc_number'),
+                'duration': d.get('duration'),
+                'duration_fmt': _fmt_seconds(d.get('duration')),
+                'format_display': fmt,
+                'format_color': led,
+                'artist_id': artist_id,
+                'artist_name': artist['name'],
+                'album_name': d.get('album_name'),
+                'cover_url': cover_url_filter(clean_db_path(d.get('cover_path'))),
+                'stream_url': f'/api/v1/stream/{d["id"]}',
+                'is_dsd': d.get('is_dsd'),
+                'dsd_rate': d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'),
+                'bit_depth': d.get('bit_depth'),
+                'container_ext': _container_ext(d),
+            })
+        return jsonify({'tracks': result})
+    finally:
+        conn.close()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Ticket 10 — Favoritos generales, Playlists, e info enriquecida
 # (Artist/Album/Track). Ver TICKET10_PLAYLISTS_COLA_ACCIONES_CONTEXTUALES.md
