@@ -1,0 +1,27 @@
+Feat (backend): orden de Playlists (Alfabético / Última Reproducción / Más Reproducidas)
+
+Ticket 20, Ítem 3. Respuestas del PO a las 2 preguntas abiertas:
+"reproducir" = tocar "Reproducir Todo" desde PlaylistDetailView (no
+hace falta escuchar la playlist completa, alcanza con arrancar);
+alfabético case-insensitive.
+
+- Lazy migration: playlists.last_played_at (TEXT, NULL hasta la
+  primera reproducción) y playlists.play_count (INTEGER DEFAULT 0).
+  Ninguna se podía derivar de updated_at, que cambia con el contenido
+  (agregar/sacar pistas), no con la reproducción.
+- _playlist_order(sort_key) nuevo, mismo patrón validado que
+  _album_order/_track_order: 'alphabetical' -> name COLLATE NOCASE ASC,
+  'last_played' -> last_played_at DESC NULLS LAST (nunca reproducidas
+  al final), 'most_played' -> play_count DESC con desempate alfabético
+  para orden estable. sort ausente/no reconocido conserva
+  updated_at DESC (comportamiento previo, sin romper clientes viejos).
+- GET /api/v1/playlists acepta ?sort= y devuelve last_played_at/
+  play_count en cada fila.
+- POST /api/v1/playlists/<id>/mark-played (nuevo): incrementa
+  play_count y actualiza last_played_at. Deliberadamente NO toca
+  updated_at (esa es la columna de "se editó el contenido", mezclarla
+  rompería el orden por Última Reproducción en cuanto alguien edite una
+  playlist vieja).
+
+Validado con py_compile, incluyendo sobre el resultado ya parcheado
+(no solo antes de aplicar el diff).

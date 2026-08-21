@@ -736,6 +736,22 @@ def get_db_connection():
             updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
         )
     ''')
+    # Lazy migration: Ticket 20, Ítem 3 — orden de Playlists por Última
+    # Reproducción / Más Reproducidas. Ninguna de las dos se podía derivar
+    # de columnas existentes: updated_at cambia cuando se agrega/saca una
+    # pista (ver api_v1_playlist_add_track/remove_track), NO cuando se
+    # reproduce — hacía falta un punto de datos propio, actualizado desde
+    # el nuevo endpoint mark-played (ver más abajo).
+    try:
+        conn.execute("ALTER TABLE playlists ADD COLUMN last_played_at TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
+    try:
+        conn.execute("ALTER TABLE playlists ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Columna ya existe
     conn.execute('''
         CREATE TABLE IF NOT EXISTS playlist_tracks (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1994,16 +2010,21 @@ def _playlist_owned_or_404(conn, playlist_id, user_id):
 @app.route('/api/v1/playlists', methods=['GET'])
 @api_login_required
 def api_v1_playlists_list():
+    # Ticket 20, Ítem 3: alphabetical | last_played | most_played.
+    # Ausente/no reconocido -> _playlist_order conserva updated_at DESC
+    # (comportamiento previo a este ticket).
+    sort = request.args.get('sort', '')
     conn = get_db_connection()
     try:
-        rows = conn.execute('''
+        rows = conn.execute(f'''
             SELECT p.id, p.name, p.created_at, p.updated_at,
+                   p.last_played_at, p.play_count,
                    COUNT(pt.id) as track_count
             FROM playlists p
             LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
             WHERE p.user_id = ?
             GROUP BY p.id
-            ORDER BY p.updated_at DESC
+            ORDER BY {_playlist_order(sort)}
         ''', (g.api_user['id'],)).fetchall()
         return jsonify({'playlists': [dict(r) for r in rows]})
     finally:
@@ -2112,6 +2133,33 @@ def api_v1_playlist_delete(playlist_id):
         conn.execute('DELETE FROM playlists WHERE id=?', (playlist_id,))
         conn.commit()
         return jsonify({'deleted': True})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/playlists/<int:playlist_id>/mark-played', methods=['POST'])
+@api_login_required
+def api_v1_playlist_mark_played(playlist_id):
+    """Ticket 20, Ítem 3. Se llama desde playAll(_:) en PlaylistDetailView
+    (botón "Reproducir Todo") — criterio confirmado por el PO: cuenta con
+    arrancar la reproducción desde la sección de playlist, no hace falta
+    escucharla completa. Tocar una pista suelta dentro del detalle
+    (play(_:in:), navegación directa) NO pasa por acá — mismo criterio.
+
+    No toca `updated_at`: esa columna es del contenido (agregar/sacar
+    pistas), no de la reproducción — mezclarlas rompería el orden por
+    Última Reproducción apenas alguien edite una playlist vieja."""
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        conn.execute(
+            "UPDATE playlists SET play_count = play_count + 1, "
+            "last_played_at = datetime('now') WHERE id=?",
+            (playlist_id,)
+        )
+        conn.commit()
+        return jsonify({'marked': True})
     finally:
         conn.close()
 
@@ -4344,6 +4392,29 @@ def _track_order(sort_key, direction):
         direction = 'desc'
     dir_ = 'DESC' if direction == 'desc' else 'ASC'
     return f'{col} {dir_} NULLS LAST'
+
+def _playlist_order(sort_key):
+    """Return validated ORDER BY clause for /api/v1/playlists (Ticket 20,
+    Ítem 3). A diferencia de _album_order/_track_order no recibe
+    `direction` — cada criterio tiene un único sentido natural que el PO
+    confirmó (alfabético A→Z, última reproducción y más reproducidas con
+    la más reciente/más alta primero), no hace falta un toggle asc/desc
+    para esto. `sort_key` inválido o ausente conserva el comportamiento
+    previo a este ticket (updated_at DESC) — ningún cliente viejo que no
+    mande `sort` ve un cambio de orden."""
+    if sort_key == 'alphabetical':
+        return 'p.name COLLATE NOCASE ASC'
+    if sort_key == 'last_played':
+        # NULLS LAST explícito (mismo criterio que _album_order/_track_order):
+        # las playlists nunca reproducidas van al final, no arriba por
+        # cómo SQLite trata NULL en un ORDER BY DESC sin esto.
+        return 'p.last_played_at DESC NULLS LAST'
+    if sort_key == 'most_played':
+        # Empate en play_count (frecuente: 0 es el caso más común) se
+        # resuelve alfabético, para que el orden sea estable entre
+        # requests en vez de depender del orden físico en disco.
+        return 'p.play_count DESC, p.name COLLATE NOCASE ASC'
+    return 'p.updated_at DESC'
 
 # ── Deduplicación de pistas repetidas (misma canción, distinto álbum) ──────────
 # Issue: en la vista de pistas (Búsqueda Avanzada y las pestañas Pistas de
