@@ -6196,7 +6196,7 @@ def _api_meta_tracks_payload(args):
     dir_       = args.get('dir',        'desc')
     intercalar = args.get('intercalar', '0') == '1'
 
-    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre'}
+    ALLOWED_FIELDS = {'mood', 'momento', 'era', 'tema_lirico', 'tier', 'idioma', 'genre', 'led'}
     if field not in ALLOWED_FIELDS or not value:
         return {'error': 'invalid field or value'}, 400
 
@@ -6223,6 +6223,12 @@ def _api_meta_tracks_payload(args):
         if field == 'genre':
             base_where  = '(t.genre=? OR tm.genre_primary=?)'
             base_params = (value, value)
+        elif field == 'led':
+            # Ticket 20, Ítem 1: led_color vive en 'tracks' (t), no en
+            # 'track_meta' (tm) — mismo caso que genre arriba, no un
+            # tm.led=? que rompería contra una tabla sin esa columna.
+            base_where  = 't.led_color=?'
+            base_params = (value,)
         else:
             base_where  = f'tm.{field}=?'
             base_params = (value,)
@@ -6232,8 +6238,11 @@ def _api_meta_tracks_payload(args):
         # sus '?' necesitan su valor otra vez, en el mismo orden.
         full_params = base_params + base_params
 
-        if field == 'genre':
-            # Same match as browse_genre: classic tracks.genre OR track_meta.genre_primary
+        if field in ('genre', 'led'):
+            # Mismo motivo que arriba: genre y led_color viven en 'tracks',
+            # no en 'track_meta' — el COUNT tiene que arrancar desde tracks
+            # con LEFT JOIN a track_meta, no un JOIN (inner) desde
+            # track_meta que excluiría pistas sin fila en esa tabla.
             count = conn.execute(f'''
                 SELECT COUNT(*) FROM tracks t
                 LEFT JOIN track_meta tm ON tm.track_id=t.id
