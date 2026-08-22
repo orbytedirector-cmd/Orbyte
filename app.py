@@ -8,6 +8,9 @@ import hashlib
 import socket
 import signal
 import atexit
+import logging
+import uuid
+from logging.handlers import RotatingFileHandler
 import urllib.request
 import urllib.error
 import http.client
@@ -162,6 +165,196 @@ def lang_label(code):
 
 app = Flask(__name__)
 CORS(app)
+
+# ── Ticket 23: logging estructurado a archivo ────────────────────────────────
+# Origen: cortes intermitentes de reproducción reportados por el PO, sin
+# forma de diagnosticarlos porque el server ahora corre como servicio
+# systemd sin consola a la vista (antes, `python app.py` interactivo
+# mostraba todo por stdout — eso se perdió al pasar a servicio).
+#
+# Se configura el logger RAÍZ (logging.getLogger(), sin nombre) en vez de
+# uno nuevo con nombre propio: app.logger (el que ya usan ~30 call sites
+# en todo este archivo — warning/info/error en stream, report-issue,
+# admin, etc.) propaga hacia el raíz por default. Configurando el raíz,
+# TODO ese logging ya existente empieza a caer también al archivo nuevo
+# sin tocar un solo call site — y cualquier logging nuevo que se agregue
+# de acá en adelante, en cualquier parte del proyecto, cae solo.
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+
+class _JSONLFormatter(logging.Formatter):
+    """Un objeto JSON por línea (JSONL) — parseable con jq/scripts, no
+    solo para leer a ojo. Campos estructurados extra (request_id,
+    track_id, etc.) se agregan pasando `extra={...}` al logger; los que
+    no aplican a una línea puntual simplemente no aparecen en ese objeto.
+    """
+    def format(self, record):
+        payload = {
+            'ts':     datetime.fromtimestamp(record.created, tz=timezone.utc)
+                      .isoformat(timespec='milliseconds'),
+            'level':  record.levelname,
+            'logger': record.name,
+            'msg':    record.getMessage(),
+        }
+        for key in (
+            'request_id', 'method', 'path', 'status', 'duration_ms',
+            'remote_addr', 'user_id', 'track_id',
+        ):
+            value = getattr(record, key, None)
+            if value is not None:
+                payload[key] = value
+        if record.exc_info:
+            payload['exc'] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+def _configure_logging():
+    """Política de limpieza: RotatingFileHandler con maxBytes=10MB x
+    backupCount=20 — tope duro de ~200MB en disco total, el archivo más
+    viejo se borra solo apenas se supera ese tope. No hace falta cron ni
+    intervención manual — el propio logging se autolimita.
+
+    Nivel INFO por default (configurable con la variable de entorno
+    ORBYTE_LOG_LEVEL sin tocar código, ej. DEBUG para una sesión de
+    diagnóstico puntual sin dejarlo así permanentemente — a DEBUG cae
+    bastante más volumen, ver el filtro en _log_request_end).
+    """
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    level = getattr(logging, os.environ.get('ORBYTE_LOG_LEVEL', 'INFO').upper(), logging.INFO)
+
+    file_handler = RotatingFileHandler(
+        os.path.join(_LOG_DIR, 'orbyte.log'),
+        maxBytes=10 * 1024 * 1024, backupCount=20, encoding='utf-8'
+    )
+    file_handler.setFormatter(_JSONLFormatter())
+    file_handler.setLevel(level)
+
+    # Consola también — journald (systemd) sigue capturando esto por su
+    # cuenta como venía haciendo, sin pisarle nada; el archivo es la
+    # fuente principal para "rescatar como archivo", esto es un espejo
+    # legible a ojo si Niko alguna vez hace `journalctl -u orbyte -f`.
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(
+        logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+    )
+    console_handler.setLevel(level)
+
+    root = logging.getLogger()
+    root.setLevel(level)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
+
+    # El logger 'werkzeug' (access log del server de desarrollo, y
+    # potencialmente errores de transporte a nivel de socket —
+    # BrokenPipeError/ConnectionResetError cuando un cliente se
+    # desconecta a mitad de una respuesta) también propaga al raíz por
+    # default. Se sube a WARNING (no INFO) para no duplicar el access
+    # log de cada request — eso ya lo cubre _log_request_end() de forma
+    # más rica (status, duración, usuario) — pero SIN silenciarlo del
+    # todo: si Werkzeug loguea un error de transporte a WARNING/ERROR
+    # (razonable esperar que sí, no confirmado 100% sin poder
+    # reproducirlo en vivo), va a terminar en el archivo igual.
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+    # Ticket 23: con debug=True (ver app.run al final de este archivo),
+    # Flask por default RE-LANZA cualquier excepción no manejada para
+    # que el debugger interactivo de Werkzeug la muestre en el
+    # navegador, en vez de pasarla por @app.errorhandler — confirmado
+    # contra la documentación oficial de Flask ("Exceptions are
+    # re-raised... if TESTING or DEBUG is enabled"). Sin este override,
+    # _log_unhandled_exception() de abajo nunca se dispararía con la
+    # configuración actual.
+    #
+    # Trade-off consciente, no un efecto secundario no buscado: esto
+    # también apaga el debugger interactivo en el navegador para
+    # excepciones no manejadas. Corriendo como servicio desatendido,
+    # tener el log en archivo importa más que ese debugger — que además,
+    # accesible por cualquiera en la LAN/Tailscale, es en los hechos
+    # una superficie de ejecución de código remota si algo lo dispara.
+    # Si alguna vez hace falta el debugger interactivo para una sesión
+    # de trabajo puntual, es una sola línea para comentar acá.
+    app.config['PROPAGATE_EXCEPTIONS'] = False
+
+    return file_handler
+
+_configure_logging()
+
+_request_logger = logging.getLogger('orbyte.request')
+_error_logger    = logging.getLogger('orbyte.error')
+
+@app.before_request
+def _log_request_start():
+    g.request_id = uuid.uuid4().hex[:8]
+    g.request_start = time.monotonic()
+
+@app.after_request
+def _log_request_end(response):
+    # El logging nunca debe poder romper una response real — cualquier
+    # excepción acá se traga silenciosamente antes que tirar abajo un
+    # request que por lo demás fue exitoso.
+    try:
+        duration_ms = (
+            int((time.monotonic() - g.request_start) * 1000)
+            if hasattr(g, 'request_start') else None
+        )
+        api_user = getattr(g, 'api_user', None)
+        user_id = api_user['id'] if api_user else session.get('user_id')
+
+        # No todo a INFO: /api/v1/auth* y /api/v1/stream* siempre (son
+        # justo lo que este ticket necesita poder cruzar contra el log
+        # del cliente), cualquier 4xx/5xx siempre (son señal, no ruido),
+        # el resto queda en DEBUG — no aparece en el archivo con el
+        # nivel INFO default, pero está ahí con ORBYTE_LOG_LEVEL=DEBUG
+        # para una sesión de diagnóstico puntual sin tocar código.
+        always_log_prefixes = ('/api/v1/auth', '/api/v1/stream')
+        should_log_info = (
+            response.status_code >= 400
+            or request.path.startswith(always_log_prefixes)
+        )
+        level = logging.INFO if should_log_info else logging.DEBUG
+        _request_logger.log(
+            level, f"{request.method} {request.path} -> {response.status_code}",
+            extra={
+                'request_id':  getattr(g, 'request_id', None),
+                'method':      request.method,
+                'path':        request.path,
+                'status':      response.status_code,
+                'duration_ms': duration_ms,
+                'remote_addr': request.remote_addr,
+                'user_id':     user_id,
+            }
+        )
+    except Exception:
+        pass
+    return response
+
+@app.errorhandler(Exception)
+def _log_unhandled_exception(e):
+    """Catch-all — se registra DESPUÉS de cualquier @app.errorhandler más
+    específico ya existente (ej. el de 404 de abajo), así que Flask llama
+    a ese primero por ser más específico; esto solo entra para lo que
+    nadie más maneja.
+
+    HTTPException (abort(400), abort(403), los 404 de abajo, etc.) es
+    tráfico normal — se devuelve tal cual (`return e`, patrón estándar de
+    Flask para catch-alls que necesitan distinguir esto de un 500 real) y
+    NO se loguea acá con traceback: ya queda cubierto por
+    _log_request_end() de arriba (status >= 400 → INFO), sin duplicar ni
+    ensuciar el log con un traceback para algo esperado. Solo una
+    excepción de Python de verdad no manejada llega hasta acá abajo.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    _error_logger.error(
+        f"Excepción no manejada en {request.method} {request.path}: {e}",
+        exc_info=True,
+        extra={
+            'request_id':  getattr(g, 'request_id', None),
+            'method':      request.method,
+            'path':        request.path,
+            'remote_addr': request.remote_addr,
+        }
+    )
+    return jsonify({'error': 'internal_error'}), 500
 
 # ── Diagnóstico: 404 sin ruta ─────────────────────────────────────────────
 # Agregado para poder depurar el cliente nativo (iOS) sin consola de Xcode
@@ -1550,6 +1743,46 @@ def api_v1_admin_revoke(user_id):
         conn.close()
     return jsonify({'status': 'ok'})
 
+# ── Ticket 23: logs como archivo, sin necesitar SSH cada vez ────────────────
+_LOG_FILENAME_RE = re.compile(r'^orbyte\.log(\.\d+)?$')
+
+@app.route('/api/v1/admin/logs')
+@api_admin_required
+def api_v1_admin_logs_list():
+    """Lista el log activo (orbyte.log) más los rotados por
+    RotatingFileHandler (orbyte.log.1, orbyte.log.2, ...) con tamaño y
+    fecha, para elegir cuál bajar sin adivinar nombres por SSH."""
+    entries = []
+    if os.path.isdir(_LOG_DIR):
+        for name in os.listdir(_LOG_DIR):
+            if not _LOG_FILENAME_RE.match(name):
+                continue
+            full = os.path.join(_LOG_DIR, name)
+            stat = os.stat(full)
+            entries.append({
+                'name': name,
+                'size_bytes': stat.st_size,
+                'modified_at': datetime.fromtimestamp(
+                    stat.st_mtime, tz=timezone.utc
+                ).isoformat(timespec='seconds'),
+            })
+    entries.sort(key=lambda e: e['name'])
+    return jsonify({'logs': entries})
+
+@app.route('/api/v1/admin/logs/<name>')
+@api_admin_required
+def api_v1_admin_logs_download(name):
+    """Descarga un archivo de log puntual. `name` se valida contra el
+    mismo patrón que la lista de arriba antes de tocar el filesystem —
+    nunca un path arbitrario (path traversal vía '../', etc.), solo
+    'orbyte.log' o 'orbyte.log.N'."""
+    if not _LOG_FILENAME_RE.match(name):
+        return jsonify({'error': 'invalid_log_name'}), 400
+    full = os.path.join(_LOG_DIR, name)
+    if not os.path.isfile(full):
+        return jsonify({'error': 'not_found'}), 404
+    return send_file(full, mimetype='text/plain', as_attachment=True, download_name=name)
+
 def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_):
     """Despacha al mismo helper que ya usan las rutas web (/mood/, /genre/,
     /led/, etc.) — así el resultado que ve el cliente nativo es idéntico al
@@ -2537,7 +2770,8 @@ def api_v1_stream(track_id):
         return jsonify({'error': 'file_not_found'}), 404
     app.logger.info(
         f"[api/v1/stream] track={track_id}: sirviendo {os.path.basename(absolute_path)} "
-        f"(range={request.headers.get('Range', '-')})"
+        f"(range={request.headers.get('Range', '-')})",
+        extra={'track_id': track_id, 'user_id': user_id}
     )
     return _serve_audio(absolute_path)
 
@@ -2637,7 +2871,8 @@ def api_v1_stream_pcm(track_id):
 
     app.logger.info(
         f"[api/v1/stream-pcm] track={track_id}: sirviendo {os.path.basename(cache_path)} "
-        f"(cache={'hit' if cache_hit else 'miss'}, range={request.headers.get('Range', '-')})"
+        f"(cache={'hit' if cache_hit else 'miss'}, range={request.headers.get('Range', '-')})",
+        extra={'track_id': track_id, 'user_id': user_id}
     )
     resp = _serve_audio(cache_path)
     resp.headers['Content-Type']      = 'audio/flac'
