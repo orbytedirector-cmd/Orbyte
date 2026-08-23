@@ -2285,17 +2285,38 @@ def api_v1_playlists_create():
 @api_login_required
 def api_v1_playlist_detail(playlist_id):
     """Detalle con las pistas ya resueltas — mismo shape que
-    /api/v1/albums/<id>/tracks, para armar PlayableTrack sin otra llamada."""
+    /api/v1/albums/<id>/tracks, para armar PlayableTrack sin otra llamada.
+
+    Ticket 24 (iOS), Lote 4: se suma artist_name/album_year/genre_primary/
+    mood/tema_lirico a cada pista — antes esta respuesta solo traía
+    artist_id (sin nombre) y nada de track_meta, así que el cliente no
+    tenía con qué armar el "Resumen" de la playlist sin pedir un
+    endpoint nuevo por separado. Se amplía el SELECT existente en vez de
+    agregar un endpoint de agregados (evaluado en el ticket: alcanza con
+    esto, el resumen se calcula del lado del cliente a partir de estas
+    mismas pistas). Mismo patrón de joins que ya usan otros endpoints de
+    este archivo (LEFT JOIN artists / LEFT JOIN track_meta, ver por
+    ejemplo api_v1_track_detail más abajo) — nada nuevo, solo replicado
+    acá. genre_primary usa el mismo COALESCE(tm.genre_primary, t.genre)
+    que ya usa el resto del archivo (línea ~2527): track_meta es
+    metadata enriquecida y puede no estar poblada para todas las pistas,
+    t.genre es el tag nativo del escaneo.
+    """
     conn = get_db_connection()
     try:
         pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
         if not pl:
             return jsonify({'error': 'not_found'}), 404
         rows = conn.execute('''
-            SELECT t.*, pt.position, al.name as album_name, al.cover_path, al.artist_id
+            SELECT t.*, pt.position, al.name as album_name, al.year as album_year,
+                   al.cover_path, al.artist_id, ar.name as artist_name,
+                   COALESCE(tm.genre_primary, t.genre) as genre_primary,
+                   tm.mood, tm.tema_lirico
             FROM playlist_tracks pt
             JOIN tracks t ON t.id = pt.track_id
             LEFT JOIN albums al ON al.id = t.album_id
+            LEFT JOIN artists ar ON al.artist_id = ar.id
+            LEFT JOIN track_meta tm ON tm.track_id = t.id
             WHERE pt.playlist_id = ?
             ORDER BY pt.position
         ''', (playlist_id,)).fetchall()
@@ -2314,7 +2335,12 @@ def api_v1_playlist_detail(playlist_id):
                 'format_display': fmt,
                 'format_color':   led,
                 'artist_id':      d.get('artist_id'),
+                'artist_name':    d.get('artist_name'),
                 'album_name':     d.get('album_name'),
+                'album_year':     d.get('album_year'),
+                'genre_primary':  d.get('genre_primary'),
+                'mood':           d.get('mood'),
+                'tema_lirico':    d.get('tema_lirico'),
                 'cover_url':      cover_url_filter(cover),
                 'stream_url':     f'/api/v1/stream/{d["id"]}',
                 'is_dsd':         d.get('is_dsd'),
