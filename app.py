@@ -3233,6 +3233,14 @@ def api_v1_ai_playlist():
     raw_query = (data.get('query') or '').strip()
     if not raw_query:
         return jsonify({'error': 'missing_query'}), 400
+    # Ticket AI-07 (Etapa 6) — turno de seguimiento de una conversación:
+    # el cliente manda las 'entities' del turno anterior tal cual las
+    # recibió, sin tocarlas. dict/None nada más — si viene otra cosa
+    # (ej. un valor corrupto de un cliente viejo) se ignora en vez de
+    # romper el turno nuevo.
+    prior_entities = data.get('prior_entities')
+    if not isinstance(prior_entities, dict):
+        prior_entities = None
     conn = get_db_connection()
     try:
         result = ai_playlist.handle_request(
@@ -3240,6 +3248,7 @@ def api_v1_ai_playlist():
             track_to_json_fn=track_to_json,
             build_adv_filters_fn=_build_adv_filters,
             dedupe_condition_fn=_track_dedupe_condition,
+            prior_entities=prior_entities,
         )
         return jsonify(result)
     finally:

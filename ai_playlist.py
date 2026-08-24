@@ -418,12 +418,44 @@ def record_feedback(conn, user_id, request_id, rating, comment, saved_playlist_i
     return cur.rowcount > 0
 
 
-def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+def _merge_entities(prior, new):
+    """Ticket AI-07 (Etapa 6) — fusión de entidades entre turnos de una
+    misma conversación. Regla simple, a propósito: por cada campo, si el
+    turno NUEVO trajo algo, gana; si no, se conserva lo del turno previo.
+    No se le pide nada de esto al LLM (el prompt de cada turno sigue
+    siendo el mismo de AI-01, sin cambios) — el merge es puramente
+    determinístico, del lado de Python, después de parsear el turno nuevo
+    de forma aislada. Mantiene el prompt simple y evita depender de que
+    el LLM recuerde contexto de turnos anteriores."""
+    merged = _empty_entities()
+    for key, empty_val in merged.items():
+        new_val = new.get(key)
+        prior_val = prior.get(key) if prior else None
+        if isinstance(empty_val, list):
+            merged[key] = new_val if new_val else (prior_val or [])
+        else:
+            merged[key] = new_val if new_val else prior_val
+    return merged
+
+
+def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                    prior_entities=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
-    por errores de la propia base de datos, que sí deben propagarse."""
+    por errores de la propia base de datos, que sí deben propagarse.
+
+    `prior_entities` (Ticket AI-07, Etapa 6): si el cliente manda las
+    entidades del turno anterior de la misma conversación (ej. el usuario
+    está respondiendo una pregunta de aclaración), se fusionan con lo que
+    se extraiga de este turno antes de mapear a filtros — ver
+    _merge_entities. Sin este parámetro (valor por defecto None) el
+    comportamiento es idéntico al de antes de este ticket: cada llamada
+    es un turno aislado, como en AI-01."""
     t0 = time.time()
     result, provider = interpret_query(conn, raw_query)
+
+    if prior_entities:
+        result['entities'] = _merge_entities(prior_entities, result['entities'])
 
     tracks, filters_applied, used_fallback = generate_playlist(
         conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
