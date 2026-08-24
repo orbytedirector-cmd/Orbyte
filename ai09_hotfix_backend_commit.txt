@@ -1,0 +1,32 @@
+Fix (backend): fallback genérico cuando el parser de IA falla del todo (Ticket AI-09b)
+
+Bug encontrado a raíz del reporte de Niko sobre "Quiero oir a metallica y
+similares" devolviendo resultados no relevantes. Si ningún proveedor de
+IA está configurado (o ambos fallan), interpret_query() devuelve
+status='error' con entities vacías. handle_request() igual llamaba a
+generate_playlist() con esas entities vacías -- y "sin ningún filtro"
+matchea toda la biblioteca, devolviendo top popularidad global como si
+fuera un resultado válido con cero criterios, en vez de pasar por el
+fallback inteligente de la Etapa 5.
+
+handle_request() ahora chequea si las entities finales (post-merge con
+prior_entities) están completamente vacías, y en ese caso va directo a
+_personalized_then_global_fallback() -- extraída de generate_playlist()
+a una función compartida, mismo criterio en los dos casos (relajación
+agotada / parser falló del todo) en un solo lugar.
+
+Validado: py_compile de los 4 módulos del epic OK, prueba funcional
+simulando exactamente el escenario reportado (interpret_query devolviendo
+error, consulta literal "Quiero oir a metallica y similares") -- ahora
+used_fallback=True y filters_applied.fallback_source queda explícito, en
+vez de aparentar ser un match legítimo. git apply --check OK en clon
+independiente, aplicado y recompilado en clon de verificación.
+
+Nota: revisé el log completo del servidor (1211 líneas, 22-24 ago) y no
+hay ningún request a /api/v1/ai/playlist en toda la ventana -- no se
+pudo confirmar con certeza si este fue el mecanismo exacto de lo que
+Niko vio, pero es un bug real independiente que valía la pena corregir.
+Pendiente: confirmar si GEMINI_API_KEY/GROQ_API_KEY están seteadas en el
+.env del servidor.
+
+Único archivo tocado: ai_playlist.py.

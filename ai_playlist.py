@@ -336,13 +336,44 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     return tracks
 
 
+def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+    """Hotfix (Ticket AI-09, reportado por Niko) — escalón final común:
+    favoritos/comportamiento (Etapa 5, Ticket AI-04) y, si tampoco hay
+    nada ahí, popularidad global sin filtros (backstop original de
+    AI-01). Extraído de generate_playlist() a una función propia porque
+    ahora lo usan DOS casos, no uno: (a) cuando la relajación de filtros
+    se agota sin resultados (mismo lugar de siempre), y (b) cuando el
+    intent parser falló por completo — ver el `if result['status'] ==
+    'error'` en handle_request más abajo. Antes de este fix, el caso (b)
+    no pasaba por acá: al tener entities vacías, `_query_tracks` con
+    args_dict={} "matcheaba todo" (sin ningún filtro) y devolvía top
+    popularidad global como si fuera un match legítimo con cero
+    criterios, sin distinguir "el usuario no pidió nada específico" de
+    "el parser nunca corrió" (ej. sin GEMINI_API_KEY/GROQ_API_KEY
+    configuradas, o ambos proveedores caídos)."""
+    personalized, source = fallback_engine.personalized_fallback(
+        conn, user_id, track_to_json_fn, limit=_PLAYLIST_SIZE
+    )
+    if personalized:
+        return personalized, {'fallback_source': source}
+
+    pool = _query_tracks(conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+    sample_size = min(_PLAYLIST_SIZE, len(pool))
+    return (random.sample(pool, sample_size) if pool else []), {'fallback_source': 'global_popularity'}
+
+
 def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
     """Filter mapper + relajación progresiva (Etapa 4) + fallback
     inteligente (Etapa 5, Ticket AI-04). Devuelve (tracks,
     filters_applied_dict, used_fallback_bool). Nunca devuelve una lista
     vacía si hay AL MENOS una pista en la biblioteca (último recurso: top
     popularidad global, sin ningún filtro — sin cambios respecto al
-    Ticket AI-01)."""
+    Ticket AI-01).
+
+    Precondición (ver handle_request): `entities` viene de un turno que
+    el parser SÍ logró interpretar (status != 'error'). Si el parser
+    falló del todo, handle_request no llama a esta función — va directo
+    a _personalized_then_global_fallback (ver Ticket AI-09)."""
     args_dict = _entities_to_args_dict(entities)
     dropped = set()
 
@@ -361,21 +392,9 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             sample_size = min(_PLAYLIST_SIZE, len(pool))
             return random.sample(pool, sample_size), retry_args, True
 
-    # Ticket AI-04 (Etapa 5): antes de caer al backstop de popularidad
-    # global sin ningún criterio personal, probar favoritos ->
-    # comportamiento individual -> comportamiento agregado. Reemplaza acá
-    # el fallback provisorio del Ticket AI-01, que iba directo a la línea
-    # de abajo.
-    personalized, source = fallback_engine.personalized_fallback(
-        conn, user_id, track_to_json_fn, limit=_PLAYLIST_SIZE
-    )
-    if personalized:
-        return personalized, {'fallback_source': source}, True
-
-    # Último recurso: top popularidad global, sin filtros.
-    pool = _query_tracks(conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
-    sample_size = min(_PLAYLIST_SIZE, len(pool))
-    return (random.sample(pool, sample_size) if pool else []), {'fallback_source': 'global_popularity'}, True
+    tracks, filters_applied = _personalized_then_global_fallback(
+        conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+    return tracks, filters_applied, True
 
 
 def _log_request(conn, user_id, raw_query, result, provider, filters_applied, used_fallback, track_count):
@@ -438,6 +457,10 @@ def _merge_entities(prior, new):
     return merged
 
 
+def _entities_are_empty(entities):
+    return not any(entities.get(key) for key in entities)
+
+
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     prior_entities=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
@@ -457,11 +480,26 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     if prior_entities:
         result['entities'] = _merge_entities(prior_entities, result['entities'])
 
-    tracks, filters_applied, used_fallback = generate_playlist(
-        conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
-
-    if result['status'] == 'error':
+    # Hotfix (Ticket AI-09): si tras el merge las entidades siguen
+    # completamente vacías (parser sin proveedores configurados, ambos
+    # fallaron, o un turno de conversación sin nada nuevo ni previo que
+    # aportar), ir directo al fallback inteligente. Antes de este fix se
+    # llamaba igual a generate_playlist(), que con entities vacías
+    # "matcheaba todo" (sin ningún filtro) y devolvía popularidad global
+    # cruda como si fuera un resultado válido con cero criterios, en vez
+    # de favoritos/comportamiento. Si HAY algo de señal (aunque
+    # result['status'] sea 'error' pero prior_entities haya aportado algo
+    # vía merge), se sigue intentando filtrar por eso primero — no se
+    # descarta señal real solo porque este turno puntual falló.
+    if _entities_are_empty(result['entities']):
+        tracks, filters_applied = _personalized_then_global_fallback(
+            conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
         used_fallback = True
+    else:
+        tracks, filters_applied, used_fallback = generate_playlist(
+            conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+        if result['status'] == 'error':
+            used_fallback = True
 
     _request_id = _log_request(conn, user_id, raw_query, result, provider, filters_applied,
                                 used_fallback, len(tracks))
