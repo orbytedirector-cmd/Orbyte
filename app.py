@@ -3248,6 +3248,7 @@ def api_v1_ai_playlist():
             track_to_json_fn=track_to_json,
             build_adv_filters_fn=_build_adv_filters,
             dedupe_condition_fn=_track_dedupe_condition,
+            build_similar_artists_fn=build_similar_artists,
             prior_entities=prior_entities,
         )
         return jsonify(result)

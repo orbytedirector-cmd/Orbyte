@@ -278,7 +278,15 @@ def interpret_query(conn, raw_query):
 def _entities_to_args_dict(entities, drop_fields=()):
     """Arma el dict de listas que espera MultiDict (y por lo tanto
     _build_adv_filters) a partir de las entidades ya normalizadas, salteando
-    los campos en drop_fields (usado por la relajación progresiva)."""
+    los campos en drop_fields (usado por la relajación progresiva).
+
+    Nota (Ticket AI-11, bugfix): 'artists' y 'albums' NO están en
+    _ENTITY_TO_FILTER_FIELD a propósito — _build_adv_filters no tiene
+    ningún parámetro de artista ni álbum (solo `pais` para
+    artists.nationality). El manejo de 'artists' vive aparte, en
+    _resolve_artist_ids() + el parámetro artist_ids de _query_tracks, más
+    abajo. 'albums' queda sin resolver todavía — ver limitación conocida
+    en el ticket."""
     args = {}
     for entity_key, filter_field in _ENTITY_TO_FILTER_FIELD.items():
         if filter_field in drop_fields:
@@ -289,10 +297,66 @@ def _entities_to_args_dict(entities, drop_fields=()):
     return args
 
 
-def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+_ARTIST_MATCH_CUTOFF = 0.75  # más estricto que _closest_match (0.6):
+# nombres de artista son mucho más numerosos que el vocabulario de
+# género/mood, más riesgo de un falso positivo con un cutoff laxo.
+
+
+def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_limit=8):
+    """Ticket AI-11 (bugfix, reportado por Niko: "Metallica y similares"
+    no encontraba a Metallica pese a que el artista SÍ está en la
+    biblioteca). Resuelve cada nombre de artista que el LLM extrajo
+    (texto libre, puede venir con mayúsculas/typos distintos) contra la
+    tabla real de artists — exacto case-insensitive primero, fuzzy
+    después — y expande cada uno a sus artistas similares ya cacheados en
+    `artists.similar_artists_json`. Es el MISMO dato que ya alimenta la
+    sección "Similares" de cada artista en la app (`build_similar_artists`,
+    reusada acá tal cual, inyectada por parámetro — mismo patrón de
+    inyección explícita que el resto de este módulo).
+
+    Devuelve un set de artist_id: los nombrados que se pudieron resolver
+    + sus similares que efectivamente existen en esta biblioteca (los que
+    no, `build_similar_artists_fn` ya los devuelve con id=None y se
+    descartan acá)."""
+    if not artist_names:
+        return set()
+
+    rows = conn.execute('SELECT id, name FROM artists').fetchall()
+    name_to_id = {r['name'].strip().lower(): r['id'] for r in rows}
+
+    ids = set()
+    for raw_name in artist_names:
+        norm = str(raw_name).strip().lower()
+        if not norm:
+            continue
+        matched_id = name_to_id.get(norm)
+        if matched_id is None:
+            close = difflib.get_close_matches(norm, list(name_to_id.keys()), n=1, cutoff=_ARTIST_MATCH_CUTOFF)
+            if close:
+                matched_id = name_to_id[close[0]]
+        if matched_id is None:
+            continue  # el LLM mencionó un artista que no está en la biblioteca — se ignora, no se fuerza nada
+        ids.add(matched_id)
+
+        similar_row = conn.execute(
+            'SELECT similar_artists_json FROM artists WHERE id=?', (matched_id,)
+        ).fetchone()
+        if similar_row and similar_row['similar_artists_json']:
+            for similar in build_similar_artists_fn(conn, similar_row['similar_artists_json'], limit=similar_limit):
+                if similar.get('id'):
+                    ids.add(similar['id'])
+    return ids
+
+
+def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn, artist_ids=None):
     """Ejecuta la búsqueda de pistas reutilizando EXACTAMENTE el mismo
     join/alias que ya usa _api_search_advanced_payload (view=tracks) en
-    app.py — no se reinventa el criterio de matching (ver ticket §3)."""
+    app.py — no se reinventa el criterio de matching (ver ticket §3).
+
+    `artist_ids` (Ticket AI-11): set opcional de artist_id — se agrega
+    como AND adicional (`al.artist_id IN (...)`) junto a lo que devuelva
+    build_adv_filters_fn. No pasa por build_adv_filters_fn porque esa
+    función no tiene ningún parámetro de artista."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -300,6 +364,10 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
             args.add(field, v)
 
     clauses, params = build_adv_filters_fn(args, pop_alias='tpc', for_albums=False)
+    if artist_ids:
+        placeholders = ','.join('?' * len(artist_ids))
+        clauses = clauses + [f'al.artist_id IN ({placeholders})']
+        params = params + list(artist_ids)
     extra_where = ' AND '.join(clauses)
     dedupe_clause = dedupe_condition_fn(extra_where=extra_where, track_alias='t', pop_alias='tpc')
     clauses = clauses + [dedupe_clause]
@@ -362,7 +430,8 @@ def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_ad
     return (random.sample(pool, sample_size) if pool else []), {'fallback_source': 'global_popularity'}
 
 
-def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                       build_similar_artists_fn):
     """Filter mapper + relajación progresiva (Etapa 4) + fallback
     inteligente (Etapa 5, Ticket AI-04). Devuelve (tracks,
     filters_applied_dict, used_fallback_bool). Nunca devuelve una lista
@@ -373,24 +442,41 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     Precondición (ver handle_request): `entities` viene de un turno que
     el parser SÍ logró interpretar (status != 'error'). Si el parser
     falló del todo, handle_request no llama a esta función — va directo
-    a _personalized_then_global_fallback (ver Ticket AI-09)."""
+    a _personalized_then_global_fallback (ver Ticket AI-09).
+
+    Ticket AI-11 (bugfix): artist_ids se calcula UNA sola vez acá arriba
+    y se mantiene constante durante toda la relajación de género/mood/
+    etc. — un artista nombrado explícitamente es señal más central que
+    cualquiera de esos campos, no tiene sentido soltarlo antes. Si ni
+    siquiera "artista + similares, sin ningún otro filtro" encuentra
+    nada (último tramo del loop, cuando `dropped` ya sacó todo lo demás),
+    recién ahí se cae a _personalized_then_global_fallback más abajo."""
+    artist_ids = _resolve_artist_ids(conn, entities.get('artists') or [], build_similar_artists_fn)
     args_dict = _entities_to_args_dict(entities)
     dropped = set()
 
-    pool = _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+    def _filters_applied(args):
+        applied = dict(args)
+        if artist_ids:
+            applied['artist_ids'] = sorted(artist_ids)
+        return applied
+
+    pool = _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                          artist_ids=artist_ids)
     if pool:
         sample_size = min(_PLAYLIST_SIZE, len(pool))
-        return random.sample(pool, sample_size), args_dict, False
+        return random.sample(pool, sample_size), _filters_applied(args_dict), False
 
     for field in _RELAXATION_ORDER:
         if field not in args_dict:
             continue
         dropped.add(field)
         retry_args = _entities_to_args_dict(entities, drop_fields=dropped)
-        pool = _query_tracks(conn, retry_args, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+        pool = _query_tracks(conn, retry_args, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                              artist_ids=artist_ids)
         if pool:
             sample_size = min(_PLAYLIST_SIZE, len(pool))
-            return random.sample(pool, sample_size), retry_args, True
+            return random.sample(pool, sample_size), _filters_applied(retry_args), True
 
     tracks, filters_applied = _personalized_then_global_fallback(
         conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
@@ -462,10 +548,16 @@ def _entities_are_empty(entities):
 
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                    prior_entities=None):
+                    build_similar_artists_fn, prior_entities=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
     por errores de la propia base de datos, que sí deben propagarse.
+
+    `build_similar_artists_fn` (Ticket AI-11): `build_similar_artists` de
+    app.py, inyectada — resuelve artistas nombrados por el usuario contra
+    la biblioteca real y los expande a artistas similares (mismo dato que
+    ya alimenta la sección "Similares" de cada artista en la app). Ver
+    _resolve_artist_ids.
 
     `prior_entities` (Ticket AI-07, Etapa 6): si el cliente manda las
     entidades del turno anterior de la misma conversación (ej. el usuario
@@ -497,7 +589,8 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
         used_fallback = True
     else:
         tracks, filters_applied, used_fallback = generate_playlist(
-            conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+            conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            build_similar_artists_fn)
         if result['status'] == 'error':
             used_fallback = True
 
