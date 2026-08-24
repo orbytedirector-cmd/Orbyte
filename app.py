@@ -33,6 +33,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from genre_similarity import genre_similarity as _genre_similarity_fn
 import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapper), módulo aislado
+import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -980,6 +981,62 @@ def get_db_connection():
             created_at            TEXT NOT NULL DEFAULT (datetime('now'))
         )
     ''')
+    # Lazy migration: Ticket AI-02 (Etapa 1 del epic "Agente de IA", mitad
+    # backend) — motor de comportamiento (colección). Tres tablas nuevas y
+    # aisladas, todas con UNIQUE(user_id, client_*_id) para que reintentos
+    # de red del cliente nunca dupliquen ni corrompan el conteo (ver
+    # AI_AGENT_MASTER_PLAN.md §8 y behavior_engine.py).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS listening_events (
+            id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id                  INTEGER NOT NULL,
+            client_event_id          TEXT NOT NULL,
+            track_id                 INTEGER NOT NULL,
+            duration_played_seconds  INTEGER NOT NULL DEFAULT 0,
+            completed                INTEGER NOT NULL DEFAULT 0,
+            source                   TEXT NOT NULL DEFAULT 'manual',
+            created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, client_event_id)
+        )
+    ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_listening_events_user "
+        "ON listening_events (user_id, created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_listening_events_track "
+        "ON listening_events (track_id)"
+    )
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS search_history (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            client_event_id  TEXT NOT NULL,
+            query_text       TEXT NOT NULL,
+            result_count     INTEGER,
+            created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, client_event_id)
+        )
+    ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_search_history_user "
+        "ON search_history (user_id, created_at)"
+    )
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS session_log (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id             INTEGER NOT NULL,
+            client_session_id   TEXT NOT NULL,
+            device              TEXT,
+            started_at          TEXT NOT NULL DEFAULT (datetime('now')),
+            ended_at            TEXT,
+            UNIQUE(user_id, client_session_id)
+        )
+    ''')
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_session_log_user "
+        "ON session_log (user_id, started_at)"
+    )
     conn.commit()
     return conn
 
@@ -3169,6 +3226,84 @@ def api_v1_ai_playlist():
             dedupe_condition_fn=_track_dedupe_condition,
         )
         return jsonify(result)
+    finally:
+        conn.close()
+
+@app.route('/api/v1/behavior/listen', methods=['POST'])
+@api_login_required
+def api_v1_behavior_listen():
+    """Ticket AI-02 (Etapa 1, backend) — logging de un intento de escucha ya
+    terminado (skip, pausa larga, fin de pista o cambio de pista). El
+    cliente lo dispara una sola vez por track_id, no en cada tick de
+    reproducción. Ver behavior_engine.log_listen — idempotente vía
+    client_event_id."""
+    data = request.get_json(silent=True) or {}
+    client_event_id = (data.get('client_event_id') or '').strip()
+    track_id = data.get('track_id')
+    if not client_event_id or not track_id:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        logged = behavior_engine.log_listen(
+            conn, g.api_user['id'], client_event_id, track_id,
+            data.get('duration_played_seconds'), data.get('completed'), data.get('source'),
+        )
+        return jsonify({'logged': logged})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/behavior/search', methods=['POST'])
+@api_login_required
+def api_v1_behavior_search():
+    """Ticket AI-02 (Etapa 1, backend) — logging de una búsqueda realizada
+    por el usuario. Decoupled de las rutas de búsqueda reales (/api/search*,
+    /api/v1/search*) a propósito: el cliente llama a esto aparte, después de
+    recibir sus resultados, así ninguna ruta de búsqueda existente cambia de
+    comportamiento (ver AI_AGENT_MASTER_PLAN.md §3). Idempotente vía
+    client_event_id."""
+    data = request.get_json(silent=True) or {}
+    client_event_id = (data.get('client_event_id') or '').strip()
+    query_text = (data.get('query_text') or '').strip()
+    if not client_event_id or not query_text:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        logged = behavior_engine.log_search(
+            conn, g.api_user['id'], client_event_id, query_text, data.get('result_count'),
+        )
+        return jsonify({'logged': logged})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/behavior/session/start', methods=['POST'])
+@api_login_required
+def api_v1_behavior_session_start():
+    """Ticket AI-02 (Etapa 1, backend) — inicio de sesión de uso. Idempotente
+    vía client_session_id (UNIQUE user_id+client_session_id)."""
+    data = request.get_json(silent=True) or {}
+    client_session_id = (data.get('client_session_id') or '').strip()
+    if not client_session_id:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        started = behavior_engine.start_session(conn, g.api_user['id'], client_session_id, data.get('device'))
+        return jsonify({'started': started})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/behavior/session/end', methods=['POST'])
+@api_login_required
+def api_v1_behavior_session_end():
+    """Ticket AI-02 (Etapa 1, backend) — cierre de sesión de uso. Idempotente:
+    solo pisa ended_at si todavía era NULL, ver behavior_engine.end_session."""
+    data = request.get_json(silent=True) or {}
+    client_session_id = (data.get('client_session_id') or '').strip()
+    if not client_session_id:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        ended = behavior_engine.end_session(conn, g.api_user['id'], client_session_id)
+        return jsonify({'ended': ended})
     finally:
         conn.close()
 

@@ -1191,3 +1191,5 @@
 {"ts": "2026-08-24T01:44:13.274+00:00", "level": "INFO", "logger": "app", "msg": "[cast] TV Principal (http://192.168.100.48:1912/) servicios: ['urn:schemas-upnp-org:service:AVTransport:1', 'urn:schemas-upnp-org:service:ConnectionManager:1', 'urn:schemas-upnp-org:service:RenderingControl:1']"}
 {"ts": "2026-08-24T05:39:50.314+00:00", "level": "WARNING", "logger": "app", "msg": "SECRET_KEY no está definida como variable de entorno — usando una clave generada y guardada en .secret_key. Para producción, exporta SECRET_KEY con un valor fijo (ej: python3 -c \"import secrets;print(secrets.token_hex(32))\")."}
 {"ts": "2026-08-24T05:39:50.347+00:00", "level": "WARNING", "logger": "werkzeug", "msg": " * Debugger is active!"}
+{"ts": "2026-08-24T06:16:15.198+00:00", "level": "WARNING", "logger": "app", "msg": "SECRET_KEY no está definida como variable de entorno — usando una clave generada y guardada en .secret_key. Para producción, exporta SECRET_KEY con un valor fijo (ej: python3 -c \"import secrets;print(secrets.token_hex(32))\")."}
+{"ts": "2026-08-24T06:16:15.231+00:00", "level": "WARNING", "logger": "werkzeug", "msg": " * Debugger is active!"}
