@@ -1,0 +1,29 @@
+Fix (backend): conectar /api/v1/health — existía completo, nunca
+quedó registrado como ruta
+
+api_health() ya estaba escrita entera (chequea que MUSIC_ROOT sea
+accesible, que la DB responda una query real, cuenta de tracks) pero
+le faltaba el decorator @app.route — nunca fue alcanzable por HTTP,
+quedó como código muerto.
+
+Motivo real de conectarla ahora: incidente de operatividad real —
+orbyte.service quedó "active (running)" según systemd durante horas
+mientras NO estaba sirviendo nada en el puerto 5001 (confirmado con
+ss -tlnp: nada escuchando ahí en ese momento). Restart=on-failure no
+actuó porque el proceso nunca "falló" en el sentido que systemd
+chequea (no hubo exit code de error, no hubo señal) — fue un cuelgue,
+no un crash. Un restart manual lo resolvió.
+
+Sin un endpoint de salud real, no hay forma de que nada externo (un
+watchdog, un timer de systemd) detecte este tipo de falla — systemd
+por sí solo solo sabe si el PID existe, no si el servicio realmente
+responde. Esta ruta es la base para el watchdog que se arma en
+paralelo a este fix (fuera de git, vive directo en el server como
+timer de systemd).
+
+Público, sin auth — pensado para un chequeo interno desde localhost,
+no para exponerse como feature de usuario.
+
+Validado: app.py parsea sin errores de sintaxis (ast.parse), y
+git apply --check contra un clon 100% fresco de feature/login-sessions
+antes de entregar este diff.

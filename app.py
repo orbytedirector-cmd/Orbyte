@@ -6742,6 +6742,7 @@ def api_debug_tags(track_id):
     return jsonify(result)
 
 
+@app.route('/api/v1/health')
 def api_health():
     root_ok  = os.path.isdir(MUSIC_ROOT)
     root_contents = []
