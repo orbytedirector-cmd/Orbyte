@@ -24,7 +24,12 @@ source venv/bin/activate
 # Install dependencies
 # qrcode[pil]: genera el QR de invitación de la Playlist Colaborativa
 # (/admin/colaborativa) — es la única dependencia nueva que trae esa feature.
-pip install -q flask flask-cors qrcode[pil] mutagen
+# requests: Ticket AI-01 — llamadas HTTP a los proveedores de IA (Gemini/Groq)
+# del agente de generación de playlists (/api/v1/ai/playlist). app.py ya la
+# importaba de forma opcional desde antes (try/except), pero nunca estaba en
+# esta lista — sin este cambio, ai_playlist.py se degrada siempre al
+# fallback de popularidad porque requests queda en None.
+pip install -q flask flask-cors qrcode[pil] mutagen requests
 
 # Start the application
 echo "Starting HiRes Browser..."

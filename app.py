@@ -32,6 +32,7 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from genre_similarity import genre_similarity as _genre_similarity_fn
+import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapper), módulo aislado
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -959,6 +960,26 @@ def get_db_connection():
         "CREATE INDEX IF NOT EXISTS idx_playlist_tracks_playlist "
         "ON playlist_tracks (playlist_id, position)"
     )
+    # Lazy migration: Ticket AI-01 (Etapas 3+4 del epic "Agente de IA") — log
+    # de cada petición al agente (texto crudo, intención parseada, filtros
+    # aplicados, si se usó fallback). Insumo directo para iterar prompts más
+    # adelante (Etapa 8) — ver AI_AGENT_MASTER_PLAN.md §10. Tabla nueva,
+    # aislada, no reemplaza ni modifica ninguna tabla existente.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ai_playlist_requests (
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id               INTEGER NOT NULL,
+            raw_query             TEXT NOT NULL,
+            status                TEXT NOT NULL,
+            parsed_intent_json    TEXT,
+            filters_applied_json  TEXT,
+            used_fallback         INTEGER NOT NULL DEFAULT 0,
+            confidence            REAL,
+            provider              TEXT,
+            track_count           INTEGER,
+            created_at            TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+    ''')
     conn.commit()
     return conn
 
@@ -3116,6 +3137,40 @@ def api_v1_search_advanced_options():
         'energy_buckets':       list(ENERGY_BUCKETS.keys()),
         'danceability_buckets': list(BAIL_BUCKETS.keys()),
     })
+
+@app.route('/api/v1/ai/playlist', methods=['POST'])
+@api_login_required
+def api_v1_ai_playlist():
+    """Ticket AI-01, primera ola del epic "Agente de IA" (Etapas 3+4) —
+    recibe una petición en lenguaje natural y devuelve una playlist.
+
+    Endpoint completamente nuevo y aislado: ai_playlist.handle_request()
+    recibe track_to_json/_build_adv_filters/_track_dedupe_condition como
+    parámetros (inyección explícita) en vez de que el módulo nuevo importe
+    app.py — evita import circular y deja clarísimo, con solo mirar la
+    firma, que ai_playlist.py únicamente LEE esas funciones, nunca las
+    modifica (ver AI_AGENT_MASTER_PLAN.md §3, principio de cero regresión).
+
+    Body esperado: {"query": "texto en lenguaje natural"}. Nunca devuelve
+    una playlist vacía si hay al menos una pista en la biblioteca — ver
+    ai_playlist.generate_playlist() para el algoritmo de relajación
+    progresiva que lo garantiza.
+    """
+    data = request.get_json(silent=True) or {}
+    raw_query = (data.get('query') or '').strip()
+    if not raw_query:
+        return jsonify({'error': 'missing_query'}), 400
+    conn = get_db_connection()
+    try:
+        result = ai_playlist.handle_request(
+            conn, g.api_user['id'], raw_query,
+            track_to_json_fn=track_to_json,
+            build_adv_filters_fn=_build_adv_filters,
+            dedupe_condition_fn=_track_dedupe_condition,
+        )
+        return jsonify(result)
+    finally:
+        conn.close()
 
 @app.route('/api/heartbeat', methods=['POST'])
 @login_required
