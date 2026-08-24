@@ -352,7 +352,7 @@ def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_ad
     "el parser nunca corrió" (ej. sin GEMINI_API_KEY/GROQ_API_KEY
     configuradas, o ambos proveedores caídos)."""
     personalized, source = fallback_engine.personalized_fallback(
-        conn, user_id, track_to_json_fn, limit=_PLAYLIST_SIZE
+        conn, user_id, track_to_json_fn, dedupe_condition_fn, limit=_PLAYLIST_SIZE
     )
     if personalized:
         return personalized, {'fallback_source': source}
