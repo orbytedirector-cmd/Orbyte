@@ -74,7 +74,7 @@ PROVIDER_STATUS = {
 
 def _empty_entities():
     return {
-        'artists': [], 'albums': [], 'genres': [], 'moods': [], 'momentos': [],
+        'artists': [], 'albums': [], 'tracks': [], 'genres': [], 'moods': [], 'momentos': [],
         'eras': [], 'temas': [], 'idiomas': [], 'paises': [],
         'place': None, 'motivation': None,
     }
@@ -133,6 +133,7 @@ def _normalize_entities(raw_entities, vocab):
     out = _empty_entities()
     out['artists'] = [a for a in (raw_entities.get('artists') or []) if a][:5]
     out['albums'] = [a for a in (raw_entities.get('albums') or []) if a][:5]
+    out['tracks'] = [a for a in (raw_entities.get('tracks') or []) if a][:5]
     out['place'] = (raw_entities.get('place') or None)
     out['motivation'] = (raw_entities.get('motivation') or None)
 
@@ -159,7 +160,7 @@ entidades y devolver SOLO un objeto JSON (sin markdown, sin texto extra) con est
 {{
   "status": "resolved" o "needs_clarification",
   "entities": {{
-    "artists": [string], "albums": [string],
+    "artists": [string], "albums": [string], "tracks": [string],
     "genres": [string], "moods": [string], "momentos": [string],
     "eras": [string], "temas": [string], "idiomas": [string], "paises": [string],
     "place": string o null, "motivation": string o null
@@ -173,6 +174,12 @@ Reglas:
 - Usa "needs_clarification" solo si la petición es demasiado vaga para extraer NINGUNA entidad útil \
 (ej: "ponme algo"). En ese caso "question" debe ser una sola pregunta corta en español y "missing_fields" \
 debe listar qué falta (ej: ["mood"]).
+- "tracks": nombres de canciones específicas que el usuario mencione, EN ESPECIAL cuando pide algo \
+"parecido a" o "similar a" una canción puntual (ej: "algo parecido a Enter Sandman", "quiero esa canción \
+de Metallica que se llama One") — no confundir con "albums" (nombre de un disco) ni con "temas" (de qué \
+habla la letra).
+- "albums" es el nombre de un disco/álbum específico si el usuario lo menciona (ej: "quiero escuchar \
+Master of Puppets entero", "algo del álbum Appetite for Destruction").
 - Para genres/moods/momentos/eras/temas/idiomas/paises: propón el valor que mejor describa la intención \
 del usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema \
 hace el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo \
@@ -348,15 +355,193 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
     return ids
 
 
-def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn, artist_ids=None):
+_ALBUM_MATCH_CUTOFF = 0.70   # títulos de álbum varían más en redacción que
+# nombres de artista (subtítulos, "(Remastered)", etc.) — un poco más
+# laxo que _ARTIST_MATCH_CUTOFF, pero igual bastante por encima del 0.6
+# de género/mood.
+_TRACK_MATCH_CUTOFF = 0.70
+
+
+def _name_index(rows, name_field='name'):
+    """Helper compartido por _resolve_album_ids/_resolve_track_ids: arma
+    un {nombre_normalizado: [ids]} — una lista de ids porque más de una
+    fila puede compartir el mismo nombre (álbumes homónimos de distintos
+    artistas, o directamente reediciones)."""
+    idx = {}
+    for r in rows:
+        key = r[name_field].strip().lower()
+        idx.setdefault(key, []).append(r['id'])
+    return idx
+
+
+def _resolve_names(name_to_resolve, hinted_index, all_rows_fn, cutoff):
+    """Motor común de _resolve_album_ids/_resolve_track_ids (Ticket
+    AI-12): matchea contra `hinted_index` primero (ej. álbumes/pistas de
+    los artistas que ya se resolvieron en este mismo turno, si los hay —
+    evita ambigüedad con nombres homónimos de otro artista); si no
+    encuentra nada ahí, recién ahí busca en toda la biblioteca
+    (`all_rows_fn`, llamada de forma perezosa — solo si hace falta)."""
+    norm = str(name_to_resolve).strip().lower()
+    if not norm:
+        return []
+
+    matched = hinted_index.get(norm)
+    if not matched:
+        close = difflib.get_close_matches(norm, list(hinted_index.keys()), n=1, cutoff=cutoff)
+        if close:
+            matched = hinted_index[close[0]]
+    if matched:
+        return matched
+
+    all_index = all_rows_fn()
+    matched = all_index.get(norm)
+    if not matched:
+        close = difflib.get_close_matches(norm, list(all_index.keys()), n=1, cutoff=cutoff)
+        if close:
+            matched = all_index[close[0]]
+    return matched or []
+
+
+def _resolve_album_ids(conn, album_names, artist_ids_hint=None):
+    """Ticket AI-12 — análogo a _resolve_artist_ids pero para álbumes,
+    pedido explícitamente por Niko ("distinguir si parte del prompt es un
+    álbum"). Si ya se resolvieron artist_ids en este mismo turno
+    (entities.artists), se prioriza matchear el nombre de álbum ENTRE
+    esos artistas primero — evita, por ejemplo, que "Master of Puppets"
+    dicho junto con "Metallica" se confunda con un álbum homónimo de otro
+    artista, si lo hubiera. Sin esa pista, o si no matchea ahí, busca en
+    toda la biblioteca (puede devolver más de un álbum con el mismo
+    nombre de distintos artistas — se incluyen todos, no se arriesga a
+    elegir mal)."""
+    if not album_names:
+        return set()
+
+    hinted_rows = []
+    if artist_ids_hint:
+        placeholders = ','.join('?' * len(artist_ids_hint))
+        hinted_rows = conn.execute(
+            f'SELECT id, name FROM albums WHERE artist_id IN ({placeholders})', list(artist_ids_hint)
+        ).fetchall()
+    hinted_index = _name_index(hinted_rows)
+
+    all_index_cache = {}
+
+    def _all_albums_index():
+        if 'idx' not in all_index_cache:
+            all_index_cache['idx'] = _name_index(conn.execute('SELECT id, name FROM albums').fetchall())
+        return all_index_cache['idx']
+
+    ids = set()
+    for raw_name in album_names:
+        for matched_id in _resolve_names(raw_name, hinted_index, _all_albums_index, _ALBUM_MATCH_CUTOFF):
+            ids.add(matched_id)
+    return ids
+
+
+def _resolve_track_ids(conn, track_names, artist_ids_hint=None):
+    """Ticket AI-12 — resuelve nombres de canción (texto libre del LLM,
+    típicamente de un "algo parecido a <canción>") contra tracks.title.
+    Mismo criterio de desambiguación por artist_ids_hint que
+    _resolve_album_ids — títulos de canción se repiten mucho más entre
+    artistas distintos que los de álbum."""
+    if not track_names:
+        return set()
+
+    hinted_rows = []
+    if artist_ids_hint:
+        placeholders = ','.join('?' * len(artist_ids_hint))
+        hinted_rows = conn.execute(
+            f'''SELECT t.id, t.title as name FROM tracks t
+                JOIN albums al ON al.id=t.album_id
+                WHERE al.artist_id IN ({placeholders})''',
+            list(artist_ids_hint)
+        ).fetchall()
+    hinted_index = _name_index(hinted_rows)
+
+    all_index_cache = {}
+
+    def _all_tracks_index():
+        if 'idx' not in all_index_cache:
+            all_index_cache['idx'] = _name_index(conn.execute('SELECT id, title as name FROM tracks').fetchall())
+        return all_index_cache['idx']
+
+    ids = set()
+    for raw_name in track_names:
+        for matched_id in _resolve_names(raw_name, hinted_index, _all_tracks_index, _TRACK_MATCH_CUTOFF):
+            ids.add(matched_id)
+    return ids
+
+
+def _sample_tracks_for_albums(conn, album_ids, per_album=5):
+    """Ticket AI-12 — una muestra de pistas top de cada álbum resuelto,
+    para alimentar _expand_via_similar_tracks. No hace falta el álbum
+    entero como semilla, unas pocas pistas representativas alcanzan."""
+    if not album_ids:
+        return set()
+    placeholders = ','.join('?' * len(album_ids))
+    rows = conn.execute(
+        f'''SELECT t.id, t.album_id FROM tracks t
+            LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+            WHERE t.album_id IN ({placeholders})
+            ORDER BY t.album_id, COALESCE(tpc.pop_score,0) DESC''',
+        list(album_ids)
+    ).fetchall()
+    seen_per_album = {}
+    sample = set()
+    for r in rows:
+        count = seen_per_album.get(r['album_id'], 0)
+        if count < per_album:
+            sample.add(r['id'])
+            seen_per_album[r['album_id']] = count + 1
+    return sample
+
+
+def _expand_via_similar_tracks(conn, seed_track_ids, limit_per_seed=15):
+    """Ticket AI-12 — expande un conjunto semilla de track_ids usando
+    `track_meta.similar_tracks_json`, el MISMO dato que ya alimenta
+    `/api/track/<id>/similar` (modal "Similares" del Now Playing). A
+    diferencia de similar_artists_json, acá similar_tracks_json ya
+    guarda track_id directo (no un nombre a resolver) — no hace falta
+    inyectar ninguna función de app.py para esto, es autocontenido.
+    Devuelve el set expandido, incluyendo las semillas originales."""
+    ids = set(seed_track_ids)
+    if not seed_track_ids:
+        return ids
+    placeholders = ','.join('?' * len(seed_track_ids))
+    rows = conn.execute(
+        f'SELECT track_id, similar_tracks_json FROM track_meta WHERE track_id IN ({placeholders})',
+        list(seed_track_ids)
+    ).fetchall()
+    for row in rows:
+        if not row['similar_tracks_json']:
+            continue
+        try:
+            similar_raw = json.loads(row['similar_tracks_json'])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(similar_raw, list):
+            continue
+        for s in similar_raw[:limit_per_seed]:
+            if isinstance(s, dict) and s.get('track_id'):
+                ids.add(s['track_id'])
+    return ids
+
+
+def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                   artist_ids=None, album_ids=None, track_ids=None):
     """Ejecuta la búsqueda de pistas reutilizando EXACTAMENTE el mismo
     join/alias que ya usa _api_search_advanced_payload (view=tracks) en
     app.py — no se reinventa el criterio de matching (ver ticket §3).
 
-    `artist_ids` (Ticket AI-11): set opcional de artist_id — se agrega
-    como AND adicional (`al.artist_id IN (...)`) junto a lo que devuelva
-    build_adv_filters_fn. No pasa por build_adv_filters_fn porque esa
-    función no tiene ningún parámetro de artista."""
+    `artist_ids`/`album_ids`/`track_ids` (Tickets AI-11/AI-12): sets
+    opcionales de identidad — se combinan entre sí con OR (son formas
+    alternativas de decir "qué música", no restricciones simultáneas) y
+    ese OR se agrega como AND adicional junto a lo que devuelva
+    build_adv_filters_fn (que sí son restricciones que califican sobre
+    la selección: género, mood, etc.). Ninguno de los tres pasa por
+    build_adv_filters_fn porque esa función no tiene parámetros de
+    artista/álbum/pista.
+    artista/álbum/pista."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -364,10 +549,21 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
             args.add(field, v)
 
     clauses, params = build_adv_filters_fn(args, pop_alias='tpc', for_albums=False)
+
+    identity_clauses, identity_params = [], []
     if artist_ids:
-        placeholders = ','.join('?' * len(artist_ids))
-        clauses = clauses + [f'al.artist_id IN ({placeholders})']
-        params = params + list(artist_ids)
+        identity_clauses.append(f"al.artist_id IN ({','.join('?' * len(artist_ids))})")
+        identity_params += list(artist_ids)
+    if album_ids:
+        identity_clauses.append(f"al.id IN ({','.join('?' * len(album_ids))})")
+        identity_params += list(album_ids)
+    if track_ids:
+        identity_clauses.append(f"t.id IN ({','.join('?' * len(track_ids))})")
+        identity_params += list(track_ids)
+    if identity_clauses:
+        clauses = clauses + ['(' + ' OR '.join(identity_clauses) + ')']
+        params = params + identity_params
+
     extra_where = ' AND '.join(clauses)
     dedupe_clause = dedupe_condition_fn(extra_where=extra_where, track_alias='t', pop_alias='tpc')
     clauses = clauses + [dedupe_clause]
@@ -444,14 +640,28 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     falló del todo, handle_request no llama a esta función — va directo
     a _personalized_then_global_fallback (ver Ticket AI-09).
 
-    Ticket AI-11 (bugfix): artist_ids se calcula UNA sola vez acá arriba
-    y se mantiene constante durante toda la relajación de género/mood/
-    etc. — un artista nombrado explícitamente es señal más central que
-    cualquiera de esos campos, no tiene sentido soltarlo antes. Si ni
-    siquiera "artista + similares, sin ningún otro filtro" encuentra
-    nada (último tramo del loop, cuando `dropped` ya sacó todo lo demás),
-    recién ahí se cae a _personalized_then_global_fallback más abajo."""
+    Ticket AI-11/AI-12 (bugfix): artist_ids/album_ids/track_ids se
+    calculan UNA sola vez acá arriba y se mantienen constantes durante
+    toda la relajación de género/mood/etc. — un artista, álbum o pista
+    nombrados explícitamente son señal más central que cualquiera de esos
+    campos, no tiene sentido soltarlos antes. Si ni siquiera "identidad +
+    similares, sin ningún otro filtro" encuentra nada (último tramo del
+    loop, cuando `dropped` ya sacó todo lo demás), recién ahí se cae a
+    _personalized_then_global_fallback más abajo.
+
+    track_ids (AI-12) combina dos fuentes, ambas expandidas vía
+    _expand_via_similar_tracks (track_meta.similar_tracks_json, el mismo
+    dato del modal "Similares" del Now Playing): pistas nombradas
+    directamente por el usuario (entities.tracks) y una muestra de pistas
+    de los álbumes ya resueltos (entities.albums) — así "el álbum X"
+    también se beneficia de una expansión "suena parecido", no solo trae
+    las pistas literales del álbum."""
     artist_ids = _resolve_artist_ids(conn, entities.get('artists') or [], build_similar_artists_fn)
+    album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
+    named_track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
+    similar_seed_ids = named_track_ids | _sample_tracks_for_albums(conn, album_ids)
+    track_ids = _expand_via_similar_tracks(conn, similar_seed_ids) if similar_seed_ids else set()
+
     args_dict = _entities_to_args_dict(entities)
     dropped = set()
 
@@ -459,10 +669,14 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
         applied = dict(args)
         if artist_ids:
             applied['artist_ids'] = sorted(artist_ids)
+        if album_ids:
+            applied['album_ids'] = sorted(album_ids)
+        if track_ids:
+            applied['track_ids'] = sorted(track_ids)
         return applied
 
     pool = _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                          artist_ids=artist_ids)
+                          artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids)
     if pool:
         sample_size = min(_PLAYLIST_SIZE, len(pool))
         return random.sample(pool, sample_size), _filters_applied(args_dict), False
@@ -473,7 +687,7 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
         dropped.add(field)
         retry_args = _entities_to_args_dict(entities, drop_fields=dropped)
         pool = _query_tracks(conn, retry_args, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                              artist_ids=artist_ids)
+                              artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids)
         if pool:
             sample_size = min(_PLAYLIST_SIZE, len(pool))
             return random.sample(pool, sample_size), _filters_applied(retry_args), True
