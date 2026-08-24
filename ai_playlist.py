@@ -379,7 +379,7 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
 
 
 def _log_request(conn, user_id, raw_query, result, provider, filters_applied, used_fallback, track_count):
-    conn.execute(
+    cur = conn.execute(
         '''INSERT INTO ai_playlist_requests
            (user_id, raw_query, status, parsed_intent_json, filters_applied_json,
             used_fallback, confidence, provider, track_count)
@@ -389,6 +389,33 @@ def _log_request(conn, user_id, raw_query, result, provider, filters_applied, us
          result['confidence'], provider, track_count)
     )
     conn.commit()
+    return cur.lastrowid
+
+
+def record_feedback(conn, user_id, request_id, rating, comment, saved_playlist_id):
+    """Ticket AI-05 (Etapa 7). UPDATE simple y naturalmente idempotente —
+    a diferencia de behavior_engine.py no hace falta un client_event_id
+    para dedupe: reenviar el mismo rating/comentario solo vuelve a pisar
+    el mismo valor, no duplica ninguna fila. `WHERE user_id=?` a propósito:
+    evita que un usuario le deje feedback a una petición ajena."""
+    fields, params = [], []
+    if rating is not None:
+        fields.append('rating=?')
+        params.append(rating)
+    if comment is not None:
+        fields.append('feedback_comment=?')
+        params.append(comment)
+    if saved_playlist_id is not None:
+        fields.append('saved_playlist_id=?')
+        params.append(saved_playlist_id)
+    fields.append("feedback_at=datetime('now')")
+    params += [request_id, user_id]
+    cur = conn.execute(
+        f"UPDATE ai_playlist_requests SET {', '.join(fields)} WHERE id=? AND user_id=?",
+        params
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
@@ -404,10 +431,11 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     if result['status'] == 'error':
         used_fallback = True
 
-    _log_request(conn, user_id, raw_query, result, provider, filters_applied,
-                 used_fallback, len(tracks))
+    _request_id = _log_request(conn, user_id, raw_query, result, provider, filters_applied,
+                                used_fallback, len(tracks))
 
     return {
+        'request_id': _request_id,
         'query': raw_query,
         'status': result['status'],
         'entities': result['entities'],

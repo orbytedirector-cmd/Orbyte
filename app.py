@@ -1037,6 +1037,22 @@ def get_db_connection():
         "CREATE INDEX IF NOT EXISTS idx_session_log_user "
         "ON session_log (user_id, started_at)"
     )
+    # Lazy migration: Ticket AI-05 (Etapa 7) — columnas de feedback sobre
+    # una playlist ya generada por el agente de IA. Mismo patrón
+    # try/except ya usado en este archivo (ver "website_url" más arriba)
+    # para agregar columnas a una tabla que ya existe (ai_playlist_requests,
+    # Ticket AI-01) sin romper nada de lo que ya guarda.
+    for ddl in (
+        "ALTER TABLE ai_playlist_requests ADD COLUMN rating INTEGER",
+        "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_comment TEXT",
+        "ALTER TABLE ai_playlist_requests ADD COLUMN saved_playlist_id INTEGER",
+        "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_at TEXT",
+    ):
+        try:
+            conn.execute(ddl)
+            conn.commit()
+        except Exception:
+            pass  # columna ya existe
     conn.commit()
     return conn
 
@@ -3304,6 +3320,34 @@ def api_v1_behavior_session_end():
     try:
         ended = behavior_engine.end_session(conn, g.api_user['id'], client_session_id)
         return jsonify({'ended': ended})
+    finally:
+        conn.close()
+
+@app.route('/api/v1/ai/playlist/<int:request_id>/feedback', methods=['POST'])
+@api_login_required
+def api_v1_ai_playlist_feedback(request_id):
+    """Ticket AI-05 (Etapa 7, mitad backend) — feedback sobre una playlist
+    ya generada por el agente de IA: rating (1-5) y/o comentario opcional,
+    y registro opcional de a qué playlist real quedó guardada. Guardar en
+    sí NO es este endpoint — reusa /api/v1/playlists + /api/v1/playlists/
+    <id>/tracks ya existentes (Ticket 10+); acá solo se anota el
+    resultado, para no reinventar la creación de playlists."""
+    data = request.get_json(silent=True) or {}
+    rating = data.get('rating')
+    comment = data.get('comment')
+    saved_playlist_id = data.get('saved_playlist_id')
+    if rating is None and comment is None and saved_playlist_id is None:
+        return jsonify({'error': 'missing_fields'}), 400
+    if rating is not None and not (isinstance(rating, int) and 1 <= rating <= 5):
+        return jsonify({'error': 'invalid_rating'}), 400
+    conn = get_db_connection()
+    try:
+        updated = ai_playlist.record_feedback(
+            conn, g.api_user['id'], request_id, rating, comment, saved_playlist_id
+        )
+        if not updated:
+            return jsonify({'error': 'not_found'}), 404
+        return jsonify({'updated': True})
     finally:
         conn.close()
 
