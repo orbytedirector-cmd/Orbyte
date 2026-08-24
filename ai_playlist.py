@@ -27,6 +27,8 @@ import time
 import random
 import difflib
 
+import fallback_engine  # Ticket AI-04 — fallback inteligente (Etapa 5), módulo aislado
+
 try:
     import requests
 except ImportError:
@@ -334,11 +336,13 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     return tracks
 
 
-def generate_playlist(conn, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
-    """Filter mapper + relajación progresiva (Etapa 4). Devuelve
-    (tracks, filters_applied_dict, used_fallback_bool). Nunca devuelve una
-    lista vacía si hay AL MENOS una pista en la biblioteca (último recurso:
-    top popularidad global, sin ningún filtro)."""
+def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+    """Filter mapper + relajación progresiva (Etapa 4) + fallback
+    inteligente (Etapa 5, Ticket AI-04). Devuelve (tracks,
+    filters_applied_dict, used_fallback_bool). Nunca devuelve una lista
+    vacía si hay AL MENOS una pista en la biblioteca (último recurso: top
+    popularidad global, sin ningún filtro — sin cambios respecto al
+    Ticket AI-01)."""
     args_dict = _entities_to_args_dict(entities)
     dropped = set()
 
@@ -357,10 +361,21 @@ def generate_playlist(conn, entities, track_to_json_fn, build_adv_filters_fn, de
             sample_size = min(_PLAYLIST_SIZE, len(pool))
             return random.sample(pool, sample_size), retry_args, True
 
+    # Ticket AI-04 (Etapa 5): antes de caer al backstop de popularidad
+    # global sin ningún criterio personal, probar favoritos ->
+    # comportamiento individual -> comportamiento agregado. Reemplaza acá
+    # el fallback provisorio del Ticket AI-01, que iba directo a la línea
+    # de abajo.
+    personalized, source = fallback_engine.personalized_fallback(
+        conn, user_id, track_to_json_fn, limit=_PLAYLIST_SIZE
+    )
+    if personalized:
+        return personalized, {'fallback_source': source}, True
+
     # Último recurso: top popularidad global, sin filtros.
     pool = _query_tracks(conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
     sample_size = min(_PLAYLIST_SIZE, len(pool))
-    return (random.sample(pool, sample_size) if pool else []), {}, True
+    return (random.sample(pool, sample_size) if pool else []), {'fallback_source': 'global_popularity'}, True
 
 
 def _log_request(conn, user_id, raw_query, result, provider, filters_applied, used_fallback, track_count):
@@ -384,7 +399,7 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     result, provider = interpret_query(conn, raw_query)
 
     tracks, filters_applied, used_fallback = generate_playlist(
-        conn, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+        conn, user_id, result['entities'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
 
     if result['status'] == 'error':
         used_fallback = True
