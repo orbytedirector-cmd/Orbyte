@@ -26,6 +26,17 @@ import json
 import time
 import random
 import difflib
+import logging
+
+# Ticket AI-19 (bug reportado por Niko: "si fuera tema de api key no
+# deberíamos tener la confirmación en los logs??" — tenía toda la
+# razón, no la había). No hace falta inyectar nada de app.py para esto:
+# el logger raíz ya está configurado ahí (RotatingFileHandler +
+# formatter JSONL, ver app.py) y cualquier logger con nombre propagra
+# hacia arriba por default — con pedir logging.getLogger('ai_playlist')
+# alcanza para que esto aparezca en orbyte.log con el mismo formato de
+# siempre, sin ningún parámetro nuevo que threadear por todos lados.
+_logger = logging.getLogger('ai_playlist')
 
 import fallback_engine  # Ticket AI-04 — fallback inteligente (Etapa 5), módulo aislado
 
@@ -276,10 +287,26 @@ def interpret_query(conn, raw_query):
     for provider_name, call_fn in (('gemini', _call_gemini), ('groq', _call_groq)):
         try:
             parsed = call_fn(prompt)
-        except Exception:
+        except requests.exceptions.HTTPError as e:
+            # Ticket AI-19: acá es donde iba a aparecer, por ejemplo, un
+            # 401 de Gemini por el problema activo de Google con las keys
+            # con prefijo "AQ." (ver ticket) — antes esto se perdía sin
+            # dejar rastro. e.response.text trae el cuerpo del error tal
+            # cual lo manda el proveedor (útil para diagnosticar sin
+            # tener que reproducir la llamada a mano).
+            body_preview = (e.response.text or '')[:300] if e.response is not None else ''
+            _logger.warning(
+                'proveedor %s falló con HTTP %s: %s — body: %s',
+                provider_name, e.response.status_code if e.response is not None else '?',
+                e, body_preview
+            )
+            parsed = None
+        except Exception as e:
+            _logger.warning('proveedor %s falló: %r', provider_name, e)
             parsed = None
         if not parsed:
             continue
+        _logger.info('proveedor %s respondió OK', provider_name)
         entities = _normalize_entities(parsed.get('entities') or {}, vocab)
         return {
             'status': parsed.get('status') if parsed.get('status') in
