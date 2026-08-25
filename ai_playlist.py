@@ -41,7 +41,22 @@ GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
-_HTTP_TIMEOUT_SECONDS = 12
+# Ticket AI-18 (bug reportado por Niko, diagnosticado cruzando log de
+# servidor + log de dispositivo con el logueo agregado en AI-17): el
+# cliente iOS timeouteaba tanto por LAN como por Tailscale en este
+# endpoint específico, y el servidor JAMÁS lo registraba — ni éxito ni
+# excepción — porque el pedido seguía procesando en su propio hilo
+# (Flask ya corre con threaded=True) mucho después de que el cliente ya
+# había tirado la toalla. Con 12s por proveedor y hasta 2 intentos
+# secuenciales (Gemini falla -> Groq), el peor caso llegaba a 24s+, muy
+# por encima de lo que el cliente esperaba en ese momento.
+#
+# 8s por proveedor dejan el peor caso (2 proveedores + overhead de DB)
+# en ~17s — ver Ticket AI-18 del lado iOS (OrbyteApiClient.swift) para
+# los timeouts nuevos de ese lado (25s LAN / 35s Tailscale para este
+# endpoint puntual), pensados con margen real sobre este número, no al
+# revés. Si se cambia este valor acá, hay que revisar ese lado también.
+_HTTP_TIMEOUT_SECONDS = 8
 _PLAYLIST_SIZE = 25
 _CANDIDATE_POOL_SIZE = 150  # de dónde se muestrea la playlist final
 
