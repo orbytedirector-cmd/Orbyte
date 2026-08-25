@@ -93,6 +93,12 @@ _ENTITY_TO_FILTER_FIELD = {
     'temas': 'tema',
     'idiomas': 'idioma',
     'paises': 'pais',
+    # Ticket AI-22 (pedido por Niko): 'anios' — año(s) específicos
+    # (ej. "de 2015", "de 1986"), distinto de 'eras' (períodos amplios
+    # tipo classic_rock_era). _build_adv_filters ya soportaba el filtro
+    # 'anio' desde antes de este epic (albums.year) — nunca estuvo
+    # conectado al parser de IA hasta ahora.
+    'anios': 'anio',
 }
 
 # Orden de relajación del fallback provisorio (Etapa 4, ver ticket §5): si la
@@ -101,6 +107,23 @@ _ENTITY_TO_FILTER_FIELD = {
 # (manejados aparte, ver _apply_artist_filter) se sueltan al final porque
 # suelen ser lo más central de la intención del usuario.
 _RELAXATION_ORDER = ['idioma', 'pais', 'era', 'tema', 'momento', 'mood', 'genero']
+
+# Ticket AI-22 (pedido por Niko) — valores válidos del campo 'ranking':
+# a diferencia de género/mood/etc (texto libre que se resuelve por
+# fuzzy-match contra un vocabulario), esto es un enum cerrado — el LLM
+# tiene que devolver EXACTAMENTE uno de estos 4 valores o None. Ver
+# _normalize_entities: si devuelve cualquier otra cosa, se descarta (no
+# se intenta adivinar la más parecida, a diferencia del resto de los
+# campos).
+#
+# 'popularidad_global'  -> lastfm_listeners (cuántos OYENTES distintos)
+# 'escuchas_global'     -> lastfm_playcount (cuántas REPRODUCCIONES en total)
+# 'escuchas_propias'    -> listening_events de este usuario en Orbyte
+# 'infravalorado'       -> pocos oyentes globales, pero ratio
+#                          reproducciones/oyente alto (definición de
+#                          Niko: "poca gente lo escucha, pero a esa poca
+#                          gente le encanta")
+_RANKING_VALUES = {'popularidad_global', 'escuchas_global', 'escuchas_propias', 'infravalorado'}
 
 PROVIDER_STATUS = {
     'gemini_configured': bool(GEMINI_API_KEY),
@@ -111,7 +134,8 @@ PROVIDER_STATUS = {
 def _empty_entities():
     return {
         'artists': [], 'albums': [], 'tracks': [], 'genres': [], 'moods': [], 'momentos': [],
-        'eras': [], 'temas': [], 'idiomas': [], 'paises': [],
+        'eras': [], 'temas': [], 'idiomas': [], 'paises': [], 'anios': [],
+        'ranking': None,
         'place': None, 'motivation': None,
     }
 
@@ -186,6 +210,27 @@ def _normalize_entities(raw_entities, vocab):
             if m and m not in matched:
                 matched.append(m)
         out[field] = matched
+
+    # Ticket AI-22: 'anios' no pasa por _closest_match — son números, no
+    # vocabulario a matchear por texto. _build_adv_filters ya filtra
+    # cualquier valor no-numérico del lado del servidor (ver
+    # `anio_vals = [v for v in args.getlist('anio') if
+    # v.lstrip('-').isdigit()]` en app.py), pero se valida acá también
+    # para no arrastrar basura a filters_applied/al log si el LLM
+    # devuelve algo raro (ej. "los 2000s" en vez de un año puntual).
+    anios_raw = raw_entities.get('anios') or []
+    if not isinstance(anios_raw, list):
+        anios_raw = [anios_raw]
+    out['anios'] = [str(int(a)) for a in anios_raw if str(a).strip().lstrip('-').isdigit()][:5]
+
+    # Ticket AI-22: 'ranking' es un enum cerrado — a diferencia del resto
+    # de los campos, NO se intenta fuzzy-match si el LLM devuelve algo
+    # fuera de _RANKING_VALUES. Mejor ranking=None (se ignora, cae al
+    # orden default por pop_score) que forzar un criterio de orden que
+    # el usuario no pidió.
+    ranking_raw = raw_entities.get('ranking')
+    out['ranking'] = ranking_raw if ranking_raw in _RANKING_VALUES else None
+
     return out
 
 
@@ -199,6 +244,7 @@ entidades y devolver SOLO un objeto JSON (sin markdown, sin texto extra) con est
     "artists": [string], "albums": [string], "tracks": [string],
     "genres": [string], "moods": [string], "momentos": [string],
     "eras": [string], "temas": [string], "idiomas": [string], "paises": [string],
+    "anios": [número], "ranking": string o null,
     "place": string o null, "motivation": string o null
   }},
   "confidence": número entre 0 y 1,
@@ -216,6 +262,26 @@ de Metallica que se llama One") — no confundir con "albums" (nombre de un disc
 habla la letra).
 - "albums" es el nombre de un disco/álbum específico si el usuario lo menciona (ej: "quiero escuchar \
 Master of Puppets entero", "algo del álbum Appetite for Destruction").
+- "anios": años puntuales que el usuario mencione (ej: "de 2015", "canciones de 1986") — un número por \
+año, no un rango como texto. Distinto de "eras" (períodos amplios tipo "los 80s" o "rock clásico") — si \
+el usuario da un año exacto, va acá; si describe una época en general, va en "eras".
+- "ranking": tiene que ser EXACTAMENTE uno de estos 4 valores, o null si el usuario no pidió ningún \
+orden de popularidad/escuchas en particular:
+  * "popularidad_global": el usuario pide lo más POPULAR/FAMOSO/CONOCIDO en general (ej: "lo más \
+popular de Metallica", "los hits de Queen", "lo más famoso del género"). Se mide en cantidad de OYENTES \
+distintos a nivel mundial (lastfm_listeners) — cuánta gente lo conoce, no cuántas veces se reprodujo.
+  * "escuchas_global": el usuario pide lo más ESCUCHADO/REPRODUCIDO, sin calificar que sea "de nosotros" \
+o "en casa" (ej: "lo más escuchado de Lord Huron", "las canciones más reproducidas del rock alternativo"). \
+Se mide en cantidad total de REPRODUCCIONES a nivel mundial (lastfm_playcount) — puede diferir de \
+popularidad_global (algo con pocos oyentes muy fieles que lo repiten mucho puede tener más reproducciones \
+que oyentes distintos).
+  * "escuchas_propias": el usuario pide lo que ÉL/ELLA o "nosotros"/"en casa" escuchó más, no lo popular \
+en el mundo (ej: "lo que más escuchamos de Queen", "mis canciones más escuchadas", "lo que más sonó en \
+casa este mes"). Señal clara: primera persona o referencia a "nosotros"/nuestra casa, no al público \
+general.
+  * "infravalorado": el usuario pide algo POCO CONOCIDO pero BUENO — "infravalorado", "subestimado", \
+"que no es tan conocido pero vale la pena", "joyitas ocultas", "hidden gems" (ej: "lo más infravalorado \
+de Radiohead", "canciones subestimadas del jazz").
 - Para genres/moods/momentos/eras/temas/idiomas/paises: propón el valor que mejor describa la intención \
 del usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema \
 hace el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo \
@@ -599,8 +665,35 @@ def _expand_via_similar_tracks(conn, seed_track_ids, limit_per_seed=15):
     return ids
 
 
+# Ticket AI-22 (pedido por Niko) — bajo cuántos oyentes globales (Last.fm)
+# se considera que un track puede evaluarse para "infravalorado". Sin
+# este piso, un track con 1 oyente y 3 reproducciones (ratio=3) le
+# ganaría a uno con 200 oyentes y 3000 reproducciones (ratio=15) por
+# pura casualidad estadística de muestra chica — el piso exige que haya
+# una base mínima de oyentes reales antes de confiar en el ratio.
+# Valor de partida, no medido contra la distribución real de esta
+# biblioteca — ajustar si en la práctica queda demasiado laxo/estricto.
+_INFRAVALORADO_MIN_LISTENERS = 20
+
+# Ticket AI-22 — criterio de ORDER BY para cada valor de 'ranking'
+# (§ver _RANKING_VALUES). Ninguno de los tres pasa por pop_score (que
+# mide calidad de audio/metadata, no popularidad — ver
+# AI_AGENT_MASTER_PLAN.md). 'escuchas_propias' no está acá porque
+# necesita un JOIN distinto (listening_events, no track_meta) — se
+# maneja aparte en _query_tracks_own_listens.
+_RANKING_ORDER_SQL = {
+    'popularidad_global': 'COALESCE(tm.lastfm_listeners, 0) DESC',
+    'escuchas_global': 'COALESCE(tm.lastfm_playcount, 0) DESC',
+    'infravalorado': (
+        f'CASE WHEN COALESCE(tm.lastfm_listeners, 0) >= {_INFRAVALORADO_MIN_LISTENERS} '
+        f'THEN CAST(COALESCE(tm.lastfm_playcount, 0) AS REAL) / tm.lastfm_listeners '
+        f'ELSE -1 END DESC'
+    ),
+}
+
+
 def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                   artist_ids=None, album_ids=None, track_ids=None):
+                   artist_ids=None, album_ids=None, track_ids=None, ranking=None):
     """Ejecuta la búsqueda de pistas reutilizando EXACTAMENTE el mismo
     join/alias que ya usa _api_search_advanced_payload (view=tracks) en
     app.py — no se reinventa el criterio de matching (ver ticket §3).
@@ -613,7 +706,15 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     la selección: género, mood, etc.). Ninguno de los tres pasa por
     build_adv_filters_fn porque esa función no tiene parámetros de
     artista/álbum/pista.
-    artista/álbum/pista."""
+
+    `ranking` (Ticket AI-22): si viene un valor de _RANKING_VALUES
+    (salvo 'escuchas_propias', que usa _query_tracks_own_listens en su
+    lugar — necesita otro JOIN), reemplaza el ORDER BY default
+    (pop_score, que mide calidad de audio/metadata, no popularidad —
+    ver AI_AGENT_MASTER_PLAN.md) por el criterio real correspondiente, y
+    el LIMIT pasa a ser _PLAYLIST_SIZE en vez de _CANDIDATE_POOL_SIZE:
+    con ranking explícito el usuario pidió un orden real, no un pool
+    para muestrear al azar (ver generate_playlist)."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -642,20 +743,24 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     params = params + params
     where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
+    order_sql = _RANKING_ORDER_SQL.get(ranking, 'COALESCE(tpc.pop_score,0) DESC')
+    limit_n = _PLAYLIST_SIZE if ranking else _CANDIDATE_POOL_SIZE
+
     data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                           al.year as album_year, al.cover_path,
                           ar.id as artist_id, ar.name as artist_name,
                           tm.mood, tm.momento, tm.era, tm.tema_lirico, tm.idioma,
                           tm.genre_primary, tm.genre_secondary, tm.bpm, tm.energy,
-                          tm.bailabilidad, tm.tier, COALESCE(tpc.pop_score,0) as pop_score
+                          tm.bailabilidad, tm.tier, tm.lastfm_listeners, tm.lastfm_playcount,
+                          COALESCE(tpc.pop_score,0) as pop_score
                    FROM tracks t
                    JOIN albums al ON al.id=t.album_id
                    LEFT JOIN artists ar ON ar.id=al.artist_id
                    LEFT JOIN track_meta tm ON tm.track_id=t.id
                    LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
                    WHERE 1=1{where}
-                   ORDER BY COALESCE(tpc.pop_score,0) DESC LIMIT ?'''
-    rows = conn.execute(data_sql, params + [_CANDIDATE_POOL_SIZE]).fetchall()
+                   ORDER BY {order_sql} LIMIT ?'''
+    rows = conn.execute(data_sql, params + [limit_n]).fetchall()
 
     tracks = []
     for r in rows:
@@ -670,6 +775,86 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
         d['stream_url'] = f'/api/v1/stream/{d["id"]}'
         tracks.append(d)
     return tracks
+
+
+def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_adv_filters_fn,
+                               dedupe_condition_fn, artist_ids=None, album_ids=None, track_ids=None):
+    """Ticket AI-22 — variante de _query_tracks para ranking='escuchas_propias':
+    en vez de ordenar por pop_score o por señales globales de Last.fm,
+    cuenta las reproducciones REALES de este usuario (listening_events,
+    Ticket AI-02/AI-03) sobre el mismo conjunto de candidatos filtrado, y
+    devuelve el top en orden estricto. JOIN distinto al resto (INNER con
+    listening_events, no LEFT) a propósito: si el usuario nunca escuchó
+    nada de lo que está pidiendo, no tiene sentido devolver resultados
+    con 0 reproducciones como si fueran "lo más escuchado" — mejor caer
+    a la relajación de filtros o al fallback, que si tienen sentido para
+    ese caso."""
+    from werkzeug.datastructures import MultiDict
+    args = MultiDict()
+    for field, vals in args_dict.items():
+        for v in vals:
+            args.add(field, v)
+
+    clauses, params = build_adv_filters_fn(args, pop_alias='tpc', for_albums=False)
+
+    identity_clauses, identity_params = [], []
+    if artist_ids:
+        identity_clauses.append(f"al.artist_id IN ({','.join('?' * len(artist_ids))})")
+        identity_params += list(artist_ids)
+    if album_ids:
+        identity_clauses.append(f"al.id IN ({','.join('?' * len(album_ids))})")
+        identity_params += list(album_ids)
+    if track_ids:
+        identity_clauses.append(f"t.id IN ({','.join('?' * len(track_ids))})")
+        identity_params += list(track_ids)
+    if identity_clauses:
+        clauses = clauses + ['(' + ' OR '.join(identity_clauses) + ')']
+        params = params + identity_params
+
+    where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
+    data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
+                          al.year as album_year, al.cover_path,
+                          ar.id as artist_id, ar.name as artist_name,
+                          tm.mood, COALESCE(tpc.pop_score,0) as pop_score,
+                          COUNT(le.id) as play_count
+                   FROM listening_events le
+                   JOIN tracks t ON t.id = le.track_id
+                   JOIN albums al ON al.id=t.album_id
+                   LEFT JOIN artists ar ON ar.id=al.artist_id
+                   LEFT JOIN track_meta tm ON tm.track_id=t.id
+                   LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                   WHERE le.user_id=?{where}
+                   GROUP BY t.id
+                   ORDER BY play_count DESC
+                   LIMIT ?'''
+    rows = conn.execute(data_sql, [user_id] + params + [_PLAYLIST_SIZE]).fetchall()
+
+    tracks = []
+    for r in rows:
+        d = track_to_json_fn(dict(r))
+        d['album_id'] = r['album_id']
+        d['album_name'] = r['album_name']
+        d['album_year'] = r['album_year']
+        d['artist_id'] = r['artist_id']
+        d['artist_name'] = r['artist_name']
+        d['mood'] = r['mood']
+        d['pop_score'] = r['pop_score']
+        d['stream_url'] = f'/api/v1/stream/{d["id"]}'
+        tracks.append(d)
+    return tracks
+
+
+def _finalize_pool(pool, ranking):
+    """Ticket AI-22 — con ranking explícito, el pool ya viene ordenado y
+    acotado a _PLAYLIST_SIZE desde la query (ver _query_tracks/
+    _query_tracks_own_listens): el usuario pidió un orden real ("lo más
+    popular", "lo más infravalorado"), no variedad — se devuelve tal
+    cual, sin randomizar. Sin ranking, sigue el comportamiento de
+    siempre: muestreo al azar del pool de candidatos más amplio."""
+    if ranking:
+        return pool[:_PLAYLIST_SIZE]
+    sample_size = min(_PLAYLIST_SIZE, len(pool))
+    return random.sample(pool, sample_size) if pool else []
 
 
 def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
@@ -727,12 +912,20 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     directamente por el usuario (entities.tracks) y una muestra de pistas
     de los álbumes ya resueltos (entities.albums) — así "el álbum X"
     también se beneficia de una expansión "suena parecido", no solo trae
-    las pistas literales del álbum."""
+    las pistas literales del álbum.
+
+    `ranking` (Ticket AI-22): si viene, se calcula UNA vez acá arriba
+    (igual que artist_ids/album_ids/track_ids) y se mantiene constante
+    durante toda la relajación — ver _run_query/_finalize_pool. Con
+    ranking='escuchas_propias' se despacha a
+    _query_tracks_own_listens en vez de _query_tracks (necesita otro
+    JOIN, contra listening_events en vez de track_meta)."""
     artist_ids = _resolve_artist_ids(conn, entities.get('artists') or [], build_similar_artists_fn)
     album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
     named_track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
     similar_seed_ids = named_track_ids | _sample_tracks_for_albums(conn, album_ids)
     track_ids = _expand_via_similar_tracks(conn, similar_seed_ids) if similar_seed_ids else set()
+    ranking = entities.get('ranking')
 
     args_dict = _entities_to_args_dict(entities)
     dropped = set()
@@ -745,24 +938,33 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             applied['album_ids'] = sorted(album_ids)
         if track_ids:
             applied['track_ids'] = sorted(track_ids)
+        if ranking:
+            applied['ranking'] = ranking
         return applied
 
-    pool = _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                          artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids)
+    def _run_query(args_dict_local):
+        if ranking == 'escuchas_propias':
+            return _query_tracks_own_listens(
+                conn, args_dict_local, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids
+            )
+        return _query_tracks(
+            conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking
+        )
+
+    pool = _run_query(args_dict)
     if pool:
-        sample_size = min(_PLAYLIST_SIZE, len(pool))
-        return random.sample(pool, sample_size), _filters_applied(args_dict), False
+        return _finalize_pool(pool, ranking), _filters_applied(args_dict), False
 
     for field in _RELAXATION_ORDER:
         if field not in args_dict:
             continue
         dropped.add(field)
         retry_args = _entities_to_args_dict(entities, drop_fields=dropped)
-        pool = _query_tracks(conn, retry_args, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                              artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids)
+        pool = _run_query(retry_args)
         if pool:
-            sample_size = min(_PLAYLIST_SIZE, len(pool))
-            return random.sample(pool, sample_size), _filters_applied(retry_args), True
+            return _finalize_pool(pool, ranking), _filters_applied(retry_args), True
 
     tracks, filters_applied = _personalized_then_global_fallback(
         conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
