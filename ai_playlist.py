@@ -11,9 +11,12 @@ Variables de entorno NUEVAS que introduce este ticket (no existían antes,
 ver AGENTE.md regla 2 — se documentan acá y en el ticket, no se inventan
 silenciosamente):
   GEMINI_API_KEY   — clave de Google AI Studio. Sin ella, Gemini se salta.
-  GEMINI_MODEL     — default 'gemini-2.5-flash'.
+  GEMINI_MODEL     — default 'gemini-3.6-flash' (Ticket AI-20 — el
+                     anterior, 'gemini-2.5-flash', dejó de existir).
   GROQ_API_KEY     — clave de GroqCloud. Sin ella, Groq se salta.
-  GROQ_MODEL       — default 'llama-3.3-70b-versatile'.
+  GROQ_MODEL       — default 'openai/gpt-oss-120b' (Ticket AI-20 — el
+                     anterior, 'llama-3.3-70b-versatile', fue dado de
+                     baja por Groq el 16/08/2026).
 Si ninguna de las dos claves está seteada, handle_request() nunca intenta
 llamar a un proveedor externo y va directo al fallback de popularidad — la
 ruta no se cae, solo entrega una playlist más genérica (ver PROVIDER_STATUS).
@@ -48,9 +51,16 @@ except ImportError:
 import os
 
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-2.5-flash')
+# Ticket AI-20 (bug reportado por Niko, confirmado con el logueo del
+# Ticket AI-19): 'gemini-2.5-flash' ya no existe — 404 real de Google:
+# "This model models/gemini-2.5-flash is no longer available to new
+# users. Please update your code to use models/gemini-3.6-flash".
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY', '')
-GROQ_MODEL = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile')
+# Ticket AI-20: 'llama-3.3-70b-versatile' se dio de baja el 16/08/2026
+# (confirmado en console.groq.com/docs/deprecations) — reemplazo
+# recomendado por Groq: openai/gpt-oss-120b.
+GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 
 # Ticket AI-18 (bug reportado por Niko, diagnosticado cruzando log de
 # servidor + log de dispositivo con el logueo agregado en AI-17): el
@@ -246,13 +256,20 @@ def _extract_json_object(text):
 def _call_gemini(prompt):
     if not (requests and GEMINI_API_KEY):
         return None
-    url = (f'https://generativelanguage.googleapis.com/v1beta/models/'
-           f'{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}')
+    # Ticket AI-21 (bug de seguridad, encontrado porque la protección de
+    # push de GitHub bloqueó un commit con la key expuesta): antes la key
+    # iba metida en la URL como query param (?key=...). Cualquier cosa
+    # que loguee o reporte esa URL —una excepción, un proxy, esto mismo—
+    # termina exponiendo la key en texto plano. Google soporta mandarla
+    # como header en su lugar (`x-goog-api-key`), que no queda pegado a
+    # la URL en ningún lado. La URL en sí ya no tiene ningún secreto.
+    url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
+    headers = {'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json'}
     body = {
         'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
         'generationConfig': {'response_mime_type': 'application/json', 'temperature': 0.2},
     }
-    resp = requests.post(url, json=body, timeout=_HTTP_TIMEOUT_SECONDS)
+    resp = requests.post(url, headers=headers, json=body, timeout=_HTTP_TIMEOUT_SECONDS)
     resp.raise_for_status()
     data = resp.json()
     text = data['candidates'][0]['content']['parts'][0]['text']
@@ -294,15 +311,28 @@ def interpret_query(conn, raw_query):
             # dejar rastro. e.response.text trae el cuerpo del error tal
             # cual lo manda el proveedor (útil para diagnosticar sin
             # tener que reproducir la llamada a mano).
+            #
+            # Ticket AI-21 (bug de seguridad): antes esta línea logueaba
+            # `e` directo con %s — la representación en texto de
+            # requests.exceptions.HTTPError incluye la URL completa del
+            # request que falló, y esa URL traía la API key de Gemini
+            # como query param (ver _call_gemini). GitHub bloqueó un push
+            # de Niko por esto mismo. Ahora se arman a mano solo los
+            # campos puntuales que hacen falta — nunca se referencia `e`
+            # directo, así que no importa qué termine incluyendo su
+            # representación en texto por dentro.
+            status = e.response.status_code if e.response is not None else '?'
+            reason = e.response.reason if e.response is not None else ''
             body_preview = (e.response.text or '')[:300] if e.response is not None else ''
             _logger.warning(
-                'proveedor %s falló con HTTP %s: %s — body: %s',
-                provider_name, e.response.status_code if e.response is not None else '?',
-                e, body_preview
+                'proveedor %s falló con HTTP %s (%s) — body: %s',
+                provider_name, status, reason, body_preview
             )
             parsed = None
         except Exception as e:
-            _logger.warning('proveedor %s falló: %r', provider_name, e)
+            # Mismo criterio que arriba: nombre de la excepción + mensaje
+            # acotado a 200 caracteres, nunca el objeto `e` completo.
+            _logger.warning('proveedor %s falló: %s: %s', provider_name, type(e).__name__, str(e)[:200])
             parsed = None
         if not parsed:
             continue

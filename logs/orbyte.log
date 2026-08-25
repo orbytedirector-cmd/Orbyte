@@ -12,3 +12,5 @@
 {"ts": "2026-08-25T18:08:13.119+00:00", "level": "WARNING", "logger": "werkzeug", "msg": " * Debugger is active!"}
 {"ts": "2026-08-25T20:40:23.813+00:00", "level": "WARNING", "logger": "app", "msg": "SECRET_KEY no está definida como variable de entorno — usando una clave generada y guardada en .secret_key. Para producción, exporta SECRET_KEY con un valor fijo (ej: python3 -c \"import secrets;print(secrets.token_hex(32))\")."}
 {"ts": "2026-08-25T20:40:23.846+00:00", "level": "WARNING", "logger": "werkzeug", "msg": " * Debugger is active!"}
+{"ts": "2026-08-25T21:46:32.694+00:00", "level": "WARNING", "logger": "app", "msg": "SECRET_KEY no está definida como variable de entorno — usando una clave generada y guardada en .secret_key. Para producción, exporta SECRET_KEY con un valor fijo (ej: python3 -c \"import secrets;print(secrets.token_hex(32))\")."}
+{"ts": "2026-08-25T21:46:32.728+00:00", "level": "WARNING", "logger": "werkzeug", "msg": " * Debugger is active!"}
