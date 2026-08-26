@@ -2,6 +2,7 @@ import os
 import re
 import json
 import math
+import gzip
 import random
 import tempfile
 import hashlib
@@ -480,7 +481,11 @@ def _send_email(to_addr, subject, html_body, attachments=None):
             msg['From'] = f'{SMTP_FROM_NAME} <{SMTP_FROM_EMAIL}>'
             msg['To'] = to_addr
             msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10) as server:
+        # Ticket 25: 20s en vez de 10 — el log adjunto ahora puede ser el
+        # archivo completo (comprimido) en vez de un recorte de 200KB,
+        # y el servidor SMTP de Gmail a veces tarda más que eso bajo
+        # carga. Sigue acotado (nunca cuelga indefinidamente).
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
             if SMTP_USE_TLS:
                 server.starttls()
             if SMTP_USER:
@@ -1667,7 +1672,21 @@ def api_v1_report_issue():
             app.logger.warning(f'report-issue: no se pudo decodificar la captura: {e}')
 
     if log_content:
-        attachments.append(('log.txt', log_content.encode('utf-8', errors='replace'), 'text/plain'))
+        # Ticket 25 (pedido por Niko: "adjuntar de manera automática el
+        # log del dispositivo... si pesa más comprimir"). El cliente
+        # ahora manda el archivo COMPLETO (antes se truncaba a ~200KB
+        # del lado de iOS) — OrbyteLogger se auto-poda en 5MB, así que en
+        # la práctica esto rara vez es grande. En vez de comprimir solo
+        # cuando ya "es un problema" (umbral arbitrario a elegir), se
+        # comprime siempre que valga la pena (texto de log comprime
+        # 90%+ típico, gzip es prácticamente gratis en CPU) — así se
+        # elimina de raíz cualquier escenario donde el tamaño del
+        # adjunto sea un problema, en vez de solo empujar el umbral.
+        log_bytes = log_content.encode('utf-8', errors='replace')
+        if len(log_bytes) > 50_000:
+            attachments.append(('log.txt.gz', gzip.compress(log_bytes), 'application/gzip'))
+        else:
+            attachments.append(('log.txt', log_bytes, 'text/plain'))
 
     user_email = g.api_user['email']
     reported_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
