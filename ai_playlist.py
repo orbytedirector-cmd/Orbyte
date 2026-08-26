@@ -136,6 +136,15 @@ def _empty_entities():
         'artists': [], 'albums': [], 'tracks': [], 'genres': [], 'moods': [], 'momentos': [],
         'eras': [], 'temas': [], 'idiomas': [], 'paises': [], 'anios': [],
         'ranking': None,
+        # Ticket AI-23 (pedido por Niko) — false (default) = búsqueda
+        # CERRADA: "Lo mejor de Stratovarius" trae solo Stratovarius.
+        # true = búsqueda ABIERTA: el usuario dio alguna señal explícita
+        # de querer expandir ("parecido a", "similar a", "como", "y
+        # artistas similares") — ver _SYSTEM_PROMPT_TEMPLATE para las
+        # señales exactas que dispara true. Aplica igual a artistas,
+        # álbumes y pistas nombradas — ver _resolve_artist_ids/
+        # generate_playlist.
+        'buscar_similares': False,
         'place': None, 'motivation': None,
     }
 
@@ -231,6 +240,11 @@ def _normalize_entities(raw_entities, vocab):
     ranking_raw = raw_entities.get('ranking')
     out['ranking'] = ranking_raw if ranking_raw in _RANKING_VALUES else None
 
+    # Ticket AI-23: booleano simple, sin fuzzy-match — bool() de Python ya
+    # maneja bien tanto un true/false real del LLM como los casos borde
+    # (None, string vacío, etc.) sin necesitar lógica extra.
+    out['buscar_similares'] = bool(raw_entities.get('buscar_similares'))
+
     return out
 
 
@@ -244,7 +258,7 @@ entidades y devolver SOLO un objeto JSON (sin markdown, sin texto extra) con est
     "artists": [string], "albums": [string], "tracks": [string],
     "genres": [string], "moods": [string], "momentos": [string],
     "eras": [string], "temas": [string], "idiomas": [string], "paises": [string],
-    "anios": [número], "ranking": string o null,
+    "anios": [número], "ranking": string o null, "buscar_similares": boolean,
     "place": string o null, "motivation": string o null
   }},
   "confidence": número entre 0 y 1,
@@ -264,15 +278,19 @@ habla la letra).
 Master of Puppets entero", "algo del álbum Appetite for Destruction").
 - "anios": años puntuales que el usuario mencione (ej: "de 2015", "canciones de 1986") — un número por \
 año, no un rango como texto. Distinto de "eras" (períodos amplios tipo "los 80s" o "rock clásico") — si \
-el usuario da un año exacto, va acá; si describe una época en general, va en "eras".
+el usuario da un año exacto, va acá; si describe una época en general, va en "eras". EXCEPCIÓN: si el \
+usuario menciona una DÉCADA junto con un pedido de ranking/popularidad (ej. "los éxitos más populares de \
+los 90"), expandí la década COMPLETA acá como lista de años (1990, 1991, ..., 1999) en vez de (o además \
+de) usar "eras" — así se puede rankear por reproducciones/oyentes dentro de ese rango exacto.
 - "ranking": tiene que ser EXACTAMENTE uno de estos 4 valores, o null si el usuario no pidió ningún \
 orden de popularidad/escuchas en particular:
   * "popularidad_global": el usuario pide lo más POPULAR/FAMOSO/CONOCIDO en general (ej: "lo más \
 popular de Metallica", "los hits de Queen", "lo más famoso del género"). Se mide en cantidad de OYENTES \
 distintos a nivel mundial (lastfm_listeners) — cuánta gente lo conoce, no cuántas veces se reprodujo.
-  * "escuchas_global": el usuario pide lo más ESCUCHADO/REPRODUCIDO, sin calificar que sea "de nosotros" \
-o "en casa" (ej: "lo más escuchado de Lord Huron", "las canciones más reproducidas del rock alternativo"). \
-Se mide en cantidad total de REPRODUCCIONES a nivel mundial (lastfm_playcount) — puede diferir de \
+  * "escuchas_global": el usuario pide lo más ESCUCHADO/REPRODUCIDO/MEJOR, sin calificar que sea "de \
+nosotros" o "en casa" (ej: "lo más escuchado de Lord Huron", "las canciones más reproducidas del rock \
+alternativo", "LO MEJOR de Stratovarius", "los mejores temas de X"). "Lo mejor de X" cae acá — se mide en \
+cantidad total de REPRODUCCIONES a nivel mundial (lastfm_playcount), que puede diferir de \
 popularidad_global (algo con pocos oyentes muy fieles que lo repiten mucho puede tener más reproducciones \
 que oyentes distintos).
   * "escuchas_propias": el usuario pide lo que ÉL/ELLA o "nosotros"/"en casa" escuchó más, no lo popular \
@@ -282,6 +300,16 @@ general.
   * "infravalorado": el usuario pide algo POCO CONOCIDO pero BUENO — "infravalorado", "subestimado", \
 "que no es tan conocido pero vale la pena", "joyitas ocultas", "hidden gems" (ej: "lo más infravalorado \
 de Radiohead", "canciones subestimadas del jazz").
+- "buscar_similares": true SOLO si el usuario da alguna señal explícita de querer expandir más allá de \
+lo nombrado literalmente — palabras como "parecido a", "similar a", "como", "tipo", "al estilo de", "y \
+artistas/bandas similares", "y algo más de ese estilo". false (default, úsalo salvo que veas una de esas \
+señales) si el usuario pide algo cerrado y específico — un artista, álbum o canción puntual, sin pedir \
+nada "parecido". Ejemplos: "Lo mejor de Stratovarius" -> false (SOLO Stratovarius, nada de bandas \
+parecidas). "Quiero oír Stratovarius y artistas similares" -> true (Stratovarius + similares). "El álbum \
+X" -> false (solo ese álbum, sin nada añadido). "Algo como el álbum X" -> true. Si el usuario nombra una \
+canción puntual en "tracks" con buscar_similares=false, el sistema va a traer TODAS las versiones \
+disponibles de esa canción (no una sola) — no hace falta que vos elijas cuál versión, tu trabajo es solo \
+decidir si hay que expandir a "parecidos" o no.
 - Para genres/moods/momentos/eras/temas/idiomas/paises: propón el valor que mejor describa la intención \
 del usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema \
 hace el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo \
@@ -447,7 +475,7 @@ _ARTIST_MATCH_CUTOFF = 0.75  # más estricto que _closest_match (0.6):
 # género/mood, más riesgo de un falso positivo con un cutoff laxo.
 
 
-def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_limit=8):
+def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_limit=8, expand_similar=True):
     """Ticket AI-11 (bugfix, reportado por Niko: "Metallica y similares"
     no encontraba a Metallica pese a que el artista SÍ está en la
     biblioteca). Resuelve cada nombre de artista que el LLM extrajo
@@ -459,10 +487,16 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
     reusada acá tal cual, inyectada por parámetro — mismo patrón de
     inyección explícita que el resto de este módulo).
 
+    `expand_similar` (Ticket AI-23, pedido por Niko): controla si se hace
+    la expansión a similares o no — false para búsquedas CERRADAS ("Lo
+    mejor de Stratovarius" = solo Stratovarius), true para ABIERTAS
+    ("Stratovarius y artistas similares"). Ver entities.buscar_similares
+    en generate_playlist.
+
     Devuelve un set de artist_id: los nombrados que se pudieron resolver
-    + sus similares que efectivamente existen en esta biblioteca (los que
-    no, `build_similar_artists_fn` ya los devuelve con id=None y se
-    descartan acá)."""
+    + (si expand_similar) sus similares que efectivamente existen en esta
+    biblioteca (los que no, `build_similar_artists_fn` ya los devuelve
+    con id=None y se descartan acá)."""
     if not artist_names:
         return set()
 
@@ -483,6 +517,8 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
             continue  # el LLM mencionó un artista que no está en la biblioteca — se ignora, no se fuerza nada
         ids.add(matched_id)
 
+        if not expand_similar:
+            continue
         similar_row = conn.execute(
             'SELECT similar_artists_json FROM artists WHERE id=?', (matched_id,)
         ).fetchone()
@@ -693,7 +729,8 @@ _RANKING_ORDER_SQL = {
 
 
 def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                   artist_ids=None, album_ids=None, track_ids=None, ranking=None):
+                   artist_ids=None, album_ids=None, track_ids=None, ranking=None, skip_dedupe=False,
+                   limit_override=None):
     """Ejecuta la búsqueda de pistas reutilizando EXACTAMENTE el mismo
     join/alias que ya usa _api_search_advanced_payload (view=tracks) en
     app.py — no se reinventa el criterio de matching (ver ticket §3).
@@ -714,7 +751,19 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     ver AI_AGENT_MASTER_PLAN.md) por el criterio real correspondiente, y
     el LIMIT pasa a ser _PLAYLIST_SIZE en vez de _CANDIDATE_POOL_SIZE:
     con ranking explícito el usuario pidió un orden real, no un pool
-    para muestrear al azar (ver generate_playlist)."""
+    para muestrear al azar (ver generate_playlist).
+
+    `skip_dedupe` (Ticket AI-23, pedido por Niko): cuando el usuario
+    nombra una pista puntual SIN pedir "parecido/similar" (búsqueda
+    cerrada), la expectativa es "todas las versiones disponibles, de
+    mejor calidad a peor" — no una sola versión deduplicada. Con
+    skip_dedupe=True se omite `dedupe_condition_fn` por completo; el
+    ORDER BY sigue siendo pop_score (que acá SÍ es el criterio correcto:
+    calidad de audio/metadata, exactamente lo que "mejor a peor" pide).
+
+    `limit_override`: si viene, pisa el LIMIT calculado automáticamente
+    (usado por el camino de "todas las versiones", que quiere hasta
+    _PLAYLIST_SIZE versiones sin pasar por la lógica de pool-para-samplear)."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -738,13 +787,16 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
         params = params + identity_params
 
     extra_where = ' AND '.join(clauses)
-    dedupe_clause = dedupe_condition_fn(extra_where=extra_where, track_alias='t', pop_alias='tpc')
-    clauses = clauses + [dedupe_clause]
-    params = params + params
-    where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
+    if skip_dedupe:
+        where = (' AND ' + extra_where) if extra_where else ''
+    else:
+        dedupe_clause = dedupe_condition_fn(extra_where=extra_where, track_alias='t', pop_alias='tpc')
+        clauses = clauses + [dedupe_clause]
+        params = params + params
+        where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
     order_sql = _RANKING_ORDER_SQL.get(ranking, 'COALESCE(tpc.pop_score,0) DESC')
-    limit_n = _PLAYLIST_SIZE if ranking else _CANDIDATE_POOL_SIZE
+    limit_n = limit_override if limit_override is not None else (_PLAYLIST_SIZE if ranking else _CANDIDATE_POOL_SIZE)
 
     data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                           al.year as album_year, al.cover_path,
@@ -919,12 +971,49 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     durante toda la relajación — ver _run_query/_finalize_pool. Con
     ranking='escuchas_propias' se despacha a
     _query_tracks_own_listens en vez de _query_tracks (necesita otro
-    JOIN, contra listening_events en vez de track_meta)."""
-    artist_ids = _resolve_artist_ids(conn, entities.get('artists') or [], build_similar_artists_fn)
+    JOIN, contra listening_events en vez de track_meta).
+
+    `buscar_similares` (Ticket AI-23, pedido por Niko): controla si
+    artist_ids se expande a artistas similares y si album_ids/tracks se
+    expanden vía similar_tracks_json. false (default, búsqueda CERRADA)
+    = solo lo nombrado literalmente. true (búsqueda ABIERTA, disparada
+    por palabras como "parecido/similar/como" — ver el prompt) = con
+    expansión, comportamiento idéntico al de antes de este ticket.
+
+    Caso especial (Ticket AI-23): si el usuario nombra una pista puntual
+    en 'tracks' SIN pedir similares, la expectativa no es "una pista
+    resuelta y deduplicada" sino "TODAS las versiones disponibles,
+    ordenadas de mejor a peor calidad" — esto se resuelve ANTES de
+    entrar al flujo normal de filtros/relajación, como un camino
+    aparte, porque el usuario ya fue 100% específico sobre qué pista
+    quiere."""
+    buscar_similares = bool(entities.get('buscar_similares'))
+    artist_ids = _resolve_artist_ids(
+        conn, entities.get('artists') or [], build_similar_artists_fn, expand_similar=buscar_similares
+    )
     album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
     named_track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
-    similar_seed_ids = named_track_ids | _sample_tracks_for_albums(conn, album_ids)
-    track_ids = _expand_via_similar_tracks(conn, similar_seed_ids) if similar_seed_ids else set()
+
+    # Ticket AI-23: pista puntual + búsqueda cerrada -> todas las
+    # versiones disponibles, sin deduplicar, ordenadas por pop_score
+    # (calidad de audio/metadata — acá SÍ es el criterio correcto). No
+    # pasa por relajación ni por fallback: el usuario fue específico.
+    if named_track_ids and not buscar_similares:
+        versions = _query_tracks(
+            conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            track_ids=named_track_ids, skip_dedupe=True, limit_override=_PLAYLIST_SIZE
+        )
+        if versions:
+            filters_applied = {'track_ids': sorted(named_track_ids), 'todas_las_versiones': True}
+            return versions, filters_applied, False
+
+    if buscar_similares:
+        similar_seed_ids = named_track_ids | _sample_tracks_for_albums(conn, album_ids)
+        track_ids = _expand_via_similar_tracks(conn, similar_seed_ids) if similar_seed_ids else set()
+    else:
+        # Cerrado: ni expansión por similar_tracks_json ni "sabor" de
+        # otras pistas del álbum — solo lo nombrado literalmente.
+        track_ids = named_track_ids
     ranking = entities.get('ranking')
 
     args_dict = _entities_to_args_dict(entities)
