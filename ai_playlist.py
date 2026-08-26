@@ -727,6 +727,136 @@ _RANKING_ORDER_SQL = {
     ),
 }
 
+# Ticket AI-24 (pedido por Niko, ejemplos 3/4 — "lo mejor de la música
+# chilena" / "los éxitos más populares de los 90"): mismo criterio que
+# _RANKING_ORDER_SQL pero a nivel de ARTISTA (ar.lastfm_listeners/
+# ar.lastfm_playcount — columnas propias de `artists`, independientes de
+# las de track_meta), para la primera etapa de la cascada
+# artista-primero-pista-después. 'escuchas_propias' no está acá por el
+# mismo motivo que en _RANKING_ORDER_SQL — necesita JOIN con
+# listening_events, se maneja aparte en _top_artist_ids_by_ranking.
+_ARTIST_RANKING_ORDER_SQL = {
+    'popularidad_global': 'COALESCE(ar.lastfm_listeners, 0) DESC',
+    'escuchas_global': 'COALESCE(ar.lastfm_playcount, 0) DESC',
+    'infravalorado': (
+        f'CASE WHEN COALESCE(ar.lastfm_listeners, 0) >= {_INFRAVALORADO_MIN_LISTENERS} '
+        f'THEN CAST(COALESCE(ar.lastfm_playcount, 0) AS REAL) / ar.lastfm_listeners '
+        f'ELSE -1 END DESC'
+    ),
+}
+
+_CASCADE_TOP_N_ARTISTS = 15  # cuántos artistas trae la etapa 1 — valor
+# de partida, da margen suficiente para que la etapa 2 tenga de dónde
+# elegir _PLAYLIST_SIZE pistas sin agotar el catálogo de 1-2 artistas.
+
+
+def _cascade_rankings(ranking):
+    """Ticket AI-24 — qué criterio usa cada etapa de la cascada
+    artista-primero-pista-después (ver _cascade_ranked_tracks). La
+    etapa 1 identifica QUÉ artistas son relevantes para la categoría
+    pedida (país, género, era, etc.); la etapa 2 saca sus mejores
+    pistas de esos artistas.
+
+    - 'infravalorado': las dos etapas buscan lo mismo — artistas poco
+      conocidos con alto enganche, y de esos, sus pistas más queridas
+      (no las más obscuras — una vez encontrado el artista infravalorado,
+      lo que importa de sus pistas es cuál es la que más pegó).
+    - 'escuchas_propias': las dos etapas son sobre el historial real del
+      usuario — qué artistas (de los que matchean el filtro) escuchó
+      más, y de esos, qué pistas escuchó más.
+    - 'popularidad_global'/'escuchas_global': la etapa 1 SIEMPRE
+      identifica a los artistas líderes por OYENTES (quiénes son, en
+      términos de alcance) — la etapa 2 siempre busca sus pistas más
+      REPRODUCIDAS (sus éxitos reales). Ejemplo de Niko: "lo mejor de la
+      música chilena" -> primero los artistas chilenos con más oyentes,
+      después sus pistas con más reproducciones — no importa si el
+      usuario pidió "oyentes" o "reproducciones" para el conjunto
+      completo, una vez identificados los artistas líderes lo relevante
+      de sus pistas es cuáles pegaron más."""
+    if ranking == 'infravalorado':
+        return 'infravalorado', 'escuchas_global'
+    if ranking == 'escuchas_propias':
+        return 'escuchas_propias', 'escuchas_propias'
+    return 'popularidad_global', 'escuchas_global'
+
+
+def _top_artist_ids_by_ranking(conn, args_dict, build_adv_filters_fn, ranking, user_id=None,
+                                limit=_CASCADE_TOP_N_ARTISTS):
+    """Ticket AI-24 — etapa 1 de la cascada. Reusa la MISMA estructura de
+    join y los MISMOS filtros de build_adv_filters_fn que ya usa
+    _query_tracks (así "país=Chile" significa exactamente lo mismo acá
+    que en cualquier otra parte del sistema, sin reinventar el filtro a
+    nivel de artista) pero agrupa por artista y ordena por el criterio
+    de _ARTIST_RANKING_ORDER_SQL en vez de por pista. Devuelve una lista
+    de artist_id, en orden."""
+    from werkzeug.datastructures import MultiDict
+    args = MultiDict()
+    for field, vals in args_dict.items():
+        for v in vals:
+            args.add(field, v)
+    clauses, params = build_adv_filters_fn(args, pop_alias='tpc', for_albums=False)
+    where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
+
+    if ranking == 'escuchas_propias':
+        if not user_id:
+            return []
+        sql = f'''SELECT ar.id as artist_id, COUNT(le.id) as play_count
+                  FROM listening_events le
+                  JOIN tracks t ON t.id = le.track_id
+                  JOIN albums al ON al.id=t.album_id
+                  JOIN artists ar ON ar.id=al.artist_id
+                  LEFT JOIN track_meta tm ON tm.track_id=t.id
+                  LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+                  WHERE le.user_id=?{where}
+                  GROUP BY ar.id
+                  ORDER BY play_count DESC
+                  LIMIT ?'''
+        rows = conn.execute(sql, [user_id] + params + [limit]).fetchall()
+        return [r['artist_id'] for r in rows]
+
+    order_sql = _ARTIST_RANKING_ORDER_SQL.get(ranking)
+    if not order_sql:
+        return []
+    sql = f'''SELECT ar.id as artist_id
+              FROM tracks t
+              JOIN albums al ON al.id=t.album_id
+              JOIN artists ar ON ar.id=al.artist_id
+              LEFT JOIN track_meta tm ON tm.track_id=t.id
+              LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
+              WHERE 1=1{where}
+              GROUP BY ar.id
+              ORDER BY {order_sql}
+              LIMIT ?'''
+    rows = conn.execute(sql, params + [limit]).fetchall()
+    return [r['artist_id'] for r in rows]
+
+
+def _cascade_ranked_tracks(conn, args_dict, build_adv_filters_fn, dedupe_condition_fn, track_to_json_fn,
+                            ranking, user_id):
+    """Ticket AI-24 (pedido por Niko, ejemplos 3/4) — cascada completa:
+    etapa 1 identifica los artistas más relevantes para la categoría
+    pedida (_top_artist_ids_by_ranking), etapa 2 trae sus mejores pistas
+    (_query_tracks/_query_tracks_own_listens, con artist_ids= el
+    resultado de la etapa 1). Puede devolver una lista corta (categoría
+    con pocos artistas/pocas pistas) — quien llama decide si enriquecer
+    con el camino de una sola etapa (ver generate_playlist)."""
+    stage1_ranking, stage2_ranking = _cascade_rankings(ranking)
+    top_artist_ids = _top_artist_ids_by_ranking(
+        conn, args_dict, build_adv_filters_fn, stage1_ranking, user_id=user_id
+    )
+    if not top_artist_ids:
+        return []
+    artist_ids = set(top_artist_ids)
+    if stage2_ranking == 'escuchas_propias':
+        return _query_tracks_own_listens(
+            conn, args_dict, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            artist_ids=artist_ids
+        )
+    return _query_tracks(
+        conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        artist_ids=artist_ids, ranking=stage2_ranking
+    )
+
 
 def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                    artist_ids=None, album_ids=None, track_ids=None, ranking=None, skip_dedupe=False,
@@ -1041,6 +1171,45 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
             artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking
         )
+
+    # Ticket AI-24 (pedido por Niko, ejemplos 3/4: "lo mejor de la
+    # música chilena", "los éxitos más populares de los 90") — cuando no
+    # se nombró ningún artista/álbum/pista puntual PERO sí hay un
+    # ranking pedido, se intenta primero la cascada
+    # artista-primero-pista-después (_cascade_ranked_tracks) en vez de
+    # ir directo al ranking plano a nivel de pista: para una categoría
+    # amplia (país, género, era), "lo mejor de X" tiene más sentido
+    # leído como "los artistas líderes de X, y de esos, sus mejores
+    # pistas" que como "las pistas individuales con más reproducciones
+    # sin importar de qué artista son" — un artista nicho con una sola
+    # pista viral podría ganarle a los artistas realmente
+    # representativos de la categoría en un ranking plano.
+    #
+    # Si la cascada trae MENOS de _PLAYLIST_SIZE pistas (categoría con
+    # pocos artistas, o pocas pistas por artista — ej. "los 90" es
+    # amplio y puede no tener "artistas líderes" tan claros como "música
+    # chilena"), se enriquece con el camino directo de una sola etapa
+    # para completar, sin repetir pistas ya traídas por la cascada. Esto
+    # NO cuenta como used_fallback=True — no es un fallback genérico,
+    # sigue siendo un resultado dirigido a la categoría pedida.
+    if ranking and not (artist_ids or album_ids or track_ids):
+        cascade_tracks = _cascade_ranked_tracks(
+            conn, args_dict, build_adv_filters_fn, dedupe_condition_fn, track_to_json_fn, ranking, user_id
+        )
+        if len(cascade_tracks) >= _PLAYLIST_SIZE:
+            filters_applied = _filters_applied(args_dict)
+            filters_applied['cascada_artista_primero'] = True
+            return cascade_tracks[:_PLAYLIST_SIZE], filters_applied, False
+        if cascade_tracks:
+            seen_ids = {t['id'] for t in cascade_tracks}
+            direct_pool = _run_query(args_dict)
+            extra = [t for t in direct_pool if t['id'] not in seen_ids]
+            combined = cascade_tracks + extra[:max(0, _PLAYLIST_SIZE - len(cascade_tracks))]
+            if combined:
+                filters_applied = _filters_applied(args_dict)
+                filters_applied['cascada_artista_primero'] = True
+                filters_applied['enriquecido_directo'] = True
+                return combined, filters_applied, False
 
     pool = _run_query(args_dict)
     if pool:

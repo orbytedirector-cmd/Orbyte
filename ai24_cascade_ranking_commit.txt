@@ -1,0 +1,44 @@
+Feat (backend): cascada de ranking en dos etapas, artista primero (Ticket AI-24)
+
+Pedido por Niko, explícitamente la opción "B" completa en vez de la
+aproximación simplificada de una sola etapa que había propuesto -- "no
+estamos privilegiando la ley del mínimo esfuerzo tipo MVP, tenemos que
+cubrir la mayoría de casos de borde".
+
+Problema que resuelve: con el ranking de una sola etapa (AI-22), "lo
+mejor de la música chilena" ordenaba pistas individuales por
+reproducciones sin importar el artista -- un artista de nicho con una
+sola pista viral (muchas reproducciones concentradas, pocos oyentes
+reales) le ganaba a los artistas genuinamente representativos de la
+categoría.
+
+Cascada de dos etapas: etapa 1 identifica los artistas relevantes para
+la categoría pedida (país, género, era, etc.) ordenados a nivel de
+ARTISTA (artists.lastfm_listeners/lastfm_playcount, columnas propias,
+distintas de las de track_meta), reusando el mismo build_adv_filters_fn
+que el resto del sistema. Etapa 2 trae las mejores pistas de esos
+artistas (top 15 por default).
+
+_cascade_rankings() decide qué criterio usa cada etapa: infravalorado y
+escuchas_propias usan el mismo criterio en las dos etapas;
+popularidad_global/escuchas_global SIEMPRE usan oyentes en etapa 1
+(identificar líderes) y reproducciones en etapa 2 (sus éxitos reales) --
+tal cual describió Niko en su ejemplo 3, sin importar cuál de los dos
+pidió para el conjunto completo.
+
+Enriquecimiento: si la cascada sola trae menos de _PLAYLIST_SIZE pistas
+(categoría angosta), se completa con la búsqueda directa de una sola
+etapa sin repetir pistas -- no cuenta como used_fallback=True, sigue
+siendo un resultado dirigido. Trade-off documentado: en este escenario
+el artista "trampa" puede volver a aparecer como relleno -- aceptado a
+propósito, mejor completar que dejar la playlist corta.
+
+Validado: py_compile OK. Prueba funcional decisiva con 15 "artistas
+líder" + 1 artista nicho con pista viral + 1 artista extranjero, en 3
+escenarios: caso puro (cascada evita la trampa sin enriquecer),
+nombrando al artista nicho puntualmente (su pista sí aparece, correcto,
+búsqueda cerrada vía AI-23), y enriquecimiento (pocos artistas líder,
+se completa sin marcar fallback genérico). git apply --check OK en clon
+independiente, aplicado y recompilado en clon de verificación.
+
+Único archivo: ai_playlist.py.
