@@ -1,0 +1,38 @@
+Feat (backend): cantidad explícita + paginación "Expandir" (Ticket AI-25)
+
+Pedido por Niko: (A) botón "Expandir" para paginar de a 25 en 25, (B)
+detectar cantidades explícitas ("Top 10 de los Beatles", "las mejores 50
+del rock clásico", "las 5 más populares de Iron Maiden").
+
+Parte B: nueva entidad 'cantidad' (número o null), validada contra tope
+duro _MAX_CANTIDAD=100. playlist_size se calcula una vez en
+generate_playlist() y reemplaza el _PLAYLIST_SIZE fijo en TODOS los
+caminos: _query_tracks, _query_tracks_own_listens, _finalize_pool, la
+cascada de AI-24, y "todas las versiones" de AI-23.
+
+Parte A: nuevo endpoint POST /api/v1/ai/playlist/<id>/expand. No vuelve
+a llamar al LLM -- relee parsed_intent_json del turno original y llama a
+generate_playlist() de nuevo con exclude_track_ids = lo ya entregado.
+Nueva columna delivered_track_ids_json en ai_playlist_requests (lazy
+migration). expand_playlist() nueva en ai_playlist.py, con chequeo
+WHERE id=? AND user_id=? (mismo criterio que record_feedback) para que
+un usuario no pueda expandir la petición de otro.
+
+Bug encontrado y corregido durante la validación: cuando la relajación
+de filtros se agota completamente (todo lo que matcheaba ya fue
+excluido) y cae a _personalized_then_global_fallback, ese escalón NUNCA
+recibía exclude_track_ids -- la 4ta tanda de una paginación de 60 pistas
+volvía a traer las mismas 25 de la primera en vez de venir vacía.
+Corregido enhebrando exclude_track_ids por los 3 niveles de
+fallback_engine.personalized_fallback (_favorites_pool,
+_individual_behavior_pool, _aggregate_behavior_pool) y por el backstop
+de popularidad global.
+
+Validado: py_compile OK. Prueba funcional con 60 pistas: paginación en
+tandas de 25/25/10/0, las primeras 3 cubren las 60 exactas sin ninguna
+repetición, la 4ta (agotamiento total) viene vacía correctamente.
+Cantidad explícita (cantidad=10 -> exactamente 10). Seguridad (usuario
+ajeno bloqueado) y petición inexistente (no rompe). git apply --check OK
+en clon independiente, aplicado y recompilado en clon de verificación.
+
+Archivos: ai_playlist.py, fallback_engine.py, app.py.

@@ -1052,6 +1052,10 @@ def get_db_connection():
         "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_comment TEXT",
         "ALTER TABLE ai_playlist_requests ADD COLUMN saved_playlist_id INTEGER",
         "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_at TEXT",
+        # Ticket AI-25 (paginación "Expandir") — guarda los track_id ya
+        # entregados en esta petición, para que expand_playlist() sepa
+        # qué excluir en el próximo batch.
+        "ALTER TABLE ai_playlist_requests ADD COLUMN delivered_track_ids_json TEXT",
     ):
         try:
             conn.execute(ddl)
@@ -3270,6 +3274,31 @@ def api_v1_ai_playlist():
             build_similar_artists_fn=build_similar_artists,
             prior_entities=prior_entities,
         )
+        return jsonify(result)
+    finally:
+        conn.close()
+
+@app.route('/api/v1/ai/playlist/<int:request_id>/expand', methods=['POST'])
+@api_login_required
+def api_v1_ai_playlist_expand(request_id):
+    """Ticket AI-25 (pedido por Niko) — botón "Expandir": la siguiente
+    tanda de resultados de la MISMA petición original (mismo
+    ranking/cascada/buscar_similares/cantidad ya resueltos en el turno
+    original), sin repetir nada de lo ya entregado y sin volver a
+    llamar al LLM — reusa ai_playlist.expand_playlist(), que relee
+    parsed_intent_json de la petición original.
+    """
+    conn = get_db_connection()
+    try:
+        result = ai_playlist.expand_playlist(
+            conn, g.api_user['id'], request_id,
+            track_to_json_fn=track_to_json,
+            build_adv_filters_fn=_build_adv_filters,
+            dedupe_condition_fn=_track_dedupe_condition,
+            build_similar_artists_fn=build_similar_artists,
+        )
+        if result is None:
+            return jsonify({'error': 'not_found'}), 404
         return jsonify(result)
     finally:
         conn.close()

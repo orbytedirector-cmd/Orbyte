@@ -80,6 +80,12 @@ GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 _HTTP_TIMEOUT_SECONDS = 8
 _PLAYLIST_SIZE = 25
 _CANDIDATE_POOL_SIZE = 150  # de dónde se muestrea la playlist final
+# Ticket AI-25 (pedido por Niko: "Top 10 de los Beatles", "las mejores
+# 50 del rock clásico") — tope duro para 'cantidad' explícita, para que
+# "las mejores 5000" no intente devolver media biblioteca en una sola
+# respuesta. Si alguien quiere más que esto, está la paginación
+# ("Expandir", mismo ticket) para pedir más de a tandas.
+_MAX_CANTIDAD = 100
 
 # Dimensiones de _build_adv_filters que el intent parser puede llenar.
 # 'place' y 'motivation' se extraen y se registran igual (valor informativo /
@@ -145,6 +151,12 @@ def _empty_entities():
         # álbumes y pistas nombradas — ver _resolve_artist_ids/
         # generate_playlist.
         'buscar_similares': False,
+        # Ticket AI-25 (pedido por Niko: "Top 10 de los Beatles", "las
+        # mejores 50 del rock clásico", "las 5 más populares de Iron
+        # Maiden") — cantidad EXPLÍCITA que el usuario pidió, o None si
+        # no especificó (en cuyo caso se usa _PLAYLIST_SIZE, 25, como
+        # siempre). Ver _normalize_entities para la validación numérica.
+        'cantidad': None,
         'place': None, 'motivation': None,
     }
 
@@ -245,6 +257,17 @@ def _normalize_entities(raw_entities, vocab):
     # (None, string vacío, etc.) sin necesitar lógica extra.
     out['buscar_similares'] = bool(raw_entities.get('buscar_similares'))
 
+    # Ticket AI-25: validar que sea un entero positivo dentro del tope —
+    # si el LLM devuelve algo raro (texto, negativo, cero, o un número
+    # absurdo), se descarta a None (cae al default de siempre) en vez de
+    # arriesgarse a un LIMIT inválido o desproporcionado.
+    cantidad_raw = raw_entities.get('cantidad')
+    try:
+        cantidad = int(cantidad_raw)
+        out['cantidad'] = cantidad if 1 <= cantidad <= _MAX_CANTIDAD else None
+    except (TypeError, ValueError):
+        out['cantidad'] = None
+
     return out
 
 
@@ -258,7 +281,7 @@ entidades y devolver SOLO un objeto JSON (sin markdown, sin texto extra) con est
     "artists": [string], "albums": [string], "tracks": [string],
     "genres": [string], "moods": [string], "momentos": [string],
     "eras": [string], "temas": [string], "idiomas": [string], "paises": [string],
-    "anios": [número], "ranking": string o null, "buscar_similares": boolean,
+    "anios": [número], "ranking": string o null, "buscar_similares": boolean, "cantidad": número o null,
     "place": string o null, "motivation": string o null
   }},
   "confidence": número entre 0 y 1,
@@ -310,6 +333,10 @@ X" -> false (solo ese álbum, sin nada añadido). "Algo como el álbum X" -> tru
 canción puntual en "tracks" con buscar_similares=false, el sistema va a traer TODAS las versiones \
 disponibles de esa canción (no una sola) — no hace falta que vos elijas cuál versión, tu trabajo es solo \
 decidir si hay que expandir a "parecidos" o no.
+- "cantidad": el número EXACTO de canciones si el usuario lo especifica (ej: "Top 10 de los Beatles" -> \
+10, "las mejores 50 del rock clásico" -> 50, "las 5 más populares de Iron Maiden" -> 5, "dame 20 \
+canciones tranquilas" -> 20). null si no menciona ninguna cantidad — en ese caso el sistema usa una \
+cantidad default razonable, no hace falta que inventes un número.
 - Para genres/moods/momentos/eras/temas/idiomas/paises: propón el valor que mejor describa la intención \
 del usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema \
 hace el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo \
@@ -832,14 +859,18 @@ def _top_artist_ids_by_ranking(conn, args_dict, build_adv_filters_fn, ranking, u
 
 
 def _cascade_ranked_tracks(conn, args_dict, build_adv_filters_fn, dedupe_condition_fn, track_to_json_fn,
-                            ranking, user_id):
+                            ranking, user_id, playlist_size=_PLAYLIST_SIZE, exclude_track_ids=None):
     """Ticket AI-24 (pedido por Niko, ejemplos 3/4) — cascada completa:
     etapa 1 identifica los artistas más relevantes para la categoría
     pedida (_top_artist_ids_by_ranking), etapa 2 trae sus mejores pistas
     (_query_tracks/_query_tracks_own_listens, con artist_ids= el
     resultado de la etapa 1). Puede devolver una lista corta (categoría
     con pocos artistas/pocas pistas) — quien llama decide si enriquecer
-    con el camino de una sola etapa (ver generate_playlist)."""
+    con el camino de una sola etapa (ver generate_playlist).
+
+    `playlist_size`/`exclude_track_ids` (Ticket AI-25): se pasan tal
+    cual a la etapa 2 — la etapa 1 (qué artistas) no los necesita, solo
+    afecta cuántas/qué pistas se traen de esos artistas."""
     stage1_ranking, stage2_ranking = _cascade_rankings(ranking)
     top_artist_ids = _top_artist_ids_by_ranking(
         conn, args_dict, build_adv_filters_fn, stage1_ranking, user_id=user_id
@@ -850,17 +881,18 @@ def _cascade_ranked_tracks(conn, args_dict, build_adv_filters_fn, dedupe_conditi
     if stage2_ranking == 'escuchas_propias':
         return _query_tracks_own_listens(
             conn, args_dict, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-            artist_ids=artist_ids
+            artist_ids=artist_ids, playlist_size=playlist_size, exclude_track_ids=exclude_track_ids
         )
     return _query_tracks(
         conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-        artist_ids=artist_ids, ranking=stage2_ranking
+        artist_ids=artist_ids, ranking=stage2_ranking, playlist_size=playlist_size,
+        exclude_track_ids=exclude_track_ids
     )
 
 
 def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                    artist_ids=None, album_ids=None, track_ids=None, ranking=None, skip_dedupe=False,
-                   limit_override=None):
+                   limit_override=None, playlist_size=_PLAYLIST_SIZE, exclude_track_ids=None):
     """Ejecuta la búsqueda de pistas reutilizando EXACTAMENTE el mismo
     join/alias que ya usa _api_search_advanced_payload (view=tracks) en
     app.py — no se reinventa el criterio de matching (ver ticket §3).
@@ -879,7 +911,7 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
     lugar — necesita otro JOIN), reemplaza el ORDER BY default
     (pop_score, que mide calidad de audio/metadata, no popularidad —
     ver AI_AGENT_MASTER_PLAN.md) por el criterio real correspondiente, y
-    el LIMIT pasa a ser _PLAYLIST_SIZE en vez de _CANDIDATE_POOL_SIZE:
+    el LIMIT pasa a ser playlist_size en vez de _CANDIDATE_POOL_SIZE:
     con ranking explícito el usuario pidió un orden real, no un pool
     para muestrear al azar (ver generate_playlist).
 
@@ -893,7 +925,18 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
 
     `limit_override`: si viene, pisa el LIMIT calculado automáticamente
     (usado por el camino de "todas las versiones", que quiere hasta
-    _PLAYLIST_SIZE versiones sin pasar por la lógica de pool-para-samplear)."""
+    playlist_size versiones sin pasar por la lógica de pool-para-samplear).
+
+    `playlist_size` (Ticket AI-25, pedido por Niko: "Top 10 de los
+    Beatles") — reemplaza el _PLAYLIST_SIZE fijo cuando el usuario pidió
+    una cantidad explícita. Default _PLAYLIST_SIZE, comportamiento
+    idéntico al de antes de este ticket si no se pasa nada distinto.
+
+    `exclude_track_ids` (Ticket AI-25, paginación "Expandir"): set
+    opcional de track_id ya entregados en un batch anterior de la MISMA
+    petición original — se excluyen con AND NOT IN, aparte del grupo OR
+    de identidad (aplica siempre, sin importar qué rama del OR haya
+    matcheado)."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -916,6 +959,10 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
         clauses = clauses + ['(' + ' OR '.join(identity_clauses) + ')']
         params = params + identity_params
 
+    if exclude_track_ids:
+        clauses = clauses + [f"t.id NOT IN ({','.join('?' * len(exclude_track_ids))})"]
+        params = params + list(exclude_track_ids)
+
     extra_where = ' AND '.join(clauses)
     if skip_dedupe:
         where = (' AND ' + extra_where) if extra_where else ''
@@ -926,7 +973,7 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
         where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
 
     order_sql = _RANKING_ORDER_SQL.get(ranking, 'COALESCE(tpc.pop_score,0) DESC')
-    limit_n = limit_override if limit_override is not None else (_PLAYLIST_SIZE if ranking else _CANDIDATE_POOL_SIZE)
+    limit_n = limit_override if limit_override is not None else (playlist_size if ranking else _CANDIDATE_POOL_SIZE)
 
     data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                           al.year as album_year, al.cover_path,
@@ -960,7 +1007,8 @@ def _query_tracks(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedup
 
 
 def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_adv_filters_fn,
-                               dedupe_condition_fn, artist_ids=None, album_ids=None, track_ids=None):
+                               dedupe_condition_fn, artist_ids=None, album_ids=None, track_ids=None,
+                               playlist_size=_PLAYLIST_SIZE, exclude_track_ids=None):
     """Ticket AI-22 — variante de _query_tracks para ranking='escuchas_propias':
     en vez de ordenar por pop_score o por señales globales de Last.fm,
     cuenta las reproducciones REALES de este usuario (listening_events,
@@ -970,7 +1018,11 @@ def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_
     nada de lo que está pidiendo, no tiene sentido devolver resultados
     con 0 reproducciones como si fueran "lo más escuchado" — mejor caer
     a la relajación de filtros o al fallback, que si tienen sentido para
-    ese caso."""
+    ese caso.
+
+    `playlist_size`/`exclude_track_ids` (Ticket AI-25): mismo significado
+    que en _query_tracks — cantidad explícita del usuario y exclusión de
+    lo ya entregado en un batch anterior ("Expandir")."""
     from werkzeug.datastructures import MultiDict
     args = MultiDict()
     for field, vals in args_dict.items():
@@ -993,6 +1045,10 @@ def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_
         clauses = clauses + ['(' + ' OR '.join(identity_clauses) + ')']
         params = params + identity_params
 
+    if exclude_track_ids:
+        clauses = clauses + [f"t.id NOT IN ({','.join('?' * len(exclude_track_ids))})"]
+        params = params + list(exclude_track_ids)
+
     where = (' AND ' + ' AND '.join(clauses)) if clauses else ''
     data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                           al.year as album_year, al.cover_path,
@@ -1009,7 +1065,7 @@ def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_
                    GROUP BY t.id
                    ORDER BY play_count DESC
                    LIMIT ?'''
-    rows = conn.execute(data_sql, [user_id] + params + [_PLAYLIST_SIZE]).fetchall()
+    rows = conn.execute(data_sql, [user_id] + params + [playlist_size]).fetchall()
 
     tracks = []
     for r in rows:
@@ -1026,20 +1082,24 @@ def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_
     return tracks
 
 
-def _finalize_pool(pool, ranking):
+def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
     """Ticket AI-22 — con ranking explícito, el pool ya viene ordenado y
-    acotado a _PLAYLIST_SIZE desde la query (ver _query_tracks/
+    acotado a playlist_size desde la query (ver _query_tracks/
     _query_tracks_own_listens): el usuario pidió un orden real ("lo más
     popular", "lo más infravalorado"), no variedad — se devuelve tal
     cual, sin randomizar. Sin ranking, sigue el comportamiento de
-    siempre: muestreo al azar del pool de candidatos más amplio."""
+    siempre: muestreo al azar del pool de candidatos más amplio.
+
+    `playlist_size` (Ticket AI-25): _PLAYLIST_SIZE por default, o la
+    cantidad explícita que pidió el usuario ("Top 10 de los Beatles")."""
     if ranking:
-        return pool[:_PLAYLIST_SIZE]
-    sample_size = min(_PLAYLIST_SIZE, len(pool))
+        return pool[:playlist_size]
+    sample_size = min(playlist_size, len(pool))
     return random.sample(pool, sample_size) if pool else []
 
 
-def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                                        playlist_size=_PLAYLIST_SIZE, exclude_track_ids=None):
     """Hotfix (Ticket AI-09, reportado por Niko) — escalón final común:
     favoritos/comportamiento (Etapa 5, Ticket AI-04) y, si tampoco hay
     nada ahí, popularidad global sin filtros (backstop original de
@@ -1053,20 +1113,33 @@ def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_ad
     popularidad global como si fuera un match legítimo con cero
     criterios, sin distinguir "el usuario no pidió nada específico" de
     "el parser nunca corrió" (ej. sin GEMINI_API_KEY/GROQ_API_KEY
-    configuradas, o ambos proveedores caídos)."""
+    configuradas, o ambos proveedores caídos).
+
+    `exclude_track_ids` (Ticket AI-25, bug encontrado probando la
+    paginación "Expandir"): antes de este fix, cuando la relajación de
+    filtros se agotaba (ej. porque YA se excluyó todo lo que matcheaba
+    el filtro en un batch anterior) y caía a este escalón, acá no se
+    sabía qué ya se había entregado — el batch 4 de una prueba con 60
+    pistas y 3 tandas de por medio volvía a traer las mismas 25 pistas
+    del batch 1, en vez de las 0 que realmente quedaban. Se enhebra por
+    los tres niveles de fallback_engine.personalized_fallback Y por el
+    backstop de popularidad global de acá abajo — ningún escalón se
+    salva de la exclusión."""
     personalized, source = fallback_engine.personalized_fallback(
-        conn, user_id, track_to_json_fn, dedupe_condition_fn, limit=_PLAYLIST_SIZE
+        conn, user_id, track_to_json_fn, dedupe_condition_fn, limit=playlist_size,
+        exclude_track_ids=exclude_track_ids
     )
     if personalized:
         return personalized, {'fallback_source': source}
 
-    pool = _query_tracks(conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
-    sample_size = min(_PLAYLIST_SIZE, len(pool))
+    pool = _query_tracks(conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                          exclude_track_ids=exclude_track_ids)
+    sample_size = min(playlist_size, len(pool))
     return (random.sample(pool, sample_size) if pool else []), {'fallback_source': 'global_popularity'}
 
 
 def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                       build_similar_artists_fn):
+                       build_similar_artists_fn, exclude_track_ids=None):
     """Filter mapper + relajación progresiva (Etapa 4) + fallback
     inteligente (Etapa 5, Ticket AI-04). Devuelve (tracks,
     filters_applied_dict, used_fallback_bool). Nunca devuelve una lista
@@ -1116,7 +1189,20 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     ordenadas de mejor a peor calidad" — esto se resuelve ANTES de
     entrar al flujo normal de filtros/relajación, como un camino
     aparte, porque el usuario ya fue 100% específico sobre qué pista
-    quiere."""
+    quiere.
+
+    `playlist_size` (Ticket AI-25, pedido por Niko: "Top 10 de los
+    Beatles", "las mejores 50 del rock clásico") — se calcula UNA vez
+    acá arriba desde entities['cantidad'] (ya validado y acotado por
+    _normalize_entities), o _PLAYLIST_SIZE si no se especificó. Se pasa
+    a TODOS los caminos de abajo, reemplazando el _PLAYLIST_SIZE fijo de
+    antes de este ticket.
+
+    `exclude_track_ids` (Ticket AI-25, paginación "Expandir") — set
+    opcional de track_id ya entregados en un batch anterior de la MISMA
+    petición original (ver expand_playlist). None/vacío en el primer
+    batch — comportamiento idéntico al de antes de este ticket."""
+    playlist_size = entities.get('cantidad') or _PLAYLIST_SIZE
     buscar_similares = bool(entities.get('buscar_similares'))
     artist_ids = _resolve_artist_ids(
         conn, entities.get('artists') or [], build_similar_artists_fn, expand_similar=buscar_similares
@@ -1131,7 +1217,8 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     if named_track_ids and not buscar_similares:
         versions = _query_tracks(
             conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-            track_ids=named_track_ids, skip_dedupe=True, limit_override=_PLAYLIST_SIZE
+            track_ids=named_track_ids, skip_dedupe=True, limit_override=playlist_size,
+            exclude_track_ids=exclude_track_ids
         )
         if versions:
             filters_applied = {'track_ids': sorted(named_track_ids), 'todas_las_versiones': True}
@@ -1159,17 +1246,21 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             applied['track_ids'] = sorted(track_ids)
         if ranking:
             applied['ranking'] = ranking
+        if entities.get('cantidad'):
+            applied['cantidad'] = entities['cantidad']
         return applied
 
     def _run_query(args_dict_local):
         if ranking == 'escuchas_propias':
             return _query_tracks_own_listens(
                 conn, args_dict_local, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids
+                artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids,
+                playlist_size=playlist_size, exclude_track_ids=exclude_track_ids
             )
         return _query_tracks(
             conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-            artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking
+            artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
+            playlist_size=playlist_size, exclude_track_ids=exclude_track_ids
         )
 
     # Ticket AI-24 (pedido por Niko, ejemplos 3/4: "lo mejor de la
@@ -1185,7 +1276,7 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     # pista viral podría ganarle a los artistas realmente
     # representativos de la categoría en un ranking plano.
     #
-    # Si la cascada trae MENOS de _PLAYLIST_SIZE pistas (categoría con
+    # Si la cascada trae MENOS de playlist_size pistas (categoría con
     # pocos artistas, o pocas pistas por artista — ej. "los 90" es
     # amplio y puede no tener "artistas líderes" tan claros como "música
     # chilena"), se enriquece con el camino directo de una sola etapa
@@ -1194,17 +1285,18 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     # sigue siendo un resultado dirigido a la categoría pedida.
     if ranking and not (artist_ids or album_ids or track_ids):
         cascade_tracks = _cascade_ranked_tracks(
-            conn, args_dict, build_adv_filters_fn, dedupe_condition_fn, track_to_json_fn, ranking, user_id
+            conn, args_dict, build_adv_filters_fn, dedupe_condition_fn, track_to_json_fn, ranking, user_id,
+            playlist_size=playlist_size, exclude_track_ids=exclude_track_ids
         )
-        if len(cascade_tracks) >= _PLAYLIST_SIZE:
+        if len(cascade_tracks) >= playlist_size:
             filters_applied = _filters_applied(args_dict)
             filters_applied['cascada_artista_primero'] = True
-            return cascade_tracks[:_PLAYLIST_SIZE], filters_applied, False
+            return cascade_tracks[:playlist_size], filters_applied, False
         if cascade_tracks:
             seen_ids = {t['id'] for t in cascade_tracks}
             direct_pool = _run_query(args_dict)
             extra = [t for t in direct_pool if t['id'] not in seen_ids]
-            combined = cascade_tracks + extra[:max(0, _PLAYLIST_SIZE - len(cascade_tracks))]
+            combined = cascade_tracks + extra[:max(0, playlist_size - len(cascade_tracks))]
             if combined:
                 filters_applied = _filters_applied(args_dict)
                 filters_applied['cascada_artista_primero'] = True
@@ -1213,7 +1305,7 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
 
     pool = _run_query(args_dict)
     if pool:
-        return _finalize_pool(pool, ranking), _filters_applied(args_dict), False
+        return _finalize_pool(pool, ranking, playlist_size=playlist_size), _filters_applied(args_dict), False
 
     for field in _RELAXATION_ORDER:
         if field not in args_dict:
@@ -1222,25 +1314,84 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
         retry_args = _entities_to_args_dict(entities, drop_fields=dropped)
         pool = _run_query(retry_args)
         if pool:
-            return _finalize_pool(pool, ranking), _filters_applied(retry_args), True
+            return _finalize_pool(pool, ranking, playlist_size=playlist_size), _filters_applied(retry_args), True
 
     tracks, filters_applied = _personalized_then_global_fallback(
-        conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+        conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        playlist_size=playlist_size, exclude_track_ids=exclude_track_ids)
     return tracks, filters_applied, True
 
 
-def _log_request(conn, user_id, raw_query, result, provider, filters_applied, used_fallback, track_count):
+def _log_request(conn, user_id, raw_query, result, provider, filters_applied, used_fallback, track_ids):
+    """Ticket AI-25 (paginación "Expandir"): ahora recibe la lista de
+    track_ids entregados (antes solo el count) — se guardan en
+    delivered_track_ids_json para que expand_playlist() sepa qué excluir
+    en el próximo batch. `track_ids` acepta una lista de ints O de dicts
+    con 'id' (los tracks ya vienen como dict desde generate_playlist)."""
+    ids = [t['id'] if isinstance(t, dict) else t for t in track_ids]
     cur = conn.execute(
         '''INSERT INTO ai_playlist_requests
            (user_id, raw_query, status, parsed_intent_json, filters_applied_json,
-            used_fallback, confidence, provider, track_count)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            used_fallback, confidence, provider, track_count, delivered_track_ids_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
         (user_id, raw_query, result['status'], json.dumps(result['entities'], ensure_ascii=False),
          json.dumps(filters_applied, ensure_ascii=False), int(used_fallback),
-         result['confidence'], provider, track_count)
+         result['confidence'], provider, len(ids), json.dumps(ids))
     )
     conn.commit()
     return cur.lastrowid
+
+
+def expand_playlist(conn, user_id, request_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                     build_similar_artists_fn):
+    """Ticket AI-25 (pedido por Niko: botón "Expandir" para pedir la
+    siguiente tanda de resultados de la MISMA petición original, en vez
+    de tener que volver a escribir la consulta). Reusa generate_playlist
+    entero (mismo ranking/cascada/buscar_similares/cantidad que ya se
+    habían resuelto en el turno original) — no vuelve a llamar al LLM,
+    relee las entidades ya parseadas de parsed_intent_json y le pasa
+    exclude_track_ids= lo ya entregado hasta ahora, para no repetir
+    nada.
+
+    `WHERE id=? AND user_id=?` al leer la fila, mismo criterio que
+    record_feedback — evita que un usuario expanda una petición ajena.
+    Devuelve None si la petición no existe o no es de este usuario (el
+    caller en app.py lo traduce a 404)."""
+    row = conn.execute(
+        'SELECT raw_query, status, parsed_intent_json, filters_applied_json, confidence, provider, '
+        'delivered_track_ids_json FROM ai_playlist_requests WHERE id=? AND user_id=?',
+        (request_id, user_id)
+    ).fetchone()
+    if not row:
+        return None
+
+    entities = json.loads(row['parsed_intent_json'])
+    try:
+        delivered_ids = set(json.loads(row['delivered_track_ids_json'] or '[]'))
+    except (ValueError, TypeError):
+        delivered_ids = set()  # peticiones de antes de este ticket, sin esta columna poblada
+
+    new_tracks, filters_applied, used_fallback = generate_playlist(
+        conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        build_similar_artists_fn, exclude_track_ids=delivered_ids
+    )
+
+    new_ids = [t['id'] for t in new_tracks]
+    updated_delivered = sorted(delivered_ids | set(new_ids))
+    conn.execute(
+        'UPDATE ai_playlist_requests SET delivered_track_ids_json=? WHERE id=?',
+        (json.dumps(updated_delivered), request_id)
+    )
+    conn.commit()
+
+    return {
+        'request_id': request_id,
+        'query': row['raw_query'],
+        'tracks': new_tracks,
+        'track_count': len(new_tracks),
+        'filters_applied': filters_applied,
+        'used_fallback': used_fallback,
+    }
 
 
 def record_feedback(conn, user_id, request_id, rating, comment, saved_playlist_id):
@@ -1341,7 +1492,7 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
             used_fallback = True
 
     _request_id = _log_request(conn, user_id, raw_query, result, provider, filters_applied,
-                                used_fallback, len(tracks))
+                                used_fallback, tracks)
 
     return {
         'request_id': _request_id,
