@@ -20,6 +20,14 @@ recibe `dedupe_condition_fn` (`_track_dedupe_condition` de app.py) como
 parámetro inyectado, mismo patrón de inyección explícita que ya usa
 ai_playlist.py — sin esto, dos masters de la misma canción podían
 aparecer juntos en una playlist de fallback (bug reportado por Niko).
+
+Ticket AI-27 (pedido por Niko): este módulo NO sabe nada de paginación
+("Expandir") — a propósito. La paginación vive por completo en
+ai_playlist_pagination.py, sirviendo tandas de un pool ya resuelto una
+sola vez, sin volver a tocar este archivo ni el dedupe compartido con el
+resto de la app. Este archivo quedó idéntico a como estaba antes de los
+Tickets AI-25/AI-26, que habían agregado acá un parámetro de exclusión
+que ya no hace falta.
 """
 import json
 import random
@@ -43,14 +51,10 @@ def _rows_to_tracks(rows, track_to_json_fn):
     return tracks
 
 
-def _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn, exclude_track_ids=None):
+def _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn):
     """Nivel individual, señal más fuerte: lo que el usuario ya marcó
     explícitamente como favorito (pistas, artistas —de las dos tablas que
-    los guardan—, álbumes y géneros de perfil).
-
-    `exclude_track_ids` (Ticket AI-25, paginación "Expandir"): set
-    opcional de track_id ya entregados en un batch anterior — se
-    excluyen con AND NOT IN, aparte del grupo OR de favoritos."""
+    los guardan—, álbumes y géneros de perfil)."""
     fav_track_ids = [r['item_id'] for r in conn.execute(
         "SELECT item_id FROM user_item_favorites WHERE user_id=? AND item_type='track'", (user_id,)
     ).fetchall()]
@@ -96,10 +100,6 @@ def _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn, exclud
         clauses.append('(' + ' OR '.join(genre_clauses) + ')')
 
     where = ' OR '.join(clauses)
-    exclude_clause, exclude_params = '', []
-    if exclude_track_ids:
-        exclude_clause = f" AND t.id NOT IN ({','.join('?' * len(exclude_track_ids))})"
-        exclude_params = list(exclude_track_ids)
     # Hotfix AI-10 (bug reportado por Niko: "Nothing Else Matters" salía
     # duplicado — dos masters distintos de la misma canción). Mismo
     # patrón de dedupe que usa el resto del proyecto (ver
@@ -117,27 +117,21 @@ def _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn, exclud
               LEFT JOIN artists ar ON ar.id=al.artist_id
               LEFT JOIN track_meta tm ON tm.track_id=t.id
               LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
-              WHERE ({where}) AND {dedupe_clause}{exclude_clause}
+              WHERE ({where}) AND {dedupe_clause}
               ORDER BY COALESCE(tpc.pop_score,0) DESC LIMIT {_POOL_LIMIT}'''
-    return _rows_to_tracks(conn.execute(sql, params + params + exclude_params).fetchall(), track_to_json_fn)
+    return _rows_to_tracks(conn.execute(sql, params + params).fetchall(), track_to_json_fn)
 
 
-def _individual_behavior_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn, exclude_track_ids=None):
+def _individual_behavior_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn):
     """Nivel individual, segunda señal: lo que este usuario más escuchó de
     verdad (listening_events, Ticket AI-02/AI-03), no lo que dijo que le
     gusta. Cubre al usuario que nunca usó favoritos pero sí tiene
-    historial real de reproducción.
-
-    `exclude_track_ids` (Ticket AI-25): igual que en _favorites_pool."""
+    historial real de reproducción."""
     # extra_where='' (sin filtros propios más allá del JOIN con
     # listening_events) — mismo caso ya soportado por
     # _track_dedupe_condition según su propio docstring, cero params
     # extra que duplicar.
     dedupe_clause = dedupe_condition_fn(extra_where='', track_alias='t', pop_alias='tpc')
-    exclude_clause, exclude_params = '', []
-    if exclude_track_ids:
-        exclude_clause = f" AND t.id NOT IN ({','.join('?' * len(exclude_track_ids))})"
-        exclude_params = list(exclude_track_ids)
     sql = f'''SELECT t.*, al.id as album_id, al.name as album_name, al.year as album_year,
                      al.cover_path, ar.id as artist_id, ar.name as artist_name,
                      tm.mood, COALESCE(tpc.pop_score,0) as pop_score,
@@ -148,25 +142,19 @@ def _individual_behavior_pool(conn, user_id, track_to_json_fn, dedupe_condition_
               LEFT JOIN artists ar ON ar.id=al.artist_id
               LEFT JOIN track_meta tm ON tm.track_id=t.id
               LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
-              WHERE le.user_id=? AND {dedupe_clause}{exclude_clause}
+              WHERE le.user_id=? AND {dedupe_clause}
               GROUP BY t.id
               ORDER BY play_count DESC, COALESCE(tpc.pop_score,0) DESC
               LIMIT {_POOL_LIMIT}'''
-    return _rows_to_tracks(conn.execute(sql, [user_id] + exclude_params).fetchall(), track_to_json_fn)
+    return _rows_to_tracks(conn.execute(sql, (user_id,)).fetchall(), track_to_json_fn)
 
 
-def _aggregate_behavior_pool(conn, track_to_json_fn, dedupe_condition_fn, exclude_track_ids=None):
+def _aggregate_behavior_pool(conn, track_to_json_fn, dedupe_condition_fn):
     """Nivel agregado/global (ver AI_AGENT_MASTER_PLAN.md §8): lo más
     escuchado entre TODOS los usuarios, sin filtrar por user_id. Sirve de
     prior para cold-start — usuario nuevo, sin favoritos ni historial
-    propio todavía, pero la base ya tiene señal de otros usuarios.
-
-    `exclude_track_ids` (Ticket AI-25): igual que en _favorites_pool."""
+    propio todavía, pero la base ya tiene señal de otros usuarios."""
     dedupe_clause = dedupe_condition_fn(extra_where='', track_alias='t', pop_alias='tpc')
-    exclude_clause, exclude_params = '', []
-    if exclude_track_ids:
-        exclude_clause = f" AND t.id NOT IN ({','.join('?' * len(exclude_track_ids))})"
-        exclude_params = list(exclude_track_ids)
     sql = f'''SELECT t.*, al.id as album_id, al.name as album_name, al.year as album_year,
                      al.cover_path, ar.id as artist_id, ar.name as artist_name,
                      tm.mood, COALESCE(tpc.pop_score,0) as pop_score,
@@ -177,33 +165,24 @@ def _aggregate_behavior_pool(conn, track_to_json_fn, dedupe_condition_fn, exclud
               LEFT JOIN artists ar ON ar.id=al.artist_id
               LEFT JOIN track_meta tm ON tm.track_id=t.id
               LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
-              WHERE {dedupe_clause}{exclude_clause}
+              WHERE {dedupe_clause}
               GROUP BY t.id
               ORDER BY play_count DESC, COALESCE(tpc.pop_score,0) DESC
               LIMIT {_POOL_LIMIT}'''
-    return _rows_to_tracks(conn.execute(sql, exclude_params).fetchall(), track_to_json_fn)
+    return _rows_to_tracks(conn.execute(sql).fetchall(), track_to_json_fn)
 
 
-def personalized_fallback(conn, user_id, track_to_json_fn, dedupe_condition_fn, limit, exclude_track_ids=None):
+def personalized_fallback(conn, user_id, track_to_json_fn, dedupe_condition_fn, limit):
     """Punto de entrada único. Prueba, en orden de señal más fuerte a más
     débil: favoritos -> comportamiento individual -> comportamiento
     agregado. Devuelve (tracks, source_label) — source_label es None si
     ninguna de las tres tuvo nada (usuario nuevo Y base sin uso todavía),
     en cuyo caso quien llama cae al backstop de popularidad global de
-    ai_playlist.py, sin cambios respecto al Ticket AI-01.
-
-    `exclude_track_ids` (Ticket AI-25, paginación "Expandir"): se pasa
-    tal cual a los tres niveles — antes de este ticket, cuando la
-    relajación de filtros se agotaba y caía acá, este escalón no sabía
-    qué ya se había entregado en un batch anterior y podía repetir
-    pistas ya mostradas."""
+    ai_playlist.py, sin cambios respecto al Ticket AI-01."""
     for source_name, pool_fn in (
-        ('favorites', lambda: _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn,
-                                               exclude_track_ids=exclude_track_ids)),
-        ('individual_behavior', lambda: _individual_behavior_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn,
-                                                                    exclude_track_ids=exclude_track_ids)),
-        ('aggregate_behavior', lambda: _aggregate_behavior_pool(conn, track_to_json_fn, dedupe_condition_fn,
-                                                                  exclude_track_ids=exclude_track_ids)),
+        ('favorites', lambda: _favorites_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn)),
+        ('individual_behavior', lambda: _individual_behavior_pool(conn, user_id, track_to_json_fn, dedupe_condition_fn)),
+        ('aggregate_behavior', lambda: _aggregate_behavior_pool(conn, track_to_json_fn, dedupe_condition_fn)),
     ):
         pool = pool_fn()
         if pool:

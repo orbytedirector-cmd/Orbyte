@@ -34,6 +34,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from genre_similarity import genre_similarity as _genre_similarity_fn
 import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapper), módulo aislado
+import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), módulo aislado
 import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -1052,10 +1053,18 @@ def get_db_connection():
         "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_comment TEXT",
         "ALTER TABLE ai_playlist_requests ADD COLUMN saved_playlist_id INTEGER",
         "ALTER TABLE ai_playlist_requests ADD COLUMN feedback_at TEXT",
-        # Ticket AI-25 (paginación "Expandir") — guarda los track_id ya
-        # entregados en esta petición, para que expand_playlist() sepa
-        # qué excluir en el próximo batch.
+        # Ticket AI-25 (paginación "Expandir", primera versión) — quedó
+        # sin usarse, reemplazada por las dos columnas de AI-27 de abajo
+        # (ver ai_playlist_pagination.py). No se borra — SQLite no borra
+        # columnas fácilmente y no hace daño dejarla.
         "ALTER TABLE ai_playlist_requests ADD COLUMN delivered_track_ids_json TEXT",
+        # Ticket AI-27 (pedido por Niko: paginación sin re-consultar la
+        # base con exclusiones) — el pool completo que devolvió
+        # generate_playlist para esta petición (no solo lo mostrado) y
+        # cuántos de esos ya se entregaron. Ver ai_playlist_pagination.py,
+        # módulo nuevo y exclusivo para esto.
+        "ALTER TABLE ai_playlist_requests ADD COLUMN candidate_pool_json TEXT",
+        "ALTER TABLE ai_playlist_requests ADD COLUMN pool_served_count INTEGER DEFAULT 0",
     ):
         try:
             conn.execute(ddl)
@@ -3281,25 +3290,27 @@ def api_v1_ai_playlist():
 @app.route('/api/v1/ai/playlist/<int:request_id>/expand', methods=['POST'])
 @api_login_required
 def api_v1_ai_playlist_expand(request_id):
-    """Ticket AI-25 (pedido por Niko) — botón "Expandir": la siguiente
-    tanda de resultados de la MISMA petición original (mismo
-    ranking/cascada/buscar_similares/cantidad ya resueltos en el turno
-    original), sin repetir nada de lo ya entregado y sin volver a
-    llamar al LLM — reusa ai_playlist.expand_playlist(), que relee
-    parsed_intent_json de la petición original.
+    """Ticket AI-27 (pedido por Niko) — botón "Expandir": sirve la
+    siguiente tanda del pool que ya se resolvió y guardó al armar la
+    respuesta original (ai_playlist_pagination.store_pool, llamado desde
+    ai_playlist.handle_request) — no vuelve a consultar la base con
+    ranking/cascada/dedupe, solo lee qué pistas siguen en la lista ya
+    guardada. Reemplaza al Ticket AI-25 (que re-consultaba con una lista
+    creciente de qué excluir, tocando 6 funciones compartidas con el
+    resto de la app para poder hacerlo).
     """
     conn = get_db_connection()
     try:
-        result = ai_playlist.expand_playlist(
-            conn, g.api_user['id'], request_id,
-            track_to_json_fn=track_to_json,
-            build_adv_filters_fn=_build_adv_filters,
-            dedupe_condition_fn=_track_dedupe_condition,
-            build_similar_artists_fn=build_similar_artists,
+        tracks = ai_playlist_pagination.next_page(
+            conn, g.api_user['id'], request_id, track_to_json_fn=track_to_json,
         )
-        if result is None:
+        if tracks is None:
             return jsonify({'error': 'not_found'}), 404
-        return jsonify(result)
+        return jsonify({
+            'request_id': request_id,
+            'tracks': tracks,
+            'track_count': len(tracks),
+        })
     finally:
         conn.close()
 
