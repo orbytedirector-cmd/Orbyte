@@ -762,6 +762,16 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass
+    # Lazy migration: Ticket 26 — apartado de Configuración. Una sola
+    # columna JSON con TODAS las preferencias adentro (mismo patrón que
+    # favorite_genres_json arriba) en vez de una columna por setting, para
+    # no necesitar otra migración cada vez que se agrega una preferencia
+    # nueva — ver DEFAULT_USER_SETTINGS / _settings_payload más abajo.
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN settings_json TEXT")
+        conn.commit()
+    except Exception:
+        pass
     # Lazy migration: Ticket 19, Feature 5 — nickname opcional que
     # reemplaza al email en el Header del cliente nativo cuando está
     # seteado. NULL/vacío = se sigue mostrando el email (fallback resuelto
@@ -1641,6 +1651,135 @@ def api_v1_me():
         # así que la columna ya está ahí una vez migrada.
         'nickname':     user['nickname'],
     })
+
+# Ticket 26 — apartado de Configuración. DEFAULT_USER_SETTINGS es la
+# fuente de verdad del shape completo: agregar una preferencia nueva acá
+# es la única migración que hace falta (settings_json ya es una sola
+# columna JSON, ver Lote 1). Los usuarios existentes heredan el default
+# de una key nueva hasta que la pisen explícitamente vía PUT — no hace
+# falta backfill.
+DEFAULT_USER_SETTINGS = {
+    # Categoría B (Ticket 26) — cantidades de Orbitron y búsqueda general.
+    # Mismos valores que _PLAYLIST_SIZE/_MAX_CANTIDAD (ai_playlist.py) y
+    # PAGE_SIZE (este archivo) al momento de esta auditoría — la lectura
+    # efectiva de esos valores por-usuario se conecta en un lote aparte,
+    # esto solo persiste la preferencia.
+    'orbitron_default_results': 25,
+    'orbitron_max_top_n': 100,
+    'search_page_size': 20,
+    # Categoría C (Ticket 26) — gesto de triple-tap para reportar (Ticket
+    # 19/25), confirmado con Niko como toggle on/off simple.
+    'triple_tap_report_enabled': True,
+    # Categoría A (Ticket 26) — timer de sueño. Confirmado con Niko: vive
+    # solo en Settings (no como acción rápida desde reproducción). Este
+    # valor es el último usado / default del picker, no el estado de un
+    # timer corriendo (eso es efímero, vive en el cliente).
+    'sleep_timer_default_minutes': 30,
+    # Categoría D (Ticket 26) — techo de calidad DSD según el DAC
+    # conectado. 'auto' preserva el comportamiento actual (DSD64 nativo,
+    # DSD128+ siempre transcodifica, Ticket 16) hasta que el motor de
+    # audio del lado iOS use este valor para decidir distinto.
+    'dac_max_dsd_tier': 'auto',
+}
+
+_DAC_DSD_TIERS = {'auto', 'dsd64', 'dsd128', 'dsd256'}
+
+
+def _settings_payload(user_id):
+    """Arma el JSON de settings — merge de lo persistido sobre los
+    defaults (nunca al revés), para que una key nueva en
+    DEFAULT_USER_SETTINGS aparezca para todos los usuarios sin tocar
+    filas existentes. Ignora keys persistidas que ya no existen en
+    DEFAULT_USER_SETTINGS (setting removida en una versión futura)."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            'SELECT settings_json FROM users WHERE id=?', (user_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    stored = json.loads(row['settings_json']) if row and row['settings_json'] else {}
+    merged = dict(DEFAULT_USER_SETTINGS)
+    merged.update({k: v for k, v in stored.items() if k in DEFAULT_USER_SETTINGS})
+    return merged
+
+
+@app.route('/api/v1/settings')
+@api_login_required
+def api_v1_settings_get():
+    return jsonify(_settings_payload(g.api_user['id']))
+
+
+@app.route('/api/v1/settings', methods=['PUT'])
+@api_login_required
+def api_v1_settings_update():
+    """Update parcial — solo se validan/pisan las keys presentes en el
+    body, el resto queda como estaba. Todas las validaciones son sobre
+    el JSON en memoria antes de persistir nada, así un solo campo
+    inválido no deja el resto a mitad de aplicar (falla atómica)."""
+    data = request.get_json(silent=True) or {}
+    current = _settings_payload(g.api_user['id'])
+    errors = {}
+
+    # orbitron_max_top_n se procesa antes que orbitron_default_results
+    # para que, si vienen ambos en el mismo PUT, el tope ya actualizado
+    # sea el que valida al default (no el viejo).
+    if 'orbitron_max_top_n' in data:
+        v = data['orbitron_max_top_n']
+        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 500:
+            current['orbitron_max_top_n'] = v
+        else:
+            errors['orbitron_max_top_n'] = 'must be an integer between 1 and 500'
+
+    if 'orbitron_default_results' in data:
+        v = data['orbitron_default_results']
+        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= current['orbitron_max_top_n']:
+            current['orbitron_default_results'] = v
+        else:
+            errors['orbitron_default_results'] = 'must be an integer between 1 and orbitron_max_top_n'
+
+    if 'search_page_size' in data:
+        v = data['search_page_size']
+        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 100:
+            current['search_page_size'] = v
+        else:
+            errors['search_page_size'] = 'must be an integer between 1 and 100'
+
+    if 'triple_tap_report_enabled' in data:
+        v = data['triple_tap_report_enabled']
+        if isinstance(v, bool):
+            current['triple_tap_report_enabled'] = v
+        else:
+            errors['triple_tap_report_enabled'] = 'must be a boolean'
+
+    if 'sleep_timer_default_minutes' in data:
+        v = data['sleep_timer_default_minutes']
+        if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 480:
+            current['sleep_timer_default_minutes'] = v
+        else:
+            errors['sleep_timer_default_minutes'] = 'must be an integer between 1 and 480 minutes'
+
+    if 'dac_max_dsd_tier' in data:
+        v = data['dac_max_dsd_tier']
+        if isinstance(v, str) and v in _DAC_DSD_TIERS:
+            current['dac_max_dsd_tier'] = v
+        else:
+            errors['dac_max_dsd_tier'] = f'must be one of {sorted(_DAC_DSD_TIERS)}'
+
+    if errors:
+        return jsonify({'error': 'validation_failed', 'details': errors}), 400
+
+    conn = get_db_connection()
+    try:
+        conn.execute(
+            'UPDATE users SET settings_json=? WHERE id=?',
+            (json.dumps(current), g.api_user['id'])
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(current)
+
 
 @app.route('/api/v1/report-issue', methods=['POST'])
 @api_login_required
