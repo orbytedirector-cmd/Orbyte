@@ -2048,13 +2048,19 @@ def api_v1_admin_logs_download(name):
         return jsonify({'error': 'not_found'}), 404
     return send_file(full, mimetype='text/plain', as_attachment=True, download_name=name)
 
-def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_):
+def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_, page_size=None):
     """Despacha al mismo helper que ya usan las rutas web (/mood/, /genre/,
     /led/, etc.) — así el resultado que ve el cliente nativo es idéntico al
-    de la web, sin reimplementar cada tipo de filtro."""
+    de la web, sin reimplementar cada tipo de filtro.
+
+    `page_size` (Ticket 26, Categoría B): resuelto por api_v1_albums()
+    desde settings_json del usuario — este helper es exclusivo de
+    /api/v1/albums (único caller), así que a diferencia de _meta_browse/
+    _paginate no hace falta preservar un default silencioso para rutas web:
+    None acá simplemente cae en PAGE_SIZE más abajo, igual que siempre."""
     order = _album_order(sort, dir_)
     if filter_type in ('mood', 'idioma', 'momento', 'era', 'tier', 'tema_lirico'):
-        return _meta_browse(conn, filter_type, filter_value, page, '', filter_type, sort, dir_)
+        return _meta_browse(conn, filter_type, filter_value, page, '', filter_type, sort, dir_, page_size=page_size)
     if filter_type == 'genre':
         count_sql = '''SELECT COUNT(DISTINCT al.id) FROM albums al
                        JOIN tracks t ON t.album_id=al.id
@@ -2070,7 +2076,7 @@ def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_):
                        JOIN tracks t ON t.album_id=al.id
                        LEFT JOIN track_meta tm ON tm.track_id=t.id
                        WHERE t.genre=? OR tm.genre_primary=?'''
-        return _paginate(conn, count_sql, [filter_value, filter_value], data_sql, [filter_value, filter_value], page, order)
+        return _paginate(conn, count_sql, [filter_value, filter_value], data_sql, [filter_value, filter_value], page, order, page_size=page_size)
     if filter_type == 'led':
         count_sql = '''SELECT COUNT(DISTINCT al.id)
                        FROM albums al JOIN tracks t ON t.album_id=al.id
@@ -2084,7 +2090,7 @@ def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_):
                        JOIN tracks t ON t.album_id=al.id
                        LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
                        WHERE t.led_color=?'''
-        return _paginate(conn, count_sql, [filter_value], data_sql, [filter_value, filter_value], page, order)
+        return _paginate(conn, count_sql, [filter_value], data_sql, [filter_value, filter_value], page, order, page_size=page_size)
     return [], 0, 1
 
 @app.route('/api/v1/home/facets')
@@ -2355,21 +2361,22 @@ def api_v1_favorites_detailed():
         page = 1
     # Ticket 19, Feature 3: "Reproducir Todo" necesita TODOS los
     # favoritos hasta el tope acordado con el PO (20 artistas / 50
-    # álbumes / 500 pistas) en un solo request, no 25 páginas
-    # secuenciales de a PAGE_SIZE=20. `limit`, si viene, reemplaza
-    # PAGE_SIZE para ese request puntual — page se ignora en ese caso
-    # (siempre offset 0), es un pedido de "dame todo de una", no una
-    # página más. Tope duro de 500 del lado del servidor pase lo que
-    # pase en el query param, para no habilitar un abuso tipo
-    # ?limit=999999.
+    # álbumes / 500 pistas) en un solo request, no N páginas
+    # secuenciales de a search_page_size (Ticket 26, Categoría B — antes
+    # PAGE_SIZE fijo). `limit`, si viene, reemplaza el default para ese
+    # request puntual — page se ignora en ese caso (siempre offset 0),
+    # es un pedido de "dame todo de una", no una página más. Tope duro
+    # de 500 del lado del servidor pase lo que pase en el query param,
+    # para no habilitar un abuso tipo ?limit=999999.
+    default_page_size = _settings_payload(g.api_user['id'])['search_page_size']
     limit_param = request.args.get('limit')
-    page_size = PAGE_SIZE
-    offset = (page - 1) * PAGE_SIZE
+    page_size = default_page_size
+    offset = (page - 1) * default_page_size
     if limit_param is not None:
         try:
             page_size = max(1, min(500, int(limit_param)))
         except (TypeError, ValueError):
-            page_size = PAGE_SIZE
+            page_size = default_page_size
         offset = 0
 
     conn = get_db_connection()
@@ -3191,7 +3198,8 @@ def api_v1_albums():
         dir_ = request.args.get('dir', 'desc')
         conn = get_db_connection()
         try:
-            albums_raw, total, total_pages = _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_)
+            page_size = _settings_payload(g.api_user['id'])['search_page_size']
+            albums_raw, total, total_pages = _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_, page_size=page_size)
         finally:
             conn.close()
         albums = [{
@@ -3414,6 +3422,12 @@ def api_v1_ai_playlist():
         prior_entities = None
     conn = get_db_connection()
     try:
+        # Ticket 26, Categoría B: default/tope por usuario en vez de los
+        # constantes fijos de siempre — _settings_payload ya hace el merge
+        # sobre DEFAULT_USER_SETTINGS, así que un usuario que nunca tocó
+        # Configuración obtiene exactamente los mismos valores que antes
+        # de este ticket (25/100).
+        user_settings = _settings_payload(g.api_user['id'])
         result = ai_playlist.handle_request(
             conn, g.api_user['id'], raw_query,
             track_to_json_fn=track_to_json,
@@ -3421,6 +3435,8 @@ def api_v1_ai_playlist():
             dedupe_condition_fn=_track_dedupe_condition,
             build_similar_artists_fn=build_similar_artists,
             prior_entities=prior_entities,
+            default_results=user_settings['orbitron_default_results'],
+            max_top_n=user_settings['orbitron_max_top_n'],
         )
         return jsonify(result)
     finally:
@@ -5257,19 +5273,26 @@ def _normalize_title_for_radio_dedupe(title):
 
 
 def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
-              order_by='al.name ASC'):
-    """Run paginated query with dynamic ORDER BY."""
+              order_by='al.name ASC', page_size=None):
+    """Run paginated query with dynamic ORDER BY.
+
+    `page_size` (Ticket 26, Categoría B): None (default) usa PAGE_SIZE tal
+    cual — todas las rutas web (/genre/, /led/, /format/, /mood/, etc.)
+    siguen llamando esta función sin pasarlo, cero cambio de comportamiento
+    para ellas. Solo las rutas /api/v1/* que resuelven el valor desde
+    settings_json lo pasan explícito."""
+    effective_page_size = page_size or PAGE_SIZE
     total  = conn.execute(count_sql, count_params).fetchone()[0]
-    offset = (page - 1) * PAGE_SIZE
+    offset = (page - 1) * effective_page_size
     final_sql = data_sql + f' ORDER BY {order_by} LIMIT ? OFFSET ?'
-    rows  = conn.execute(final_sql, list(data_params) + [PAGE_SIZE, offset]).fetchall()
+    rows  = conn.execute(final_sql, list(data_params) + [effective_page_size, offset]).fetchall()
     albums = []
     for a in rows:
         d = dict(a)
         d['cover_path'] = clean_db_path(d.get('cover_path'))
         d['album_led']  = d.get('album_led') or 'yellow'
         albums.append(d)
-    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    total_pages = max(1, (total + effective_page_size - 1) // effective_page_size)
     return albums, total, total_pages
 
 # ── Búsqueda Avanzada (multi-filter search) ─────────────────────────────────────
@@ -5543,7 +5566,7 @@ def advanced_search_page():
     # that race entirely.
     return render_template('advanced_search.html', initial_query=request.query_string.decode('utf-8'), **opts)
 
-def _api_search_advanced_payload(args):
+def _api_search_advanced_payload(args, page_size=None):
     """
     Multi-filter search across every RichMetaPro + technical field at once.
     ?view=albums (default) or ?view=tracks selects which result set to return;
@@ -5558,11 +5581,17 @@ def _api_search_advanced_payload(args):
     'stream_url' por pista incondicionalmente (para ambos): el JS de la web
     ya ignora campos extra que no usa, y así el cliente nativo puede
     reproducir sin un segundo request a /api/v1/albums/<id>/tracks.
+
+    `page_size` (Ticket 26, Categoría B): None (default) preserva PAGE_SIZE
+    tal cual — api_search_advanced() (web) llama esta función sin pasarlo,
+    a propósito. Solo api_v1_search_advanced() resuelve el valor desde
+    settings_json y lo pasa explícito.
     """
     page = max(1, args.get('page', 1, type=int))
     sort = args.get('sort', 'popularidad')
     dir_ = args.get('dir', 'desc')
     view = args.get('view', 'albums')
+    effective_page_size = page_size or PAGE_SIZE
 
     conn = get_db_connection()
     try:
@@ -5593,7 +5622,7 @@ def _api_search_advanced_payload(args):
             total = conn.execute(count_sql, params).fetchone()[0]
 
             order = _track_order(sort, dir_)
-            offset = (page - 1) * PAGE_SIZE
+            offset = (page - 1) * effective_page_size
             data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                                   al.year as album_year, al.cover_path,
                                   ar.id as artist_id, ar.name as artist_name,
@@ -5607,7 +5636,7 @@ def _api_search_advanced_payload(args):
                            LEFT JOIN track_pop_cache tpc ON tpc.track_id=t.id
                            WHERE 1=1{where}
                            ORDER BY {order} LIMIT ? OFFSET ?'''
-            rows = conn.execute(data_sql, params + [PAGE_SIZE, offset]).fetchall()
+            rows = conn.execute(data_sql, params + [effective_page_size, offset]).fetchall()
 
             tracks = []
             for r in rows:
@@ -5631,7 +5660,7 @@ def _api_search_advanced_payload(args):
                 d['stream_url']    = f'/api/v1/stream/{d["id"]}'
                 tracks.append(d)
 
-            total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+            total_pages = max(1, (total + effective_page_size - 1) // effective_page_size)
             return {'tracks': tracks, 'total': total, 'total_pages': total_pages, 'page': page}
 
         # view == 'albums'
@@ -5662,7 +5691,7 @@ def _api_search_advanced_payload(args):
                        LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
                        WHERE 1=1{where}'''
         order = _album_order(sort, dir_)
-        albums, total, total_pages = _paginate(conn, count_sql, params, data_sql, params, page, order)
+        albums, total, total_pages = _paginate(conn, count_sql, params, data_sql, params, page, order, page_size=page_size)
         # _paginate() only cleans cover_path — it never had to add cover_url
         # because every other caller renders albums through Jinja (which
         # applies the |cover_url filter at template time). This is a plain
@@ -5684,8 +5713,12 @@ def api_search_advanced():
 def api_v1_search_advanced():
     """Espejo nativo de /api/search/advanced — Ticket 08, Lote A §4.2. Misma
     lógica exacta vía _api_search_advanced_payload (ver comentario ahí),
-    protegido por token en vez de cookie de sesión."""
-    return jsonify(_api_search_advanced_payload(request.args))
+    protegido por token en vez de cookie de sesión.
+
+    Ticket 26, Categoría B: a diferencia de la ruta web (arriba), acá se
+    resuelve search_page_size desde settings_json del usuario."""
+    page_size = _settings_payload(g.api_user['id'])['search_page_size']
+    return jsonify(_api_search_advanced_payload(request.args, page_size=page_size))
 
 # ── Format browse ──────────────────────────────────────────────────────────────
 
@@ -5804,7 +5837,7 @@ def browse_genre(genre):
 
 # ── RichMetaPro browse ─────────────────────────────────────────────────────────
 
-def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad', dir_='desc'):
+def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad', dir_='desc', page_size=None):
     # Map filter field to album_meta predominant column where available
     _AM_COL = {
         'mood':    'mood_predominante',
@@ -5869,7 +5902,7 @@ def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad
             "HAVING COUNT(*)*2 > (SELECT COUNT(*) FROM tracks t2 WHERE t2.album_id=al.id)".format(f=field)
         )
     order = _album_order(sort, dir_)
-    return _paginate(conn, count_sql, [value], data_sql, [value], page, order)
+    return _paginate(conn, count_sql, [value], data_sql, [value], page, order, page_size=page_size)
 
 
 @app.route('/mood/<path:mood>')
@@ -6954,7 +6987,7 @@ def api_v1_radio_next():
         conn.close()
 
 
-def _api_meta_tracks_payload(args):
+def _api_meta_tracks_payload(args, page_size=None):
     """Cuerpo compartido de /api/meta/tracks (web) y /api/v1/meta/tracks
     (nativo, con @api_login_required) — Ticket 08, Lote A §4.3. Extraído de
     la ruta web al agregar el mirror nativo, mismo criterio que
@@ -6962,7 +6995,13 @@ def _api_meta_tracks_payload(args):
     lógica de dedupe/paginación). Devuelve (payload_dict, status_code) para
     que ambas rutas puedan propagar el 400 de 'field/value inválido' sin
     duplicar esa validación. Agrega 'stream_url' por pista
-    incondicionalmente, igual que en _api_search_advanced_payload."""
+    incondicionalmente, igual que en _api_search_advanced_payload.
+
+    `page_size` (Ticket 26, Categoría B): None (default) preserva PAGE_SIZE
+    tal cual para la ruta web — solo api_v1_meta_tracks() lo resuelve desde
+    settings_json y lo pasa explícito. No aplica al modo `intercalar`, que
+    ya tenía su propio tope fijo (500) independiente de la paginación
+    normal — eso no cambia."""
     field      = args.get('field',      '').strip()
     value      = args.get('value',      '').strip()
     page       = max(1, args.get('page', 1, type=int))
@@ -7038,8 +7077,9 @@ def _api_meta_tracks_payload(args):
             offset = 0
             order  = 'RANDOM()'
         else:
-            limit  = PAGE_SIZE
-            offset = (page - 1) * PAGE_SIZE
+            effective_page_size = page_size or PAGE_SIZE
+            limit  = effective_page_size
+            offset = (page - 1) * effective_page_size
             order  = _track_order(sort, dir_)
 
         # Build the WHERE clause — per-track always (see comment above)
@@ -7094,7 +7134,7 @@ def _api_meta_tracks_payload(args):
             d['container_ext']  = _container_ext(d)
             result.append(d)
 
-        total_pages = 1 if intercalar else max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE)
+        total_pages = 1 if intercalar else max(1, (count + effective_page_size - 1) // effective_page_size)
         return {
             'tracks':      result,
             'total':       count,
@@ -7115,8 +7155,12 @@ def api_meta_tracks():
 def api_v1_meta_tracks():
     """Espejo nativo de /api/meta/tracks — Ticket 08, Lote A §4.3. Misma
     lógica exacta vía _api_meta_tracks_payload (ver comentario ahí),
-    protegido por token en vez de cookie de sesión."""
-    payload, status = _api_meta_tracks_payload(request.args)
+    protegido por token en vez de cookie de sesión.
+
+    Ticket 26, Categoría B: a diferencia de la ruta web (arriba), acá se
+    resuelve search_page_size desde settings_json del usuario."""
+    page_size = _settings_payload(g.api_user['id'])['search_page_size']
+    payload, status = _api_meta_tracks_payload(request.args, page_size=page_size)
     return jsonify(payload), status
 
 

@@ -1,0 +1,65 @@
+Ticket 26 (Lote 4/backend): Categoría B completa — cantidades por usuario
+
+Conecta las 3 preferencias de settings_json (Lote 1) a la lógica real,
+reemplazando las constantes fijas SOLO para las rutas /api/v1/* (lo
+que usa la app iOS) — las rutas web del PWA quedan intactas, ver nota
+de alcance más abajo.
+
+## Orbitron (orbitron_default_results / orbitron_max_top_n)
+
+- ai_playlist._normalize_entities/interpret_query: nuevo parámetro
+  opcional `max_cantidad` (default _MAX_CANTIDAD, compatible hacia
+  atrás) — valida el "Top N" explícito contra el tope del usuario en
+  vez del fijo.
+- ai_playlist.handle_request: nuevos parámetros opcionales
+  `default_results`/`max_top_n`. None (default) cae en las mismas
+  constantes de siempre — cero cambio para cualquier llamada que no
+  los pase.
+- app.py::api_v1_ai_playlist: resuelve _settings_payload(user_id) y
+  pasa ambos valores. Único caller de handle_request().
+
+## Paginación general (search_page_size)
+
+Resultó más grande de lo esperado: PAGE_SIZE lo comparten 5 funciones
+internas (_paginate, _meta_browse, _api_v1_filtered_albums,
+_api_search_advanced_payload, _api_meta_tracks_payload) usadas TANTO
+por rutas web viejas (/genre/, /led/, /format/, /mood/, /momento/,
+/era/, /tema/, /tier/, /idioma/, /api/search/advanced,
+/api/meta/tracks) COMO por los espejos /api/v1/* del nativo.
+
+Todas las 5 funciones ganan un parámetro opcional `page_size=None`:
+None preserva PAGE_SIZE tal cual (default de siempre). Cada una lo
+pasa a la que llama por dentro cuando corresponde. Endpoints
+/api/v1/* actualizados para resolverlo desde settings_json y pasarlo
+explícito:
+- api_v1_albums() -> _api_v1_filtered_albums()
+- api_v1_search_advanced() -> _api_search_advanced_payload()
+- api_v1_meta_tracks() -> _api_meta_tracks_payload()
+- api_v1_favorites_detailed(): no pasa por ningún helper compartido,
+  se resuelve inline (mismo lugar donde ya vivía el PAGE_SIZE fijo).
+  El override `?limit=` (usado por "Reproducir Todo", Ticket 19)
+  sigue funcionando exactamente igual — no se tocó esa lógica, solo
+  la fuente del default.
+
+## Decisión de alcance (avisada a Niko, no bloqueante)
+
+Las rutas web (/genre/, /led/, /mood/, etc. y sus pares /api/*) NO
+leen settings_json — siguen con PAGE_SIZE=20 fijo, sin ningún cambio
+de comportamiento. El ticket nunca mencionó la web, y varias de estas
+funciones son compartidas 1:1 con el nativo — extenderlo a la web es
+trabajo aparte a futuro si se decide que vale la pena.
+
+## Validación
+
+- Cada función tocada revisada con TODOS sus call sites (grep
+  exhaustivo, ver conversación) — confirmado: los que ya pasaban por
+  el mismo helper compartido con la web siguen sin pasar `page_size`
+  (comportamiento web intacto), solo los endpoints /api/v1/* lo
+  resuelven y pasan.
+- py_compile OK en ai_playlist.py y app.py.
+- Diff aplicado limpio (git apply --check + apply real) contra un
+  clone independiente de HEAD 00220d2, compila ahí también.
+
+Comportamiento por defecto sin tocar nada en Configuración: idéntico
+al actual en los 3 casos (25/100/20) — confirmado con Niko como
+requisito antes de empezar este lote.

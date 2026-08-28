@@ -209,9 +209,14 @@ def _closest_match(value, options, cutoff=0.6):
     return None
 
 
-def _normalize_entities(raw_entities, vocab):
+def _normalize_entities(raw_entities, vocab, max_cantidad=_MAX_CANTIDAD):
     """Normaliza cada valor devuelto por el LLM contra el vocabulario real de
-    la base, descartando lo que no matchea nada (nunca fuerza un match malo)."""
+    la base, descartando lo que no matchea nada (nunca fuerza un match malo).
+
+    `max_cantidad` (Ticket 26, Categoría B): tope real a validar contra —
+    _MAX_CANTIDAD sigue siendo el default si no se pasa nada (compatibilidad
+    hacia atrás), pero interpret_query/handle_request lo resuelven por
+    usuario desde settings_json antes de llegar acá."""
     out = _empty_entities()
     out['artists'] = [a for a in (raw_entities.get('artists') or []) if a][:5]
     out['albums'] = [a for a in (raw_entities.get('albums') or []) if a][:5]
@@ -265,7 +270,7 @@ def _normalize_entities(raw_entities, vocab):
     cantidad_raw = raw_entities.get('cantidad')
     try:
         cantidad = int(cantidad_raw)
-        out['cantidad'] = cantidad if 1 <= cantidad <= _MAX_CANTIDAD else None
+        out['cantidad'] = cantidad if 1 <= cantidad <= max_cantidad else None
     except (TypeError, ValueError):
         out['cantidad'] = None
 
@@ -416,10 +421,13 @@ def _call_groq(prompt):
     return _extract_json_object(text)
 
 
-def interpret_query(conn, raw_query):
+def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD):
     """Devuelve (parsed_dict, provider_used_or_None). parsed_dict sigue el
     schema de AI_AGENT_MASTER_PLAN.md §6. Gemini primero, Groq como
-    respaldo — ver ticket §3 para la justificación de por qué ese orden."""
+    respaldo — ver ticket §3 para la justificación de por qué ese orden.
+
+    `max_cantidad` (Ticket 26, Categoría B): pasado tal cual a
+    _normalize_entities — ver ese docstring."""
     vocab = _get_full_vocab(conn)
     prompt = _build_system_prompt(raw_query, vocab)
 
@@ -459,7 +467,7 @@ def interpret_query(conn, raw_query):
         if not parsed:
             continue
         _logger.info('proveedor %s respondió OK', provider_name)
-        entities = _normalize_entities(parsed.get('entities') or {}, vocab)
+        entities = _normalize_entities(parsed.get('entities') or {}, vocab, max_cantidad=max_cantidad)
         return {
             'status': parsed.get('status') if parsed.get('status') in
                       ('resolved', 'needs_clarification') else 'resolved',
@@ -1399,7 +1407,7 @@ def _entities_are_empty(entities):
 
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                    build_similar_artists_fn, prior_entities=None):
+                    build_similar_artists_fn, prior_entities=None, default_results=None, max_top_n=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
     por errores de la propia base de datos, que sí deben propagarse.
@@ -1418,6 +1426,13 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     comportamiento es idéntico al de antes de este ticket: cada llamada
     es un turno aislado, como en AI-01.
 
+    `default_results`/`max_top_n` (Ticket 26, Categoría B): valores por
+    usuario (settings_json, resueltos por app.py::api_v1_ai_playlist antes
+    de llamar acá) que reemplazan _PLAYLIST_SIZE/_MAX_CANTIDAD como
+    default/tope. None (default de este parámetro, no del usuario) cae en
+    los mismos módulo-constantes de siempre — mismo comportamiento exacto
+    que antes de este ticket para cualquier llamada que no los pase.
+
     Ticket AI-27 (pedido por Niko, paginación "Expandir" reconstruida
     para no tocar generate_playlist/_query_tracks/fallback_engine): acá
     es donde se pide el pool AMPLIADO (ai_playlist_pagination.fetch_size_for)
@@ -1428,7 +1443,12 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     ai_playlist_pagination.store_pool() para que "Expandir" lo sirva
     después sin volver a consultar nada."""
     t0 = time.time()
-    result, provider = interpret_query(conn, raw_query)
+    # Ticket 26, Categoría B: None (no vino nada, o el caller no pasó
+    # settings) cae en los constantes de siempre — mismo comportamiento
+    # exacto que antes de este ticket.
+    effective_default = default_results or _PLAYLIST_SIZE
+    effective_max = max_top_n or _MAX_CANTIDAD
+    result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max)
 
     if prior_entities:
         result['entities'] = _merge_entities(prior_entities, result['entities'])
@@ -1437,7 +1457,7 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     # pidió, o el default de siempre) vs. cuánto pedirle a
     # generate_playlist para tener de dónde paginar después — dos
     # números distintos a propósito.
-    display_size = result['entities'].get('cantidad') or _PLAYLIST_SIZE
+    display_size = result['entities'].get('cantidad') or effective_default
     fetch_size = ai_playlist_pagination.fetch_size_for(display_size)
 
     # Hotfix (Ticket AI-09): si tras el merge las entidades siguen
