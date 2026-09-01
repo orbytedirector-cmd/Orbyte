@@ -7887,6 +7887,232 @@ def api_admin_cast_volume():
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
 
 
+# ── /api/v1/cast/* — espejo nativo de /api/admin/cast/* de arriba (Ticket 30) ──
+# Decision explicita de Niko: DLNA/UPnP abierto a CUALQUIER usuario logueado
+# desde la app nativa, no solo admin (a diferencia de la version web, que
+# sigue admin-only - ver {% if current_user.is_admin %} en base.html, sin
+# tocar). Mismo patron ya establecido en este archivo para otros mirrors
+# nativos de rutas web con distinto gate de auth (_lyrics_payload/
+# api_v1_lyrics, _lookup_artist_website/api_v1_artist_website): TODA la
+# logica real (_cast_ssdp_discover/_cast_soap_call/_cast_try_send_track/
+# _cast_get_volume/_cast_set_volume/cast_token_for_track) se reusa tal
+# cual, cero duplicacion - el unico cambio real por endpoint es el
+# decorator, api_login_required (Bearer token O cookie de sesion de
+# cuenta real, cualquier usuario aprobado) en vez de admin_required
+# (cookie de sesion + is_admin). No hace falta agregar estos nombres a
+# _COLLAB_GUEST_BLOCKED_ENDPOINTS: un invitado de sesion colaborativa
+# nunca tiene session['user_id'] seteado (ver collab_join(), hace
+# session.clear() antes de armar su propia sesion con is_collab_guest),
+# asi que api_login_required lo rechaza igual sin necesitar la lista -
+# ademas, /api/v1/* esta completamente exento del gate de
+# _require_login() que es lo unico que consulta esa lista (linea
+# "if request.path.startswith('/api/v1/'): return" mas arriba en este
+# archivo). Confirmado leyendo _require_login()/api_login_required()/
+# collab_join() reales antes de asumir que esto era seguro.
+
+@app.route('/api/v1/cast/discover', methods=['POST'])
+@api_login_required
+def api_v1_cast_discover():
+    locations = _cast_ssdp_discover(timeout=4)
+    conn = get_db_connection()
+    found = 0
+    try:
+        for location in locations:
+            info = _cast_fetch_device_info(location)
+            if not info:
+                continue
+            name, manufacturer, model_name, av_transport_url, rendering_control_url, ip = info
+            conn.execute('''
+                INSERT INTO cast_targets (name, control_url, rendering_control_url, ip, manufacturer, model_name, discovered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(control_url) DO UPDATE SET
+                    name=excluded.name, ip=excluded.ip, rendering_control_url=excluded.rendering_control_url,
+                    manufacturer=excluded.manufacturer, model_name=excluded.model_name
+            ''', (name, av_transport_url, rendering_control_url, ip, manufacturer, model_name, _utcnow_iso()))
+            found += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok', 'found': found})
+
+
+@app.route('/api/v1/cast/targets')
+@api_login_required
+def api_v1_cast_targets():
+    conn = get_db_connection()
+    try:
+        rows = conn.execute('SELECT * FROM cast_targets ORDER BY name').fetchall()
+        return jsonify([dict(r) for r in rows])
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/cast/targets/<int:target_id>', methods=['DELETE'])
+@api_login_required
+def api_v1_cast_target_delete(target_id):
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM cast_targets WHERE id=?', (target_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/v1/cast/play', methods=['POST'])
+@api_login_required
+def api_v1_cast_play():
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    track_id = data.get('track_id')
+    if not target_id or not track_id:
+        return jsonify({'status': 'error', 'message': 'Falta target_id o track_id'}), 400
+
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+        track = conn.execute('''
+            SELECT t.id, t.title, t.artist, t.file_path, t.genre, t.track_number,
+                   al.name AS album_name, al.cover_path
+            FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
+            WHERE t.id=?''', (track_id,)).fetchone()
+        if not target:
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}), 404
+        if not track:
+            return jsonify({'status': 'error', 'message': 'Pista no encontrada'}), 404
+
+        file_path = clean_db_path(track['file_path'])
+        if not os.path.isfile(file_path):
+            return jsonify({'status': 'error', 'message': 'El archivo no está en disco'}), 404
+
+        token = cast_token_for_track(track['id'])
+        base = request.host_url.rstrip('/')
+        media_url = f"{base}/cast-audio/{track['id']}?token={token}"
+        cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
+        file_size = os.path.getsize(file_path)
+
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.dsf', '.dff'):
+            mime_candidates = _CAST_DSD_MIME_CANDIDATES
+        else:
+            mime_candidates = [_CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream']
+
+        ok, mime_used, reason = _cast_try_send_track(
+            target['control_url'], track, media_url, cover_url, file_path, file_size, mime_candidates)
+
+        if ok:
+            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, user={g.api_user['id']})")
+            conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
+            conn.commit()
+            global _cast_active_target
+            _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
+            return jsonify({'status': 'ok', 'device': target['name']})
+
+        app.logger.warning(f"[cast v1] '{track['title']}' -> {target['name']} FALLÓ: {reason}")
+        return jsonify({'status': 'error', 'message': reason}), 502
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/cast/transport', methods=['POST'])
+@api_login_required
+def api_v1_cast_transport():
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    action = data.get('action')
+    if action not in ('Play', 'Pause', 'Stop'):
+        return jsonify({'status': 'error', 'message': 'Acción inválida'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    body = (f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            f'<InstanceID>0</InstanceID>{"<Speed>1</Speed>" if action == "Play" else ""}</u:{action}>')
+    status, body_resp = _cast_soap_call(target['control_url'], action, body)
+    app.logger.info(f"[cast v1] {action} -> {target['name']}: HTTP {status}")
+    if status == 200:
+        global _cast_active_target
+        if action == 'Stop':
+            if _cast_active_target and _cast_active_target.get('id') == target['id']:
+                _cast_active_target = None
+        else:
+            _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
+@app.route('/api/v1/cast/seek', methods=['POST'])
+@api_login_required
+def api_v1_cast_seek():
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    seconds = data.get('seconds')
+    if target_id is None or seconds is None:
+        return jsonify({'status': 'error', 'message': 'Faltan parámetros'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    seconds = max(0, int(seconds))
+    target_time = f'{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}'
+    body = ('<u:Seek xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            '<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>'
+            f'<Target>{target_time}</Target></u:Seek>')
+    status, body_resp = _cast_soap_call(target['control_url'], 'Seek', body)
+    app.logger.info(f"[cast v1] Seek {seconds}s -> {target['name']}: HTTP {status}")
+    if status == 200:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
+@app.route('/api/v1/cast/volume', methods=['GET', 'POST'])
+@api_login_required
+def api_v1_cast_volume():
+    if request.method == 'GET':
+        target_id = request.args.get('target_id', type=int)
+        if target_id is None:
+            return jsonify({'status': 'error', 'message': 'Falta target_id'}), 400
+        conn = get_db_connection()
+        try:
+            target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+        finally:
+            conn.close()
+        if not target:
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+        if not target['rendering_control_url']:
+            return jsonify({'status': 'error', 'message': 'Este dispositivo no expone control de volumen por UPnP'}), 501
+        volume = _cast_get_volume(target['rendering_control_url'])
+        if volume is None:
+            return jsonify({'status': 'error', 'message': 'El dispositivo no respondió GetVolume'}), 502
+        return jsonify({'status': 'ok', 'volume': volume})
+
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    volume = data.get('volume')
+    if target_id is None or volume is None:
+        return jsonify({'status': 'error', 'message': 'Faltan parámetros'}), 400
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    if not target['rendering_control_url']:
+        return jsonify({'status': 'error', 'message': 'Este dispositivo no expone control de volumen por UPnP'}), 501
+    status, body_resp = _cast_set_volume(target['rendering_control_url'], max(0, min(100, int(volume))))
+    app.logger.info(f"[cast v1] SetVolume {volume} -> {target['name']}: HTTP {status}")
+    if status == 200:
+        return jsonify({'status': 'ok'})
+    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+
+
 def parse_range_header(rh, file_size):
     if not rh.startswith('bytes='): return (0, None)
     parts = rh[6:].split('-')
