@@ -2871,6 +2871,19 @@ def api_v1_artist_detail(artist_id):
                 'album_id': d.get('album_id'), 'album_name': d.get('album_name'),
                 'cover_url': cover_url_filter(cover),
                 'stream_url': f'/api/v1/stream/{d["id"]}',
+                # Fix (Motor 2 - prerrequisito): este dict se armaba a mano y
+                # dejaba afuera TODOS los campos de calidad, pese a que ya
+                # estaban en `d` via el `t.*` de arriba - una pista DSD en
+                # Populares sonaba por el camino equivocado desde que se
+                # conecto Play real ahi (Ticket 34), porque el cliente no
+                # tenia forma de saber que lo era. Mismas claves que
+                # track_to_json()/los demas endpoints que devuelven pistas.
+                'is_dsd': bool(d.get('is_dsd')),
+                'dsd_rate': d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'),
+                'bit_depth': d.get('bit_depth'),
+                'container_ext': _container_ext(d),
+                'is_mqa': bool(d.get('is_mqa')),
             })
 
         is_favorite = bool(conn.execute(
