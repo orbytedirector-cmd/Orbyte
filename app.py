@@ -2783,6 +2783,27 @@ def api_v1_playlist_reorder(playlist_id):
 # queries que ya arman artist()/album() para el HTML, así no se reinventa
 # qué datos importan.
 
+def _normalize_lastfm_count(value):
+    """Ticket 39 (bugfix, reportado por Niko): lastfm_listeners/
+    lastfm_playcount pueden llegar desde SQLite como número o como string
+    según la afinidad de tipo real de la columna en esa fila puntual —
+    mismo problema exacto que ya se documentó y resolvió del lado del
+    cliente para otros campos mixtos (ver FlexibleNumberStringSerializer/
+    FlexibleNumberString en Android/iOS). Los clientes declaran
+    OrbyteArtistDetail.lastfmListeners/lastfmPlaycount como Int? estricto
+    (sin ese serializer flexible), así que una fila con el valor guardado
+    como string rompe el decode COMPLETO del JSON de la pantalla de
+    detalle de artista. Se normaliza acá, en el origen, para arreglar la
+    causa raíz de una sola vez para ambos clientes en vez de parchear cada
+    modelo por separado — mismo criterio recomendado en TICKET_39 §2."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @app.route('/api/v1/artist/<int:artist_id>')
 @api_login_required
 def api_v1_artist_detail(artist_id):
@@ -2897,8 +2918,13 @@ def api_v1_artist_detail(artist_id):
             'flag': ar_data.get('flag'), 'genres': genres,
             'total_tracks': total_tracks, 'albums': albums,
             'similar_artists': similar_artists, 'top_tracks': top_tracks,
-            'lastfm_listeners': ar_data.get('lastfm_listeners'),
-            'lastfm_playcount': ar_data.get('lastfm_playcount'),
+            # Ticket 39: normalizado (ver _normalize_lastfm_count) -- antes
+            # se mandaba ar_data.get(...) crudo, que podia llegar como
+            # string desde SQLite y romper el decode COMPLETO del JSON en
+            # Android/iOS (OrbyteArtistDetail.lastfmListeners/lastfmPlaycount
+            # son Int? estricto en ambos clientes).
+            'lastfm_listeners': _normalize_lastfm_count(ar_data.get('lastfm_listeners')),
+            'lastfm_playcount': _normalize_lastfm_count(ar_data.get('lastfm_playcount')),
             'is_favorite': is_favorite,
         })
     finally:
@@ -3334,6 +3360,13 @@ def api_v1_search():
         ).fetchall()
 
         artists_out = [dict(a) for a in artists]
+        # Ticket 39 (barrido preventivo, mismo bug de api_v1_artist_detail):
+        # este endpoint tambien expone a.lastfm_listeners crudo desde
+        # SQLite -- normalizamos por si algun cliente futuro (o una lista
+        # de busqueda que muestre oyentes) llega a tipar este campo
+        # estrictamente como Int, igual que le paso al detalle de artista.
+        for _a in artists_out:
+            _a['lastfm_listeners'] = _normalize_lastfm_count(_a.get('lastfm_listeners'))
 
         albums_out = []
         for a in albums:
