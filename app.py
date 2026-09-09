@@ -2899,12 +2899,30 @@ def api_v1_artist_detail(artist_id):
                 # conecto Play real ahi (Ticket 34), porque el cliente no
                 # tenia forma de saber que lo era. Mismas claves que
                 # track_to_json()/los demas endpoints que devuelven pistas.
-                'is_dsd': bool(d.get('is_dsd')),
+                #
+                # Fix (Ticket 39, reportado por Niko: "No se pudo cargar
+                # el artista" -- reproducido con Helloween, confirmado con
+                # traceback real de Android): el bool(...) de aca abajo
+                # era el UNICO lugar de los 6 en todo el proyecto que
+                # envuelve is_dsd/is_mqa en bool() antes de mandarlo --
+                # jsonify() serializa eso como true/false real (JSON
+                # boolean), mientras que track_to_json() y los demas 5
+                # endpoints que devuelven pistas (incluido el pass-through
+                # normal de esta misma tabla) mandan el 0/1 crudo tal cual
+                # sale de SQLite (Python int, no bool). SearchTrack.isDSD/
+                # isMqa (Android) y su equivalente Swift estan tipados
+                # Int?/Int? A PROPOSITO, no Boolean (ver comentario en
+                # SearchModels.kt) -- kotlinx.serialization rompe el
+                # decode COMPLETO del JSON apenas encuentra un `true`
+                # literal donde espera un numero. Sacar el bool() alcanza:
+                # d.get(...) ya devuelve el 0/1 crudo esperado, igual que
+                # en los otros 5 lugares.
+                'is_dsd': d.get('is_dsd'),
                 'dsd_rate': d.get('dsd_rate'),
                 'sample_rate_real': d.get('sample_rate_real'),
                 'bit_depth': d.get('bit_depth'),
                 'container_ext': _container_ext(d),
-                'is_mqa': bool(d.get('is_mqa')),
+                'is_mqa': d.get('is_mqa'),
             })
 
         is_favorite = bool(conn.execute(
