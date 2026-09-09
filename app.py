@@ -3507,10 +3507,22 @@ def api_v1_ai_playlist_expand(request_id):
         )
         if tracks is None:
             return jsonify({'error': 'not_found'}), 404
+        # Fix (Ticket 39, reportado por Niko: "Expandir" no traia nada):
+        # OrbyteAiPlaylistExpandResult.usedFallback (Swift) y su
+        # equivalente Kotlin declaran `Bool`/`Boolean` NO opcional -- esta
+        # respuesta nunca incluia used_fallback, asi que el decode del
+        # JSON entero fallaba SIEMPRE (100% de los casos, confirmado en
+        # el log de iOS: "AIPlaylistView: Expandir fallo - decoding"),
+        # independientemente del tamano del pool o el ranking. Paginar
+        # nunca vuelve a llamar al LLM ni re-evalua fallback (ver
+        # next_page()/ai_playlist_pagination.py) -- el valor es
+        # constante False a proposito, no hace falta leerlo de la fila
+        # original.
         return jsonify({
             'request_id': request_id,
             'tracks': tracks,
             'track_count': len(tracks),
+            'used_fallback': False,
         })
     finally:
         conn.close()
