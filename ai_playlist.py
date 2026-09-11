@@ -1502,13 +1502,25 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             )
             suggested_target = round(quota * _SUGGESTION_SHARE)
             seen_ids = set()
+            resolution_log = []
             for title in suggested_titles:
                 match = _resolve_suggested_track_version(artist_pool, title, normalize_title_fn, led_quality_rank_fn)
                 if match and match['id'] not in seen_ids:
                     resolved_suggestions.append(match)
                     seen_ids.add(match['id'])
+                    resolution_log.append({'sugerido': title, 'resuelto': True, 'match': match.get('title')})
+                elif not match:
+                    # Ticket AI-31 (afinar el modelo): título que Gemini
+                    # propuso pero no matcheó nada en el catálogo real de
+                    # este artista — o Gemini "alucinó" la canción, o el
+                    # título está guardado muy distinto en la biblioteca.
+                    resolution_log.append({'sugerido': title, 'resuelto': False})
                 if len(resolved_suggestions) >= suggested_target:
                     break
+            if resolution_log:
+                _audit_logger.info(json.dumps(
+                    {'artista_sugerencias': nm, 'resolucion': resolution_log}, ensure_ascii=False
+                ))
 
         filter_pool = _query_tracks(
             conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
@@ -1521,10 +1533,22 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             # AI-28) es lo que efectivamente logra el reparto 60/40 sin
             # tocar esa lógica en absoluto: toma hasta `suggested_target`
             # sugeridas + el resto de filter_pool hasta completar la
-            # cuota. Se descarta de filter_pool cualquier pista que ya
-            # haya salido por sugerencia, para no repetir.
+            # cuota.
+            #
+            # Bugfix (Ticket AI-30, confirmado con log real de Niko:
+            # "For Whom The Bell Tolls" aparecía DOS veces — la elegida
+            # por sugerencia y también su "(Remastered)" vía el filtro).
+            # No alcanza con descartar por id exacto: otra VERSIÓN de la
+            # misma canción sugerida (remaster/vivo/acústico) tiene un id
+            # distinto pero es el mismo tema — se descarta también por
+            # título normalizado (mismo criterio de agrupación que ya usa
+            # _resolve_suggested_track_version).
             suggested_ids = {t['id'] for t in resolved_suggestions}
-            filter_pool = [t for t in filter_pool if t['id'] not in suggested_ids]
+            suggested_norm_titles = {normalize_title_fn(t.get('title')) for t in resolved_suggestions}
+            filter_pool = [
+                t for t in filter_pool
+                if t['id'] not in suggested_ids and normalize_title_fn(t.get('title')) not in suggested_norm_titles
+            ]
             fetched[nm] = resolved_suggestions + filter_pool
         else:
             fetched[nm] = filter_pool
@@ -1659,7 +1683,8 @@ def _resolve_suggested_track_version(artist_pool, suggested_title, normalize_tit
 
 
 def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                                          suggested_artist_ids, album_ids, track_ids, ranking, playlist_size):
+                                          suggested_artist_ids, album_ids, track_ids, ranking, playlist_size,
+                                          normalize_title_fn=None):
     """Ticket AI-30 — caso "sin artistas nombrados" (complementario al de
     _query_tracks_balanced_by_artist, que cubre "con artistas
     nombrados"). Cuando el usuario NO nombró ningún artista pero Gemini
@@ -1678,8 +1703,12 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
     2. El resto (40%, o más si lo sugerido no alcanza el 60%) sale de la
        búsqueda por filtros de siempre, sin restricción de artista.
     3. Se descarta de la lista de filtros cualquier pista que ya haya
-       salido por sugerencia, y el resultado final se arma con el mismo
-       shuffle ponderado que el resto de este ticket
+       salido por sugerencia — por id exacto Y por título normalizado
+       (Ticket AI-30 bugfix, mismo confirmado con log real en
+       _query_tracks_balanced_by_artist: dos versiones de la misma
+       canción, ej. "(Remasterizado)", tienen id distinto y se colaban
+       igual) —, y el resultado final se arma con el mismo shuffle
+       ponderado que el resto de este ticket
        (_merge_selected_by_track_popularity)."""
     suggested_target = round(playlist_size * _SUGGESTION_SHARE)
     suggested_candidate_limit = min(_CANDIDATE_POOL_SIZE, max(suggested_target * 4, suggested_target + 20))
@@ -1689,6 +1718,9 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
         limit_override=suggested_candidate_limit
     )[:suggested_target]
     suggested_ids = {t['id'] for t in suggested_pool}
+    suggested_norm_titles = (
+        {normalize_title_fn(t.get('title')) for t in suggested_pool} if normalize_title_fn else set()
+    )
 
     filter_target = playlist_size - len(suggested_pool)
     filter_pool = []
@@ -1699,7 +1731,11 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
             album_ids=album_ids, track_ids=track_ids, ranking=ranking,
             limit_override=filter_candidate_limit
         )
-        filter_pool = [t for t in filter_candidates if t['id'] not in suggested_ids][:filter_target]
+        filter_pool = [
+            t for t in filter_candidates
+            if t['id'] not in suggested_ids
+            and (not normalize_title_fn or normalize_title_fn(t.get('title')) not in suggested_norm_titles)
+        ][:filter_target]
 
     return _merge_selected_by_track_popularity(
         {'sugeridos_gemini': suggested_pool, 'filtro_general': filter_pool},
@@ -1936,17 +1972,23 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             # 40% de la búsqueda por filtros de siempre sin restricción
             # de artista. Ver _query_tracks_with_suggested_artists.
             #
-            # Alcance (Ticket AI-30, documentado a propósito): esta rama
-            # NO interactúa con la cascada artista-primero de más abajo
-            # (Ticket AI-24) — esa cascada solo se intenta cuando NO hay
-            # artist_ids/album_ids/track_ids en absoluto, y corre ANTES
-            # de llegar acá. Si en el futuro se quiere que las sugerencias
-            # de Gemini también compitan/complementen la cascada, es una
-            # decisión de producto aparte — no asumida acá.
+            # Interacción con la cascada artista-primero (Ticket AI-24,
+            # corregido — confirmado con log real de Niko, request 102):
+            # cuando hay ranking Y ni artist/album/track identity, la
+            # cascada corre PRIMERO (más abajo en esta función) y, si
+            # trae MENOS de playlist_size, llama a _run_query(args_dict)
+            # para completar el resto ("enriquecido_directo") — ESA
+            # llamada sí pasa por acá. En la práctica, entonces, esta
+            # rama SÍ termina contribuyendo cuando la cascada se queda
+            # corta — no compite con ella, la complementa en el hueco que
+            # deja. Si la cascada por sí sola ya llena playlist_size, esta
+            # rama nunca se ejecuta para ese pedido — comportamiento
+            # correcto: la cascada (basada en agregados reales de la
+            # biblioteca) ya alcanzó, no hace falta la sugerencia.
             return _query_tracks_with_suggested_artists(
                 conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                 suggested_artist_ids=suggested_artist_ids, album_ids=album_ids, track_ids=track_ids,
-                ranking=ranking, playlist_size=playlist_size
+                ranking=ranking, playlist_size=playlist_size, normalize_title_fn=normalize_title_fn
             )
         return _query_tracks(
             conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
