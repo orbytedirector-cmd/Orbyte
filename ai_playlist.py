@@ -160,6 +160,15 @@ def _empty_entities():
         # siempre). Ver _normalize_entities para la validación numérica.
         'cantidad': None,
         'place': None, 'motivation': None,
+        # Ticket AI-30 (idea de Niko: aprovechar el conocimiento musical
+        # general de Gemini, no solo su capacidad de extraer filtros) —
+        # exactamente uno de los dos se llena por turno, nunca los dos:
+        # 'pistas_sugeridas_por_artista' cuando el usuario SÍ nombró
+        # artistas (título de canciones que Gemini cree representativas
+        # de CADA uno), 'artistas_sugeridos' cuando NO nombró ninguno
+        # (nombres de artista que calzan con toda la intención
+        # combinada). Ver _SYSTEM_PROMPT_TEMPLATE y generate_playlist.
+        'pistas_sugeridas_por_artista': {}, 'artistas_sugeridos': [],
     }
 
 
@@ -262,6 +271,29 @@ def _normalize_entities(raw_entities, vocab, max_cantidad=_MAX_CANTIDAD):
     # mande una lista arbitrariamente larga.
     out['anios'] = [str(int(a)) for a in anios_raw if str(a).strip().lstrip('-').isdigit()][:12]
 
+    # Ticket AI-30 — a diferencia de genres/moods/etc., esto NO pasa por
+    # _closest_match: son nombres propios de artistas/canciones que
+    # Gemini propone desde su conocimiento general, no vocabulario
+    # cerrado de la biblioteca. Acá solo se sanea la FORMA (tipos,
+    # topes); la validación real contra lo que Niko realmente tiene pasa
+    # después, en generate_playlist (_resolve_suggested_track_version /
+    # _resolve_artist_ids) — mismo principio que "artists"/"tracks" de
+    # arriba, que tampoco fuzzy-matchean acá.
+    #
+    # La clave se normaliza con el MISMO .strip().lower() que usa
+    # _resolve_artist_ids_grouped para las claves de artist_id_groups —
+    # generate_playlist hace lookup de las sugerencias por ese nombre
+    # normalizado (ver _run_query); sin esto, "Helloween" (como lo haya
+    # escrito Gemini) nunca matchearía contra la clave "helloween" de
+    # artist_id_groups y las sugerencias se perderían en silencio.
+    suggested_tracks_raw = raw_entities.get('pistas_sugeridas_por_artista')
+    out['pistas_sugeridas_por_artista'] = {
+        str(k).strip().lower(): [str(t) for t in v if t][:8]
+        for k, v in (suggested_tracks_raw.items() if isinstance(suggested_tracks_raw, dict) else [])
+        if k and isinstance(v, list)
+    }
+    out['artistas_sugeridos'] = [a for a in (raw_entities.get('artistas_sugeridos') or []) if a][:10]
+
     # Ticket AI-22: 'ranking' es un enum cerrado — a diferencia del resto
     # de los campos, NO se intenta fuzzy-match si el LLM devuelve algo
     # fuera de _RANKING_VALUES. Mejor ranking=None (se ignora, cae al
@@ -300,7 +332,8 @@ entidades y devolver SOLO un objeto JSON (sin markdown, sin texto extra) con est
     "genres": [string], "moods": [string], "momentos": [string],
     "eras": [string], "temas": [string], "idiomas": [string], "paises": [string],
     "anios": [número], "ranking": string o null, "buscar_similares": boolean, "cantidad": número o null,
-    "place": string o null, "motivation": string o null
+    "place": string o null, "motivation": string o null,
+    "pistas_sugeridas_por_artista": {{}}, "artistas_sugeridos": [string]
   }},
   "confidence": número entre 0 y 1,
   "question": string o null,
@@ -369,6 +402,22 @@ biblioteca): {idiomas_list}. Identificá el idioma que pide el usuario y devolv�
 letras correspondiente (ej: "en español" -> "es", "en inglés" -> "en", "en alemán" -> "de", "en japonés" \
 -> "ja") — NUNCA el nombre completo del idioma en ningún idioma, ni una variante distinta de 2 letras que \
 no esté en esa lista exacta.
+- "pistas_sugeridas_por_artista" y "artistas_sugeridos" (Ticket AI-30): a diferencia de todo lo de \
+arriba, que son FILTROS, estos dos campos son sugerencias que salen de TU PROPIO conocimiento musical \
+general — el sistema las valida después contra la biblioteca real, así que no hace falta que existan ahí, \
+pero sí tienen que ser reales y precisas (nada inventado). Se llena EXACTAMENTE UNO de los dos, nunca los \
+dos, según si el usuario nombró artistas o no:
+  * Si "artists" tiene uno o más nombres: llená "pistas_sugeridas_por_artista" con hasta 8 títulos de \
+canciones por cada uno de esos artistas — las que vos consideres más relevantes/icónicas/representativas \
+de ESE artista puntual, según tu conocimiento (ej: para "Metallica" -> "Master of Puppets", "Enter \
+Sandman", "One", etc.). La clave de cada entrada tiene que ser EXACTAMENTE el mismo string que pusiste en \
+"artists" para ese artista. Dejá "artistas_sugeridos" como lista vacía.
+  * Si "artists" está VACÍO: llená "artistas_sugeridos" con 5 a 10 nombres de artistas reales y concretos \
+que vos consideres que mejor calzan con TODA la intención combinada del pedido a la vez (género + idioma + \
+década/era + mood + tema juntos, no un artista que solo cumpla uno de esos aspectos por separado). Dejá \
+"pistas_sugeridas_por_artista" como objeto vacío ({{}}).
+  * Si no tenés una sugerencia de calidad y precisa para el caso que corresponda, dejá el campo vacío \
+({{}} o []) en vez de forzar algo genérico o dudoso — una sugerencia de baja calidad es peor que ninguna.
 - "motivation" es el propósito de la escucha si el usuario lo menciona (ej: "para entrenar", "para \
 estudiar") — no es un filtro, es contexto.
 - "place" es un lugar mencionado explícitamente (ej: "para un roadtrip"), si aplica.
@@ -1335,7 +1384,8 @@ def _merge_selected_by_track_popularity(selected_by_name, order):
 
 def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                                       artist_id_groups, album_ids=None, track_ids=None, ranking=None,
-                                      playlist_size=_PLAYLIST_SIZE):
+                                      playlist_size=_PLAYLIST_SIZE, pistas_sugeridas_por_artista=None,
+                                      normalize_title_fn=None, led_quality_rank_fn=None):
     """Ticket AI-28 (Ticket 41, punto 1 — reportado por Niko: "Dame un
     Mix con lo mejor de: Helloween, Stratovarius, Sonata Arctica,
     Hammerfall..." quedaba casi todo concentrado en uno solo). Causa
@@ -1345,23 +1395,34 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
     LIMIT antes de que el sistema llegue a los demás, sin que exista
     ninguna cuota ni garantía por artista.
 
-    Solo se llama a esta función cuando hay 2+ NOMBRES de artista
-    resueltos (`artist_id_groups` con 2+ claves) — generate_playlist
-    decide eso; con 1 solo nombre se sigue usando _query_tracks tal cual,
-    orden puro por ranking, sin ningún cambio de comportamiento (pedido
-    explícito de Niko: el balanceo es solo para "mix" de 2+, no para
-    "lo mejor de Stratovarius" a secas).
+    Se llama a esta función cuando hay 2+ NOMBRES de artista resueltos
+    (`artist_id_groups` con 2+ claves), O exactamente 1 nombre CON
+    sugerencias de Gemini para él (Ticket AI-30, ver generate_playlist)
+    — con 1 solo nombre y sin sugerencias se sigue usando _query_tracks
+    tal cual, orden puro por ranking, sin ningún cambio de comportamiento
+    (pedido explícito de Niko: el balanceo es solo para "mix" de 2+ o
+    para inyectar sugerencias, no para "lo mejor de Stratovarius" a
+    secas sin más señales).
 
     Estrategia (decidida con Niko, Ticket 41):
     1. Popularidad de cada artista nombrado vía _artist_popularity_proxy.
     2. Cuotas vía _compute_artist_mix_quotas (50/50 con 2 nombres; con
        3+, top-2 se llevan 60% ponderado por raíz cuadrada entre ellos,
-       el resto se reparte parejo con el 40% restante).
+       el resto se reparte parejo con el 40% restante; con 1 solo
+       nombre, toda la cuota es playlist_size).
     3. Por cada artista, se trae un pool CANDIDATO más grande que su
-       cuota (mismo ORDER BY/ranking y mismos filtros de args_dict/
-       album_ids/track_ids de siempre, vía _query_tracks de toda la
-       vida — no se reinventa el criterio de matching ni de orden) para
-       tener de dónde sacar de más si algún otro artista se queda corto.
+       cuota. Ticket AI-30 (pedido por Niko: aprovechar el conocimiento
+       musical de Gemini): si `pistas_sugeridas_por_artista` trae
+       títulos para este artista puntual, el 60% de SU cuota
+       (_SUGGESTION_SHARE) se intenta cubrir primero con esas
+       sugerencias, resueltas y validadas contra la biblioteca real de
+       ESE artista (_resolve_suggested_track_version — elige la mejor
+       versión entre estudio/vivo/remaster si hay varias); el resto de
+       la cuota (o toda, si no hay sugerencias para este artista, o si
+       las sugeridas no llegan al 60%) sale de la búsqueda por filtros
+       de siempre (mismo ORDER BY/ranking y mismos filtros de
+       args_dict/album_ids/track_ids de siempre, vía _query_tracks — no
+       se reinventa el criterio de matching ni de orden).
     4. Si un artista nombrado no tiene suficientes pistas en la
        biblioteca para cubrir su cuota, el faltante se reparte entre los
        demás artistas nombrados que sí tengan pistas de sobra —
@@ -1384,6 +1445,7 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
     pop_by_name = {nm: _artist_popularity_proxy(conn, artist_id_groups[nm]) for nm in names}
     quotas = _compute_artist_mix_quotas(pop_by_name, playlist_size)
     order = sorted(names, key=lambda nm: pop_by_name[nm], reverse=True)
+    suggestions_by_name = pistas_sugeridas_por_artista or {}
 
     fetched = {}
     for nm in order:
@@ -1393,11 +1455,45 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
         # en _CANDIDATE_POOL_SIZE para no pedir de más si la cuota ya es
         # grande (ej. "las mejores 100 de estos 3 artistas").
         candidate_limit = min(_CANDIDATE_POOL_SIZE, max(quota * 4, quota + 20))
-        fetched[nm] = _query_tracks(
+        suggested_titles = suggestions_by_name.get(nm) or []
+
+        resolved_suggestions = []
+        if suggested_titles and normalize_title_fn and led_quality_rank_fn:
+            # Ticket AI-30: hasta el 60% de la cuota de ESTE artista sale
+            # de sus sugerencias, resueltas contra su propio catálogo
+            # (incluye similares si buscar_similares expandió el grupo —
+            # mismo set de ids que ya usa el resto de la función).
+            artist_pool = _fetch_artist_track_pool(
+                conn, artist_id_groups[nm], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn
+            )
+            suggested_target = round(quota * _SUGGESTION_SHARE)
+            seen_ids = set()
+            for title in suggested_titles:
+                match = _resolve_suggested_track_version(artist_pool, title, normalize_title_fn, led_quality_rank_fn)
+                if match and match['id'] not in seen_ids:
+                    resolved_suggestions.append(match)
+                    seen_ids.add(match['id'])
+                if len(resolved_suggestions) >= suggested_target:
+                    break
+
+        filter_pool = _query_tracks(
             conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
             artist_ids=artist_id_groups[nm], album_ids=album_ids, track_ids=track_ids, ranking=ranking,
             limit_override=candidate_limit
         )
+        if resolved_suggestions:
+            # Las sugeridas van PRIMERO en fetched[nm] — el slice
+            # [:quota] de más abajo (`selected`, sin cambios respecto a
+            # AI-28) es lo que efectivamente logra el reparto 60/40 sin
+            # tocar esa lógica en absoluto: toma hasta `suggested_target`
+            # sugeridas + el resto de filter_pool hasta completar la
+            # cuota. Se descarta de filter_pool cualquier pista que ya
+            # haya salido por sugerencia, para no repetir.
+            suggested_ids = {t['id'] for t in resolved_suggestions}
+            filter_pool = [t for t in filter_pool if t['id'] not in suggested_ids]
+            fetched[nm] = resolved_suggestions + filter_pool
+        else:
+            fetched[nm] = filter_pool
 
     selected = {nm: fetched[nm][:quotas.get(nm, 0)] for nm in order}
     total_deficit = sum(max(0, quotas.get(nm, 0) - len(fetched[nm])) for nm in order)
@@ -1421,6 +1517,159 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             # biblioteca chica para TODOS los artistas del mix a la vez).
 
     return _merge_selected_by_track_popularity(selected, order)
+
+
+# Ticket AI-30 — qué fracción del cupo de un artista (su cuota en un
+# mix, o el playlist_size completo si es el único nombrado) se llena
+# con sugerencias de Gemini antes de completar con la búsqueda por
+# filtros de siempre. Mismo valor y mismo criterio de "si no alcanza el
+# 60%, completa el filtro" para el caso "artistas sugeridos" (sin
+# ningún artista nombrado) — decidido con Niko en el chat, no hay razón
+# para que sean números distintos entre los dos casos.
+_SUGGESTION_SHARE = 0.6
+
+
+def _score_track_version(track, group, led_quality_rank_fn):
+    """Ticket AI-30 — score para elegir la versión "canónica" entre
+    variantes de una misma canción (estudio/vivo/remaster/acústico) al
+    resolver una sugerencia de Gemini contra la biblioteca real. Fórmula
+    confirmada con Niko (ejemplo trabajado en el chat: Master of Puppets
+    estudio 1986 vs remaster 2017 vs en vivo 1999 — gana la de estudio):
+
+        score = calidad×0.4 + reproducciones×0.4 + bonus_original×0.2
+
+    - calidad: ranking de led_color (led_quality_rank_fn, mismo mapeo
+      que ya usa _track_dedupe_condition del lado de app.py — inyectada
+      por parámetro, este módulo no reimplementa ese mapeo).
+    - reproducciones: lastfm_playcount normalizado 0-100 RELATIVO al
+      máximo del grupo (no de toda la biblioteca) — lo que importa acá
+      es cuál versión puntual es más escuchada, no compararla contra
+      canciones de otros artistas.
+    - bonus_original: 100 si es la versión del álbum con el `year` más
+      antiguo del grupo (el debut de ese tema), decayendo LINEAL según
+      qué tan lejos está ese año del más antiguo del grupo (0 en el año
+      más nuevo del grupo) — así "ser el original" pesa fuerte sin
+      aplastar del todo a una versión bastante mejor grabada o más
+      escuchada. 0 si no hay dato de año en el grupo."""
+    quality = led_quality_rank_fn(track.get('led_color'))
+    max_pc = max((_track_playcount(t) for t in group), default=0) or 1
+    pop_norm = _track_playcount(track) / max_pc * 100.0
+
+    years = [t.get('album_year') for t in group if t.get('album_year')]
+    my_year = track.get('album_year')
+    if years and my_year:
+        oldest, newest = min(years), max(years)
+        bonus = 100.0 if newest == oldest else 100.0 * (newest - my_year) / (newest - oldest)
+    else:
+        bonus = 0.0
+
+    return quality * 0.4 + pop_norm * 0.4 + bonus * 0.2
+
+
+def _fetch_artist_track_pool(conn, artist_ids, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+    """Ticket AI-30 — trae TODAS las pistas de un artista puntual (o de
+    su grupo de ids si buscar_similares expandió a similares — mismo
+    set que ya usa el resto de generate_playlist, ver artist_id_groups),
+    ya convertidas a dict vía track_to_json_fn (mismo formato que el
+    resto del pipeline), para poder agruparlas por título normalizado y
+    resolver sugerencias de Gemini contra ellas (ver
+    _resolve_suggested_track_version). Reusa _query_tracks tal cual en
+    vez de escribir SQL nuevo — mismo JOIN/criterio de matching de
+    siempre (ver AGENTE.md regla 2). skip_dedupe=True a propósito: acá
+    hacen falta TODAS las versiones existentes para poder puntuarlas
+    (_score_track_version), no la que ya elige _track_dedupe_condition
+    para la vista general. limit_override generoso (500) — ni el
+    catálogo de un artista muy prolífico debería superarlo en una
+    biblioteca personal."""
+    return _query_tracks(
+        conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        artist_ids=artist_ids, skip_dedupe=True, limit_override=500
+    )
+
+
+def _resolve_suggested_track_version(artist_pool, suggested_title, normalize_title_fn, led_quality_rank_fn):
+    """Ticket AI-30 — dado el pool YA TRAÍDO de todas las pistas de un
+    artista (ver _fetch_artist_track_pool) y un título que Gemini
+    propuso como "de las más relevantes" de ese artista, encuentra el
+    grupo de pistas que representan ese tema puntual (mismo título
+    normalizado — agrupa estudio/vivo/remaster/acústico aunque el
+    título literal sea distinto, vía normalize_title_fn inyectada,
+    _normalize_title_for_radio_dedupe de app.py / Ticket 14) y devuelve
+    UNA sola pista para representarlo, elegida por _score_track_version.
+
+    No reusa _resolve_track_ids (Ticket AI-12) a propósito: esa función
+    busca el match ÚNICO más cercano (fuzzy con n=1) contra el título
+    tal cual está guardado — no agrupa variantes con sufijo de versión
+    distinto, que es exactamente lo que hace falta acá. Devuelve None si
+    ninguna pista del artista se parece lo suficiente al título
+    sugerido (ej. Gemini alucinó una canción que ese artista no tiene)."""
+    norm_target = normalize_title_fn(suggested_title)
+    if not norm_target:
+        return None
+
+    groups = {}
+    for t in artist_pool:
+        key = normalize_title_fn(t.get('title'))
+        if key:
+            groups.setdefault(key, []).append(t)
+
+    group = groups.get(norm_target)
+    if not group:
+        close = difflib.get_close_matches(norm_target, list(groups.keys()), n=1, cutoff=_TRACK_MATCH_CUTOFF)
+        if not close:
+            return None
+        group = groups[close[0]]
+
+    return max(group, key=lambda t: _score_track_version(t, group, led_quality_rank_fn))
+
+
+def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                                          suggested_artist_ids, album_ids, track_ids, ranking, playlist_size):
+    """Ticket AI-30 — caso "sin artistas nombrados" (complementario al de
+    _query_tracks_balanced_by_artist, que cubre "con artistas
+    nombrados"). Cuando el usuario NO nombró ningún artista pero Gemini
+    propuso artistas reales que calzan con TODA la intención combinada
+    del pedido (género+idioma+década+mood juntos — ver
+    "artistas_sugeridos" en el prompt) y esos nombres SÍ existen en la
+    biblioteca (resuelto en generate_playlist vía _resolve_artist_ids,
+    sin expansión a similares — son ya la sugerencia final de Gemini,
+    no hace falta expandir más), se arma el pool así:
+
+    1. _SUGGESTION_SHARE (60%) del playlist_size sale de esos artistas
+       sugeridos — CON los mismos filtros del pedido (género/idioma/
+       década/etc, vía args_dict) para no traer, por ejemplo, un tema en
+       inglés de un artista sugerido si el usuario pidió específicamente
+       "en español".
+    2. El resto (40%, o más si lo sugerido no alcanza el 60%) sale de la
+       búsqueda por filtros de siempre, sin restricción de artista.
+    3. Se descarta de la lista de filtros cualquier pista que ya haya
+       salido por sugerencia, y el resultado final se arma con el mismo
+       shuffle ponderado que el resto de este ticket
+       (_merge_selected_by_track_popularity)."""
+    suggested_target = round(playlist_size * _SUGGESTION_SHARE)
+    suggested_candidate_limit = min(_CANDIDATE_POOL_SIZE, max(suggested_target * 4, suggested_target + 20))
+    suggested_pool = _query_tracks(
+        conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        artist_ids=suggested_artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
+        limit_override=suggested_candidate_limit
+    )[:suggested_target]
+    suggested_ids = {t['id'] for t in suggested_pool}
+
+    filter_target = playlist_size - len(suggested_pool)
+    filter_pool = []
+    if filter_target > 0:
+        filter_candidate_limit = min(_CANDIDATE_POOL_SIZE, max(filter_target * 4, filter_target + 20))
+        filter_candidates = _query_tracks(
+            conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            album_ids=album_ids, track_ids=track_ids, ranking=ranking,
+            limit_override=filter_candidate_limit
+        )
+        filter_pool = [t for t in filter_candidates if t['id'] not in suggested_ids][:filter_target]
+
+    return _merge_selected_by_track_popularity(
+        {'sugeridos_gemini': suggested_pool, 'filtro_general': filter_pool},
+        ['sugeridos_gemini', 'filtro_general']
+    )
 
 
 def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
@@ -1474,7 +1723,7 @@ def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_ad
 
 
 def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                       build_similar_artists_fn):
+                       build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None):
     """Filter mapper + relajación progresiva (Etapa 4) + fallback
     inteligente (Etapa 5, Ticket AI-04). Devuelve (tracks,
     filters_applied_dict, used_fallback_bool). Nunca devuelve una lista
@@ -1557,6 +1806,23 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     artist_ids = set()
     for _bucket in artist_id_groups.values():
         artist_ids |= _bucket
+
+    # Ticket AI-30 (idea de Niko: aprovechar el conocimiento musical
+    # general de Gemini) — SOLO tiene sentido cuando el usuario no
+    # nombró ningún artista (con nombres explícitos, la sugerencia que
+    # importa es de PISTAS por artista — ver pistas_sugeridas_por_artista
+    # más abajo, en _run_query). expand_similar=False y
+    # build_similar_artists_fn=None a propósito: estos ya SON la
+    # sugerencia final de Gemini, no hace falta expandirlos a similares
+    # de nuevo (ver _resolve_artist_ids_grouped — con expand_similar=False
+    # nunca se llega a invocar build_similar_artists_fn, es seguro pasar
+    # None acá).
+    suggested_artist_ids = set()
+    if not artist_id_groups and entities.get('artistas_sugeridos'):
+        suggested_artist_ids = _resolve_artist_ids(
+            conn, entities['artistas_sugeridos'], None, expand_similar=False
+        )
+
     album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
     named_track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
 
@@ -1611,18 +1877,41 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
                 artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids,
                 playlist_size=playlist_size
             )
-        if len(artist_id_groups) >= 2:
+        suggested_tracks_by_artist = entities.get('pistas_sugeridas_por_artista') or {}
+        if len(artist_id_groups) >= 2 or (len(artist_id_groups) == 1 and suggested_tracks_by_artist):
             # Ticket AI-28 (Ticket 41, punto 1) — 2+ artistas nombrados:
             # cuota por artista + intercalado, en vez de una sola
             # consulta con todos los IDs mezclados (causa raíz del mix
-            # desbalanceado hacia el más escuchado). Con 1 solo nombre
-            # (or 0), cae al camino de _query_tracks de siempre, sin
-            # cambios — el balanceo es solo para "mix" de 2+, pedido
-            # explícito de Niko.
+            # desbalanceado hacia el más escuchado). Ticket AI-30 amplía
+            # esto a 1 SOLO artista cuando Gemini sugirió pistas para él
+            # (con 1 artista y SIN sugerencias, sigue cayendo al camino
+            # de _query_tracks de siempre más abajo, sin cambios — pedido
+            # explícito de Niko: el balanceo/sugerencias no aplican a
+            # "lo mejor de Stratovarius" a secas, sin más señales).
             return _query_tracks_balanced_by_artist(
                 conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                 artist_id_groups=artist_id_groups, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
-                playlist_size=playlist_size
+                playlist_size=playlist_size, pistas_sugeridas_por_artista=suggested_tracks_by_artist,
+                normalize_title_fn=normalize_title_fn, led_quality_rank_fn=led_quality_rank_fn
+            )
+        if not artist_id_groups and suggested_artist_ids:
+            # Ticket AI-30 — sin ningún artista nombrado, pero Gemini
+            # propuso artistas que sí existen en la biblioteca: 60% del
+            # pool sale de ellos (con los mismos filtros del pedido),
+            # 40% de la búsqueda por filtros de siempre sin restricción
+            # de artista. Ver _query_tracks_with_suggested_artists.
+            #
+            # Alcance (Ticket AI-30, documentado a propósito): esta rama
+            # NO interactúa con la cascada artista-primero de más abajo
+            # (Ticket AI-24) — esa cascada solo se intenta cuando NO hay
+            # artist_ids/album_ids/track_ids en absoluto, y corre ANTES
+            # de llegar acá. Si en el futuro se quiere que las sugerencias
+            # de Gemini también compitan/complementen la cascada, es una
+            # decisión de producto aparte — no asumida acá.
+            return _query_tracks_with_suggested_artists(
+                conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                suggested_artist_ids=suggested_artist_ids, album_ids=album_ids, track_ids=track_ids,
+                ranking=ranking, playlist_size=playlist_size
             )
         return _query_tracks(
             conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
@@ -1759,7 +2048,8 @@ def _entities_are_empty(entities):
 
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-                    build_similar_artists_fn, prior_entities=None, default_results=None, max_top_n=None):
+                    build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
+                    prior_entities=None, default_results=None, max_top_n=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
     por errores de la propia base de datos, que sí deben propagarse.
@@ -1769,6 +2059,17 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     la biblioteca real y los expande a artistas similares (mismo dato que
     ya alimenta la sección "Similares" de cada artista en la app). Ver
     _resolve_artist_ids.
+
+    `normalize_title_fn`/`led_quality_rank_fn` (Ticket AI-30): también
+    inyectadas de app.py — `_normalize_title_for_radio_dedupe` (Ticket
+    14, agrupa versiones de una misma pista con sufijo de versión
+    distinto) y `led_quality_rank` (equivalente en Python del ranking de
+    calidad por led_color que ya usa `_track_dedupe_condition`). Se usan
+    para resolver y elegir la mejor versión de las sugerencias de pistas
+    que Gemini propone por artista — ver generate_playlist/
+    _resolve_suggested_track_version. None (default) si el caller no las
+    pasa: las sugerencias de Gemini simplemente no se aplican en ese
+    caso, sin romper nada del resto del pipeline.
 
     `prior_entities` (Ticket AI-07, Etapa 6): si el cliente manda las
     entidades del turno anterior de la misma conversación (ej. el usuario
@@ -1833,7 +2134,8 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
         entities_for_fetch['cantidad'] = fetch_size
         pool, filters_applied, used_fallback = generate_playlist(
             conn, user_id, entities_for_fetch, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
-            build_similar_artists_fn)
+            build_similar_artists_fn, normalize_title_fn=normalize_title_fn,
+            led_quality_rank_fn=led_quality_rank_fn)
         if result['status'] == 'error':
             used_fallback = True
 

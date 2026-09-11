@@ -3498,6 +3498,12 @@ def api_v1_ai_playlist():
             build_adv_filters_fn=_build_adv_filters,
             dedupe_condition_fn=_track_dedupe_condition,
             build_similar_artists_fn=build_similar_artists,
+            # Ticket AI-30: sugerencias de Gemini validadas contra la
+            # biblioteca — normalize_title_fn agrupa versiones de un
+            # mismo tema (estudio/vivo/remaster, Ticket 14) y
+            # led_quality_rank_fn puntúa cuál de esas versiones ganar.
+            normalize_title_fn=_normalize_title_for_radio_dedupe,
+            led_quality_rank_fn=led_quality_rank,
             prior_entities=prior_entities,
             default_results=user_settings['orbitron_default_results'],
             max_top_n=user_settings['orbitron_max_top_n'],
@@ -5253,6 +5259,26 @@ _TRACK_QUALITY_RANK_SQL = """(CASE {alias}.led_color
         WHEN 'white'   THEN 16.6666666667
         ELSE 0.0
     END)"""
+
+# Ticket AI-30 — mismo mapeo que _TRACK_QUALITY_RANK_SQL de arriba, pero
+# como dict de Python en vez de fragmento SQL. ai_playlist.py necesita
+# puntuar la "calidad" de distintas versiones de una pista (estudio,
+# remaster, en vivo) ya traídas como dicts en memoria — no tiene sentido
+# volver a la base solo para eso, y ai_playlist.py no puede ejecutar SQL
+# con este CASE directamente sin duplicar el mapeo. Se inyecta como
+# función (led_quality_rank_fn) al mismo estilo que track_to_json_fn/
+# build_adv_filters_fn/dedupe_condition_fn — ver AGENTE.md regla 2 (nunca
+# reinventar, y ai_playlist.py solo LEE funciones de este módulo, nunca
+# las modifica). Mantenido pegado al SQL de arriba a propósito: si se
+# agrega un color nuevo, actualizar los dos en el mismo commit.
+LED_QUALITY_RANK = {
+    'magenta': 100.0, 'blue': 83.3333333333, 'green': 66.6666666667,
+    'red': 50.0, 'cyan': 33.3333333333, 'white': 16.6666666667,
+}
+
+
+def led_quality_rank(led_color):
+    return LED_QUALITY_RANK.get(led_color, 0.0)
 
 # Alias usados por las dos consultas que llaman a _track_dedupe_condition —
 # se re-prefijan con "dup_" para poder unir una segunda copia de tracks/
