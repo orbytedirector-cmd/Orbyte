@@ -1233,27 +1233,55 @@ def _compute_artist_mix_quotas(pop_by_name, playlist_size):
     return quotas
 
 
-def _interleave_by_quota(selected_by_name, order):
-    """Ticket AI-28 — intercala las pistas ya elegidas por artista
-    (dict {nombre: lista_ya_ordenada_por_ranking}) en un único orden
-    final, en vez de devolver bloques consecutivos por artista (todo
-    Helloween primero, después todo Stratovarius). Round-robin
-    ponderado por la cuota final de cada uno: en cada paso, el próximo
-    en salir es el artista cuya fracción (pistas ya emitidas / su
-    cuota) sea más chica — a igual cuota alternan 1 a 1; el que tiene
-    más cuota aparece más seguido, pero repartido a lo largo de toda la
-    lista, no todo amontonado al principio."""
-    counts = {nm: len(selected_by_name.get(nm, [])) for nm in order}
-    emitted = {nm: 0 for nm in order}
+def _track_playcount(track):
+    """Ticket AI-28 — lastfm_playcount puede llegar desde SQLite como
+    string o None (mismo problema de tipos ya documentado del lado de
+    app.py en Ticket 39, ver _normalize_lastfm_count ahí) — acá solo
+    hace falta un número para poder comparar/ordenar pistas, así que
+    cualquier valor inválido cae a 0 en vez de None (a diferencia de
+    _normalize_lastfm_count, que sí distingue "sin dato" para mostrarlo
+    distinto en la UI — acá esa distinción no aplica, solo importa el
+    orden relativo)."""
+    try:
+        return int(track.get('lastfm_playcount') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_selected_by_track_popularity(selected_by_name, order):
+    """Ticket AI-28 — ajuste pedido por Niko después de validar el
+    balanceo por cuota: el orden final YA NO alterna "a quién le toca"
+    mirando la cuota pendiente de cada artista (round-robin ponderado,
+    versión anterior de este fix). En su lugar, mezcla las listas de
+    pistas ya elegidas por artista como si fueran mazos ordenados por
+    la popularidad de CADA PISTA (reproducciones reales,
+    lastfm_playcount — a nivel de pista, NO el prestigio general del
+    artista) y en cada paso saca la carta más alta de arriba de
+    cualquiera de los mazos que todavía tengan pistas.
+
+    La CUOTA por artista (cuántas pistas le tocan a cada uno — ver
+    _compute_artist_mix_quotas, ya validada con Niko) no cambia en
+    absoluto acá; esta función solo decide el ORDEN final en el que esas
+    pistas ya elegidas se presentan.
+
+    Con esto, la playlist alterna naturalmente entre artistas mientras
+    sus temas más escuchados están en rangos de reproducciones
+    parecidos, y recién hacia el final puede aparecer una racha del
+    artista con más cuota, si le quedan pistas después de que los demás
+    ya agotaron la suya — esa racha es inevitable sin romper la cuota ya
+    validada (ej. 10 pistas de un artista vs 5 de otros tres: en algún
+    punto los otros tres se acaban y solo queda ese uno)."""
+    pools = {nm: sorted(selected_by_name.get(nm, []), key=_track_playcount, reverse=True) for nm in order}
+    pointers = {nm: 0 for nm in order}
     result = []
-    total = sum(counts.values())
+    total = sum(len(pools[nm]) for nm in order)
     for _ in range(total):
-        candidates = [nm for nm in order if emitted[nm] < counts[nm]]
+        candidates = [nm for nm in order if pointers[nm] < len(pools[nm])]
         if not candidates:
             break
-        best = min(candidates, key=lambda nm: emitted[nm] / counts[nm])
-        result.append(selected_by_name[best][emitted[best]])
-        emitted[best] += 1
+        best = max(candidates, key=lambda nm: _track_playcount(pools[nm][pointers[nm]]))
+        result.append(pools[best][pointers[best]])
+        pointers[best] += 1
     return result
 
 
@@ -1293,8 +1321,10 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
        playlist por esto salvo que TODOS los artistas nombrados juntos
        no alcancen para playlist_size pistas — ahí sí, la lista sale más
        corta, no hay de dónde más sacar).
-    5. El resultado final se intercala (_interleave_by_quota) en vez de
-       devolver bloques consecutivos por artista.
+    5. El resultado final se mezcla por popularidad real de cada pista
+       (_merge_selected_by_track_popularity — reproducciones a nivel de
+       PISTA, no fama general del artista) en vez de devolver bloques
+       consecutivos por artista ni un round-robin artificial.
 
     Devuelve una lista de tracks ya en el orden final (longitud
     <= playlist_size). Con `ranking` presente, _finalize_pool (llamado
@@ -1343,7 +1373,7 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             # playlist_size, no hay de dónde más sacar (caso real de
             # biblioteca chica para TODOS los artistas del mix a la vez).
 
-    return _interleave_by_quota(selected, order)
+    return _merge_selected_by_track_popularity(selected, order)
 
 
 def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
