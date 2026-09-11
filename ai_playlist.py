@@ -1778,6 +1778,69 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
     )
 
 
+def _ensure_suggested_artists_represented(conn, pool, suggested_artist_ids, args_dict, track_to_json_fn,
+                                           build_adv_filters_fn, dedupe_condition_fn, ranking, playlist_size,
+                                           normalize_title_fn):
+    """Ticket AI-30 (feedback de Niko revisando el log real: "Lo mejor
+    del jazz de los 60" -> Nina Simone sola llenó las 150 pistas del
+    pool vía la cascada artista-primero (Ticket AI-24) ANTES de que
+    _query_tracks_with_suggested_artists tuviera oportunidad de correr
+    — ninguna de las 8 sugerencias de Gemini (Miles Davis, Coltrane,
+    Bill Evans...) entraba). La cascada puede llenar playlist_size por
+    sí sola sin dejar ningún hueco para el camino de "enriquecido" que
+    es el único lugar donde hoy se invoca la reserva de sugerencias.
+
+    Esta función se llama DESPUÉS de que la cascada (o su enriquecido)
+    ya armó `pool`, como un chequeo final: si `suggested_artist_ids`
+    tiene contenido y ese pool no llega al cupo esperado
+    (_SUGGESTION_SHARE de playlist_size) de pistas de esos artistas,
+    trae más de ellos (con los MISMOS filtros del pedido) y los inyecta,
+    descartando del final del pool lo que NO sea de un artista sugerido
+    para no pasarse de playlist_size. Si el pool YA tenía suficiente
+    representación (por casualidad, ej. "música chilena" donde varios
+    sugeridos ya eran genuinamente populares), no toca nada.
+
+    Devuelve (pool_final, priority_ids) — priority_ids para que quien
+    llama reordene con _merge_selected_by_track_popularity y las nuevas
+    salgan primero (mismo criterio ya validado con Niko para el resto
+    de AI-30), no solo que "estén" en el pool sino que se VEAN."""
+    if not suggested_artist_ids:
+        return pool, set()
+
+    target = round(playlist_size * _SUGGESTION_SHARE)
+    already_from_suggested = [t for t in pool if t.get('artist_id') in suggested_artist_ids]
+    deficit = target - len(already_from_suggested)
+    if deficit <= 0:
+        return pool, {t['id'] for t in already_from_suggested}
+
+    candidate_limit = min(_CANDIDATE_POOL_SIZE, max(deficit * 4, deficit + 20))
+    extra_candidates = _query_tracks(
+        conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        artist_ids=suggested_artist_ids, ranking=ranking, limit_override=candidate_limit
+    )
+    already_ids = {t['id'] for t in pool}
+    already_norm_titles = {normalize_title_fn(t.get('title')) for t in pool} if normalize_title_fn else set()
+    new_ones = [
+        t for t in extra_candidates
+        if t['id'] not in already_ids
+        and (not normalize_title_fn or normalize_title_fn(t.get('title')) not in already_norm_titles)
+    ][:deficit]
+    if not new_ones:
+        # No hay más pistas disponibles de los artistas sugeridos (con
+        # estos filtros) — se deja el pool tal cual, no hay de dónde
+        # sacar más (mismo criterio de "no forzar" del resto del ticket).
+        return pool, {t['id'] for t in already_from_suggested}
+
+    # Se descartan del FINAL del pool tantas pistas ajenas a los
+    # artistas sugeridos como haga falta, para no superar playlist_size.
+    non_suggested_idx = [i for i, t in enumerate(pool) if t.get('artist_id') not in suggested_artist_ids]
+    to_remove = set(non_suggested_idx[-len(new_ones):]) if non_suggested_idx else set()
+    kept = [t for i, t in enumerate(pool) if i not in to_remove]
+    final_pool = kept + new_ones
+    priority_ids = {t['id'] for t in already_from_suggested} | {t['id'] for t in new_ones}
+    return final_pool, priority_ids
+
+
 def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
     """Ticket AI-22 — con ranking explícito, el pool ya viene ordenado y
     acotado a playlist_size desde la query (ver _query_tracks/
@@ -2059,7 +2122,21 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
         if len(cascade_tracks) >= playlist_size:
             filters_applied = _filters_applied(args_dict)
             filters_applied['cascada_artista_primero'] = True
-            return cascade_tracks[:playlist_size], filters_applied, False
+            final_pool = cascade_tracks[:playlist_size]
+            # Ticket AI-30 (feedback de Niko: la cascada por sí sola
+            # puede llenar TODO el cupo con un solo artista dominante —
+            # ej. "lo mejor del jazz de los 60" -> Nina Simone — sin
+            # dejar hueco para las sugerencias de Gemini. Se chequea acá
+            # SIEMPRE, no solo en el camino de "enriquecido" de más
+            # abajo, que es el único que corría antes.
+            final_pool, priority_ids = _ensure_suggested_artists_represented(
+                conn, final_pool, suggested_artist_ids, args_dict, track_to_json_fn, build_adv_filters_fn,
+                dedupe_condition_fn, ranking, playlist_size, normalize_title_fn
+            )
+            if priority_ids:
+                final_pool = _merge_selected_by_track_popularity({'pool': final_pool}, ['pool'], priority_ids=priority_ids)
+                filters_applied['sugerencias_inyectadas'] = True
+            return final_pool, filters_applied, False
         if cascade_tracks:
             # Bug encontrado en AI-26 (independiente de la paginación,
             # vive acá adentro de una sola llamada): comparar por id
@@ -2074,6 +2151,19 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
                 filters_applied = _filters_applied(args_dict)
                 filters_applied['cascada_artista_primero'] = True
                 filters_applied['enriquecido_directo'] = True
+                # Ticket AI-30 — mismo chequeo que arriba: _run_query ya
+                # intenta esto vía _query_tracks_with_suggested_artists,
+                # pero acá "direct_pool" es el resultado COMPLETO de
+                # _run_query, no necesariamente con la reserva del 60%
+                # respetada tras el recorte de `extra[:...]` — se
+                # confirma acá, no se asume.
+                combined, priority_ids = _ensure_suggested_artists_represented(
+                    conn, combined, suggested_artist_ids, args_dict, track_to_json_fn, build_adv_filters_fn,
+                    dedupe_condition_fn, ranking, playlist_size, normalize_title_fn
+                )
+                if priority_ids:
+                    combined = _merge_selected_by_track_popularity({'pool': combined}, ['pool'], priority_ids=priority_ids)
+                    filters_applied['sugerencias_inyectadas'] = True
                 return combined, filters_applied, False
 
     pool = _run_query(args_dict)
