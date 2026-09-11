@@ -42,6 +42,23 @@ import logging
 # siempre, sin ningún parámetro nuevo que threadear por todos lados.
 _logger = logging.getLogger('ai_playlist')
 
+# Ticket AI-31 (pedido por Niko: "que se genere algún log separado para
+# todo lo que es Orbitron, donde quede el prompt del usuario, la
+# sugerencia de Gemini, y los resultados filtrados... para ir afinando
+# cada vez más el modelo"). Mismo criterio que _logger de arriba —
+# nombre propio, propaga solo al logger raíz ya configurado en app.py
+# (RotatingFileHandler + formatter JSONL en logs/orbyte.log), sin
+# montar ningún archivo/handler nuevo. Nombre distinto a propósito para
+# poder filtrar SOLO estas líneas con
+# `grep '"logger": "ai_playlist.audit"' logs/orbyte.log | jq .msg -r | jq .`
+# (doble jq: la línea entera es JSONL, y el campo "msg" es a su vez un
+# JSON con el detalle — ver _log_audit más abajo. No se extendió
+# _JSONLFormatter con campos nuevos porque esa clase es compartida por
+# TODO el logging de la app — todo el detalle de Orbitron va empaquetado
+# dentro de "msg" en vez de arriesgar una regresión en el formatter
+# central por algo que solo necesita este módulo).
+_audit_logger = logging.getLogger('ai_playlist.audit')
+
 import fallback_engine  # Ticket AI-04 — fallback inteligente (Etapa 5), módulo aislado
 import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), módulo aislado
 
@@ -2065,6 +2082,39 @@ def _entities_are_empty(entities):
     return not any(entities.get(key) for key in entities)
 
 
+def _log_audit(request_id, raw_query, provider, entities, filters_applied, used_fallback, tracks):
+    """Ticket AI-31 (pedido por Niko) — una línea por pedido de playlist
+    con todo lo necesario para ir afinando el prompt/modelo con el
+    tiempo: el pedido tal cual lo escribió el usuario, qué sugirió
+    Gemini (si sugirió algo — vacío si no aplicaba, ver
+    "pistas_sugeridas_por_artista"/"artistas_sugeridos" en
+    _empty_entities), qué filtros se terminaron usando, y el resultado
+    final YA FILTRADO (artista + título de cada pista — no hace falta
+    el dict completo de cada una acá, con eso alcanza para ver a ojo si
+    la sugerencia de Gemini terminó representada en el resultado o no).
+
+    Nunca lanza — un log de auditoría roto NUNCA debe tumbar un pedido
+    real (aprendizaje directo del bug de _score_track_version: si algo
+    inesperado llega en `tracks`, esto degrada a un WARNING en el
+    logger de siempre en vez de propagar)."""
+    try:
+        payload = {
+            'request_id': request_id,
+            'raw_query': raw_query,
+            'provider': provider,
+            'artists': entities.get('artists') or [],
+            'pistas_sugeridas_por_artista': entities.get('pistas_sugeridas_por_artista') or {},
+            'artistas_sugeridos': entities.get('artistas_sugeridos') or [],
+            'filters_applied': filters_applied,
+            'used_fallback': used_fallback,
+            'track_count': len(tracks),
+            'tracks': [f"{t.get('artist_name') or '?'} - {t.get('title') or '?'}" for t in tracks],
+        }
+        _audit_logger.info(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        _logger.warning('AI-31: no se pudo armar el log de auditoría (request_id=%r)', request_id, exc_info=True)
+
+
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
                     prior_entities=None, default_results=None, max_top_n=None):
@@ -2162,6 +2212,7 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     _request_id = _log_request(conn, user_id, raw_query, result, provider, filters_applied,
                                 used_fallback, len(tracks))
     ai_playlist_pagination.store_pool(conn, _request_id, pool, already_shown_count=len(tracks))
+    _log_audit(_request_id, raw_query, provider, result['entities'], filters_applied, used_fallback, tracks)
 
     return {
         'request_id': _request_id,
