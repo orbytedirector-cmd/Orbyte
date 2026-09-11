@@ -1249,39 +1249,42 @@ def _track_playcount(track):
 
 
 def _merge_selected_by_track_popularity(selected_by_name, order):
-    """Ticket AI-28 — ajuste pedido por Niko después de validar el
-    balanceo por cuota: el orden final YA NO alterna "a quién le toca"
-    mirando la cuota pendiente de cada artista (round-robin ponderado,
-    versión anterior de este fix). En su lugar, mezcla las listas de
-    pistas ya elegidas por artista como si fueran mazos ordenados por
-    la popularidad de CADA PISTA (reproducciones reales,
-    lastfm_playcount — a nivel de pista, NO el prestigio general del
-    artista) y en cada paso saca la carta más alta de arriba de
-    cualquiera de los mazos que todavía tengan pistas.
+    """Ticket AI-28 — v2 (bugfix reportado por Niko sobre la v1 de este
+    mismo fix, ver commit anterior 3c84d314): la v1 mezclaba los mazos
+    por VALOR ABSOLUTO de lastfm_playcount cruzando artistas — eso se
+    rompe cuando un artista tiene un catálogo "parejo" (varios temas con
+    reproducciones medias pero similares entre sí) contra otro con perfil
+    "pico y caída" (un hit enorme y después una caída fuerte): el parejo
+    eclipsa por completo al de pico-y-caída durante muchas posiciones
+    seguidas, porque tema a tema sus números medios siguen ganándole a
+    los temas más flojos del otro — recién reaparece el de pico-y-caída
+    cuando al parejo se le acaba la cuota. Exactamente el síntoma que
+    reportó Niko: "Sonata, sonata, sonata... 1 sola de Helloween muy
+    adelante".
 
-    La CUOTA por artista (cuántas pistas le tocan a cada uno — ver
-    _compute_artist_mix_quotas, ya validada con Niko) no cambia en
-    absoluto acá; esta función solo decide el ORDEN final en el que esas
-    pistas ya elegidas se presentan.
+    v2: vuelve a una alternancia ESTRICTA de una pista por artista por
+    ronda (ronda 1 = la mejor pista de cada artista con cuota disponible,
+    ronda 2 = la segunda mejor de cada uno, etc. — un artista que ya
+    agotó su cuota simplemente no participa en las rondas siguientes).
+    Las reproducciones reales de cada pista (lastfm_playcount, a nivel
+    de PISTA — aclaración explícita de Niko, no fama del artista) SOLO
+    deciden el orden DENTRO de cada ronda (cuál de las 4 mejores pistas
+    de esta ronda va primero), nunca se comparan valores de rondas
+    distintas entre sí — así ningún artista puede eclipsar a otro por
+    tener un catálogo con números más parejos.
 
-    Con esto, la playlist alterna naturalmente entre artistas mientras
-    sus temas más escuchados están en rangos de reproducciones
-    parecidos, y recién hacia el final puede aparecer una racha del
-    artista con más cuota, si le quedan pistas después de que los demás
-    ya agotaron la suya — esa racha es inevitable sin romper la cuota ya
-    validada (ej. 10 pistas de un artista vs 5 de otros tres: en algún
-    punto los otros tres se acaban y solo queda ese uno)."""
+    La CUOTA por artista (_compute_artist_mix_quotas, sin cambios) sigue
+    intacta; esto solo decide el orden de presentación final."""
     pools = {nm: sorted(selected_by_name.get(nm, []), key=_track_playcount, reverse=True) for nm in order}
     pointers = {nm: 0 for nm in order}
     result = []
-    total = sum(len(pools[nm]) for nm in order)
-    for _ in range(total):
-        candidates = [nm for nm in order if pointers[nm] < len(pools[nm])]
-        if not candidates:
-            break
-        best = max(candidates, key=lambda nm: _track_playcount(pools[nm][pointers[nm]]))
-        result.append(pools[best][pointers[best]])
-        pointers[best] += 1
+    max_len = max((len(pools[nm]) for nm in order), default=0)
+    for _ in range(max_len):
+        ronda = [(nm, pools[nm][pointers[nm]]) for nm in order if pointers[nm] < len(pools[nm])]
+        ronda.sort(key=lambda par: _track_playcount(par[1]), reverse=True)
+        for nm, track in ronda:
+            result.append(track)
+            pointers[nm] += 1
     return result
 
 
@@ -1321,10 +1324,10 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
        playlist por esto salvo que TODOS los artistas nombrados juntos
        no alcancen para playlist_size pistas — ahí sí, la lista sale más
        corta, no hay de dónde más sacar).
-    5. El resultado final se mezcla por popularidad real de cada pista
-       (_merge_selected_by_track_popularity — reproducciones a nivel de
-       PISTA, no fama general del artista) en vez de devolver bloques
-       consecutivos por artista ni un round-robin artificial.
+    5. El resultado final se arma por rondas (una pista de cada artista
+       activo por ronda), ordenadas DENTRO de cada ronda por
+       reproducciones reales de cada pista (_merge_selected_by_track_popularity
+       — v2, ver su docstring para el bug de v1 que esto corrige).
 
     Devuelve una lista de tracks ya en el orden final (longitud
     <= playlist_size). Con `ranking` presente, _finalize_pool (llamado
