@@ -1520,12 +1520,26 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
 
         resolved_suggestions = []
         if suggested_titles and normalize_title_fn and led_quality_rank_fn:
-            # Ticket AI-30: hasta el 60% de la cuota de ESTE artista sale
-            # de sus sugerencias, resueltas contra su propio catálogo
-            # (incluye similares si buscar_similares expandió el grupo —
-            # mismo set de ids que ya usa el resto de la función).
+            # Ticket AI-30 — fix (hallazgo revisando el log real:
+            # "Metallica y artistas similares" hacía fallar la
+            # resolución de "One", que con SOLO Metallica sí resolvía
+            # bien). Causa: artist_id_groups[nm] incluye los ids de los
+            # similares expandidos cuando buscar_similares=True — con 9
+            # artistas combinados (Metallica + 8 similares), el límite
+            # de _fetch_artist_track_pool (500, pensado para UN
+            # catálogo) podía dejar afuera pistas de Metallica antes de
+            # llegar a "One", según cómo ordena pop_score al grupo
+            # combinado. La sugerencia es de Gemini PARA Metallica
+            # puntual, no para "Metallica y 8 más" — tiene que resolver
+            # solo contra el catálogo propio del artista nombrado, sin
+            # la expansión a similares (que sigue aplicando igual que
+            # siempre para el resto de la función — quota, filter_pool,
+            # etc. — esto NO cambia). Se re-resuelve sin expand_similar
+            # en vez de guardar esto aparte en _resolve_artist_ids_grouped
+            # para no tocar su firma/return por un caso acotado.
+            own_artist_ids = _resolve_artist_ids(conn, [nm], None, expand_similar=False) or artist_id_groups[nm]
             artist_pool = _fetch_artist_track_pool(
-                conn, artist_id_groups[nm], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn
+                conn, own_artist_ids, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn
             )
             suggested_target = round(quota * _SUGGESTION_SHARE)
             seen_ids = set()
