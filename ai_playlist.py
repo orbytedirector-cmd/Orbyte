@@ -1325,6 +1325,23 @@ def _track_playcount(track):
         return 0
 
 
+def _track_album_year(track):
+    """Ticket AI-30 — bugfix confirmado con traceback real de Niko
+    (TypeError: unsupported operand type(s) for -: 'str' and 'str' en
+    _score_track_version): album_year también llega desde SQLite como
+    STRING, no int — mismo problema de tipos que _track_playcount ya
+    blinda para lastfm_playcount, pero acá se me pasó blindarlo en la
+    v1 de _score_track_version. A diferencia de _track_playcount, un
+    valor inválido cae a None (no a 0): 0 sería un "año" falso que
+    rompería silenciosamente cuál versión es más antigua/nueva del
+    grupo — mejor no tener el dato que tener uno inventado."""
+    try:
+        v = track.get('album_year')
+        return int(v) if v not in (None, '') else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _merge_selected_by_track_popularity(selected_by_name, order):
     """Ticket AI-28 — v3 (ajuste sobre v2, ver commit 81adad3c). v2
     alternaba estrictamente por RONDA (una pista de cada artista con
@@ -1555,9 +1572,10 @@ def _score_track_version(track, group, led_quality_rank_fn):
     max_pc = max((_track_playcount(t) for t in group), default=0) or 1
     pop_norm = _track_playcount(track) / max_pc * 100.0
 
-    years = [t.get('album_year') for t in group if t.get('album_year')]
-    my_year = track.get('album_year')
-    if years and my_year:
+    years = [_track_album_year(t) for t in group]
+    years = [y for y in years if y is not None]
+    my_year = _track_album_year(track)
+    if years and my_year is not None:
         oldest, newest = min(years), max(years)
         bonus = 100.0 if newest == oldest else 100.0 * (newest - my_year) / (newest - oldest)
     else:
