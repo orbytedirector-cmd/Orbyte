@@ -468,6 +468,19 @@ def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD):
         if not parsed:
             continue
         _logger.info('proveedor %s respondió OK', provider_name)
+        # TEMPORAL (Ticket 41, punto 2 — diagnóstico en vivo antes de
+        # escribir cualquier fix, mismo criterio ya usado en TICKET 39 §
+        # diagnóstico Bug 2: agregar, probar, revertir). Necesario
+        # específicamente para el Candidato A (el cap `anios[:5]` de
+        # _normalize_entities puede estar cortando una década completa
+        # que el LLM sí devolvió bien) — sin esto no hay forma de saber
+        # si el LLM mandó los 10 años de la década o menos desde el
+        # vocabulario. Buscar en el servidor con:
+        #   journalctl -u orbyte.service | grep TICKET41_DIAG
+        # REVERTIR esta línea (y este comentario) una vez confirmada la
+        # causa real del punto 2 — no es un log permanente.
+        _logger.info('TICKET41_DIAG raw_query=%r raw_entities=%s',
+                      raw_query, json.dumps(parsed.get('entities') or {}, ensure_ascii=False))
         entities = _normalize_entities(parsed.get('entities') or {}, vocab, max_cantidad=max_cantidad)
         return {
             'status': parsed.get('status') if parsed.get('status') in
