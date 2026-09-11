@@ -1359,7 +1359,7 @@ def _track_album_year(track):
         return None
 
 
-def _merge_selected_by_track_popularity(selected_by_name, order):
+def _merge_selected_by_track_popularity(selected_by_name, order, priority_ids=None):
     """Ticket AI-28 — v3 (ajuste sobre v2, ver commit 81adad3c). v2
     alternaba estrictamente por RONDA (una pista de cada artista con
     cuota disponible, en orden fijo dentro de la ronda por reproducciones
@@ -1383,9 +1383,27 @@ def _merge_selected_by_track_popularity(selected_by_name, order):
     ya no interviene en esa decisión.
 
     Las reproducciones reales de cada pista (lastfm_playcount, a nivel de
-    PISTA) siguen decidiendo SOLO el orden interno de cada artista (sus
+    PISTA) siguen decidiendo el orden interno de cada artista (sus
     propios mazos vienen pre-ordenados de más a menos escuchada antes de
-    barajar) — eso no cambió.
+    barajar).
+
+    Ticket AI-30 (feedback de Niko revisando el log real: las
+    sugerencias de Gemini casi nunca aparecían en la página 1, porque
+    con solo 8 sugeridas compitiendo contra una cuota de ~90 dentro de
+    un pool de 150, terminaban perdidas en algún punto intermedio según
+    su reproducciones real). `priority_ids` (set de ids, default None =
+    sin prioridad, comportamiento IDÉNTICO al de antes): dentro del mazo
+    de CADA artista, las pistas cuyo id está en `priority_ids` (las
+    sugerencias ya resueltas) van SIEMPRE primero, sin importar sus
+    reproducciones — "las sugerencias van siempre primero en el orden
+    final, sin importar reproducciones" (pedido explícito de Niko). El
+    barajado ENTRE artistas (de quién pone la próxima carta) no cambia —
+    sigue siendo aleatorio ponderado por cupo restante, para no perder
+    la mezcla orgánica entre artistas que ya se validó. Efecto práctico:
+    todas las sugerencias resueltas de un artista salen antes que
+    cualquiera de sus propias pistas de filtro (aunque estas tengan más
+    reproducciones), pero siguen intercalándose con las de OTROS
+    artistas como siempre.
 
     Efecto secundario esperado y aceptado (hablado con Niko): al usar
     random.choices, dos pedidos idénticos ("lo mejor de Helloween,
@@ -1400,7 +1418,15 @@ def _merge_selected_by_track_popularity(selected_by_name, order):
     eclipsaba a uno con perfil pico-y-caída (ej. Helloween) durante
     muchas posiciones seguidas. v2 lo arregló con rondas estrictas; v3
     mantiene ese arreglo pero afloja la rigidez de la ronda."""
-    pools = {nm: sorted(selected_by_name.get(nm, []), key=_track_playcount, reverse=True) for nm in order}
+    priority_ids = priority_ids or set()
+
+    def _sort_key(t):
+        # (0, ...) = es una sugerencia -> siempre antes que (1, ...).
+        # Dentro de cada uno de esos dos grupos, orden de siempre por
+        # reproducciones reales descendente.
+        return (0 if t.get('id') in priority_ids else 1, -_track_playcount(t))
+
+    pools = {nm: sorted(selected_by_name.get(nm, []), key=_sort_key) for nm in order}
     pointers = {nm: 0 for nm in order}
     remaining_len = {nm: len(pools[nm]) for nm in order}
     result = []
@@ -1482,6 +1508,7 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
     suggestions_by_name = pistas_sugeridas_por_artista or {}
 
     fetched = {}
+    all_priority_ids = set()
     for nm in order:
         quota = quotas.get(nm, 0)
         # Buffer de candidatos por sobre la cuota, para tener margen de
@@ -1550,6 +1577,13 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
                 if t['id'] not in suggested_ids and normalize_title_fn(t.get('title')) not in suggested_norm_titles
             ]
             fetched[nm] = resolved_suggestions + filter_pool
+            # Ticket AI-30 (pedido de Niko revisando el log real): se
+            # acumulan estos ids para que _merge_selected_by_track_popularity
+            # los ponga siempre primero dentro del mazo de este artista,
+            # sin importar sus reproducciones — antes quedaban perdidos
+            # en algún punto intermedio del pool de 150 según su
+            # popularidad real, y casi nunca aparecían en la página 1.
+            all_priority_ids |= suggested_ids
         else:
             fetched[nm] = filter_pool
 
@@ -1574,7 +1608,7 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             # playlist_size, no hay de dónde más sacar (caso real de
             # biblioteca chica para TODOS los artistas del mix a la vez).
 
-    return _merge_selected_by_track_popularity(selected, order)
+    return _merge_selected_by_track_popularity(selected, order, priority_ids=all_priority_ids)
 
 
 # Ticket AI-30 — qué fracción del cupo de un artista (su cuota en un
@@ -1739,7 +1773,8 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
 
     return _merge_selected_by_track_popularity(
         {'sugeridos_gemini': suggested_pool, 'filtro_general': filter_pool},
-        ['sugeridos_gemini', 'filtro_general']
+        ['sugeridos_gemini', 'filtro_general'],
+        priority_ids=suggested_ids
     )
 
 
