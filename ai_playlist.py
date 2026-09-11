@@ -249,7 +249,18 @@ def _normalize_entities(raw_entities, vocab, max_cantidad=_MAX_CANTIDAD):
     anios_raw = raw_entities.get('anios') or []
     if not isinstance(anios_raw, list):
         anios_raw = [anios_raw]
-    out['anios'] = [str(int(a)) for a in anios_raw if str(a).strip().lstrip('-').isdigit()][:5]
+    # Ticket AI-29 (Ticket 41, punto 2, Candidato A confirmado en vivo):
+    # el cap era [:5] — pensado para "un par de años puntuales que el
+    # usuario nombra a mano" (ej. "canciones de 2015 y 2018"), pero
+    # desde Ticket AI-22 esta lista TAMBIÉN recibe la expansión de una
+    # década completa (10 años, ver la regla de "anios" en
+    # _SYSTEM_PROMPT_TEMPLATE) — con [:5] se perdía la mitad de la
+    # década en silencio (confirmado con log real: el LLM mandó
+    # 1980..1989 completos, se logueaba con éxito, y acá se cortaba a
+    # 1980-1984). 12 cubre una década completa (10) + margen para un
+    # par de años sueltos adicionales sin abrir la puerta a que el LLM
+    # mande una lista arbitrariamente larga.
+    out['anios'] = [str(int(a)) for a in anios_raw if str(a).strip().lstrip('-').isdigit()][:12]
 
     # Ticket AI-22: 'ranking' es un enum cerrado — a diferencia del resto
     # de los campos, NO se intenta fuzzy-match si el LLM devuelve algo
@@ -307,11 +318,13 @@ habla la letra).
 - "albums" es el nombre de un disco/álbum específico si el usuario lo menciona (ej: "quiero escuchar \
 Master of Puppets entero", "algo del álbum Appetite for Destruction").
 - "anios": años puntuales que el usuario mencione (ej: "de 2015", "canciones de 1986") — un número por \
-año, no un rango como texto. Distinto de "eras" (períodos amplios tipo "los 80s" o "rock clásico") — si \
-el usuario da un año exacto, va acá; si describe una época en general, va en "eras". EXCEPCIÓN: si el \
-usuario menciona una DÉCADA junto con un pedido de ranking/popularidad (ej. "los éxitos más populares de \
-los 90"), expandí la década COMPLETA acá como lista de años (1990, 1991, ..., 1999) en vez de (o además \
-de) usar "eras" — así se puede rankear por reproducciones/oyentes dentro de ese rango exacto.
+año, no un rango como texto. TAMBIÉN va acá — expandida COMPLETA como lista de años (ej. 1990, 1991, ..., \
+1999) — cualquier DÉCADA explícita que el usuario mencione (ej: "rock de los 80", "los éxitos más \
+populares de los 90", "algo de los 2000"), tenga o no un pedido de ranking/popularidad junto — así se \
+puede filtrar/rankear por ese rango exacto de años. "eras" (más abajo) es SOLO para períodos descritos de \
+forma temática/abierta, SIN un número de década explícito (ej: "rock clásico", "la época del grunge", \
+"los inicios del rock") — si el usuario da un número de década, siempre va en "anios" expandida, nunca en \
+"eras".
 - "ranking": tiene que ser EXACTAMENTE uno de estos 4 valores, o null si el usuario no pidió ningún \
 orden de popularidad/escuchas en particular:
   * "popularidad_global": el usuario pide lo más POPULAR/FAMOSO/CONOCIDO en general (ej: "lo más \
@@ -344,12 +357,18 @@ decidir si hay que expandir a "parecidos" o no.
 10, "las mejores 50 del rock clásico" -> 50, "las 5 más populares de Iron Maiden" -> 5, "dame 20 \
 canciones tranquilas" -> 20). null si no menciona ninguna cantidad — en ese caso el sistema usa una \
 cantidad default razonable, no hace falta que inventes un número.
-- Para genres/moods/momentos/eras/temas/idiomas/paises: propón el valor que mejor describa la intención \
-del usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema \
-hace el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo \
-(no son la lista completa): moods={moods_sample}; momentos={momentos_sample}; temas={temas_sample}; \
+- Para genres/moods/momentos/eras/temas/paises: propón el valor que mejor describa la intención del \
+usuario en tus propias palabras, no hace falta que coincida exacto con ningún catálogo — el sistema hace \
+el matching después. Ejemplos de vocabulario ya usado en el catálogo real, como referencia de estilo (no \
+son la lista completa): moods={moods_sample}; momentos={momentos_sample}; temas={temas_sample}; \
 eras=[early_rock_era, british_invasion_era, classic_rock_era, nwobhm_synth_era, grunge_alternative_era, \
 post_millennial_era, streaming_era, current_era].
+- "idiomas": a DIFERENCIA de genres/moods/momentos/eras/temas, este es un catálogo CERRADO — los ÚNICOS \
+valores válidos son estos códigos ISO 639-1 de 2 letras (los idiomas que realmente existen en la \
+biblioteca): {idiomas_list}. Identificá el idioma que pide el usuario y devolvé SIEMPRE el código de 2 \
+letras correspondiente (ej: "en español" -> "es", "en inglés" -> "en", "en alemán" -> "de", "en japonés" \
+-> "ja") — NUNCA el nombre completo del idioma en ningún idioma, ni una variante distinta de 2 letras que \
+no esté en esa lista exacta.
 - "motivation" es el propósito de la escucha si el usuario lo menciona (ej: "para entrenar", "para \
 estudiar") — no es un filtro, es contexto.
 - "place" es un lugar mencionado explícitamente (ej: "para un roadtrip"), si aplica.
@@ -364,9 +383,18 @@ def _build_system_prompt(user_query, vocab):
     def sample(key, n=8):
         vals = vocab.get(key) or []
         return json.dumps(vals[:n], ensure_ascii=False)
+    # Ticket AI-29 (Ticket 41, punto 2) — a diferencia de moods/momentos/
+    # temas (sample() de 8, son campos abiertos de verdad), "idiomas" es
+    # un catálogo CERRADO y chico (códigos ISO 639-1 reales de la
+    # biblioteca, confirmados con Niko: en/es/de/ja/it/fr/sv/pt/so/fi/
+    # la/sw/hr/id/pl/ru/tr/ca/cy/et) — se pasa COMPLETO, no un sample,
+    # para que el LLM tenga la lista exacta y no tenga que adivinar
+    # cuáles de los ~180 códigos ISO existentes son los que realmente
+    # hay en esta biblioteca puntual.
+    idiomas_list = json.dumps(sorted(vocab.get('idiomas') or []), ensure_ascii=False)
     return _SYSTEM_PROMPT_TEMPLATE.format(
         moods_sample=sample('moods'), momentos_sample=sample('momentos'),
-        temas_sample=sample('temas'), user_query=user_query,
+        temas_sample=sample('temas'), idiomas_list=idiomas_list, user_query=user_query,
     )
 
 
@@ -468,19 +496,6 @@ def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD):
         if not parsed:
             continue
         _logger.info('proveedor %s respondió OK', provider_name)
-        # TEMPORAL (Ticket 41, punto 2 — diagnóstico en vivo antes de
-        # escribir cualquier fix, mismo criterio ya usado en TICKET 39 §
-        # diagnóstico Bug 2: agregar, probar, revertir). Necesario
-        # específicamente para el Candidato A (el cap `anios[:5]` de
-        # _normalize_entities puede estar cortando una década completa
-        # que el LLM sí devolvió bien) — sin esto no hay forma de saber
-        # si el LLM mandó los 10 años de la década o menos desde el
-        # vocabulario. Buscar en el servidor con:
-        #   journalctl -u orbyte.service | grep TICKET41_DIAG
-        # REVERTIR esta línea (y este comentario) una vez confirmada la
-        # causa real del punto 2 — no es un log permanente.
-        _logger.info('TICKET41_DIAG raw_query=%r raw_entities=%s',
-                      raw_query, json.dumps(parsed.get('entities') or {}, ensure_ascii=False))
         entities = _normalize_entities(parsed.get('entities') or {}, vocab, max_cantidad=max_cantidad)
         return {
             'status': parsed.get('status') if parsed.get('status') in
