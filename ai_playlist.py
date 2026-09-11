@@ -1359,6 +1359,34 @@ def _track_album_year(track):
         return None
 
 
+def _dedupe_by_normalized_title(tracks, normalize_title_fn):
+    """Ticket AI-30 — bug real confirmado con log de Niko: "For Whom The
+    Bell Tolls" y "For Whom The Bell Tolls (Remastered)" aparecían las
+    DOS en el mismo resultado, sin que ninguna fuera una sugerencia de
+    Gemini — el bugfix anterior (dedupe contra sugerencias) no cubre
+    este caso porque acá ninguna de las dos viene de una sugerencia,
+    son dos filas distintas que el propio filter_pool trae. La SQL
+    (_track_dedupe_condition) ya dedupea títulos EXACTOS entre álbumes/
+    calidades distintas, pero no variantes con sufijo de versión
+    distinto (mismo caso que Ticket 14 en Infinite Radio) — se agrupa acá
+    por título normalizado y se conserva solo la PRIMERA de cada grupo
+    (la lista ya viene ordenada por ranking/pop_score desde
+    _query_tracks, así que la primera es la mejor rankeada de ese
+    grupo)."""
+    if not normalize_title_fn:
+        return tracks
+    seen_titles = set()
+    result = []
+    for t in tracks:
+        key = normalize_title_fn(t.get('title'))
+        if key and key in seen_titles:
+            continue
+        if key:
+            seen_titles.add(key)
+        result.append(t)
+    return result
+
+
 def _merge_selected_by_track_popularity(selected_by_name, order, priority_ids=None):
     """Ticket AI-28 — v3 (ajuste sobre v2, ver commit 81adad3c). v2
     alternaba estrictamente por RONDA (una pista de cada artista con
@@ -1568,6 +1596,10 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             artist_ids=artist_id_groups[nm], album_ids=album_ids, track_ids=track_ids, ranking=ranking,
             limit_override=candidate_limit
         )
+        # Ticket AI-30 (bug real: "For Whom The Bell Tolls" duplicada
+        # sin ser sugerencia — ver _dedupe_by_normalized_title). Se
+        # aplica siempre, haya o no sugerencias resueltas este turno.
+        filter_pool = _dedupe_by_normalized_title(filter_pool, normalize_title_fn)
         if resolved_suggestions:
             # Las sugeridas van PRIMERO en fetched[nm] — el slice
             # [:quota] de más abajo (`selected`, sin cambios respecto a
@@ -1622,7 +1654,8 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
             # playlist_size, no hay de dónde más sacar (caso real de
             # biblioteca chica para TODOS los artistas del mix a la vez).
 
-    return _merge_selected_by_track_popularity(selected, order, priority_ids=all_priority_ids)
+    merged = _merge_selected_by_track_popularity(selected, order, priority_ids=all_priority_ids)
+    return merged, all_priority_ids
 
 
 # Ticket AI-30 — qué fracción del cupo de un artista (su cuota en un
@@ -1764,7 +1797,12 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
         conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
         artist_ids=suggested_artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
         limit_override=suggested_candidate_limit
-    )[:suggested_target]
+    )
+    # Ticket AI-30 (mismo bug de "For Whom The Bell Tolls" — ver
+    # _dedupe_by_normalized_title): se aplica también acá, antes de
+    # cortar a suggested_target, para no gastar cupo en 2 versiones del
+    # mismo tema de un artista sugerido.
+    suggested_pool = _dedupe_by_normalized_title(suggested_pool, normalize_title_fn)[:suggested_target]
     suggested_ids = {t['id'] for t in suggested_pool}
     suggested_norm_titles = (
         {normalize_title_fn(t.get('title')) for t in suggested_pool} if normalize_title_fn else set()
@@ -1779,17 +1817,19 @@ def _query_tracks_with_suggested_artists(conn, args_dict, track_to_json_fn, buil
             album_ids=album_ids, track_ids=track_ids, ranking=ranking,
             limit_override=filter_candidate_limit
         )
+        filter_candidates = _dedupe_by_normalized_title(filter_candidates, normalize_title_fn)
         filter_pool = [
             t for t in filter_candidates
             if t['id'] not in suggested_ids
             and (not normalize_title_fn or normalize_title_fn(t.get('title')) not in suggested_norm_titles)
         ][:filter_target]
 
-    return _merge_selected_by_track_popularity(
+    merged = _merge_selected_by_track_popularity(
         {'sugeridos_gemini': suggested_pool, 'filtro_general': filter_pool},
         ['sugeridos_gemini', 'filtro_general'],
         priority_ids=suggested_ids
     )
+    return merged, suggested_ids
 
 
 def _ensure_suggested_artists_represented(conn, pool, suggested_artist_ids, args_dict, track_to_json_fn,
@@ -1855,7 +1895,7 @@ def _ensure_suggested_artists_represented(conn, pool, suggested_artist_ids, args
     return final_pool, priority_ids
 
 
-def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
+def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE, priority_ids=None):
     """Ticket AI-22 — con ranking explícito, el pool ya viene ordenado y
     acotado a playlist_size desde la query (ver _query_tracks/
     _query_tracks_own_listens): el usuario pidió un orden real ("lo más
@@ -1864,11 +1904,30 @@ def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
     siempre: muestreo al azar del pool de candidatos más amplio.
 
     `playlist_size` (Ticket AI-25): _PLAYLIST_SIZE por default, o la
-    cantidad explícita que pidió el usuario ("Top 10 de los Beatles")."""
+    cantidad explícita que pidió el usuario ("Top 10 de los Beatles").
+
+    Ticket AI-30 (bug real confirmado por Niko: "Metallica y artistas
+    similares" — sin "lo mejor", sin ranking — resolvía las 8
+    sugerencias de Gemini perfecto, pero NINGUNA aparecía en la página
+    1). Causa: el camino sin ranking hacía random.sample() sobre TODO
+    el pool sin distinguir sugerencias del resto — con 8 sugerencias
+    entre ~150 candidatos, la chance de que alguna caiga en las
+    primeras 25 al muestrear al azar es baja. `priority_ids` (default
+    None = sin cambio de comportamiento): las pistas con id en ese set
+    se incluyen SIEMPRE en el resultado (hasta playlist_size), el resto
+    de los cupos se llena con random.sample sobre lo que queda — mismo
+    principio de "las sugerencias van siempre primero" ya aplicado en
+    _merge_selected_by_track_popularity, ahora también acá."""
     if ranking:
         return pool[:playlist_size]
-    sample_size = min(playlist_size, len(pool))
-    return random.sample(pool, sample_size) if pool else []
+    priority_ids = priority_ids or set()
+    if not priority_ids:
+        sample_size = min(playlist_size, len(pool))
+        return random.sample(pool, sample_size) if pool else []
+    priority_tracks = [t for t in pool if t.get('id') in priority_ids]
+    rest = [t for t in pool if t.get('id') not in priority_ids]
+    rest_sample_size = max(0, min(playlist_size - len(priority_tracks), len(rest)))
+    return priority_tracks[:playlist_size] + (random.sample(rest, rest_sample_size) if rest_sample_size else [])
 
 
 def _personalized_then_global_fallback(conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
@@ -2055,11 +2114,12 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             # alcance investigado en el Ticket 41, que se enfocó en
             # _query_tracks). Con 2+ artistas nombrados y "mis escuchas
             # de X, Y y Z", sigue el comportamiento de siempre.
-            return _query_tracks_own_listens(
+            pool = _query_tracks_own_listens(
                 conn, args_dict_local, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                 artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids,
                 playlist_size=playlist_size
             )
+            return pool, set()
         suggested_tracks_by_artist = entities.get('pistas_sugeridas_por_artista') or {}
         if len(artist_id_groups) >= 2 or (len(artist_id_groups) == 1 and suggested_tracks_by_artist):
             # Ticket AI-28 (Ticket 41, punto 1) — 2+ artistas nombrados:
@@ -2102,11 +2162,12 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
                 suggested_artist_ids=suggested_artist_ids, album_ids=album_ids, track_ids=track_ids,
                 ranking=ranking, playlist_size=playlist_size, normalize_title_fn=normalize_title_fn
             )
-        return _query_tracks(
+        pool = _query_tracks(
             conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
             artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
             playlist_size=playlist_size
         )
+        return pool, set()
 
     # Ticket AI-24 (pedido por Niko, ejemplos 3/4: "lo mejor de la
     # música chilena", "los éxitos más populares de los 90") — cuando no
@@ -2158,7 +2219,7 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
             # de un tema que la cascada ya había traído. Se compara por
             # título+artista normalizados en vez de por id.
             seen_keys = {_dedupe_key(t.get('title'), t.get('artist')) for t in cascade_tracks}
-            direct_pool = _run_query(args_dict)
+            direct_pool, _ = _run_query(args_dict)
             extra = [t for t in direct_pool if _dedupe_key(t.get('title'), t.get('artist')) not in seen_keys]
             combined = cascade_tracks + extra[:max(0, playlist_size - len(cascade_tracks))]
             if combined:
@@ -2180,18 +2241,20 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
                     filters_applied['sugerencias_inyectadas'] = True
                 return combined, filters_applied, False
 
-    pool = _run_query(args_dict)
+    pool, priority_ids = _run_query(args_dict)
     if pool:
-        return _finalize_pool(pool, ranking, playlist_size=playlist_size), _filters_applied(args_dict), False
+        return _finalize_pool(pool, ranking, playlist_size=playlist_size, priority_ids=priority_ids), \
+            _filters_applied(args_dict), False
 
     for field in _RELAXATION_ORDER:
         if field not in args_dict:
             continue
         dropped.add(field)
         retry_args = _entities_to_args_dict(entities, drop_fields=dropped)
-        pool = _run_query(retry_args)
+        pool, priority_ids = _run_query(retry_args)
         if pool:
-            return _finalize_pool(pool, ranking, playlist_size=playlist_size), _filters_applied(retry_args), True
+            return _finalize_pool(pool, ranking, playlist_size=playlist_size, priority_ids=priority_ids), \
+                _filters_applied(retry_args), True
 
     tracks, filters_applied = _personalized_then_global_fallback(
         conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
