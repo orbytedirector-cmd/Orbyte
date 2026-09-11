@@ -1249,42 +1249,59 @@ def _track_playcount(track):
 
 
 def _merge_selected_by_track_popularity(selected_by_name, order):
-    """Ticket AI-28 — v2 (bugfix reportado por Niko sobre la v1 de este
-    mismo fix, ver commit anterior 3c84d314): la v1 mezclaba los mazos
-    por VALOR ABSOLUTO de lastfm_playcount cruzando artistas — eso se
-    rompe cuando un artista tiene un catálogo "parejo" (varios temas con
-    reproducciones medias pero similares entre sí) contra otro con perfil
-    "pico y caída" (un hit enorme y después una caída fuerte): el parejo
-    eclipsa por completo al de pico-y-caída durante muchas posiciones
-    seguidas, porque tema a tema sus números medios siguen ganándole a
-    los temas más flojos del otro — recién reaparece el de pico-y-caída
-    cuando al parejo se le acaba la cuota. Exactamente el síntoma que
-    reportó Niko: "Sonata, sonata, sonata... 1 sola de Helloween muy
-    adelante".
+    """Ticket AI-28 — v3 (ajuste sobre v2, ver commit 81adad3c). v2
+    alternaba estrictamente por RONDA (una pista de cada artista con
+    cuota disponible, en orden fijo dentro de la ronda por reproducciones
+    reales) — arregló el bug de v1 (ver docstring histórico más abajo),
+    pero Niko lo sintió demasiado mecánico/predecible: "1,1,1,1 y luego
+    1,1,1,1 pierde algo de naturalidad".
 
-    v2: vuelve a una alternancia ESTRICTA de una pista por artista por
-    ronda (ronda 1 = la mejor pista de cada artista con cuota disponible,
-    ronda 2 = la segunda mejor de cada uno, etc. — un artista que ya
-    agotó su cuota simplemente no participa en las rondas siguientes).
-    Las reproducciones reales de cada pista (lastfm_playcount, a nivel
-    de PISTA — aclaración explícita de Niko, no fama del artista) SOLO
-    deciden el orden DENTRO de cada ronda (cuál de las 4 mejores pistas
-    de esta ronda va primero), nunca se comparan valores de rondas
-    distintas entre sí — así ningún artista puede eclipsar a otro por
-    tener un catálogo con números más parejos.
+    v3: en vez de una ronda fija, en cada paso se SORTEA al azar qué
+    artista pone la próxima pista, con probabilidad proporcional a
+    cuántas pistas le quedan pendientes de SU cuota en ese momento
+    (`random.choices` con weights = cuota restante) — es el mismo efecto
+    que barajar varios mazos juntos, cada uno con tantas cartas como su
+    cuota, sin tocar el orden interno de cada mazo. Un artista con más
+    cuota pendiente tiene más chances de salir en cualquier paso dado,
+    pero no hay ningún patrón fijo — a veces sale 2 o 3 veces seguidas
+    por azar (como un shuffle real), sin que eso implique volver al bug
+    de v1: acá NUNCA se comparan reproducciones de un artista contra las
+    de otro para decidir el turno, solo la cantidad de pistas que le
+    quedan — el bug de v1 (un catálogo "parejo" eclipsando a uno "pico y
+    caída") no puede reaparecer porque el valor absoluto de reproducciones
+    ya no interviene en esa decisión.
 
-    La CUOTA por artista (_compute_artist_mix_quotas, sin cambios) sigue
-    intacta; esto solo decide el orden de presentación final."""
+    Las reproducciones reales de cada pista (lastfm_playcount, a nivel de
+    PISTA) siguen decidiendo SOLO el orden interno de cada artista (sus
+    propios mazos vienen pre-ordenados de más a menos escuchada antes de
+    barajar) — eso no cambió.
+
+    Efecto secundario esperado y aceptado (hablado con Niko): al usar
+    random.choices, dos pedidos idénticos ("lo mejor de Helloween,
+    Stratovarius...") pueden devolver un orden distinto cada vez — es
+    justamente lo que da la sensación de "natural"/shuffle real, no un
+    bug. La CUOTA por artista (_compute_artist_mix_quotas) sigue sin
+    cambios, esto es puramente el orden de presentación.
+
+    Historia (v1, commit 3c84d314): la primera versión de este merge
+    comparaba lastfm_playcount en valor absoluto CRUZANDO artistas — se
+    rompía cuando un artista con catálogo parejo (ej. Sonata Arctica)
+    eclipsaba a uno con perfil pico-y-caída (ej. Helloween) durante
+    muchas posiciones seguidas. v2 lo arregló con rondas estrictas; v3
+    mantiene ese arreglo pero afloja la rigidez de la ronda."""
     pools = {nm: sorted(selected_by_name.get(nm, []), key=_track_playcount, reverse=True) for nm in order}
     pointers = {nm: 0 for nm in order}
+    remaining_len = {nm: len(pools[nm]) for nm in order}
     result = []
-    max_len = max((len(pools[nm]) for nm in order), default=0)
-    for _ in range(max_len):
-        ronda = [(nm, pools[nm][pointers[nm]]) for nm in order if pointers[nm] < len(pools[nm])]
-        ronda.sort(key=lambda par: _track_playcount(par[1]), reverse=True)
-        for nm, track in ronda:
-            result.append(track)
-            pointers[nm] += 1
+    total = sum(remaining_len.values())
+    for _ in range(total):
+        candidates = [nm for nm in order if pointers[nm] < remaining_len[nm]]
+        if not candidates:
+            break
+        weights = [remaining_len[nm] - pointers[nm] for nm in candidates]
+        chosen = random.choices(candidates, weights=weights, k=1)[0]
+        result.append(pools[chosen][pointers[chosen]])
+        pointers[chosen] += 1
     return result
 
 
@@ -1324,10 +1341,9 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
        playlist por esto salvo que TODOS los artistas nombrados juntos
        no alcancen para playlist_size pistas — ahí sí, la lista sale más
        corta, no hay de dónde más sacar).
-    5. El resultado final se arma por rondas (una pista de cada artista
-       activo por ronda), ordenadas DENTRO de cada ronda por
-       reproducciones reales de cada pista (_merge_selected_by_track_popularity
-       — v2, ver su docstring para el bug de v1 que esto corrige).
+    5. El resultado final se arma con un shuffle ponderado por cuota
+       restante (_merge_selected_by_track_popularity — v3, ver su
+       docstring para el historial de v1/v2 y por qué se llegó acá).
 
     Devuelve una lista de tracks ya en el orden final (longitud
     <= playlist_size). Con `ranking` presente, _finalize_pool (llamado
