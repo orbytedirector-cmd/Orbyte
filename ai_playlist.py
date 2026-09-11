@@ -26,6 +26,7 @@ opcional (try/except ImportError) — no se agrega ninguna dependencia nueva
 al proyecto más que esa (que sí hay que sumar a start.sh, ver el ticket).
 """
 import json
+import math
 import time
 import random
 import difflib
@@ -511,7 +512,7 @@ _ARTIST_MATCH_CUTOFF = 0.75  # más estricto que _closest_match (0.6):
 # género/mood, más riesgo de un falso positivo con un cutoff laxo.
 
 
-def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_limit=8, expand_similar=True):
+def _resolve_artist_ids_grouped(conn, artist_names, build_similar_artists_fn, similar_limit=8, expand_similar=True):
     """Ticket AI-11 (bugfix, reportado por Niko: "Metallica y similares"
     no encontraba a Metallica pese a que el artista SÍ está en la
     biblioteca). Resuelve cada nombre de artista que el LLM extrajo
@@ -529,17 +530,33 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
     ("Stratovarius y artistas similares"). Ver entities.buscar_similares
     en generate_playlist.
 
-    Devuelve un set de artist_id: los nombrados que se pudieron resolver
-    + (si expand_similar) sus similares que efectivamente existen en esta
-    biblioteca (los que no, `build_similar_artists_fn` ya los devuelve
-    con id=None y se descartan acá)."""
+    Ticket AI-28 (Ticket 41, punto 1 — bug reportado por Niko: un mix de
+    varios artistas nombrados quedaba desbalanceado hacia el más
+    escuchado globalmente). Antes de este ticket, esta función devolvía
+    un solo `set` plano con todos los IDs de todos los nombres
+    mezclados — no había forma de saber "estos IDs son de Helloween,
+    estos otros de Stratovarius" para poder darle una cuota a cada uno
+    más adelante (ver _query_tracks_balanced_by_artist). Ahora devuelve
+    un dict {nombre_normalizado: set_de_ids}: el nombre normalizado
+    (mismo `.strip().lower()` de siempre) es la clave, así que un mismo
+    artista nombrado dos veces con grafía distinta no genera dos grupos
+    separados. Los similares expandidos de un artista quedan agrupados
+    bajo ESE mismo nombre, no como grupos aparte — "Metallica y
+    similares" sigue siendo UN solo bucket para efectos de cuota.
+
+    Devuelve dict {nombre: set_de_artist_id}: por cada nombre, los IDs
+    nombrados que se pudieron resolver + (si expand_similar) sus
+    similares que efectivamente existen en esta biblioteca (los que no,
+    `build_similar_artists_fn` ya los devuelve con id=None y se
+    descartan acá). Nombres que el LLM mencionó pero no matchearon
+    ningún artista real simplemente no aparecen como clave."""
     if not artist_names:
-        return set()
+        return {}
 
     rows = conn.execute('SELECT id, name FROM artists').fetchall()
     name_to_id = {r['name'].strip().lower(): r['id'] for r in rows}
 
-    ids = set()
+    grouped = {}
     for raw_name in artist_names:
         norm = str(raw_name).strip().lower()
         if not norm:
@@ -551,7 +568,9 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
                 matched_id = name_to_id[close[0]]
         if matched_id is None:
             continue  # el LLM mencionó un artista que no está en la biblioteca — se ignora, no se fuerza nada
-        ids.add(matched_id)
+
+        bucket = grouped.setdefault(norm, set())
+        bucket.add(matched_id)
 
         if not expand_similar:
             continue
@@ -561,7 +580,25 @@ def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_li
         if similar_row and similar_row['similar_artists_json']:
             for similar in build_similar_artists_fn(conn, similar_row['similar_artists_json'], limit=similar_limit):
                 if similar.get('id'):
-                    ids.add(similar['id'])
+                    bucket.add(similar['id'])
+    return grouped
+
+
+def _resolve_artist_ids(conn, artist_names, build_similar_artists_fn, similar_limit=8, expand_similar=True):
+    """Wrapper delgado sobre _resolve_artist_ids_grouped (Ticket AI-28 —
+    ver docstring ahí para el detalle completo de la resolución). Se
+    mantiene con esta firma/comportamiento exacto (un solo set plano,
+    todos los nombres combinados) porque sigue siendo lo único que
+    necesitan los demás usos de artist_ids en generate_playlist
+    (filters_applied, hint para álbumes/pistas nombradas, la cascada
+    artista-primero) — el balanceo por cuota (Ticket 41, punto 1) es la
+    ÚNICA parte que necesita el dict agrupado, y lo pide aparte."""
+    grouped = _resolve_artist_ids_grouped(
+        conn, artist_names, build_similar_artists_fn, similar_limit=similar_limit, expand_similar=expand_similar
+    )
+    ids = set()
+    for bucket in grouped.values():
+        ids |= bucket
     return ids
 
 
@@ -1099,6 +1136,216 @@ def _query_tracks_own_listens(conn, args_dict, user_id, track_to_json_fn, build_
     return tracks
 
 
+# Ticket AI-28 (Ticket 41, punto 1) — reparto de cuotas para el mix de
+# varios artistas nombrados, decidido con Niko: los 2 artistas más
+# populares del grupo se llevan el 60% del total entre ellos dos, el
+# 40% restante se reparte parejo entre el resto. Con exactamente 2
+# artistas nombrados no aplica este split (no hay "resto") — ahí es
+# 50/50 directo, ver _compute_artist_mix_quotas.
+_ARTIST_MIX_TOP2_SHARE = 0.6
+
+
+def _artist_popularity_proxy(conn, artist_ids):
+    """Ticket AI-28 — señal de "qué tan popular es este artista" para
+    decidir cuotas en el mix multi-artista. Usa el mayor
+    `lastfm_playcount` entre TODAS las pistas del artista (su tema más
+    escuchado) en vez de sumar o promediar el catálogo completo: sumar
+    favorecería a un artista con catálogo grande de temas menores por
+    sobre uno con menos pistas pero un hit fuerte, que es exactamente el
+    tipo de comparación que "más popular" debería capturar acá. No
+    reusa track_pop_cache.pop_score a propósito — ese campo mide calidad
+    de audio/metadata, no popularidad real (ver nota en
+    _RANKING_ORDER_SQL/AI_AGENT_MASTER_PLAN.md)."""
+    if not artist_ids:
+        return 0
+    placeholders = ','.join('?' * len(artist_ids))
+    row = conn.execute(
+        f'''SELECT MAX(COALESCE(tm.lastfm_playcount, 0)) as maxpc
+            FROM tracks t
+            JOIN albums al ON al.id = t.album_id
+            LEFT JOIN track_meta tm ON tm.track_id = t.id
+            WHERE al.artist_id IN ({placeholders})''',
+        list(artist_ids)
+    ).fetchone()
+    return (row['maxpc'] or 0) if row else 0
+
+
+def _compute_artist_mix_quotas(pop_by_name, playlist_size):
+    """Ticket AI-28 (Ticket 41, punto 1) — cuánto de `playlist_size` le
+    corresponde a cada artista nombrado en un mix de 2+, decidido con
+    Niko:
+    - 2 artistas: 50/50, sin importar popularidad relativa.
+    - 3+ artistas: los 2 más populares (por _artist_popularity_proxy) se
+      reparten _ARTIST_MIX_TOP2_SHARE (60%) del total ENTRE ELLOS DOS,
+      ponderado por raíz cuadrada de su popularidad (no proporcional
+      directo — si uno le saca mucha ventaja al otro, la raíz cuadrada
+      suaviza la brecha en vez de llevársela casi toda); el 40% restante
+      se reparte PAREJO entre el resto de los artistas nombrados, sin
+      pesar por popularidad.
+
+    `pop_by_name`: dict {nombre: valor_de_popularidad} (ver
+    _artist_popularity_proxy), ya con una entrada por cada nombre
+    resuelto — esta función no toca la base, solo hace la aritmética del
+    reparto.
+
+    Devuelve dict {nombre: cuota_int}. Las cuotas siempre suman
+    exactamente `playlist_size` (los restos de redondeo se ajustan sobre
+    el artista más popular del top-2, nunca se pierde una pista por
+    redondeo)."""
+    names = list(pop_by_name.keys())
+    k = len(names)
+    if k == 0:
+        return {}
+    if k == 1:
+        return {names[0]: playlist_size}
+
+    if k == 2:
+        base = playlist_size // 2
+        return {names[0]: base, names[1]: playlist_size - base}
+
+    ordered = sorted(names, key=lambda nm: pop_by_name[nm], reverse=True)
+    top2, rest = ordered[:2], ordered[2:]
+
+    top2_total = round(playlist_size * _ARTIST_MIX_TOP2_SHARE)
+    rest_total = playlist_size - top2_total
+
+    p1, p2 = pop_by_name[top2[0]], pop_by_name[top2[1]]
+    w1, w2 = math.sqrt(max(p1, 0)), math.sqrt(max(p2, 0))
+    if w1 + w2 <= 0:
+        share1 = top2_total // 2  # ninguno de los dos tiene dato de popularidad — parejo entre ellos
+    else:
+        share1 = round(top2_total * (w1 / (w1 + w2)))
+    share2 = top2_total - share1
+    quotas = {top2[0]: share1, top2[1]: share2}
+
+    if rest:
+        base_rest = rest_total // len(rest)
+        remainder = rest_total - base_rest * len(rest)
+        for i, nm in enumerate(rest):
+            quotas[nm] = base_rest + (1 if i < remainder else 0)
+
+    # Ajuste final: cualquier desfase por los round() de arriba (a lo
+    # sumo 1-2 pistas) se corrige sobre el artista más popular — nunca
+    # se pierde ni se inventa una pista de más respecto a playlist_size.
+    diff = playlist_size - sum(quotas.values())
+    if diff:
+        quotas[top2[0]] += diff
+    return quotas
+
+
+def _interleave_by_quota(selected_by_name, order):
+    """Ticket AI-28 — intercala las pistas ya elegidas por artista
+    (dict {nombre: lista_ya_ordenada_por_ranking}) en un único orden
+    final, en vez de devolver bloques consecutivos por artista (todo
+    Helloween primero, después todo Stratovarius). Round-robin
+    ponderado por la cuota final de cada uno: en cada paso, el próximo
+    en salir es el artista cuya fracción (pistas ya emitidas / su
+    cuota) sea más chica — a igual cuota alternan 1 a 1; el que tiene
+    más cuota aparece más seguido, pero repartido a lo largo de toda la
+    lista, no todo amontonado al principio."""
+    counts = {nm: len(selected_by_name.get(nm, [])) for nm in order}
+    emitted = {nm: 0 for nm in order}
+    result = []
+    total = sum(counts.values())
+    for _ in range(total):
+        candidates = [nm for nm in order if emitted[nm] < counts[nm]]
+        if not candidates:
+            break
+        best = min(candidates, key=lambda nm: emitted[nm] / counts[nm])
+        result.append(selected_by_name[best][emitted[best]])
+        emitted[best] += 1
+    return result
+
+
+def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                                      artist_id_groups, album_ids=None, track_ids=None, ranking=None,
+                                      playlist_size=_PLAYLIST_SIZE):
+    """Ticket AI-28 (Ticket 41, punto 1 — reportado por Niko: "Dame un
+    Mix con lo mejor de: Helloween, Stratovarius, Sonata Arctica,
+    Hammerfall..." quedaba casi todo concentrado en uno solo). Causa
+    raíz (ver ticket): _query_tracks() de siempre arma UNA sola consulta
+    con todos los artist_id mezclados en un set plano y un único
+    ORDER BY + LIMIT — el artista con más `lastfm_playcount` copa el
+    LIMIT antes de que el sistema llegue a los demás, sin que exista
+    ninguna cuota ni garantía por artista.
+
+    Solo se llama a esta función cuando hay 2+ NOMBRES de artista
+    resueltos (`artist_id_groups` con 2+ claves) — generate_playlist
+    decide eso; con 1 solo nombre se sigue usando _query_tracks tal cual,
+    orden puro por ranking, sin ningún cambio de comportamiento (pedido
+    explícito de Niko: el balanceo es solo para "mix" de 2+, no para
+    "lo mejor de Stratovarius" a secas).
+
+    Estrategia (decidida con Niko, Ticket 41):
+    1. Popularidad de cada artista nombrado vía _artist_popularity_proxy.
+    2. Cuotas vía _compute_artist_mix_quotas (50/50 con 2 nombres; con
+       3+, top-2 se llevan 60% ponderado por raíz cuadrada entre ellos,
+       el resto se reparte parejo con el 40% restante).
+    3. Por cada artista, se trae un pool CANDIDATO más grande que su
+       cuota (mismo ORDER BY/ranking y mismos filtros de args_dict/
+       album_ids/track_ids de siempre, vía _query_tracks de toda la
+       vida — no se reinventa el criterio de matching ni de orden) para
+       tener de dónde sacar de más si algún otro artista se queda corto.
+    4. Si un artista nombrado no tiene suficientes pistas en la
+       biblioteca para cubrir su cuota, el faltante se reparte entre los
+       demás artistas nombrados que sí tengan pistas de sobra —
+       priorizando al más popular primero, en ronda (nunca se acorta la
+       playlist por esto salvo que TODOS los artistas nombrados juntos
+       no alcancen para playlist_size pistas — ahí sí, la lista sale más
+       corta, no hay de dónde más sacar).
+    5. El resultado final se intercala (_interleave_by_quota) en vez de
+       devolver bloques consecutivos por artista.
+
+    Devuelve una lista de tracks ya en el orden final (longitud
+    <= playlist_size). Con `ranking` presente, _finalize_pool (llamado
+    desde generate_playlist) hace pool[:playlist_size] sobre este
+    resultado sin reordenar — el orden que arma esta función ES el
+    orden final que ve el usuario. Sin ranking, _finalize_pool hace
+    random.sample, que reordena pero conserva el CONJUNTO ya balanceado
+    de pistas (la mezcla de artistas no se pierde, solo el orden)."""
+    names = list(artist_id_groups.keys())
+    pop_by_name = {nm: _artist_popularity_proxy(conn, artist_id_groups[nm]) for nm in names}
+    quotas = _compute_artist_mix_quotas(pop_by_name, playlist_size)
+    order = sorted(names, key=lambda nm: pop_by_name[nm], reverse=True)
+
+    fetched = {}
+    for nm in order:
+        quota = quotas.get(nm, 0)
+        # Buffer de candidatos por sobre la cuota, para tener margen de
+        # dónde tapar el hueco de otro artista si le falta (paso 4). Tope
+        # en _CANDIDATE_POOL_SIZE para no pedir de más si la cuota ya es
+        # grande (ej. "las mejores 100 de estos 3 artistas").
+        candidate_limit = min(_CANDIDATE_POOL_SIZE, max(quota * 4, quota + 20))
+        fetched[nm] = _query_tracks(
+            conn, args_dict, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            artist_ids=artist_id_groups[nm], album_ids=album_ids, track_ids=track_ids, ranking=ranking,
+            limit_override=candidate_limit
+        )
+
+    selected = {nm: fetched[nm][:quotas.get(nm, 0)] for nm in order}
+    total_deficit = sum(max(0, quotas.get(nm, 0) - len(fetched[nm])) for nm in order)
+    if total_deficit > 0:
+        surplus_ptr = {nm: len(selected[nm]) for nm in order}
+        progressed = True
+        while total_deficit > 0 and progressed:
+            progressed = False
+            for nm in order:
+                if total_deficit <= 0:
+                    break
+                ptr = surplus_ptr[nm]
+                if ptr < len(fetched[nm]):
+                    selected[nm].append(fetched[nm][ptr])
+                    surplus_ptr[nm] = ptr + 1
+                    total_deficit -= 1
+                    progressed = True
+            # si progressed queda False, ningún artista nombrado tiene ya
+            # más pistas disponibles — la playlist sale más corta que
+            # playlist_size, no hay de dónde más sacar (caso real de
+            # biblioteca chica para TODOS los artistas del mix a la vez).
+
+    return _interleave_by_quota(selected, order)
+
+
 def _finalize_pool(pool, ranking, playlist_size=_PLAYLIST_SIZE):
     """Ticket AI-22 — con ranking explícito, el pool ya viene ordenado y
     acotado a playlist_size desde la query (ver _query_tracks/
@@ -1220,9 +1467,19 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
     esta función sepa nada de paginación en absoluto."""
     playlist_size = entities.get('cantidad') or _PLAYLIST_SIZE
     buscar_similares = bool(entities.get('buscar_similares'))
-    artist_ids = _resolve_artist_ids(
+    # Ticket AI-28 (Ticket 41, punto 1): se resuelve agrupado por nombre
+    # (no un set plano) para poder darle una cuota a cada artista
+    # nombrado más abajo si son 2+ — ver _run_query. `artist_ids` (el
+    # set plano de siempre) se deriva del mismo dict y sigue
+    # alimentando exactamente lo mismo que antes (filters_applied, hint
+    # para álbumes/pistas, la cascada artista-primero): ningún otro uso
+    # de artist_ids en esta función cambia de comportamiento.
+    artist_id_groups = _resolve_artist_ids_grouped(
         conn, entities.get('artists') or [], build_similar_artists_fn, expand_similar=buscar_similares
     )
+    artist_ids = set()
+    for _bucket in artist_id_groups.values():
+        artist_ids |= _bucket
     album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
     named_track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
 
@@ -1267,9 +1524,27 @@ def generate_playlist(conn, user_id, entities, track_to_json_fn, build_adv_filte
 
     def _run_query(args_dict_local):
         if ranking == 'escuchas_propias':
+            # Ticket AI-28: el balanceo por cuota no cubre este camino
+            # (JOIN distinto, contra listening_events — fuera del
+            # alcance investigado en el Ticket 41, que se enfocó en
+            # _query_tracks). Con 2+ artistas nombrados y "mis escuchas
+            # de X, Y y Z", sigue el comportamiento de siempre.
             return _query_tracks_own_listens(
                 conn, args_dict_local, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                 artist_ids=artist_ids, album_ids=album_ids, track_ids=track_ids,
+                playlist_size=playlist_size
+            )
+        if len(artist_id_groups) >= 2:
+            # Ticket AI-28 (Ticket 41, punto 1) — 2+ artistas nombrados:
+            # cuota por artista + intercalado, en vez de una sola
+            # consulta con todos los IDs mezclados (causa raíz del mix
+            # desbalanceado hacia el más escuchado). Con 1 solo nombre
+            # (or 0), cae al camino de _query_tracks de siempre, sin
+            # cambios — el balanceo es solo para "mix" de 2+, pedido
+            # explícito de Niko.
+            return _query_tracks_balanced_by_artist(
+                conn, args_dict_local, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+                artist_id_groups=artist_id_groups, album_ids=album_ids, track_ids=track_ids, ranking=ranking,
                 playlist_size=playlist_size
             )
         return _query_tracks(
