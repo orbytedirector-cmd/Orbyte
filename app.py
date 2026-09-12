@@ -5354,6 +5354,20 @@ _RADIO_DEDUPE_SUFFIX_RE = re.compile(
           |album\s+version
           |remix
         )
+        # Ticket AI-30 (bug real confirmado por Niko: "One" de Metallica
+        # resolvía a una versión en vivo en vez de la de estudio, al
+        # elegir la mejor versión para una sugerencia de Gemini —
+        # _resolve_suggested_track_version). Causa: el original en la
+        # biblioteca está guardado como "One (Remastered 2018)" —
+        # palabra ANTES del año — pero acá solo se contemplaba el orden
+        # "(2018 Remastered)" (año ANTES de la palabra, vía el grupo
+        # opcional del principio). Se agrega el mismo grupo de año
+        # OPCIONAL también DESPUÉS de la palabra clave, para cubrir
+        # ambos órdenes. Validado contra los 68.803 títulos reales de
+        # la biblioteca de Niko: 1139 títulos cambian de resultado, los
+        # 25 revisados al azar quedan todos correctos (ninguno se corta
+        # de más ni de menos).
+        \s*(?:\d{4}\s*)?
         \s*[\)\]]\s*$''',
     re.IGNORECASE | re.VERBOSE
 )
