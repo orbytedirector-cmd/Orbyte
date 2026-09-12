@@ -8590,6 +8590,12 @@ def _dsd_cache_cleanup():
 # o de tocar algo que ya usan iOS/Android.
 _ALEXA_CACHE_DIR      = os.path.join(tempfile.gettempdir(), 'orbyte_alexa_cache')
 _ALEXA_CACHE_MAX_AGE  = 24 * 3600   # seconds — un día alcanza de sobra para uso personal
+# Ticket 42, Lote 13: tope adicional por TAMAÑO total, no solo por edad.
+# tempfile.gettempdir() suele ser /tmp, que en muchas distros es tmpfs
+# (RAM, no disco) — un caché que crece sin límite ahí puede competir por
+# memoria real con el resto del sistema. 300MB son unas ~50 canciones a
+# 192kbps, de sobra para uso personal.
+_ALEXA_CACHE_MAX_BYTES = 300 * 1024 * 1024
 
 def _alexa_cache_path(absolute_path):
     """Nombre de caché determinístico: hash de ruta + mtime, igual que _dsd_cache_path."""
@@ -8602,16 +8608,38 @@ def _alexa_cache_path(absolute_path):
     return os.path.join(_ALEXA_CACHE_DIR, f'{key}.mp3')
 
 def _alexa_cache_cleanup():
-    """Limpieza best-effort, igual que _dsd_cache_cleanup."""
+    """Limpieza best-effort, igual que _dsd_cache_cleanup — por edad, y
+    ahora también por tamaño total (Ticket 42, Lote 13): si el caché entero
+    supera _ALEXA_CACHE_MAX_BYTES, borra primero los archivos más viejos
+    hasta bajar del límite, sin esperar a que cumplan las 24hs."""
     try:
         now = time.time()
+        entries = []
         for name in os.listdir(_ALEXA_CACHE_DIR):
             fp = os.path.join(_ALEXA_CACHE_DIR, name)
             try:
-                if now - os.path.getmtime(fp) > _ALEXA_CACHE_MAX_AGE:
-                    os.remove(fp)
+                st = os.stat(fp)
             except OSError:
-                pass
+                continue
+            if now - st.st_mtime > _ALEXA_CACHE_MAX_AGE:
+                try:
+                    os.remove(fp)
+                except OSError:
+                    pass
+                continue
+            entries.append((st.st_mtime, st.st_size, fp))
+
+        total = sum(size for _, size, _ in entries)
+        if total > _ALEXA_CACHE_MAX_BYTES:
+            entries.sort(key=lambda e: e[0])  # más viejos primero
+            for _, size, fp in entries:
+                if total <= _ALEXA_CACHE_MAX_BYTES:
+                    break
+                try:
+                    os.remove(fp)
+                    total -= size
+                except OSError:
+                    pass
     except FileNotFoundError:
         pass
 
