@@ -544,6 +544,7 @@ def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=
     prompt = _build_system_prompt(raw_query, vocab)
 
     for provider_name, call_fn in (('gemini', _call_gemini), ('groq', _call_groq)):
+        _t_provider0 = time.time()
         try:
             parsed = call_fn(prompt, thinking_level=thinking_level) if provider_name == 'gemini' else call_fn(prompt)
         except requests.exceptions.HTTPError as e:
@@ -566,19 +567,27 @@ def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=
             status = e.response.status_code if e.response is not None else '?'
             reason = e.response.reason if e.response is not None else ''
             body_preview = (e.response.text or '')[:300] if e.response is not None else ''
+            _provider_ms = int((time.time() - _t_provider0) * 1000)
             _logger.warning(
-                'proveedor %s falló con HTTP %s (%s) — body: %s',
-                provider_name, status, reason, body_preview
+                'proveedor %s falló con HTTP %s (%s) tras %dms — body: %s',
+                provider_name, status, reason, _provider_ms, body_preview
             )
             parsed = None
         except Exception as e:
             # Mismo criterio que arriba: nombre de la excepción + mensaje
             # acotado a 200 caracteres, nunca el objeto `e` completo.
-            _logger.warning('proveedor %s falló: %s: %s', provider_name, type(e).__name__, str(e)[:200])
+            _provider_ms = int((time.time() - _t_provider0) * 1000)
+            _logger.warning('proveedor %s falló tras %dms: %s: %s', provider_name, _provider_ms, type(e).__name__, str(e)[:200])
             parsed = None
         if not parsed:
             continue
-        _logger.info('proveedor %s respondió OK', provider_name)
+        _provider_ms = int((time.time() - _t_provider0) * 1000)
+        # Ticket 42, Lote 8 — medición puntual para diagnosticar de dónde
+        # sale la latencia variable (~3s a ~14s medida en pruebas): separa
+        # cuánto tardó el proveedor LLM en sí de cuánto tarda el resto del
+        # pipeline (generate_playlist, DB) — este último se puede inferir
+        # restando esto del elapsed_ms total que ya loguea _log_request.
+        _logger.info('proveedor %s respondió OK en %dms', provider_name, _provider_ms)
         entities = _normalize_entities(parsed.get('entities') or {}, vocab, max_cantidad=max_cantidad)
         return {
             'status': parsed.get('status') if parsed.get('status') in
