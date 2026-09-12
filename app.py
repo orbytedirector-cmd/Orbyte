@@ -3234,6 +3234,99 @@ def api_v1_stream_pcm(track_id):
     resp.headers['X-Transcode-Cache'] = 'hit' if cache_hit else 'miss'
     return resp
 
+@app.route('/api/v1/alexa/stream/<int:track_id>')
+def api_v1_alexa_stream(track_id):
+    """Ticket 42 — streaming para la skill de Alexa. Aislado a propósito de
+    /api/v1/stream y /api/v1/stream-pcm (mismo criterio que esos dos: no
+    tocar lo que ya sirve a iOS/Android). El dispositivo Echo reproduce la
+    URL directamente vía la directiva AudioPlayer.Play de Alexa — no puede
+    mandar headers custom, así que, igual que /api/v1/stream, el token
+    también se acepta como ?token=... en la URL.
+
+    AudioPlayer no soporta FLAC/DSD ni sample rates altos (restricción
+    confirmada — ver Ticket 42) — se transcodea a MP3 192kbps/44.1kHz, el
+    formato más simple de la lista soportada, sin importar la fuente
+    original (la calidad no es un objetivo en esta ruta puntual). Igual que
+    /api/v1/stream-pcm: transcodeo COMPLETO a un caché en disco antes de
+    servir nada (nunca en vivo), mismo criterio que evitó los cortes de
+    reproducción en ese endpoint."""
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
+    if not token:
+        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: sin token (ni header ni query)")
+        return jsonify({'error': 'not_authenticated'}), 401
+    try:
+        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired) as e:
+        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: token inválido ({e.__class__.__name__})")
+        return jsonify({'error': 'invalid_token'}), 401
+
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        if not user or not user['is_approved']:
+            app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: user={user_id} no aprobado o inexistente")
+            return jsonify({'error': 'not_authenticated'}), 401
+        row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: no existe en la DB")
+        return jsonify({'error': 'track_not_found'}), 404
+
+    # Mismo criterio de limpieza de path que /api/v1/stream y /api/v1/stream-pcm.
+    relative_path = clean_db_path(row['file_path']).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if relative_path.startswith(root + '/'):
+        relative_path = relative_path[len(root) + 1:]
+    elif relative_path.startswith(root):
+        relative_path = relative_path[len(root):]
+    absolute_path = os.path.join(MUSIC_ROOT, relative_path)
+    if not os.path.isfile(absolute_path):
+        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: archivo no encontrado en disco: {absolute_path}")
+        return jsonify({'error': 'file_not_found'}), 404
+
+    _alexa_cache_cleanup()
+    cache_path = _alexa_cache_path(absolute_path)
+    cache_hit  = os.path.isfile(cache_path)
+
+    if not cache_hit:
+        tmp_path = f'{cache_path}.{os.getpid()}.tmp'
+        cmd = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+            '-i', absolute_path,
+            '-vn',                 # sin portada embebida
+            '-ar', '44100',        # AudioPlayer no necesita ni soporta hi-res
+            '-ac', '2',
+            '-c:a', 'libmp3lame',
+            '-b:a', '192k',
+            '-f', 'mp3',
+            tmp_path,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
+            if result.returncode != 0 or not os.path.isfile(tmp_path):
+                app.logger.error(
+                    f"[api/v1/alexa/stream] ffmpeg failed for {absolute_path}: "
+                    f"{result.stderr.decode(errors='replace')[:500]}"
+                )
+                return jsonify({'error': 'transcode_failed'}), 500
+            os.replace(tmp_path, cache_path)
+        finally:
+            if os.path.isfile(tmp_path):
+                try: os.remove(tmp_path)
+                except OSError: pass
+
+    app.logger.info(
+        f"[api/v1/alexa/stream] track={track_id}: sirviendo {os.path.basename(cache_path)} "
+        f"(cache={'hit' if cache_hit else 'miss'}, range={request.headers.get('Range', '-')})",
+        extra={'track_id': track_id, 'user_id': user_id}
+    )
+    resp = _serve_audio(cache_path)
+    resp.headers['Content-Type']      = 'audio/mpeg'
+    resp.headers['X-Transcode-Cache'] = 'hit' if cache_hit else 'miss'
+    return resp
+
 @app.route('/api/v1/albums')
 @api_login_required
 def api_v1_albums():
@@ -8424,6 +8517,37 @@ def _dsd_cache_cleanup():
             fp = os.path.join(_DSD_CACHE_DIR, name)
             try:
                 if now - os.path.getmtime(fp) > _DSD_CACHE_MAX_AGE:
+                    os.remove(fp)
+            except OSError:
+                pass
+    except FileNotFoundError:
+        pass
+
+# ── Ticket 42: caché de transcodeo MP3 para la skill de Alexa ──────────────
+# Mismo criterio que _DSD_CACHE_DIR de arriba: directorio, hash y limpieza
+# propios, completamente separados del caché DSD — cero riesgo de colisión
+# o de tocar algo que ya usan iOS/Android.
+_ALEXA_CACHE_DIR      = os.path.join(tempfile.gettempdir(), 'orbyte_alexa_cache')
+_ALEXA_CACHE_MAX_AGE  = 24 * 3600   # seconds — un día alcanza de sobra para uso personal
+
+def _alexa_cache_path(absolute_path):
+    """Nombre de caché determinístico: hash de ruta + mtime, igual que _dsd_cache_path."""
+    os.makedirs(_ALEXA_CACHE_DIR, exist_ok=True)
+    try:
+        mtime = os.path.getmtime(absolute_path)
+    except OSError:
+        mtime = 0
+    key = hashlib.sha1(f'{absolute_path}:{mtime}'.encode('utf-8')).hexdigest()
+    return os.path.join(_ALEXA_CACHE_DIR, f'{key}.mp3')
+
+def _alexa_cache_cleanup():
+    """Limpieza best-effort, igual que _dsd_cache_cleanup."""
+    try:
+        now = time.time()
+        for name in os.listdir(_ALEXA_CACHE_DIR):
+            fp = os.path.join(_ALEXA_CACHE_DIR, name)
+            try:
+                if now - os.path.getmtime(fp) > _ALEXA_CACHE_MAX_AGE:
                     os.remove(fp)
             except OSError:
                 pass
