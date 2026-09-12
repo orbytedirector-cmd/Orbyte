@@ -3584,6 +3584,13 @@ def api_v1_ai_playlist():
     thinking_level = data.get('thinking_level')
     if thinking_level not in ('minimal', 'low', 'medium', 'high'):
         thinking_level = None
+    # Ticket 42, Lote 9 (Alexa): mismo criterio — whitelist explícita,
+    # None si no viene o viene corrupto, cero cambio para iOS/Android.
+    provider_order = data.get('provider_order')
+    if (not isinstance(provider_order, list)
+            or set(provider_order) - {'gemini', 'groq'}
+            or len(provider_order) != len(set(provider_order))):
+        provider_order = None
     conn = get_db_connection()
     try:
         # Ticket 26, Categoría B: default/tope por usuario en vez de los
@@ -3608,6 +3615,7 @@ def api_v1_ai_playlist():
             default_results=user_settings['orbitron_default_results'],
             max_top_n=user_settings['orbitron_max_top_n'],
             thinking_level=thinking_level,
+            provider_order=provider_order,
         )
         return jsonify(result)
     finally:

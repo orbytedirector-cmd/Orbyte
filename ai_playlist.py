@@ -528,10 +528,11 @@ def _call_groq(prompt):
     return _extract_json_object(text)
 
 
-def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=None):
+def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=None, provider_order=None):
     """Devuelve (parsed_dict, provider_used_or_None). parsed_dict sigue el
     schema de AI_AGENT_MASTER_PLAN.md §6. Gemini primero, Groq como
-    respaldo — ver ticket §3 para la justificación de por qué ese orden.
+    respaldo por default — ver ticket §3 para la justificación de por qué
+    ese orden.
 
     `max_cantidad` (Ticket 26, Categoría B): pasado tal cual a
     _normalize_entities — ver ese docstring.
@@ -539,11 +540,23 @@ def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=
     `thinking_level` (Ticket 42, Lote 4): None por default — ningún caller
     existente lo pasa, así que el comportamiento no cambia para nadie salvo
     que se pida explícitamente. Solo aplica a Gemini (ver _call_gemini);
-    Groq no tiene este concepto, se lo sigue llamando igual que siempre."""
+    Groq no tiene este concepto, se lo sigue llamando igual que siempre.
+
+    `provider_order` (Ticket 42, Lote 9): None por default -> ('gemini',
+    'groq'), igual que siempre para iOS/Android. Medido en producción:
+    cuando Gemini falla, se espera su propio timeout de 8s completo ANTES
+    de recién ahí probar Groq (~10s+ total) — inviable para el límite
+    duro de 8s de Alexa. La skill de Alexa manda ('groq', 'gemini') para
+    ese camino puntual: Groq responde rápido y consistente (~2.4s medido),
+    y Gemini queda como respaldo si Groq llegara a fallar."""
     vocab = _get_full_vocab(conn)
     prompt = _build_system_prompt(raw_query, vocab)
 
-    for provider_name, call_fn in (('gemini', _call_gemini), ('groq', _call_groq)):
+    providers = {'gemini': _call_gemini, 'groq': _call_groq}
+    order = provider_order if provider_order else ('gemini', 'groq')
+
+    for provider_name in order:
+        call_fn = providers[provider_name]
         _t_provider0 = time.time()
         try:
             parsed = call_fn(prompt, thinking_level=thinking_level) if provider_name == 'gemini' else call_fn(prompt)
@@ -2387,7 +2400,8 @@ def _log_audit(request_id, raw_query, provider, entities, filters_applied, used_
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
-                    prior_entities=None, default_results=None, max_top_n=None, thinking_level=None):
+                    prior_entities=None, default_results=None, max_top_n=None, thinking_level=None,
+                    provider_order=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
     por errores de la propia base de datos, que sí deben propagarse.
@@ -2441,7 +2455,7 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     effective_max = max_top_n or _MAX_CANTIDAD
     # Ticket 42, Lote 4: thinking_level None por default — sin cambio de
     # comportamiento para ningún caller que no lo pase explícitamente.
-    result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max, thinking_level=thinking_level)
+    result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max, thinking_level=thinking_level, provider_order=provider_order)
 
     if prior_entities:
         result['entities'] = _merge_entities(prior_entities, result['entities'])
