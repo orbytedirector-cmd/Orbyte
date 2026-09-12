@@ -3577,6 +3577,13 @@ def api_v1_ai_playlist():
     prior_entities = data.get('prior_entities')
     if not isinstance(prior_entities, dict):
         prior_entities = None
+    # Ticket 42, Lote 4 (Alexa): campo nuevo y opcional, ignorado por
+    # completo si no viene (iOS/Android nunca lo mandan, cero cambio de
+    # comportamiento para ellos). Whitelist explícita — nunca se reenvía
+    # a Gemini un valor arbitrario que venga en el body.
+    thinking_level = data.get('thinking_level')
+    if thinking_level not in ('minimal', 'low', 'medium', 'high'):
+        thinking_level = None
     conn = get_db_connection()
     try:
         # Ticket 26, Categoría B: default/tope por usuario en vez de los
@@ -3600,6 +3607,7 @@ def api_v1_ai_playlist():
             prior_entities=prior_entities,
             default_results=user_settings['orbitron_default_results'],
             max_top_n=user_settings['orbitron_max_top_n'],
+            thinking_level=thinking_level,
         )
         return jsonify(result)
     finally:

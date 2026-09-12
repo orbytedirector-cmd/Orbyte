@@ -475,7 +475,16 @@ def _extract_json_object(text):
     return json.loads(t.strip())
 
 
-def _call_gemini(prompt):
+def _call_gemini(prompt, thinking_level=None):
+    """Ticket 42, Lote 4 (Alexa) — `thinking_level` es un parámetro nuevo,
+    opcional, agregado a propósito con default None: si no se pasa nada
+    (todo caller existente — iOS/Android — no lo pasa), el generationConfig
+    queda IDÉNTICO al de antes de este ticket, sin ninguna diferencia de
+    comportamiento. gemini-3.6-flash trae el modo "thinking" activado por
+    defecto, lo que agrega varios segundos de deliberación interna antes de
+    responder — probable causa real tanto del timeout de Alexa (límite
+    duro de 8s) como del diagnóstico ya abierto de Android Auto Lote 4
+    (~40s ocasionales). Valores válidos de Google: minimal/low/medium/high."""
     if not (requests and GEMINI_API_KEY):
         return None
     # Ticket AI-21 (bug de seguridad, encontrado porque la protección de
@@ -487,9 +496,12 @@ def _call_gemini(prompt):
     # la URL en ningún lado. La URL en sí ya no tiene ningún secreto.
     url = f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
     headers = {'x-goog-api-key': GEMINI_API_KEY, 'Content-Type': 'application/json'}
+    generation_config = {'response_mime_type': 'application/json', 'temperature': 0.2}
+    if thinking_level:
+        generation_config['thinkingConfig'] = {'thinkingLevel': thinking_level}
     body = {
         'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
-        'generationConfig': {'response_mime_type': 'application/json', 'temperature': 0.2},
+        'generationConfig': generation_config,
     }
     resp = requests.post(url, headers=headers, json=body, timeout=_HTTP_TIMEOUT_SECONDS)
     resp.raise_for_status()
@@ -516,19 +528,24 @@ def _call_groq(prompt):
     return _extract_json_object(text)
 
 
-def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD):
+def interpret_query(conn, raw_query, max_cantidad=_MAX_CANTIDAD, thinking_level=None):
     """Devuelve (parsed_dict, provider_used_or_None). parsed_dict sigue el
     schema de AI_AGENT_MASTER_PLAN.md §6. Gemini primero, Groq como
     respaldo — ver ticket §3 para la justificación de por qué ese orden.
 
     `max_cantidad` (Ticket 26, Categoría B): pasado tal cual a
-    _normalize_entities — ver ese docstring."""
+    _normalize_entities — ver ese docstring.
+
+    `thinking_level` (Ticket 42, Lote 4): None por default — ningún caller
+    existente lo pasa, así que el comportamiento no cambia para nadie salvo
+    que se pida explícitamente. Solo aplica a Gemini (ver _call_gemini);
+    Groq no tiene este concepto, se lo sigue llamando igual que siempre."""
     vocab = _get_full_vocab(conn)
     prompt = _build_system_prompt(raw_query, vocab)
 
     for provider_name, call_fn in (('gemini', _call_gemini), ('groq', _call_groq)):
         try:
-            parsed = call_fn(prompt)
+            parsed = call_fn(prompt, thinking_level=thinking_level) if provider_name == 'gemini' else call_fn(prompt)
         except requests.exceptions.HTTPError as e:
             # Ticket AI-19: acá es donde iba a aparecer, por ejemplo, un
             # 401 de Gemini por el problema activo de Google con las keys
@@ -2361,7 +2378,7 @@ def _log_audit(request_id, raw_query, provider, entities, filters_applied, used_
 
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
-                    prior_entities=None, default_results=None, max_top_n=None):
+                    prior_entities=None, default_results=None, max_top_n=None, thinking_level=None):
     """Punto de entrada único, llamado desde app.py::api_v1_ai_playlist.
     Nunca lanza (todo error de proveedor externo se degrada a fallback) salvo
     por errores de la propia base de datos, que sí deben propagarse.
@@ -2413,7 +2430,9 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     # exacto que antes de este ticket.
     effective_default = default_results or _PLAYLIST_SIZE
     effective_max = max_top_n or _MAX_CANTIDAD
-    result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max)
+    # Ticket 42, Lote 4: thinking_level None por default — sin cambio de
+    # comportamiento para ningún caller que no lo pase explícitamente.
+    result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max, thinking_level=thinking_level)
 
     if prior_entities:
         result['entities'] = _merge_entities(prior_entities, result['entities'])
