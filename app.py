@@ -3327,6 +3327,51 @@ def api_v1_alexa_stream(track_id):
     resp.headers['X-Transcode-Cache'] = 'hit' if cache_hit else 'miss'
     return resp
 
+@app.route('/api/v1/alexa/track/<int:track_id>')
+def api_v1_alexa_track(track_id):
+    """Ticket 42, Lote 10 — lookup mínimo (título/artista/álbum/portada)
+    para que Next/Previous/Resume/el encolado automático de la skill de
+    Alexa puedan mostrar la metadata real de CUALQUIER pista, no solo la
+    primera de cada pedido (esas sí la tienen a mano desde la respuesta
+    de /api/v1/ai/playlist). Aislado a propósito de /api/v1/track/<id>
+    (ese es de uso general de la app; este es puntual para Alexa, mismo
+    criterio que /api/v1/alexa/stream). Consulta simple, sin Gemini de
+    por medio — pensado para responder en milisegundos. Mismo patrón de
+    auth que /api/v1/alexa/stream: token por header o por query, así la
+    Lambda puede usarlo igual sin importar cuál elija."""
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
+    if not token:
+        return jsonify({'error': 'not_authenticated'}), 401
+    try:
+        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return jsonify({'error': 'invalid_token'}), 401
+
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+        if not user or not user['is_approved']:
+            return jsonify({'error': 'not_authenticated'}), 401
+        t = conn.execute('''
+            SELECT t.id, t.title, ar.name as artist_name, a.name as album_name, a.cover_path
+            FROM tracks t
+            LEFT JOIN albums a ON t.album_id=a.id
+            LEFT JOIN artists ar ON a.artist_id=ar.id
+            WHERE t.id=?
+        ''', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not t:
+        return jsonify({'error': 'track_not_found'}), 404
+    return jsonify({
+        'id': t['id'],
+        'title': t['title'],
+        'artist_name': t['artist_name'],
+        'album_name': t['album_name'],
+        'cover_url': cover_url_filter(t['cover_path']),
+    })
+
 @app.route('/api/v1/albums')
 @api_login_required
 def api_v1_albums():
