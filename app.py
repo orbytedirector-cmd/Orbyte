@@ -1898,9 +1898,24 @@ def api_track_similar_artists(track_id):
 def api_album_tracks(album_id):
     conn = get_db_connection()
     try:
-        alb = conn.execute('SELECT name, cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        alb = conn.execute(
+            'SELECT al.name, al.cover_path, al.artist_id, ar.name as artist_name '
+            'FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id WHERE al.id=?',
+            (album_id,)
+        ).fetchone()
         album_cover      = clean_db_path(alb['cover_path']) if alb else None
         album_artist_id  = alb['artist_id'] if alb else None
+        # Bug real reportado (Niko, Orbyte-Desktop): "Artista" salía
+        # vacío para CUALQUIER pista cargada por esta via (entrar a un
+        # álbum -> tocar una pista) - esta consulta ya calculaba
+        # album_artist_id (el numero) pero nunca buscaba el NOMBRE del
+        # artista correspondiente en la tabla artists, así que
+        # 'artist_name' nunca se agregaba a la respuesta - el cliente
+        # SI busca ese campo correctamente (ver player_backend.py,
+        # Orbyte-Desktop), pero no puede mostrar lo que nunca llega.
+        # album_artist_id (el numero, usado para "navegar al artista")
+        # se deja intacto, esto solo agrega el nombre al lado.
+        album_artist_name = alb['artist_name'] if alb else None
         album_name       = alb['name'] if alb else None
         tracks = conn.execute(
             'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
@@ -1917,8 +1932,9 @@ def api_album_tracks(album_id):
             d['format_display'] = fmt
             d['format_color']   = led
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
-            d['artist_id']      = album_artist_id   # needed by player for navigation
-            d['album_name']     = album_name        # needed by player for display/navigation
+            d['artist_id']      = album_artist_id    # needed by player for navigation
+            d['artist_name']    = album_artist_name  # needed by player for display (Niko, bug real)
+            d['album_name']     = album_name         # needed by player for display/navigation
             tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (t['id'],)).fetchone()
             if tm:
                 for k in tm.keys():
