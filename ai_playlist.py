@@ -2398,6 +2398,236 @@ def _log_audit(request_id, raw_query, provider, entities, filters_applied, used_
         _logger.warning('AI-31: no se pudo armar el log de auditoría (request_id=%r)', request_id, exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Ticket AI-31 (pedido por Niko, desde Orbyte-Desktop): "modo directo".
+#
+# Bug real (request 192, log de Niko): "El Álbum sin daños a terceros de
+# Ricardo Arjona" -> el parser extrajo bien albums=["Sin daños a
+# terceros"] y se resolvió album_id 9517, PERO _query_tracks combina
+# artista/álbum/pista con OR ("pistas de Arjona O del álbum") y además
+# AI-30 sumó pistas sugeridas del artista -> devolvió un mix de Arjona,
+# no el álbum.
+#
+# Regla de activación acordada con Niko: SOLO cuando el pedido es una
+# solicitud directa y explícita ("Reproducí el álbum X", "Buscá la pista
+# X") — nunca en las consultas típicas ("lo mejor de...", "un mix
+# con...", "algo como..."), que siguen EXACTAMENTE por el camino de
+# siempre. Todo esto vive afuera de generate_playlist (que no se toca,
+# mismo criterio que AI-27) y se engancha en handle_request con red de
+# seguridad: cualquier excepción acá cae al flujo normal.
+#
+# Contrato con los clientes SIN cambios: mismos 3 status, mismos campos.
+# iOS/Android/Android Auto/Alexa/Desktop no necesitan actualización.
+#
+#   Álbum encontrado   -> el álbum ENTERO, en orden de disco/pista, sin
+#                         muestreo ni tope de 25 ("Expandir" queda vacío).
+#   Mismo álbum en varias versiones (reediciones/Hi-Res) -> la de mejor
+#                         calidad (led_quality_rank), luego más pistas.
+#   Homónimos de artistas distintos, sin artista nombrado ->
+#                         needs_clarification preguntando cuál; la
+#                         respuesta ("el de Arjona") se fusiona con
+#                         _merge_entities de siempre.
+#   Álbum/pista NO está en la biblioteca -> flujo normal (selección del
+#                         artista) + used_fallback=True (el cliente
+#                         muestra "No encontramos una coincidencia exacta").
+#   Pista encontrada   -> SOLO la mejor versión (decisión de Niko),
+#                         elegida con _score_track_version (AI-30).
+# ---------------------------------------------------------------------------
+
+import re as _re
+import unicodedata as _unicodedata
+
+_DIRECT_ALBUM_RE = _re.compile(r'\b(album|albumes|disco|lp)\b')
+_DIRECT_TRACK_RE = _re.compile(r'\b(cancion|pista|tema|track|song)\b')
+# Señales de "no es un pedido directo" — se buscan DESPUÉS de sacar del
+# texto los nombres de álbum/pista/artista (un álbum llamado "Como ama
+# una mujer" no debe desactivar el modo directo).
+_DIRECT_EXCLUDE_RE = _re.compile(
+    r'\b(lo mejor|mejores|mejor|mix|mezcl\w*|parecid\w*|similar\w*|estilo|onda|tipo|como|'
+    r'top|selecci\w*|variad\w*|playlist|lista|aleatori\w*|random|algo|algunas?|algunos?|'
+    r'poco|pocas|pocos|exitos|hits)\b'
+)
+# Filtros que expresan una intención distinta de "este álbum/pista tal
+# cual" — si el usuario los pidió, no es un pedido directo.
+_DIRECT_BLOCKING_FIELDS = ('genres', 'moods', 'momentos', 'eras', 'temas', 'idiomas', 'paises', 'anios')
+
+
+def _direct_norm(text):
+    text = _unicodedata.normalize('NFKD', str(text or '').lower())
+    text = ''.join(c for c in text if not _unicodedata.combining(c))
+    return _re.sub(r'\s+', ' ', text).strip()
+
+
+def _direct_request_kind(raw_query, entities, prior_entities):
+    """'album' | 'track' | None. Conservador a propósito: ante la duda,
+    None (flujo de siempre)."""
+    if entities.get('buscar_similares') or entities.get('cantidad') or entities.get('ranking'):
+        return None
+    if any(entities.get(k) for k in _DIRECT_BLOCKING_FIELDS):
+        return None
+    albums = entities.get('albums') or []
+    tracks = entities.get('tracks') or []
+    if not albums and not tracks:
+        return None
+
+    q = _direct_norm(raw_query)
+    stripped = q
+    names = list(albums) + list(tracks) + list(entities.get('artists') or [])
+    for name in sorted(names, key=lambda n: -len(str(n))):
+        n = _direct_norm(name)
+        if n:
+            stripped = stripped.replace(n, ' ')
+    if _DIRECT_EXCLUDE_RE.search(stripped):
+        return None
+
+    # Respuesta a una contra-pregunta de este mismo modo: "el de Arjona"
+    # no repite la palabra "álbum", pero el turno anterior ya la tenía.
+    prior = prior_entities or {}
+    if tracks and (_DIRECT_TRACK_RE.search(stripped) or (prior.get('tracks') and not albums)):
+        return 'track'
+    if albums and (_DIRECT_ALBUM_RE.search(stripped) or prior.get('albums')):
+        return 'album'
+    return None
+
+
+def _direct_track_sort_key(t):
+    def _num(v):
+        m = _re.match(r'\s*(\d+)', str(v or ''))
+        return int(m.group(1)) if m else 9999
+    return (_num(t.get('disc_number') or 1), _num(t.get('track_number')), t.get('id') or 0)
+
+
+def _direct_album_rows(conn, album_ids):
+    placeholders = ','.join('?' * len(album_ids))
+    sql = ('SELECT al.id, al.name, al.year, al.artist_id, ar.name AS artist_name '
+           'FROM albums al LEFT JOIN artists ar ON ar.id=al.artist_id '
+           f'WHERE al.id IN ({placeholders})')
+    return conn.execute(sql, list(album_ids)).fetchall()
+
+
+def _direct_album_tracks(conn, album_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn):
+    # Reusa _query_tracks tal cual (mismo JOIN/formato que el resto del
+    # pipeline); skip_dedupe porque acá se quiere el álbum literal.
+    tracks = _query_tracks(
+        conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+        album_ids={album_id}, skip_dedupe=True, limit_override=1000
+    )
+    return sorted(tracks, key=_direct_track_sort_key)
+
+
+def _pick_best_album(conn, rows, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn, led_quality_rank_fn):
+    best, best_key, best_tracks = None, None, None
+    for r in rows:
+        tracks = _direct_album_tracks(conn, r['id'], track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn)
+        if not tracks:
+            continue
+        if led_quality_rank_fn:
+            quality = max((led_quality_rank_fn(t.get('led_color')) for t in tracks), default=0)
+        else:
+            quality = 0
+        key = (quality, len(tracks), -r['id'])
+        if best_key is None or key > best_key:
+            best, best_key, best_tracks = r, key, tracks
+    return best, best_tracks
+
+
+def _direct_options_text(options):
+    if len(options) == 1:
+        return options[0]
+    return ', '.join(options[:-1]) + ' o ' + options[-1]
+
+
+def _try_direct_request(conn, raw_query, entities, prior_entities, track_to_json_fn, build_adv_filters_fn,
+                        dedupe_condition_fn, normalize_title_fn=None, led_quality_rank_fn=None):
+    """None = no aplica (flujo normal). Si aplica, devuelve un dict:
+    {'pool', 'filters_applied', 'status', 'question'} o, si lo pedido no
+    está en la biblioteca, {'not_found': 'album'|'track'} (el caller sigue
+    por el flujo normal y marca used_fallback)."""
+    kind = _direct_request_kind(raw_query, entities, prior_entities)
+    if kind is None:
+        return None
+
+    artist_ids = _resolve_artist_ids(conn, entities.get('artists') or [], None, expand_similar=False)
+
+    if kind == 'track':
+        track_ids = _resolve_track_ids(conn, entities.get('tracks') or [], artist_ids_hint=artist_ids)
+        if not track_ids:
+            return {'not_found': 'track'}
+        versions = _query_tracks(
+            conn, {}, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
+            track_ids=track_ids, skip_dedupe=True, limit_override=200
+        )
+        if artist_ids:
+            versions = [t for t in versions if t.get('artist_id') in artist_ids] or versions
+        if not versions:
+            return {'not_found': 'track'}
+        by_artist = {}
+        for t in versions:
+            by_artist.setdefault(t.get('artist_id'), []).append(t)
+        if len(by_artist) > 1 and not artist_ids:
+            options = []
+            for group in list(by_artist.values())[:4]:
+                t0 = group[0]
+                options.append('«%s» de %s' % (t0.get('title'), t0.get('artist_name') or '?'))
+            question = ('Encontré más de una canción con ese nombre: '
+                        + _direct_options_text(options) + '. ¿Cuál querés?')
+            first = list(by_artist.values())[0]
+            return {'pool': first[:1], 'status': 'needs_clarification', 'question': question,
+                    'filters_applied': {'modo_directo': 'pista', 'ambiguo': True}}
+        if led_quality_rank_fn:
+            best = max(versions, key=lambda t: _score_track_version(t, versions, led_quality_rank_fn))
+        else:
+            best = versions[0]
+        return {'pool': [best], 'status': 'resolved', 'question': None,
+                'filters_applied': {'modo_directo': 'pista', 'track_id': best.get('id')}}
+
+    # kind == 'album'
+    album_ids = _resolve_album_ids(conn, entities.get('albums') or [], artist_ids_hint=artist_ids)
+    if not album_ids:
+        return {'not_found': 'album'}
+    rows = _direct_album_rows(conn, album_ids)
+    if artist_ids:
+        rows = [r for r in rows if r['artist_id'] in artist_ids] or rows
+    by_artist = {}
+    for r in rows:
+        by_artist.setdefault(r['artist_id'], []).append(r)
+
+    if len(by_artist) > 1 and not artist_ids:
+        # Homónimos de artistas distintos: preguntar cuál, mostrando el
+        # primero como playlist parcial (mismo criterio que el resto de
+        # needs_clarification: nunca una respuesta vacía).
+        options = []
+        for group in list(by_artist.values())[:4]:
+            r0 = group[0]
+            year = ' (%s)' % r0['year'] if r0['year'] else ''
+            options.append('«%s» de %s%s' % (r0['name'], r0['artist_name'] or '?', year))
+        _best, first_tracks = _pick_best_album(conn, list(by_artist.values())[0], track_to_json_fn,
+                                               build_adv_filters_fn, dedupe_condition_fn, led_quality_rank_fn)
+        question = 'Encontré más de un álbum con ese nombre: ' + _direct_options_text(options) + '. ¿Cuál querés?'
+        return {'pool': first_tracks or [], 'status': 'needs_clarification', 'question': question,
+                'filters_applied': {'modo_directo': 'album', 'ambiguo': True}}
+
+    # Un solo artista: si el pedido nombró VARIOS álbumes distintos, se
+    # encadenan en el orden pedido; si es uno solo (quizás en varias
+    # versiones), gana la mejor versión.
+    pool, chosen_ids = [], []
+    row_ids = {r['id'] for r in rows}
+    for name in (entities.get('albums') or []):
+        ids_for_name = set(_resolve_album_ids(conn, [name], artist_ids_hint=artist_ids)) & row_ids
+        cand = [r for r in rows if r['id'] in ids_for_name]
+        if not cand:
+            continue
+        best, tracks = _pick_best_album(conn, cand, track_to_json_fn, build_adv_filters_fn,
+                                        dedupe_condition_fn, led_quality_rank_fn)
+        if best is not None and best['id'] not in chosen_ids:
+            chosen_ids.append(best['id'])
+            pool.extend(tracks)
+    if not pool:
+        return {'not_found': 'album'}
+    return {'pool': pool, 'status': 'resolved', 'question': None,
+            'filters_applied': {'modo_directo': 'album', 'album_ids': chosen_ids}}
+
+
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
                     prior_entities=None, default_results=None, max_top_n=None, thinking_level=None,
@@ -2467,6 +2697,20 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     display_size = result['entities'].get('cantidad') or effective_default
     fetch_size = ai_playlist_pagination.fetch_size_for(display_size)
 
+    # Ticket AI-31: modo directo ("Reproducí el álbum X" / "Buscá la
+    # pista X") — ver _try_direct_request. Red de seguridad: cualquier
+    # error acá se loguea y se sigue por el flujo de siempre.
+    direct = None
+    if result['status'] != 'error':
+        try:
+            direct = _try_direct_request(
+                conn, raw_query, result['entities'], prior_entities, track_to_json_fn,
+                build_adv_filters_fn, dedupe_condition_fn,
+                normalize_title_fn=normalize_title_fn, led_quality_rank_fn=led_quality_rank_fn)
+        except Exception:
+            _logger.exception('AI-31: modo directo falló, se sigue por el flujo normal')
+            direct = None
+
     # Hotfix (Ticket AI-09): si tras el merge las entidades siguen
     # completamente vacías (parser sin proveedores configurados, ambos
     # fallaron, o un turno de conversación sin nada nuevo ni previo que
@@ -2478,7 +2722,14 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     # result['status'] sea 'error' pero prior_entities haya aportado algo
     # vía merge), se sigue intentando filtrar por eso primero — no se
     # descarta señal real solo porque este turno puntual falló.
-    if _entities_are_empty(result['entities']):
+    if direct and direct.get('pool'):
+        pool = direct['pool']
+        filters_applied = direct['filters_applied']
+        used_fallback = False
+        display_size = len(pool)  # AI-31: el álbum entero, sin tope de 25
+        result['status'] = direct['status']
+        result['question'] = direct.get('question')
+    elif _entities_are_empty(result['entities']):
         pool, filters_applied = _personalized_then_global_fallback(
             conn, user_id, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
             playlist_size=fetch_size)
@@ -2491,6 +2742,11 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
             build_similar_artists_fn, normalize_title_fn=normalize_title_fn,
             led_quality_rank_fn=led_quality_rank_fn)
         if result['status'] == 'error':
+            used_fallback = True
+        if direct and direct.get('not_found'):
+            # AI-31 (decisión de Niko): lo pedido no está en la
+            # biblioteca -> selección del artista + aviso de "coincidencia
+            # más parecida" en el cliente.
             used_fallback = True
 
     tracks = pool[:display_size]
