@@ -413,6 +413,12 @@ el matching después. Ejemplos de vocabulario ya usado en el catálogo real, com
 son la lista completa): moods={moods_sample}; momentos={momentos_sample}; temas={temas_sample}; \
 eras=[early_rock_era, british_invasion_era, classic_rock_era, nwobhm_synth_era, grunge_alternative_era, \
 post_millennial_era, streaming_era, current_era].
+- MUY IMPORTANTE (Ticket AI-32): si el usuario nombra artistas, álbumes o canciones concretas, NO \
+completes genres/moods/momentos/eras/temas/idiomas/paises/anios con valores que el usuario NO dijo \
+explícitamente — no los deduzcas del estilo de los artistas. Ejemplos: "Un mix con lo mejor de Saratoga y \
+Avalanch" -> genres=[], moods=[] (solo artists + ranking). "Lo más energético de Saratoga" -> \
+moods=["energético"] (lo pidió). "Baladas de Mägo de Oz en español" -> temas/moods de balada e idiomas=["es"] \
+(lo pidió). Sin artistas/álbumes/canciones nombrados, inferir estos campos sigue siendo lo correcto.
 - "idiomas": a DIFERENCIA de genres/moods/momentos/eras/temas, este es un catálogo CERRADO — los ÚNICOS \
 valores válidos son estos códigos ISO 639-1 de 2 letras (los idiomas que realmente existen en la \
 biblioteca): {idiomas_list}. Identificá el idioma que pide el usuario y devolvé SIEMPRE el código de 2 \
@@ -2628,6 +2634,88 @@ def _try_direct_request(conn, raw_query, entities, prior_entities, track_to_json
             'filters_applied': {'modo_directo': 'album', 'album_ids': chosen_ids}}
 
 
+# ---------------------------------------------------------------------------
+# Ticket AI-32 (pedido por Niko): filtros que el usuario NO pidió.
+#
+# Bug real (requests 186 y 196 de Niko): "Un mix con lo mejor de: Mägo de
+# oz, saratoga, tierra santa, avalanch, warcry" -> Gemini, siguiendo la
+# regla del prompt "propón el valor que mejor describa la intención",
+# DEDUJO de los artistas genres=["Metal"] + moods=["Energético"] (o
+# idioma "es" en otro intento). Con artistas nombrados eso recorta el
+# pool: en la 196 quedaron 16 pistas (16 mostradas, 0 para "Expandir").
+#
+# Regla de Niko: si nombra artistas/álbumes/pistas y pide "lo mejor", es
+# lo más popular de CADA uno, sin filtros agregados; "Expandir" sigue con
+# más de esos mismos. Un filtro que SÍ dijo ("lo más energético de
+# Saratoga") se respeta.
+#
+# Dos capas: (1) regla explícita en el prompt; (2) este chequeo
+# determinístico, porque un LLM no siempre obedece: con identidad
+# nombrada, cada valor de estos campos tiene que estar "apoyado" en el
+# texto del pedido (por raíz de palabra, sin tildes, y SIN contar los
+# nombres de artistas/álbumes/pistas - "Metal" no cuenta por estar dentro
+# de "Metallica"). Sin identidad nombrada ("algo tranquilo para leer un
+# domingo") no se toca nada: ahí inferir el mood es justamente el trabajo.
+# ---------------------------------------------------------------------------
+_GROUNDED_FIELDS = ('genres', 'moods', 'momentos', 'eras', 'temas', 'paises', 'idiomas', 'anios')
+_LANG_WORDS = {
+    'es': ('espanol', 'castellano'), 'en': ('ingles', 'english'), 'pt': ('portugues',),
+    'fr': ('frances', 'french'), 'it': ('italiano',), 'de': ('aleman', 'german'),
+    'ja': ('japones', 'japanese'), 'ko': ('coreano', 'k-pop', 'kpop'), 'la': ('latin',),
+}
+_DECADE_WORDS = {'50': 'cincuenta', '60': 'sesenta', '70': 'setenta', '80': 'ochenta', '90': 'noventa'}
+
+
+def _is_value_grounded(field, value, q):
+    v = _direct_norm(value)
+    if not v:
+        return False
+    if field == 'idiomas':
+        return any(w in q for w in _LANG_WORDS.get(v, ())) or _re.search(r'\b' + _re.escape(v) + r'\b', q) is not None
+    digits = _re.findall(r'\d+', v)
+    if digits:
+        for d in digits:
+            cands = {d}
+            if len(d) == 4:
+                cands.add(d[2:])
+            for c in cands:
+                if _re.search(r'\b' + c, q) or (c in _DECADE_WORDS and _DECADE_WORDS[c] in q):
+                    return True
+        return False
+    for tok in _re.findall(r'[a-z0-9]+', v):
+        if len(tok) < 3:
+            continue
+        stem = tok[:5] if len(tok) >= 5 else tok
+        if _re.search(r'\b' + _re.escape(stem), q):
+            return True
+    return False
+
+
+def _drop_ungrounded_filters(raw_query, entities, force=False):
+    """Si hay artistas/álbumes/pistas nombrados (en este turno o, con
+    `force`, en el turno anterior de una aclaración), saca de `entities`
+    (in place) los valores de _GROUNDED_FIELDS que no aparecen en el texto.
+    Devuelve {campo: [valores descartados]} para el log."""
+    has_identity = force or any(entities.get(k) for k in ('artists', 'albums', 'tracks'))
+    if not has_identity:
+        return {}
+    q = _direct_norm(raw_query)
+    names = list(entities.get('artists') or []) + list(entities.get('albums') or []) + list(entities.get('tracks') or [])
+    for name in sorted(names, key=lambda n: -len(str(n))):
+        n = _direct_norm(name)
+        if n:
+            q = q.replace(n, ' ')
+    dropped = {}
+    for field in _GROUNDED_FIELDS:
+        values = entities.get(field) or []
+        keep = [v for v in values if _is_value_grounded(field, v, q)]
+        gone = [v for v in values if v not in keep]
+        if gone:
+            dropped[field] = gone
+            entities[field] = keep
+    return dropped
+
+
 def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters_fn, dedupe_condition_fn,
                     build_similar_artists_fn, normalize_title_fn=None, led_quality_rank_fn=None,
                     prior_entities=None, default_results=None, max_top_n=None, thinking_level=None,
@@ -2686,6 +2774,19 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
     # Ticket 42, Lote 4: thinking_level None por default — sin cambio de
     # comportamiento para ningún caller que no lo pase explícitamente.
     result, provider = interpret_query(conn, raw_query, max_cantidad=effective_max, thinking_level=thinking_level, provider_order=provider_order)
+
+    # Ticket AI-32: filtros inferidos que el usuario no pidió (ver
+    # _drop_ungrounded_filters). Sobre lo extraído EN ESTE TURNO (lo del
+    # turno anterior ya pasó por acá en su momento).
+    prior_has_identity = bool(prior_entities and any(
+        prior_entities.get(k) for k in ('artists', 'albums', 'tracks')))
+    dropped_filters = {}
+    if result['status'] != 'error':
+        try:
+            dropped_filters = _drop_ungrounded_filters(raw_query, result['entities'], force=prior_has_identity)
+        except Exception:
+            _logger.exception('AI-32: chequeo de filtros falló, se sigue sin tocar nada')
+            dropped_filters = {}
 
     if prior_entities:
         result['entities'] = _merge_entities(prior_entities, result['entities'])
@@ -2748,6 +2849,10 @@ def handle_request(conn, user_id, raw_query, track_to_json_fn, build_adv_filters
             # biblioteca -> selección del artista + aviso de "coincidencia
             # más parecida" en el cliente.
             used_fallback = True
+
+    if dropped_filters:
+        filters_applied = dict(filters_applied or {})
+        filters_applied['filtros_inferidos_descartados'] = dropped_filters  # AI-32: auditoría
 
     tracks = pool[:display_size]
 
