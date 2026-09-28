@@ -1359,6 +1359,41 @@ def logout():
 _api_token_signer = URLSafeTimedSerializer(app.secret_key, salt='api-auth-v1')
 _API_TOKEN_MAX_AGE = 60 * 60 * 24 * 30  # 30 días
 
+# Ticket B-01 (pedido por Niko): presencia de las APPS (iOS/Android/Desktop).
+# Antes, para un cliente con token Bearer la actividad solo se registraba en
+# login/logout; las apps guardan la sesión y no vuelven a hacer login, así que
+# "Última conexión" / "Último dispositivo" quedaban viejos (Desktop mostraba
+# el Android de días atrás). El heartbeat de la web (/api/heartbeat) es solo
+# por cookie. Regla de Niko: registrar enseguida si CAMBIA el dispositivo (o
+# la IP); con el mismo dispositivo, solo refrescar la hora, sin saturar.
+# Siempre UPDATE de la fila del usuario (nunca filas nuevas). Sin lecturas
+# extra: api_login_required ya trae la fila completa del usuario.
+# 60 s < ONLINE_WINDOW_MINUTES (2 min): el "en línea" del panel sigue exacto.
+_API_PRESENCE_REFRESH_SECONDS = 60
+
+
+def _api_presence_touch(user):
+    try:
+        device = _parse_device(request.headers.get('User-Agent', ''))
+        ip = (request.headers.get('X-Forwarded-For', request.remote_addr) or '').split(',')[0].strip()
+        changed = device != (user.get('last_device') or '') or ip != (user.get('last_ip') or '')
+        stale = True
+        last_seen = user.get('last_seen')
+        if last_seen:
+            try:
+                seen = datetime.fromisoformat(str(last_seen).replace('Z', '+00:00'))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                stale = (datetime.now(timezone.utc) - seen).total_seconds() >= _API_PRESENCE_REFRESH_SECONDS
+            except ValueError:
+                stale = True
+        if changed or stale:
+            _touch_user_activity(user['id'])
+    except Exception:
+        # La presencia nunca puede romper un request de la API.
+        app.logger.exception('B-01: no se pudo registrar la presencia')
+
+
 def api_login_required(view):
     """Para /api/v1/*: acepta token Bearer (cliente nativo) O cookie de
     sesión activa (fetch() same-origin desde la propia web) — así la web
@@ -1381,6 +1416,8 @@ def api_login_required(view):
                 user = dict(row) if row else None
             finally:
                 conn.close()
+            if user and user['is_approved']:
+                _api_presence_touch(user)  # Ticket B-01: solo apps (Bearer); la web ya tiene su heartbeat
         elif session.get('user_id'):
             conn = get_db_connection()
             try:
