@@ -8299,10 +8299,13 @@ def api_v1_cast_target_delete(target_id):
 # Ticket D-04: perfiles en cascada, del mejor al mas compatible. 'cd' es el
 # mismo formato que el TX-8050 ya reproduce sin problema (FLAC 16/44.1).
 _CAST_PCM_PERFILES = {
+    # Ticket D-05: 'max' = misma resolucion que ya usan /stream-dsd y
+    # /api/v1/stream-pcm (176.4k), pero a 24-bit (techo real de un DAC DLNA).
+    'max': {'rate': '176400', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
     'hi': {'rate': '88200', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
     'cd': {'rate': '44100', 'fmt': ['-sample_fmt', 's16']},
 }
-_CAST_PCM_ORDEN = ['hi', 'cd']
+_CAST_PCM_ORDEN = ['max', 'hi', 'cd']
 _CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
 # Ultimo perfil que SI sono por renderer (RAM, igual que _cast_targets_sin_dsd):
 # se prueba primero y no se repite el que ya fallo.
@@ -8396,6 +8399,7 @@ def api_v1_cast_play():
         cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
         file_size = os.path.getsize(file_path)
 
+        _cast_pausas.pop(target['id'], None)  # Ticket D-05: pista nueva anula pausa emulada
         ext = os.path.splitext(file_path)[1].lower()
         es_dsd = ext in ('.dsf', '.dff')
         transcodificado = False
@@ -8456,6 +8460,65 @@ def api_v1_cast_play():
         conn.close()
 
 
+# ── Ticket D-05 (pedido por Niko): pausa emulada para renderers sin Pause ──
+# El TX-8050 responde HTTP 500 a Pause (visto en el log real). Para esos
+# renderers: al pausar se guarda en RAM la pista + segundo actual y se manda
+# Stop; al reanudar (Play) se vuelve a mandar la misma pista con un token
+# NUEVO (los de cast duran 10 min, una pausa larga los venceria) y se hace
+# Seek al segundo guardado. Solo RAM, mismo criterio que _cast_active_target.
+_cast_pausas = {}  # target_id -> {'track_id', 'perfil', 'position_s'}
+
+
+def _cast_uri_a_pista(uri):
+    """'/cast-audio/123' o '/cast-audio/123/pcm/hi' -> (123, 'hi'|None), o (None, None)."""
+    m = re.search(r'/cast-audio/(\d+)(?:/pcm/([a-z]+))?', uri or '')
+    return (int(m.group(1)), m.group(2)) if m else (None, None)
+
+
+def _cast_reenviar_pista(target, track_id, perfil, base):
+    """Vuelve a cargar una pista en el renderer (misma version: original o PCM
+    del perfil indicado). Devuelve (ok, motivo)."""
+    conn = get_db_connection()
+    try:
+        track = conn.execute('''
+            SELECT t.id, t.title, t.artist, t.file_path, t.genre, t.track_number,
+                   al.name AS album_name, al.cover_path
+            FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
+            WHERE t.id=?''', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not track:
+        return False, 'Pista no encontrada'
+    file_path = clean_db_path(track['file_path'])
+    token = cast_token_for_track(track['id'])
+    cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
+    if perfil:
+        ruta = _dsd_transcode_para_cast(file_path, perfil)
+        if not ruta:
+            return False, 'No se pudo convertir el DSD a PCM'
+        media_url = f"{base}/cast-audio/{track['id']}/pcm/{perfil}?token={token}"
+        mimes = _CAST_PCM_MIME_CANDIDATES
+    else:
+        ruta = file_path
+        media_url = f"{base}/cast-audio/{track['id']}?token={token}"
+        ext = os.path.splitext(file_path)[1].lower()
+        mimes = [_CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream']
+    if not os.path.isfile(ruta):
+        return False, 'El archivo no está en disco'
+    ok, _mime, motivo = _cast_try_send_track(
+        target['control_url'], track, media_url, cover_url, ruta, os.path.getsize(ruta), mimes)
+    return ok, motivo
+
+
+def _cast_seek_segundos(control_url, seconds):
+    t = f'{seconds // 3600:02d}:{(seconds % 3600) // 60:02d}:{seconds % 60:02d}'
+    status, _ = _cast_soap_call(control_url, 'Seek',
+        '<u:Seek xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        '<InstanceID>0</InstanceID><Unit>REL_TIME</Unit>'
+        f'<Target>{t}</Target></u:Seek>')
+    return status
+
+
 @app.route('/api/v1/cast/transport', methods=['POST'])
 @api_login_required
 def api_v1_cast_transport():
@@ -8471,12 +8534,45 @@ def api_v1_cast_transport():
         conn.close()
     if not target:
         return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    global _cast_active_target
+    base = request.host_url.rstrip('/')
+
+    # Ticket D-05: reanudar una pausa emulada -> recargar pista + Seek
+    if action == 'Play' and target['id'] in _cast_pausas:
+        pausa = _cast_pausas.pop(target['id'])
+        ok, motivo = _cast_reenviar_pista(target, pausa['track_id'], pausa['perfil'], base)
+        if not ok:
+            app.logger.warning(f"[cast v1] reanudar -> {target['name']} FALLÓ: {motivo}")
+            return jsonify({'status': 'error', 'message': motivo}), 502
+        pos = pausa['position_s'] or 0
+        seek_ok = pos <= 0 or _cast_seek_segundos(target['control_url'], pos) == 200
+        app.logger.info(f"[cast v1] reanudar -> {target['name']} desde {pos}s (seek={'OK' if seek_ok else 'NO'})")
+        _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
+        return jsonify({'status': 'ok', 'emulated': True, 'resumed_from': pos if seek_ok else 0})
+
+    if action == 'Stop':
+        _cast_pausas.pop(target['id'], None)
+
     body = (f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
             f'<InstanceID>0</InstanceID>{"<Speed>1</Speed>" if action == "Play" else ""}</u:{action}>')
     status, body_resp = _cast_soap_call(target['control_url'], action, body)
     app.logger.info(f"[cast v1] {action} -> {target['name']}: HTTP {status}")
+
+    # Ticket D-05: el renderer no soporta Pause -> guardar posicion y Stop
+    if action == 'Pause' and status != 200:
+        pos = _cast_get_position_info(target['control_url']) or {}
+        track_id, perfil = _cast_uri_a_pista(pos.get('track_uri'))
+        if track_id:
+            stop_status, _ = _cast_soap_call(target['control_url'], 'Stop',
+                '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+                '<InstanceID>0</InstanceID></u:Stop>')
+            if stop_status == 200:
+                _cast_pausas[target['id']] = {'track_id': track_id, 'perfil': perfil,
+                                              'position_s': pos.get('position_s') or 0}
+                app.logger.info(f"[cast v1] Pause emulado -> {target['name']} en {pos.get('position_s')}s")
+                return jsonify({'status': 'ok', 'emulated': True})
+
     if status == 200:
-        global _cast_active_target
         if action == 'Stop':
             if _cast_active_target and _cast_active_target.get('id') == target['id']:
                 _cast_active_target = None
@@ -8630,6 +8726,14 @@ def api_v1_cast_status():
             return jsonify({'status': 'error', 'message': 'El dispositivo no respondió'}), 502
         pos = _cast_get_position_info(target['control_url']) or {}
 
+        # Ticket D-05: con pausa emulada el renderer dice STOPPED; se informa
+        # PAUSED_PLAYBACK con la pista y el segundo guardados.
+        pausa = _cast_pausas.get(target['id'])
+        if pausa and state in ('STOPPED', 'NO_MEDIA_PRESENT'):
+            state = 'PAUSED_PLAYBACK'
+            pos = {'position_s': pausa['position_s'], 'duration_s': None,
+                   'track_uri': f"/cast-audio/{pausa['track_id']}"}
+
         track = None
         m = re.search(r'/cast-audio/(\d+)', pos.get('track_uri') or '')
         if m:
@@ -8646,10 +8750,16 @@ def api_v1_cast_status():
                 track['format_color']   = led
                 track['cover_url']      = cover_url_filter(track.pop('cover_path'))
 
+        # Ticket D-05: que version esta sonando ('max'/'hi'/'cd' = DSD convertido a PCM)
+        _tid, pcm_perfil = _cast_uri_a_pista(pos.get('track_uri'))
+        if pausa and state == 'PAUSED_PLAYBACK':
+            pcm_perfil = pausa['perfil']
+
         return jsonify({
             'status':     'ok',
             'target':     {'id': target['id'], 'name': target['name']},
             'state':      state,
+            'pcm_profile': pcm_perfil,
             'position_s': pos.get('position_s'),
             'duration_s': pos.get('duration_s') or (track or {}).get('duration'),
             'track':      track,
