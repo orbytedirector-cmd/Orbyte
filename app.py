@@ -7974,11 +7974,18 @@ def _cast_preparar_eiscp(control_url, estado_actual):
     host = urlparse(control_url).hostname
     if not host or estado_actual in ('PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'):
         return
-    if time.monotonic() - _eiscp_listo.get(host, 0) < 120:
+    # Ticket D-15: el atajo "sono hace poco" solo vale si el renderer RESPONDE.
+    # estado None = no contesta UPnP (standby): hay que despertarlo aunque haya
+    # sonado hace 1 minuto (Niko lo apago entre dos pistas y se salteaba todo).
+    if estado_actual is not None and time.monotonic() - _eiscp_listo.get(host, 0) < 120:
         return
     try:
         pwr = _eiscp(host, 'PWRQSTN', consulta='PWR')
     except OSError:
+        if estado_actual is None:
+            # Ticket D-15: ni UPnP ni eISCP -> apagado del todo, o un Onkyo con
+            # "Network Standby" desactivado (en standby no escucha la red).
+            app.logger.info(f"[cast eiscp] {host} no responde (ni UPnP ni eISCP)")
         return  # no habla eISCP -> no es Onkyo/Integra
     try:
         if pwr != '01':
@@ -7998,6 +8005,13 @@ def _cast_preparar_eiscp(control_url, estado_actual):
         app.logger.info(f"[cast eiscp] {host} -> servicio DLNA (NSV000)")
         _eiscp(host, 'NSV000')
         time.sleep(2.5)
+        # Ticket D-15: recien despertado, el renderer DLNA tarda en volver a
+        # contestar UPnP; esperar hasta 15 s antes de mandarle la pista.
+        if estado_actual is None:
+            fin = time.monotonic() + 15
+            while time.monotonic() < fin and _cast_get_transport_state(control_url) is None:
+                time.sleep(1)
+            app.logger.info(f"[cast eiscp] {host} UPnP {'listo' if time.monotonic() < fin else 'sin respuesta tras 15 s'}")
     except OSError as e:
         app.logger.warning(f"[cast eiscp] {host}: no se pudo preparar ({e}) — se intenta igual")
 
