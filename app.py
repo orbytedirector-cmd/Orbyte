@@ -8865,13 +8865,42 @@ COVER_NAMES = [
     'thumb.jpg','Thumb.jpg','back.jpg','Back.jpg',
 ]
 
+# Ticket D-13: miniaturas de portada. /cover/<ruta>?w=N (N = 64..1024) sirve
+# una copia reducida en cache (JPEG) en vez del archivo original, que puede
+# pesar varios MB y medir 3000 px. Sin ?w (todos los clientes de siempre) o
+# sin Pillow instalado: el original, igual que antes.
+_COVER_THUMB_DIR = os.path.join(tempfile.gettempdir(), 'orbyte_cover_thumbs')
+
+
+def _send_cover(path):
+    w = request.args.get('w', type=int)
+    if w:
+        w = max(64, min(1024, w))
+        try:
+            from PIL import Image
+            os.makedirs(_COVER_THUMB_DIR, exist_ok=True)
+            key = hashlib.sha1(f'{path}:{os.path.getmtime(path)}:{w}'.encode('utf-8')).hexdigest()
+            thumb = os.path.join(_COVER_THUMB_DIR, f'{key}.jpg')
+            if not os.path.isfile(thumb):
+                with Image.open(path) as im:
+                    im = im.convert('RGB')
+                    im.thumbnail((w, w), Image.LANCZOS)
+                    tmp = f'{thumb}.{os.getpid()}.tmp'
+                    im.save(tmp, 'JPEG', quality=85, optimize=True)
+                    os.replace(tmp, thumb)
+            return send_file(thumb, mimetype='image/jpeg', max_age=86400)
+        except Exception as e:  # sin Pillow o imagen rara -> original
+            app.logger.debug(f"[cover] miniatura no disponible para {path}: {e}")
+    mime, _ = mimetypes.guess_type(path)
+    return send_file(path, mimetype=mime or 'image/jpeg', max_age=86400)
+
+
 @app.route('/cover/<path:filepath>')
 def cover_file(filepath):
     # Try exact path first
     absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
     if os.path.isfile(absolute_path):
-        mime, _ = mimetypes.guess_type(absolute_path)
-        return send_file(absolute_path, mimetype=mime or 'image/jpeg', max_age=86400)
+        return _send_cover(absolute_path)
 
     # Fallback: try common cover filenames in same directory
     directory = os.path.dirname(absolute_path)
@@ -8879,16 +8908,14 @@ def cover_file(filepath):
         for name in COVER_NAMES:
             alt = os.path.join(directory, name)
             if os.path.isfile(alt):
-                mime, _ = mimetypes.guess_type(alt)
-                return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+                return _send_cover(alt)
         # Last resort: first image file found in directory
         try:
             for fname in sorted(os.listdir(directory)):
                 if fname.lower().endswith(('.jpg', '.jpeg', '.png', '.webp', '.gif')):
                     alt = os.path.join(directory, fname)
                     if os.path.isfile(alt):
-                        mime, _ = mimetypes.guess_type(alt)
-                        return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+                        return _send_cover(alt)
         except PermissionError:
             pass
 
@@ -8898,8 +8925,7 @@ def cover_file(filepath):
         for name in COVER_NAMES:
             alt = os.path.join(parent, name)
             if os.path.isfile(alt):
-                mime, _ = mimetypes.guess_type(alt)
-                return send_file(alt, mimetype=mime or 'image/jpeg', max_age=86400)
+                return _send_cover(alt)
 
     return "Cover not found", 404
 

@@ -222,9 +222,18 @@ let orb = { requestId: null, entities: null, tracks: [] };
 // =====================================================================
 // API (cookie de sesion, mismo origen)
 // =====================================================================
+// Ticket D-13: toda llamada tiene limite de tiempo (AbortController). Antes, si
+// el receptor estaba en standby, las consultas quedaban colgadas y se apilaban.
 async function api(ruta, opciones = {}) {
-  const r = await fetch(ruta, Object.assign({ credentials: "same-origin",
-    headers: { "Content-Type": "application/json" } }, opciones));
+  const ctl = new AbortController();
+  const limite = setTimeout(() => ctl.abort(), opciones.timeout || 15000);
+  let r;
+  try {
+    r = await fetch(ruta, Object.assign({ credentials: "same-origin", signal: ctl.signal,
+      headers: { "Content-Type": "application/json" } }, opciones));
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? "Sin respuesta del servidor" : e.message);
+  } finally { clearTimeout(limite); }
   if (r.status === 401) { document.getElementById("login").classList.add("visible"); throw new Error("Sesión vencida"); }
   let data = null;
   try { data = await r.json(); } catch (e) {}
@@ -242,6 +251,10 @@ const post = (ruta, body) => api(ruta, { method: "POST", body: JSON.stringify(bo
 // =====================================================================
 const $ = (id) => document.getElementById(id);
 function fmt(s) { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+// Ticket D-13: portadas reducidas en el servidor (/cover/...?w=N) en vez del
+// original de varios MB: 13 portadas de 3000 px decodificadas saturaban la
+// memoria de la vista web de la app.
+function miniatura(url, w) { return url ? url + (url.includes("?") ? "&" : "?") + "w=" + w : url; }
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function aviso(txt, error) { const a = $("aviso"); a.textContent = txt || ""; a.classList.toggle("err", !!error); }
 function ledColor(c) { return c ? `var(--led-${c}, var(--text3))` : "var(--text3)"; }
@@ -276,7 +289,8 @@ async function reproducirIndice(i) {
   mia = pista.id; enviando = true; ultimoComando = Date.now();
   pintarPista(pista); aviso("Enviando al equipo…");
   try {
-    const r = await post("/api/v1/cast/play", { target_id: st.destino, track_id: pista.id });
+    const r = await api("/api/v1/cast/play", { method: "POST", timeout: 90000,
+      body: JSON.stringify({ target_id: st.destino, track_id: pista.id }) });
     saltosSeguidos = 0;
     aviso(avisoSalto || (r && r.transcoded ? "Convertido para este equipo" : ""), !!avisoSalto);
     avisoSalto = "";
@@ -348,11 +362,18 @@ function posicionActual() {
   if (rx.state === "PLAYING") return Math.min(rx.dur || Infinity, rx.pos + (Date.now() - rx.t) / 1000);
   return rx.pos || 0;
 }
+// Ticket D-13: HA deja vivas en segundo plano las vistas ya visitadas: esta
+// pagina seguia consultando aunque estuvieras en otra pestaña. Una vista
+// oculta deja el iframe sin tamaño (display:none) -> no se consulta nada.
+// (innerWidth conserva el ultimo tamaño; el ancho real del documento queda en 0).
+const visible = () => !document.hidden && document.documentElement.getBoundingClientRect().width > 0;
+let sondeando = false;
 async function sondear() {
-  if (!st.destino || enviando) return;
+  if (!st.destino || enviando || sondeando || !visible()) return;
+  sondeando = true;
   const pedidoEn = Date.now();
   try {
-    const s = await api("/api/v1/cast/status?target_id=" + st.destino);
+    const s = await api("/api/v1/cast/status?target_id=" + st.destino, { timeout: 10000 });
     $("dot").className = "dot on";
     if (pedidoEn < ultimoComando + 1500 || enviando) return;   // transitorio tras un comando
     const antes = { state: rx.state, pos: posicionActual(), dur: rx.dur, track: rx.track };
@@ -375,6 +396,7 @@ async function sondear() {
     }
     pintarPista(rx.track); pintarEstado();
   } catch (e) { $("dot").className = "dot err"; }
+  finally { sondeando = false; }
 }
 
 // =====================================================================
@@ -384,7 +406,8 @@ function pintarPista(p) {
   const c = $("cover");
   if (p && p.cover_url) {
     if (c.tagName !== "IMG") { const img = document.createElement("img"); img.className = "cover"; img.id = "cover"; c.replaceWith(img); }
-    if ($("cover").getAttribute("src") !== p.cover_url) $("cover").src = p.cover_url;
+    const url = miniatura(p.cover_url, 640);
+    if ($("cover").getAttribute("src") !== url) $("cover").src = url;
   } else if (c.tagName === "IMG") {
     const d = document.createElement("div"); d.className = "cover vacia"; d.id = "cover"; d.textContent = "♪"; c.replaceWith(d);
   }
@@ -409,7 +432,7 @@ function tickBarra() {
 }
 function filaPista(p, acciones, actual) {
   return `<div class="fila${actual ? " actual" : ""}" ${acciones.tap ? `onclick="${acciones.tap}"` : ""}>
-    ${p.cover_url ? `<img class="mini-cover" loading="lazy" src="${esc(p.cover_url)}">` : '<div class="mini-cover"></div>'}
+    ${p.cover_url ? `<img class="mini-cover" loading="lazy" decoding="async" src="${esc(miniatura(p.cover_url, 96))}">` : '<div class="mini-cover"></div>'}
     <div class="fila-texto"><div class="fila-t">${esc(p.title)}</div>
       <div class="fila-s"><span class="led" style="display:inline-block;margin-right:5px;background:${ledColor(p.format_color || p.led_color)}"></span>${esc([p.artist || p.artist_name, p.album_name].filter(Boolean).join(" · "))}${p.duration ? " · " + fmt(p.duration) : ""}</div></div>
     ${acciones.extra || ""}</div>`;
@@ -451,7 +474,7 @@ async function buscar(ev) {
     if (resultados.albums.length) {
       h += '<div class="seccion">Álbumes</div>';
       h += resultados.albums.slice(0, 12).map((a, i) => `<div class="fila" onclick="abrirAlbum(${i})">
-        ${a.cover_url ? `<img class="mini-cover" loading="lazy" src="${esc(a.cover_url)}">` : '<div class="mini-cover"></div>'}
+        ${a.cover_url ? `<img class="mini-cover" loading="lazy" decoding="async" src="${esc(miniatura(a.cover_url, 96))}">` : '<div class="mini-cover"></div>'}
         <div class="fila-texto"><div class="fila-t">${esc(a.name)}</div><div class="fila-s">${esc([a.artist_name, a.year, a.track_count && a.track_count + " pistas"].filter(Boolean).join(" · "))}</div></div>
         <button class="fila-acc" aria-label="Reproducir álbum">▶</button></div>`).join("");
     }
@@ -486,7 +509,7 @@ async function pedirOrbitron(ev) {
   try {
     const body = { query: q };
     if (orb.entities) body.prior_entities = orb.entities;   // seguimiento de la conversacion
-    const r = await post("/api/v1/ai/playlist", body);
+    const r = await api("/api/v1/ai/playlist", { method: "POST", timeout: 90000, body: JSON.stringify(body) });
     orb = { requestId: r.request_id, entities: r.entities, tracks: r.tracks || [] };
     $("orb-txt").textContent = r.question ? r.question : `${orb.tracks.length} pistas para “${q}”`;
     $("orb-resp").classList.add("visible");
@@ -558,7 +581,7 @@ if (st.idx >= 0 && st.cola[st.idx]) { rx.track = st.cola[st.idx]; mia = st.cola[
 pintarEstado();
 cargarDestinos().then(sondear);
 setInterval(sondear, 2000);
-setInterval(tickBarra, 500);
+setInterval(() => { if (visible()) tickBarra(); }, 500);
 // Si el iframe estuvo oculto (otra pestaña del dashboard), resincronizar al volver
 document.addEventListener("visibilitychange", () => { if (!document.hidden) { sondear(); leerVolumen(); } });
 </script>
