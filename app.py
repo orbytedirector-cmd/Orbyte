@@ -7689,8 +7689,14 @@ def cast_audio(track_id, perfil=None):
         pcm_path = _dsd_transcode_para_cast(path, perfil)
         if not pcm_path:
             return "No se pudo convertir el DSD a PCM", 500
-        return _serve_audio(pcm_path)
-    return _serve_audio(path)
+        path = pcm_path
+    # Ticket D-07: cabeceras DLNA en la respuesta - algunos renderers las piden
+    # (getcontentFeatures.dlna.org: 1) para decidir si permiten Seek.
+    resp = _serve_audio(path)
+    resp.headers['contentFeatures.dlna.org'] = _CAST_DLNA_FLAGS
+    resp.headers['transferMode.dlna.org'] = 'Streaming'
+    resp.headers['Accept-Ranges'] = 'bytes'
+    return resp
 
 
 @app.route('/cast-cover/<int:track_id>')
@@ -7914,6 +7920,11 @@ def _cast_send_track(control_url, media_url, didl):
         '<InstanceID>0</InstanceID><Speed>1</Speed></u:Play>')
 
 
+# Ticket D-07: OP=01 -> seek por rango de bytes; FLAGS = streaming + background
+# transfer + DLNA v1.5 (los mismos que anuncian Gerbera/MiniDLNA).
+_CAST_DLNA_FLAGS = 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01500000000000000000000000000000'
+
+
 def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, file_size, mime_candidates):
     """Prueba cada mime de mime_candidates hasta que el renderer EFECTIVAMENTE
     arranca a reproducir (confirmado con GetTransportInfo — un renderer puede
@@ -7924,13 +7935,19 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
     real en vez de confiar ciegamente en el 200.
     Devuelve (ok: bool, mime_usado: str|None, motivo_si_falló: str|None)."""
     last_reason = 'El dispositivo no respondió'
-    for mime in mime_candidates:
-        protocol_info = f'http-get:*:{mime}:*'
+    # Ticket D-07: primero con flags DLNA que anuncian "se puede saltar por
+    # rangos de bytes" (DLNA.ORG_OP=01). El TX-8050 respondia HTTP 500 a
+    # Seek/Pause con el protocolInfo pelado ('*'): muchos renderers DLNA
+    # solo habilitan Seek si el recurso lo declara. Si un renderer rechaza
+    # los flags, se reintenta con '*' (comportamiento de siempre).
+    intentos = [(m, f) for m in mime_candidates for f in (_CAST_DLNA_FLAGS, '*')]
+    for mime, flags in intentos:
+        protocol_info = f'http-get:*:{mime}:{flags}'
         didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
                                  media_url, file_size, album=track['album_name'], genre=track['genre'],
                                  track_number=track['track_number'], cover_url=cover_url)
         status, body = _cast_send_track(control_url, media_url, didl)
-        app.logger.info(f"[cast] SetAVTransportURI+Play mime={mime} -> HTTP {status}")
+        app.logger.info(f"[cast] SetAVTransportURI+Play mime={mime} dlna={'si' if flags != '*' else 'no'} -> HTTP {status}")
         if status != 200:
             last_reason = f'El dispositivo devolvió HTTP {status} para {mime}'
             continue
