@@ -36,7 +36,13 @@
   /* ---------- Ahora suena ---------- */
   .now { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
     display: flex; flex-direction: column; gap: 14px; min-height: 0; }
-  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  /* Ticket D-10: 3 columnas -> el reloj queda centrado de verdad entre marca y equipo */
+  .topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
+  .topbar .device { justify-self: end; }
+  .reloj { text-align: center; font-family: Orbitron, sans-serif; color: var(--gold2); line-height: 1.15;
+    font-variant-numeric: tabular-nums; }
+  .reloj-hora { font-size: 20px; font-weight: 700; letter-spacing: .08em; }
+  .reloj-fecha { font-size: 10px; font-weight: 600; letter-spacing: .14em; color: var(--gold); }
   .brand { font-family: Orbitron, sans-serif; font-weight: 700; letter-spacing: .12em; color: var(--gold); font-size: 13px; }
   .device { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border2);
     border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--text2); }
@@ -117,6 +123,7 @@
   <section class="now">
     <div class="topbar">
       <div class="brand">ORBYTE</div>
+      <div class="reloj"><div class="reloj-hora" id="reloj-hora">--:--:--</div><div class="reloj-fecha" id="reloj-fecha">--‑--‑----</div></div>
       <div class="device"><span class="dot" id="dot"></span><select id="destino" onchange="cambiarDestino(this.value)"><option value="">Buscando equipos…</option></select></div>
     </div>
     <div class="cover-wrap"><div class="cover vacia" id="cover">♪</div></div>
@@ -512,6 +519,14 @@ function verTab(v) {
   function aSegundos(ev) { const r = barra.getBoundingClientRect(); return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * (rx.dur || 0); }
   barra.addEventListener("pointerup", (ev) => { if (rx.dur && rx.track) buscarPos(aSegundos(ev)); });
 })();
+
+// Ticket D-10: reloj 24 h (HH:MM:SS) + fecha DD-MM-YYYY, hora local del iPad
+function reloj() {
+  const d = new Date(), z = (n) => String(n).padStart(2, "0");
+  $("reloj-hora").textContent = `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
+  $("reloj-fecha").textContent = `${z(d.getDate())}-${z(d.getMonth() + 1)}-${d.getFullYear()}`;
+}
+reloj(); setInterval(reloj, 1000);
 
 renderCola();
 if (st.idx >= 0 && st.cola[st.idx]) { rx.track = st.cola[st.idx]; mia = st.cola[st.idx].id; pintarPista(rx.track); }
