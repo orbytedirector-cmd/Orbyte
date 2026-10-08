@@ -7,6 +7,7 @@ import random
 import tempfile
 import hashlib
 import socket
+import struct
 import signal
 import atexit
 import logging
@@ -7927,6 +7928,80 @@ _CAST_DLNA_FLAGS = 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=0150000000000000
 _CAST_ARRANQUE_S = 4.0
 
 
+# ── Ticket D-14 (pedido por Niko): preparar receptores Onkyo/Integra (eISCP) ─
+# El TX-8050 despertado por SetAVTransportURI se enciende en NET con el ULTIMO
+# servicio usado (ej. radio por internet) y no reproduce nada. Antes de mandar
+# una pista: si el equipo habla eISCP (puerto 60128), se enciende si esta en
+# standby (PWR01), se pasa a la entrada NET (SLI2B) y al servicio DLNA (NSV000)
+# - los comandos que Niko confirmo a mano. Cualquier otro renderer (Yamaha,
+# etc.) no tiene ese puerto abierto: se detecta en < 1 s y se sigue igual que
+# siempre. Solo RAM, sin columnas nuevas.
+_EISCP_PORT = 60128
+_eiscp_listo = {}  # host -> monotonic del ultimo envio que sono (cola en curso: no repetir)
+
+
+def _eiscp_paquete(cmd):
+    data = f"!1{cmd}\r".encode('ascii')
+    return b"ISCP" + struct.pack(">IIB3x", 16, len(data), 1) + data
+
+
+def _eiscp(host, cmd, consulta=None, timeout=2.0):
+    """Manda un comando eISCP. Con consulta='PWR' (p. ej.) devuelve el valor de
+    la primera respuesta '!1PWRxx' ('01', '00', '2B'...). None si no hubo
+    respuesta; lanza OSError si el puerto no esta abierto (no es eISCP)."""
+    with socket.create_connection((host, _EISCP_PORT), timeout=0.8) as s:
+        s.settimeout(timeout)
+        s.sendall(_eiscp_paquete(cmd))
+        if not consulta:
+            return None
+        buf, fin = b"", time.monotonic() + timeout
+        while time.monotonic() < fin:
+            try:
+                trozo = s.recv(1024)
+            except socket.timeout:
+                break
+            if not trozo:
+                break
+            buf += trozo
+            for m in re.finditer(rb"!1" + consulta.encode() + rb"([0-9A-Za-z]+)", buf):
+                return m.group(1).decode('ascii', 'ignore').upper()
+        return None
+
+
+def _cast_preparar_eiscp(control_url, estado_actual):
+    """Deja un Onkyo/Integra listo para recibir por DLNA. No hace nada si el
+    renderer ya esta reproduciendo/pausado o si sono hace poco (cola en curso)."""
+    host = urlparse(control_url).hostname
+    if not host or estado_actual in ('PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'):
+        return
+    if time.monotonic() - _eiscp_listo.get(host, 0) < 120:
+        return
+    try:
+        pwr = _eiscp(host, 'PWRQSTN', consulta='PWR')
+    except OSError:
+        return  # no habla eISCP -> no es Onkyo/Integra
+    try:
+        if pwr != '01':
+            app.logger.info(f"[cast eiscp] {host} en standby (PWR={pwr}) -> encendiendo")
+            _eiscp(host, 'PWR01')
+            fin = time.monotonic() + 12
+            while time.monotonic() < fin:
+                time.sleep(1)
+                if _eiscp(host, 'PWRQSTN', consulta='PWR') == '01':
+                    break
+            time.sleep(3)  # el modulo de red tarda un poco mas que la pantalla
+        sli = _eiscp(host, 'SLIQSTN', consulta='SLI')
+        if sli != '2B':
+            app.logger.info(f"[cast eiscp] {host} entrada {sli} -> NET (SLI2B)")
+            _eiscp(host, 'SLI2B')
+            time.sleep(1.5)
+        app.logger.info(f"[cast eiscp] {host} -> servicio DLNA (NSV000)")
+        _eiscp(host, 'NSV000')
+        time.sleep(2.5)
+    except OSError as e:
+        app.logger.warning(f"[cast eiscp] {host}: no se pudo preparar ({e}) — se intenta igual")
+
+
 def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, file_size, mime_candidates):
     """Prueba cada mime de mime_candidates hasta que el renderer EFECTIVAMENTE
     arranca a reproducir (confirmado con GetTransportInfo — un renderer puede
@@ -7947,7 +8022,9 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
     # nueva. Visto en el TX-8050: SetAVTransportURI+Play sobre una pista en
     # curso lo deja en STOPPED durante la transicion, y el chequeo lo daba
     # por rechazado (pasaba al cambiar de pista a mano, no al terminar sola).
-    if _cast_get_transport_state(control_url) in ('PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'):
+    estado_previo = _cast_get_transport_state(control_url)
+    _cast_preparar_eiscp(control_url, estado_previo)  # Ticket D-14
+    if estado_previo in ('PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'):
         _cast_soap_call(control_url, 'Stop',
             '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
             '<InstanceID>0</InstanceID></u:Stop>', timeout=4)
@@ -7975,6 +8052,7 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
         if state in ('STOPPED', 'NO_MEDIA_PRESENT', None):
             last_reason = f'El dispositivo no aceptó el formato {mime} (estado: {state or "no se pudo consultar"})'
             continue
+        _eiscp_listo[urlparse(control_url).hostname] = time.monotonic()  # Ticket D-14
         return True, mime, None
     return False, None, last_reason
 
