@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Orbyte · Mini</title>
+<!--
+  Ticket D-02 (pedido por Niko): mini control de Orbyte para el dashboard de
+  Home Assistant (iPad, iframe). Pagina SUELTA a proposito (no extiende
+  base.html): no carga el reproductor local ni el SPA - el audio NUNCA suena
+  en el iPad, se manda al receptor DLNA (TX-8050) via /api/v1/cast/*.
+  Auth: cookie de sesion (mismo host que HA -> same-site, la cookie viaja
+  dentro del iframe); api_login_required la acepta en /api/v1/*.
+  La cola vive en este navegador (localStorage): el iPad esta siempre
+  encendido y es quien pide la siguiente pista al terminar la actual.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #000; --card: #0d0d0d; --card2: #141414; --border: #1f1f1f; --border2: #2a2a2a;
+    --gold: #C8920A; --gold2: #F5C518; --gold-dim: rgba(200,146,10,0.16);
+    --text: #efefef; --text2: #8a8a8a; --text3: #4a4a4a; --danger: #ff5a6e;
+    --led-yellow:#f5c518; --led-white:#f0f0f0; --led-cyan:#00d4ff; --led-red:#ff2244;
+    --led-green:#00e676; --led-blue:#2979ff; --led-magenta:#e040fb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text);
+    font-family: Inter, -apple-system, system-ui, sans-serif; overflow: hidden;
+    -webkit-tap-highlight-color: transparent; -webkit-user-select: none; user-select: none; }
+  input { -webkit-user-select: text; user-select: text; font-family: inherit; }
+  button { font-family: inherit; color: inherit; background: none; border: none; cursor: pointer; }
+  .app { height: 100%; display: grid; grid-template-columns: minmax(320px, 42%) 1fr; gap: 14px; padding: 14px; }
+  @media (max-width: 820px) { .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow-y: auto; } }
+
+  /* ---------- Ahora suena ---------- */
+  .now { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
+    display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .brand { font-family: Orbitron, sans-serif; font-weight: 700; letter-spacing: .12em; color: var(--gold); font-size: 13px; }
+  .device { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border2);
+    border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--text2); }
+  .device select { background: transparent; color: var(--text); border: none; font-size: 13px; outline: none; max-width: 160px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text3); flex-shrink: 0; }
+  .dot.on { background: var(--led-green); box-shadow: 0 0 8px var(--led-green); }
+  .dot.err { background: var(--danger); }
+  .cover-wrap { flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; }
+  .cover { width: 100%; max-width: 420px; aspect-ratio: 1; max-height: 100%; border-radius: 12px; object-fit: cover;
+    background: linear-gradient(135deg, #1a1408, #0d0d0d); border: 1px solid var(--border2); }
+  .cover.vacia { display: flex; align-items: center; justify-content: center; font-size: 64px; color: var(--text3); }
+  .meta { text-align: center; min-width: 0; }
+  .titulo { font-size: 22px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .artista { font-size: 15px; color: var(--text2); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badges { display: flex; gap: 8px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .04em;
+    padding: 3px 9px; border-radius: 999px; background: var(--card2); border: 1px solid var(--border2); color: var(--text2); }
+  .led { width: 9px; height: 9px; border-radius: 50%; }
+  .progreso { display: flex; flex-direction: column; gap: 6px; }
+  .barra { position: relative; height: 22px; display: flex; align-items: center; cursor: pointer; touch-action: none; }
+  .barra-fondo { width: 100%; height: 5px; border-radius: 3px; background: var(--border2); overflow: hidden; }
+  .barra-relleno { height: 100%; width: 0; background: var(--gold); border-radius: 3px; }
+  .tiempos { display: flex; justify-content: space-between; font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
+  .controles { display: flex; align-items: center; justify-content: center; gap: 26px; }
+  .ctl { width: 54px; height: 54px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--text); }
+  .ctl:active { background: var(--card2); }
+  .ctl svg { width: 26px; height: 26px; fill: currentColor; }
+  .ctl.play { width: 74px; height: 74px; background: var(--gold); color: #000; }
+  .ctl.play svg { width: 32px; height: 32px; }
+  .ctl:disabled { opacity: .3; }
+  .volumen { display: flex; align-items: center; gap: 12px; color: var(--text2); }
+  .volumen svg { width: 20px; height: 20px; fill: currentColor; flex-shrink: 0; }
+  input[type=range] { -webkit-appearance: none; appearance: none; flex: 1; height: 5px; border-radius: 3px; background: var(--border2); outline: none; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: var(--gold2); border: none; }
+  .vol-num { width: 30px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; }
+  .aviso { min-height: 18px; font-size: 12px; text-align: center; color: var(--text2); }
+  .aviso.err { color: var(--danger); }
+
+  /* ---------- Panel derecho ---------- */
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 16px; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .tabs { display: flex; border-bottom: 1px solid var(--border); }
+  .tab { flex: 1; padding: 15px 8px; font-size: 13px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text2); border-bottom: 2px solid transparent; }
+  .tab.activa { color: var(--gold2); border-bottom-color: var(--gold); }
+  .vista { display: none; flex: 1; min-height: 0; flex-direction: column; }
+  .vista.activa { display: flex; }
+  .buscador { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); }
+  .buscador input { flex: 1; background: var(--card2); border: 1px solid var(--border2); border-radius: 10px; color: var(--text);
+    padding: 12px 14px; font-size: 16px; outline: none; }
+  .buscador input:focus { border-color: var(--gold); }
+  .btn { background: var(--gold); color: #000; font-weight: 600; font-size: 14px; border-radius: 10px; padding: 0 16px; white-space: nowrap; }
+  .btn.sec { background: var(--card2); color: var(--text); border: 1px solid var(--border2); }
+  .btn:disabled { opacity: .4; }
+  .lista { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 0; }
+  .seccion { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text3); padding: 12px 16px 6px; }
+  .fila { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+  .fila:active { background: var(--card2); }
+  .fila.actual { background: var(--gold-dim); }
+  .mini-cover { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; background: var(--card2); flex-shrink: 0; }
+  .fila-texto { flex: 1; min-width: 0; }
+  .fila-t { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .fila-s { font-size: 12px; color: var(--text2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+  .fila-acc { width: 40px; height: 40px; border-radius: 50%; color: var(--text2); font-size: 22px; flex-shrink: 0; }
+  .fila-acc:active { background: var(--border2); }
+  .vacio { padding: 40px 20px; text-align: center; color: var(--text3); font-size: 14px; line-height: 1.5; }
+  .orbitron-resp { padding: 10px 16px; font-size: 13px; color: var(--text2); border-bottom: 1px solid var(--border); display: none; gap: 8px; align-items: center; }
+  .orbitron-resp.visible { display: flex; }
+  .orbitron-resp span { flex: 1; }
+  .login { position: fixed; inset: 0; background: rgba(0,0,0,.92); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 16px; text-align: center; padding: 30px; }
+  .login.visible { display: flex; }
+  .login a { color: #000; background: var(--gold); padding: 14px 26px; border-radius: 12px; font-weight: 600; text-decoration: none; }
+  .spinner { width: 18px; height: 18px; border: 2px solid var(--border2); border-top-color: var(--gold); border-radius: 50%; animation: gira 0.8s linear infinite; }
+  @keyframes gira { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ================= AHORA SUENA ================= -->
+  <section class="now">
+    <div class="topbar">
+      <div class="brand">ORBYTE</div>
+      <div class="device"><span class="dot" id="dot"></span><select id="destino" onchange="cambiarDestino(this.value)"><option value="">Buscando equipos…</option></select></div>
+    </div>
+    <div class="cover-wrap"><div class="cover vacia" id="cover">♪</div></div>
+    <div class="meta">
+      <div class="titulo" id="titulo">Nada sonando</div>
+      <div class="artista" id="artista">Busca algo o pídeselo a Orbitron</div>
+      <div class="badges" id="badges"></div>
+    </div>
+    <div class="progreso">
+      <div class="barra" id="barra"><div class="barra-fondo"><div class="barra-relleno" id="relleno"></div></div></div>
+      <div class="tiempos"><span id="t-pos">0:00</span><span id="t-dur">0:00</span></div>
+    </div>
+    <div class="controles">
+      <button class="ctl" id="b-prev" onclick="anterior()" aria-label="Anterior"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
+      <button class="ctl play" id="b-play" onclick="playPausa()" aria-label="Reproducir"><svg viewBox="0 0 24 24" id="ico-play"><path d="M8 5v14l11-7z"/></svg></button>
+      <button class="ctl" id="b-next" onclick="siguiente()" aria-label="Siguiente"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+    </div>
+    <div class="volumen">
+      <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
+      <input type="range" id="vol" min="0" max="100" value="0" oninput="moverVolumen(this.value)">
+      <span class="vol-num" id="vol-num">–</span>
+    </div>
+    <div class="aviso" id="aviso"></div>
+  </section>
+
+  <!-- ================= PANEL ================= -->
+  <section class="panel">
+    <div class="tabs">
+      <button class="tab activa" data-v="cola" onclick="verTab('cola')">Cola</button>
+      <button class="tab" data-v="buscar" onclick="verTab('buscar')">Buscar</button>
+      <button class="tab" data-v="orbitron" onclick="verTab('orbitron')">Orbitron</button>
+    </div>
+
+    <div class="vista activa" id="v-cola">
+      <div class="buscador" style="justify-content:flex-end">
+        <button class="btn sec" onclick="vaciarCola()" style="height:40px">Vaciar cola</button>
+      </div>
+      <div class="lista" id="lista-cola"></div>
+    </div>
+
+    <div class="vista" id="v-buscar">
+      <form class="buscador" onsubmit="buscar(event)">
+        <input id="q" type="search" placeholder="Artista, álbum o canción" autocomplete="off" enterkeyhint="search">
+        <button class="btn" type="submit">Buscar</button>
+      </form>
+      <div class="lista" id="lista-buscar"><div class="vacio">Busca en tu biblioteca.</div></div>
+    </div>
+
+    <div class="vista" id="v-orbitron">
+      <form class="buscador" onsubmit="pedirOrbitron(event)">
+        <input id="qo" type="text" placeholder="Ej: jazz tranquilo para trabajar" autocomplete="off" enterkeyhint="send">
+        <button class="btn" type="submit" id="b-orb">Pedir</button>
+      </form>
+      <div class="orbitron-resp" id="orb-resp"><span id="orb-txt"></span>
+        <button class="btn" style="height:36px" onclick="reproducirOrbitron()">▶ Todo</button>
+        <button class="btn sec" style="height:36px" id="b-expandir" onclick="expandirOrbitron()">+ Más</button>
+      </div>
+      <div class="lista" id="lista-orbitron"><div class="vacio">Pídele a Orbitron una playlist en tus palabras.<br>Puedes seguir refinando: “más tranquilo”, “solo de los 70”…</div></div>
+    </div>
+  </section>
+</div>
+
+<div class="login" id="login">
+  <div style="font-family:Orbitron;color:var(--gold);letter-spacing:.12em">ORBYTE</div>
+  <div style="color:var(--text2)">La sesión expiró o nunca se inició en este equipo.</div>
+  <a href="/login?next=/mini">Iniciar sesión</a>
+</div>
+
+<script>
+// =====================================================================
+// Estado (persistido en este navegador)
+// =====================================================================
+const CLAVE = "orbyte_mini_v1";
+let st = { cola: [], idx: -1, destino: null };
+try { Object.assign(st, JSON.parse(localStorage.getItem(CLAVE) || "{}")); } catch (e) {}
+function guardar() { try { localStorage.setItem(CLAVE, JSON.stringify(st)); } catch (e) {} }
+
+// Lo que dice el receptor (via /api/v1/cast/status) + reloj local entre sondeos
+let rx = { state: null, pos: 0, dur: 0, track: null, perfil: null, t: 0 };
+let mia = null;            // id de la pista que ENVIO esta pagina (solo esa avanza la cola sola)
+let enviando = false;      // hay un cast/play en curso
+let ultimoComando = 0;     // estados leidos justo despues de un comando son transitorios
+let saltosSeguidos = 0;    // tope para no girar en circulo con archivos rotos
+let avisoSalto = "";       // se mantiene visible aunque la siguiente arranque bien
+let orb = { requestId: null, entities: null, tracks: [] };
+
+// =====================================================================
+// API (cookie de sesion, mismo origen)
+// =====================================================================
+async function api(ruta, opciones = {}) {
+  const r = await fetch(ruta, Object.assign({ credentials: "same-origin",
+    headers: { "Content-Type": "application/json" } }, opciones));
+  if (r.status === 401) { document.getElementById("login").classList.add("visible"); throw new Error("Sesión vencida"); }
+  let data = null;
+  try { data = await r.json(); } catch (e) {}
+  if (!r.ok || (data && data.status === "error")) {
+    const err = new Error((data && (data.message || data.error)) || ("HTTP " + r.status));
+    err.code = data && data.code;
+    throw err;
+  }
+  return data;
+}
+const post = (ruta, body) => api(ruta, { method: "POST", body: JSON.stringify(body) });
+
+// =====================================================================
+// Utilidades
+// =====================================================================
+const $ = (id) => document.getElementById(id);
+function fmt(s) { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function aviso(txt, error) { const a = $("aviso"); a.textContent = txt || ""; a.classList.toggle("err", !!error); }
+function ledColor(c) { return c ? `var(--led-${c}, var(--text3))` : "var(--text3)"; }
+const PERFILES = { hi: "PCM 88.2 kHz/24", hi48: "PCM 96 kHz/24", cd: "PCM 44.1 kHz/16" };
+
+// =====================================================================
+// Destino (receptor DLNA)
+// =====================================================================
+async function cargarDestinos() {
+  try {
+    const lista = await api("/api/v1/cast/targets");
+    const sel = $("destino");
+    sel.innerHTML = lista.length ? "" : '<option value="">Sin equipos</option>';
+    lista.forEach((t) => { const o = document.createElement("option"); o.value = t.id; o.textContent = t.name; sel.appendChild(o); });
+    if (!st.destino || !lista.some((t) => t.id === st.destino)) {
+      const pref = lista.find((t) => /8050|onkyo/i.test(t.name)) || lista[0];
+      st.destino = pref ? pref.id : null; guardar();
+    }
+    if (st.destino) sel.value = st.destino;
+    leerVolumen();
+  } catch (e) { $("dot").className = "dot err"; aviso("No se pudieron cargar los equipos: " + e.message, true); }
+}
+function cambiarDestino(v) { st.destino = v ? parseInt(v, 10) : null; guardar(); leerVolumen(); sondear(); }
+
+// =====================================================================
+// Reproduccion
+// =====================================================================
+async function reproducirIndice(i) {
+  if (!st.destino || i < 0 || i >= st.cola.length) return;
+  st.idx = i; guardar(); renderCola();
+  const pista = st.cola[i];
+  mia = pista.id; enviando = true; ultimoComando = Date.now();
+  pintarPista(pista); aviso("Enviando al equipo…");
+  try {
+    const r = await post("/api/v1/cast/play", { target_id: st.destino, track_id: pista.id });
+    saltosSeguidos = 0;
+    aviso(avisoSalto || (r && r.transcoded ? "Convertido para este equipo" : ""), !!avisoSalto);
+    avisoSalto = "";
+    rx = { state: "PLAYING", pos: 0, dur: pista.duration || 0, track: pista, perfil: r && r.pcm_profile, t: Date.now() };
+  } catch (e) {
+    if (e.code === "empty_file" || e.code === "file_missing") {
+      // Archivo roto: saltar a la siguiente si hay (tope = largo de la cola)
+      saltosSeguidos++;
+      if (i + 1 < st.cola.length && saltosSeguidos < st.cola.length) {
+        avisoSalto = "Saltada (" + e.message + "): " + pista.title;
+        aviso(avisoSalto, true);
+        enviando = false; return reproducirIndice(i + 1);
+      }
+    }
+    saltosSeguidos = 0; mia = null;
+    aviso(e.message, true);
+  } finally { enviando = false; ultimoComando = Date.now(); pintarEstado(); }
+}
+
+async function playPausa() {
+  if (!st.destino) return;
+  if (rx.state === "PLAYING") {
+    rx.pos = posicionActual(); rx.t = Date.now();   // congelar donde iba
+    ultimoComando = Date.now(); rx.state = "PAUSED_PLAYBACK"; pintarEstado();
+    try { await post("/api/v1/cast/transport", { target_id: st.destino, action: "Pause" }); }
+    catch (e) { aviso(e.message, true); }
+  } else if (rx.state === "PAUSED_PLAYBACK") {
+    ultimoComando = Date.now(); aviso("Reanudando…");
+    try { await post("/api/v1/cast/transport", { target_id: st.destino, action: "Play" }); rx.state = "PLAYING"; rx.t = Date.now(); aviso(""); }
+    catch (e) { aviso(e.message, true); }
+  } else if (st.idx >= 0) {
+    reproducirIndice(st.idx);
+  } else if (st.cola.length) {
+    reproducirIndice(0);
+  }
+  ultimoComando = Date.now(); pintarEstado();
+}
+function siguiente() { if (st.idx + 1 < st.cola.length) reproducirIndice(st.idx + 1); }
+function anterior() {
+  if (posicionActual() > 5 && st.idx >= 0) return buscarPos(0);
+  if (st.idx > 0) reproducirIndice(st.idx - 1);
+}
+async function buscarPos(seg) {
+  if (!st.destino || !rx.track) return;
+  ultimoComando = Date.now(); rx.pos = seg; rx.t = Date.now(); pintarEstado();
+  try { await post("/api/v1/cast/seek", { target_id: st.destino, seconds: Math.round(seg) }); }
+  catch (e) { aviso("Este equipo no permitió saltar: " + e.message, true); }
+}
+
+// Volumen del receptor (UPnP RenderingControl), con espera para no saturar
+let volTimer = null;
+function moverVolumen(v) {
+  $("vol-num").textContent = v;
+  clearTimeout(volTimer);
+  volTimer = setTimeout(() => {
+    if (st.destino) post("/api/v1/cast/volume", { target_id: st.destino, volume: parseInt(v, 10) }).catch((e) => aviso(e.message, true));
+  }, 250);
+}
+async function leerVolumen() {
+  if (!st.destino) return;
+  try { const r = await api("/api/v1/cast/volume?target_id=" + st.destino); $("vol").value = r.volume; $("vol-num").textContent = r.volume; }
+  catch (e) { $("vol-num").textContent = "–"; }
+}
+
+// =====================================================================
+// Sincronizacion con el receptor
+// =====================================================================
+function posicionActual() {
+  if (rx.state === "PLAYING") return Math.min(rx.dur || Infinity, rx.pos + (Date.now() - rx.t) / 1000);
+  return rx.pos || 0;
+}
+async function sondear() {
+  if (!st.destino || enviando) return;
+  const pedidoEn = Date.now();
+  try {
+    const s = await api("/api/v1/cast/status?target_id=" + st.destino);
+    $("dot").className = "dot on";
+    if (pedidoEn < ultimoComando + 1500 || enviando) return;   // transitorio tras un comando
+    const antes = { state: rx.state, pos: posicionActual(), dur: rx.dur, track: rx.track };
+    // Fin de pista: el receptor quedo parado cerca del final de la pista que mandamos nosotros
+    if ((s.state === "STOPPED" || s.state === "NO_MEDIA_PRESENT") && antes.state === "PLAYING" &&
+        antes.track && antes.track.id === mia && antes.dur && antes.pos >= antes.dur - 5) {
+      rx.state = "STOPPED";
+      if (st.idx + 1 < st.cola.length) return reproducirIndice(st.idx + 1);
+      mia = null; pintarEstado(); return;
+    }
+    rx.state = s.state;
+    rx.pos = s.position_s || 0; rx.t = Date.now();
+    rx.dur = s.duration_s || (s.track && s.track.duration) || rx.dur;
+    rx.perfil = s.pcm_profile;
+    if (s.track) {
+      // Si suena algo que no es de nuestra cola (lo mando Desktop/iPhone), se muestra igual
+      const enCola = st.cola[st.idx] && st.cola[st.idx].id === s.track.id ? st.cola[st.idx] : null;
+      rx.track = Object.assign({}, s.track, enCola || {});
+      if (!enCola) mia = null;
+    }
+    pintarPista(rx.track); pintarEstado();
+  } catch (e) { $("dot").className = "dot err"; }
+}
+
+// =====================================================================
+// Pintado
+// =====================================================================
+function pintarPista(p) {
+  const c = $("cover");
+  if (p && p.cover_url) {
+    if (c.tagName !== "IMG") { const img = document.createElement("img"); img.className = "cover"; img.id = "cover"; c.replaceWith(img); }
+    if ($("cover").getAttribute("src") !== p.cover_url) $("cover").src = p.cover_url;
+  } else if (c.tagName === "IMG") {
+    const d = document.createElement("div"); d.className = "cover vacia"; d.id = "cover"; d.textContent = "♪"; c.replaceWith(d);
+  }
+  $("titulo").textContent = p ? p.title : "Nada sonando";
+  $("artista").textContent = p ? [p.artist || p.artist_name, p.album_name].filter(Boolean).join(" · ") : "Busca algo o pídeselo a Orbitron";
+  let b = "";
+  if (p && p.format_display) b += `<span class="badge"><span class="led" style="background:${ledColor(p.format_color || p.led_color)}"></span>${esc(p.format_display)}</span>`;
+  if (rx.perfil && PERFILES[rx.perfil]) b += `<span class="badge">→ ${PERFILES[rx.perfil]}</span>`;
+  $("badges").innerHTML = b;
+}
+function pintarEstado() {
+  const sonando = rx.state === "PLAYING";
+  $("ico-play").innerHTML = sonando ? '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>' : '<path d="M8 5v14l11-7z"/>';
+  $("b-next").disabled = !(st.idx + 1 < st.cola.length);
+  $("b-prev").disabled = !(st.idx > 0 || posicionActual() > 5);
+  tickBarra();
+}
+function tickBarra() {
+  const pos = posicionActual(), dur = rx.dur || 0;
+  $("relleno").style.width = dur ? Math.min(100, (pos / dur) * 100) + "%" : "0";
+  $("t-pos").textContent = fmt(pos); $("t-dur").textContent = fmt(dur);
+}
+function filaPista(p, acciones, actual) {
+  return `<div class="fila${actual ? " actual" : ""}" ${acciones.tap ? `onclick="${acciones.tap}"` : ""}>
+    ${p.cover_url ? `<img class="mini-cover" loading="lazy" src="${esc(p.cover_url)}">` : '<div class="mini-cover"></div>'}
+    <div class="fila-texto"><div class="fila-t">${esc(p.title)}</div>
+      <div class="fila-s"><span class="led" style="display:inline-block;margin-right:5px;background:${ledColor(p.format_color || p.led_color)}"></span>${esc([p.artist || p.artist_name, p.album_name].filter(Boolean).join(" · "))}${p.duration ? " · " + fmt(p.duration) : ""}</div></div>
+    ${acciones.extra || ""}</div>`;
+}
+function renderCola() {
+  const el = $("lista-cola");
+  if (!st.cola.length) { el.innerHTML = '<div class="vacio">La cola está vacía.<br>Agrega pistas desde Buscar u Orbitron.</div>'; return; }
+  el.innerHTML = st.cola.map((p, i) => filaPista(p, {
+    tap: `reproducirIndice(${i})`,
+    extra: `<button class="fila-acc" onclick="event.stopPropagation();quitar(${i})" aria-label="Quitar">×</button>`,
+  }, i === st.idx)).join("");
+}
+
+// =====================================================================
+// Cola
+// =====================================================================
+function ponerCola(pistas, desde = 0) { st.cola = pistas.slice(); st.idx = -1; guardar(); renderCola(); reproducirIndice(desde); verTab("cola"); }
+function agregar(p) { st.cola.push(p); guardar(); renderCola(); aviso("Agregada a la cola: " + p.title); if (st.idx < 0) reproducirIndice(st.cola.length - 1); }
+function quitar(i) {
+  st.cola.splice(i, 1);
+  if (i < st.idx) st.idx--; else if (i === st.idx) st.idx = Math.min(st.idx, st.cola.length - 1);
+  guardar(); renderCola(); pintarEstado();
+}
+function vaciarCola() { st.cola = []; st.idx = -1; mia = null; guardar(); renderCola(); pintarEstado(); }
+
+// =====================================================================
+// Buscar
+// =====================================================================
+let resultados = { tracks: [], albums: [] };
+async function buscar(ev) {
+  ev.preventDefault();
+  const q = $("q").value.trim(); if (!q) return;
+  $("q").blur();
+  const el = $("lista-buscar"); el.innerHTML = '<div class="vacio"><div class="spinner" style="margin:auto"></div></div>';
+  try {
+    const r = await api("/api/v1/search?q=" + encodeURIComponent(q));
+    resultados = { tracks: r.tracks || [], albums: r.albums || [] };
+    let h = "";
+    if (resultados.albums.length) {
+      h += '<div class="seccion">Álbumes</div>';
+      h += resultados.albums.slice(0, 12).map((a, i) => `<div class="fila" onclick="abrirAlbum(${i})">
+        ${a.cover_url ? `<img class="mini-cover" loading="lazy" src="${esc(a.cover_url)}">` : '<div class="mini-cover"></div>'}
+        <div class="fila-texto"><div class="fila-t">${esc(a.name)}</div><div class="fila-s">${esc([a.artist_name, a.year, a.track_count && a.track_count + " pistas"].filter(Boolean).join(" · "))}</div></div>
+        <button class="fila-acc" aria-label="Reproducir álbum">▶</button></div>`).join("");
+    }
+    if (resultados.tracks.length) {
+      h += '<div class="seccion">Canciones</div>';
+      h += resultados.tracks.map((p, i) => filaPista(p, {
+        tap: `ponerCola([resultados.tracks[${i}]])`,
+        extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(resultados.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
+      })).join("");
+    }
+    el.innerHTML = h || '<div class="vacio">Sin resultados.</div>';
+  } catch (e) { el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`; }
+}
+async function abrirAlbum(i) {
+  const a = resultados.albums[i]; aviso("Cargando álbum…");
+  try {
+    const r = await api("/api/v1/albums/" + a.id + "/tracks");
+    const pistas = (r.tracks || []).map((t) => Object.assign({ artist: a.artist_name }, t));
+    if (!pistas.length) return aviso("El álbum no tiene pistas", true);
+    ponerCola(pistas, 0);
+  } catch (e) { aviso(e.message, true); }
+}
+
+// =====================================================================
+// Orbitron
+// =====================================================================
+async function pedirOrbitron(ev) {
+  ev.preventDefault();
+  const q = $("qo").value.trim(); if (!q) return;
+  $("qo").blur(); $("b-orb").disabled = true;
+  const el = $("lista-orbitron"); el.innerHTML = '<div class="vacio"><div class="spinner" style="margin:auto"></div><br>Orbitron está armando tu playlist…</div>';
+  try {
+    const body = { query: q };
+    if (orb.entities) body.prior_entities = orb.entities;   // seguimiento de la conversacion
+    const r = await post("/api/v1/ai/playlist", body);
+    orb = { requestId: r.request_id, entities: r.entities, tracks: r.tracks || [] };
+    $("orb-txt").textContent = r.question ? r.question : `${orb.tracks.length} pistas para “${q}”`;
+    $("orb-resp").classList.add("visible");
+    $("qo").value = ""; $("qo").placeholder = "Refina: “más tranquilo”, “solo de los 70”…";
+    pintarOrbitron();
+  } catch (e) { el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`; }
+  finally { $("b-orb").disabled = false; }
+}
+function pintarOrbitron() {
+  $("lista-orbitron").innerHTML = orb.tracks.length ? orb.tracks.map((p, i) => filaPista(p, {
+    tap: `ponerCola(orb.tracks, ${i})`,
+    extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(orb.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
+  })).join("") : '<div class="vacio">Orbitron no encontró pistas.</div>';
+}
+function reproducirOrbitron() { if (orb.tracks.length) ponerCola(orb.tracks, 0); }
+async function expandirOrbitron() {
+  if (!orb.requestId) return;
+  $("b-expandir").disabled = true;
+  try {
+    const r = await post("/api/v1/ai/playlist/" + orb.requestId + "/expand", {});
+    const nuevas = r.tracks || [];
+    orb.tracks = orb.tracks.concat(nuevas);
+    $("orb-txt").textContent = `${orb.tracks.length} pistas` + (nuevas.length ? "" : " (no hay más)");
+    pintarOrbitron();
+  } catch (e) { aviso(e.message, true); }
+  finally { $("b-expandir").disabled = false; }
+}
+
+// =====================================================================
+// UI general
+// =====================================================================
+function verTab(v) {
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("activa", t.dataset.v === v));
+  document.querySelectorAll(".vista").forEach((x) => x.classList.toggle("activa", x.id === "v-" + v));
+}
+// Tocar/arrastrar en la barra = seek
+(function () {
+  const barra = $("barra");
+  function aSegundos(ev) { const r = barra.getBoundingClientRect(); return Math.max(0, Math.min(1, (ev.clientX - r.left) / r.width)) * (rx.dur || 0); }
+  barra.addEventListener("pointerup", (ev) => { if (rx.dur && rx.track) buscarPos(aSegundos(ev)); });
+})();
+
+renderCola();
+if (st.idx >= 0 && st.cola[st.idx]) { rx.track = st.cola[st.idx]; mia = st.cola[st.idx].id; pintarPista(rx.track); }
+pintarEstado();
+cargarDestinos().then(sondear);
+setInterval(sondear, 2000);
+setInterval(tickBarra, 500);
+// Si el iframe estuvo oculto (otra pestaña del dashboard), resincronizar al volver
+document.addEventListener("visibilitychange", () => { if (!document.hidden) { sondear(); leerVolumen(); } });
+</script>
+</body>
+</html>
