@@ -7683,7 +7683,7 @@ def cast_audio(track_id, perfil=None):
         return "Archivo no encontrado en disco", 404
     # Ticket D-03/D-04: /pcm/<perfil> -> version FLAC de un DSD (ver _dsd_transcode_para_cast).
     # El token sigue atado al track_id, no hace falta otro.
-    if perfil and os.path.splitext(path)[1].lower() in ('.dsf', '.dff'):
+    if perfil:  # Ticket D-09: tambien PCM hi-res (antes solo DSD)
         if perfil not in _CAST_PCM_PERFILES:
             return "Perfil PCM desconocido", 404
         pcm_path = _dsd_transcode_para_cast(path, perfil)
@@ -8338,6 +8338,8 @@ _CAST_PCM_PERFILES = {
     # /api/v1/stream-pcm (176.4k), pero a 24-bit (techo real de un DAC DLNA).
     'max': {'rate': '176400', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
     'hi': {'rate': '88200', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
+    # Ticket D-09: familia 48k (192k/384k -> 96k, division exacta) para PCM hi-res.
+    'hi48': {'rate': '96000', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
     'cd': {'rate': '44100', 'fmt': ['-sample_fmt', 's16']},
 }
 # Ticket D-06: 'max' FUERA de la cascada. Probado en el TX-8050: rechaza
@@ -8346,6 +8348,18 @@ _CAST_PCM_PERFILES = {
 # PLAYING igual). 88.2k/24 ('hi') si suena. 'max' queda definido por si un
 # renderer futuro lo soporta, pero solo se usaria agregandolo aca a mano.
 _CAST_PCM_ORDEN = ['hi', 'cd']
+# Ticket D-09: PCM por encima de esto (24/192, 24/176.4, DXD) se baja al perfil
+# de su familia si el renderer lo rechaza. 96k/24 confirmado en el TX-8050.
+_CAST_PCM_MAX_RATE = 96000
+
+
+def _cast_perfil_pcm_para(sample_rate):
+    """Perfil de la MISMA familia de frecuencia (division exacta, sin
+    remuestreo fraccional): 44.1k/88.2k/176.4k -> 'hi'; 48k/96k/192k -> 'hi48'."""
+    try:
+        return 'hi' if int(sample_rate) % 44100 == 0 else 'hi48'
+    except (TypeError, ValueError):
+        return 'hi'
 _CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
 # Ultimo perfil que SI sono por renderer (RAM, igual que _cast_targets_sin_dsd):
 # se prueba primero y no se repite el que ya fallo.
@@ -8356,6 +8370,8 @@ _cast_pcm_perfil_ok = {}
 # vez. Solo RAM (regla 2 de AGENTE.md: nada de columnas nuevas); se
 # reaprende solo tras un reinicio.
 _cast_targets_sin_dsd = set()
+# Ticket D-09: renderers que rechazaron PCM > _CAST_PCM_MAX_RATE (misma logica, RAM).
+_cast_targets_max96 = set()
 
 
 def _dsd_cast_cache_path(absolute_path, perfil='hi'):
@@ -8382,8 +8398,14 @@ def _dsd_transcode_para_cast(absolute_path, perfil='hi'):
         '-f', 'flac',
         tmp_path,
     ]
+    # Ticket D-09: remuestreo con SoX (mejor calidad) si este ffmpeg lo trae;
+    # si no, el remuestreador por defecto de siempre.
+    idx = cmd.index('-ar')
+    cmd_soxr = cmd[:idx] + ['-af', 'aresample=resampler=soxr:precision=28'] + cmd[idx:]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        result = subprocess.run(cmd_soxr, capture_output=True, timeout=300)
+        if result.returncode != 0 and b'soxr' in result.stderr.lower():
+            result = subprocess.run(cmd, capture_output=True, timeout=300)
         if result.returncode != 0 or not os.path.isfile(tmp_path):
             app.logger.error(f"[cast dsd->pcm] ffmpeg fallo para {absolute_path}: "
                              f"{result.stderr.decode(errors='replace')[:500]}")
@@ -8421,7 +8443,7 @@ def api_v1_cast_play():
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
         track = conn.execute('''
             SELECT t.id, t.title, t.artist, t.file_path, t.genre, t.track_number,
-                   al.name AS album_name, al.cover_path
+                   t.sample_rate_real, al.name AS album_name, al.cover_path
             FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
             WHERE t.id=?''', (track_id,)).fetchone()
         if not target:
@@ -8429,9 +8451,14 @@ def api_v1_cast_play():
         if not track:
             return jsonify({'status': 'error', 'message': 'Pista no encontrada'}), 404
 
+        # Ticket D-09: 'code' para que el cliente distinga "el ARCHIVO no sirve"
+        # (saltar a la siguiente) de "el receptor fallo" (mostrar error).
         file_path = clean_db_path(track['file_path'])
         if not os.path.isfile(file_path):
-            return jsonify({'status': 'error', 'message': 'El archivo no está en disco'}), 404
+            return jsonify({'status': 'error', 'code': 'file_missing', 'message': 'El archivo no está en disco'}), 404
+        if os.path.getsize(file_path) == 0:
+            app.logger.warning(f"[cast v1] '{track['title']}' archivo vacío (0 bytes): {file_path}")
+            return jsonify({'status': 'error', 'code': 'empty_file', 'message': 'El archivo está vacío (0 bytes)'}), 422
 
         token = cast_token_for_track(track['id'])
         base = request.host_url.rstrip('/')
@@ -8442,9 +8469,15 @@ def api_v1_cast_play():
         _cast_pausas.pop(target['id'], None)  # Ticket D-05: pista nueva anula pausa emulada
         ext = os.path.splitext(file_path)[1].lower()
         es_dsd = ext in ('.dsf', '.dff')
+        # Ticket D-09: PCM por encima de 96k (24/192...) - si el renderer ya
+        # demostro que no lo acepta, directo al perfil de su familia.
+        rate = track['sample_rate_real'] or 0
+        es_hires = (not es_dsd) and rate > _CAST_PCM_MAX_RATE
         transcodificado = False
         if es_dsd and target['id'] in _cast_targets_sin_dsd:
             ok, mime_used, reason = False, None, 'renderer sin DSD (ya conocido)'
+        elif es_hires and target['id'] in _cast_targets_max96:
+            ok, mime_used, reason = False, None, f'renderer sin PCM > {_CAST_PCM_MAX_RATE} Hz (ya conocido)'
         else:
             if es_dsd:
                 mime_candidates = _CAST_DSD_MIME_CANDIDATES
@@ -8457,15 +8490,18 @@ def api_v1_cast_play():
         # luego cd 44.1k/16), URL por path sin '&'. Primero el ultimo perfil que
         # ya funciono en este renderer.
         perfil_usado = None
-        if not ok and es_dsd:
-            previo = _cast_pcm_perfil_ok.get(target['id'])
-            if previo not in _CAST_PCM_ORDEN:
-                previo = None
-            orden = ([previo] if previo else []) + [x for x in _CAST_PCM_ORDEN if x != previo]
+        if not ok and (es_dsd or es_hires):
+            if es_dsd:
+                previo = _cast_pcm_perfil_ok.get(target['id'])
+                if previo not in _CAST_PCM_ORDEN:
+                    previo = None
+                orden = ([previo] if previo else []) + [x for x in _CAST_PCM_ORDEN if x != previo]
+            else:
+                orden = [_cast_perfil_pcm_para(rate), 'cd']
             for perfil in orden:
                 pcm_path = _dsd_transcode_para_cast(file_path, perfil)
                 if not pcm_path:
-                    reason = 'No se pudo convertir el DSD a PCM'
+                    reason = 'No se pudo convertir el archivo a PCM'
                     break
                 ok, mime_used, reason = _cast_try_send_track(
                     target['control_url'], track,
@@ -8478,7 +8514,11 @@ def api_v1_cast_play():
             transcodificado = ok
             # Solo se recuerda si el PCM SI sonó: prueba que el renderer estaba
             # alcanzable y rechazó el formato (un corte de red no lo marca).
-            if ok:
+            if ok and es_hires:
+                if target['id'] not in _cast_targets_max96:
+                    _cast_targets_max96.add(target['id'])
+                    app.logger.info(f"[cast v1] {target['name']} no acepta PCM > {_CAST_PCM_MAX_RATE} Hz — se recuerda, se convierte ({perfil_usado})")
+            elif ok:
                 _cast_pcm_perfil_ok[target['id']] = perfil_usado
                 if target['id'] not in _cast_targets_sin_dsd:
                     _cast_targets_sin_dsd.add(target['id'])
