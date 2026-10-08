@@ -8305,7 +8305,12 @@ _CAST_PCM_PERFILES = {
     'hi': {'rate': '88200', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
     'cd': {'rate': '44100', 'fmt': ['-sample_fmt', 's16']},
 }
-_CAST_PCM_ORDEN = ['max', 'hi', 'cd']
+# Ticket D-06: 'max' FUERA de la cascada. Probado en el TX-8050: rechaza
+# audio/flac a 176.4k (STOPPED) pero con audio/x-flac responde PLAYING y NO
+# suena -> falso positivo imposible de detectar por UPnP (el renderer dice
+# PLAYING igual). 88.2k/24 ('hi') si suena. 'max' queda definido por si un
+# renderer futuro lo soporta, pero solo se usaria agregandolo aca a mano.
+_CAST_PCM_ORDEN = ['hi', 'cd']
 _CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
 # Ultimo perfil que SI sono por renderer (RAM, igual que _cast_targets_sin_dsd):
 # se prueba primero y no se repite el que ya fallo.
@@ -8419,6 +8424,8 @@ def api_v1_cast_play():
         perfil_usado = None
         if not ok and es_dsd:
             previo = _cast_pcm_perfil_ok.get(target['id'])
+            if previo not in _CAST_PCM_ORDEN:
+                previo = None
             orden = ([previo] if previo else []) + [x for x in _CAST_PCM_ORDEN if x != previo]
             for perfil in orden:
                 pcm_path = _dsd_transcode_para_cast(file_path, perfil)
