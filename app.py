@@ -7675,6 +7675,13 @@ def cast_audio(track_id):
     if not os.path.isfile(path):
         app.logger.warning(f"cast_audio: archivo no encontrado en disco: {path}")
         return "Archivo no encontrado en disco", 404
+    # Ticket D-03: ?pcm=1 -> version FLAC 88.2k/24 de un DSD (ver _dsd_transcode_para_cast).
+    # El token sigue atado al track_id, no hace falta otro.
+    if request.args.get('pcm') == '1' and os.path.splitext(path)[1].lower() in ('.dsf', '.dff'):
+        pcm_path = _dsd_transcode_para_cast(path)
+        if not pcm_path:
+            return "No se pudo convertir el DSD a PCM", 500
+        return _serve_audio(pcm_path)
     return _serve_audio(path)
 
 
@@ -8266,6 +8273,80 @@ def api_v1_cast_target_delete(target_id):
     return jsonify({'status': 'ok'})
 
 
+# ── Ticket D-03 (reportado por Niko): DSD -> PCM para cast ─────────────────
+# Renderers sin soporte DSD (el Onkyo TX-8050) rechazan los cuatro mime de
+# _CAST_DSD_MIME_CANDIDATES y, peor, al recibir Play sin una URI nueva
+# valida REPITEN la ultima pista que tenian cargada. La conversion a PCM
+# de iOS/Android ocurre en el telefono, asi que no sirve cuando el audio
+# va directo del server al renderer: hay que convertir aca.
+#
+# Mismo criterio ya probado en /stream-dsd y /api/v1/stream-pcm: transcode
+# COMPLETO a disco antes de servir (nunca en vivo), mismo directorio de
+# cache (_DSD_CACHE_DIR, misma limpieza _dsd_cache_cleanup), servido con
+# _serve_audio (Content-Length + Range). Diferencia: 88.2kHz/24-bit en vez
+# de 176.4kHz/32-bit, porque un renderer DLNA de esa epoca casi seguro no
+# acepta FLAC por encima de 96kHz/24-bit. 88.2k es divisor exacto de
+# DSD64 (2.8224 MHz / 32). Archivo de cache distinto (sufijo .cast.flac)
+# para no pisar el de la PWA/iOS, que tiene otros parametros.
+_CAST_PCM_RATE = '88200'
+_CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
+
+# Renderers que ya rechazaron DSD nativo en esta vida del proceso: se les
+# manda PCM directo y no se pierden ~6s probando los cuatro mime DSD cada
+# vez. Solo RAM (regla 2 de AGENTE.md: nada de columnas nuevas); se
+# reaprende solo tras un reinicio.
+_cast_targets_sin_dsd = set()
+
+
+def _dsd_cast_cache_path(absolute_path):
+    """Igual que _dsd_cache_path pero con sufijo propio para la version de cast."""
+    return _dsd_cache_path(absolute_path)[:-len('.flac')] + '.cast.flac'
+
+
+def _dsd_transcode_para_cast(absolute_path):
+    """Devuelve la ruta del FLAC 88.2kHz/24-bit en cache (lo crea si no
+    existe), o None si ffmpeg fallo."""
+    _dsd_cache_cleanup()
+    cache_path = _dsd_cast_cache_path(absolute_path)
+    if os.path.isfile(cache_path):
+        return cache_path
+    tmp_path = f'{cache_path}.{os.getpid()}.tmp'
+    cmd = [
+        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+        '-i', absolute_path,
+        '-vn',
+        '-ar', _CAST_PCM_RATE,
+        '-sample_fmt', 's32', '-bits_per_raw_sample', '24',
+        '-c:a', 'flac',
+        '-compression_level', '0',
+        '-f', 'flac',
+        tmp_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=300)
+        if result.returncode != 0 or not os.path.isfile(tmp_path):
+            app.logger.error(f"[cast dsd->pcm] ffmpeg fallo para {absolute_path}: "
+                             f"{result.stderr.decode(errors='replace')[:500]}")
+            return None
+        os.replace(tmp_path, cache_path)
+        return cache_path
+    except subprocess.TimeoutExpired:
+        app.logger.error(f"[cast dsd->pcm] ffmpeg timeout para {absolute_path}")
+        return None
+    finally:
+        if os.path.isfile(tmp_path):
+            try: os.remove(tmp_path)
+            except OSError: pass
+
+
+def _cast_stop(control_url):
+    """Stop best-effort. Se usa cuando un envio falla del todo, para que el
+    renderer no se quede repitiendo la pista anterior como si fuera la nueva."""
+    _cast_soap_call(control_url, 'Stop',
+        '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        '<InstanceID>0</InstanceID></u:Stop>', timeout=3)
+
+
 @app.route('/api/v1/cast/play', methods=['POST'])
 @api_login_required
 def api_v1_cast_play():
@@ -8299,23 +8380,48 @@ def api_v1_cast_play():
         file_size = os.path.getsize(file_path)
 
         ext = os.path.splitext(file_path)[1].lower()
-        if ext in ('.dsf', '.dff'):
-            mime_candidates = _CAST_DSD_MIME_CANDIDATES
+        es_dsd = ext in ('.dsf', '.dff')
+        transcodificado = False
+        if es_dsd and target['id'] in _cast_targets_sin_dsd:
+            ok, mime_used, reason = False, None, 'renderer sin DSD (ya conocido)'
         else:
-            mime_candidates = [_CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream']
+            if es_dsd:
+                mime_candidates = _CAST_DSD_MIME_CANDIDATES
+            else:
+                mime_candidates = [_CAST_MIME_BY_EXT.get(ext) or mimetypes.guess_type(file_path)[0] or 'application/octet-stream']
+            ok, mime_used, reason = _cast_try_send_track(
+                target['control_url'], track, media_url, cover_url, file_path, file_size, mime_candidates)
 
-        ok, mime_used, reason = _cast_try_send_track(
-            target['control_url'], track, media_url, cover_url, file_path, file_size, mime_candidates)
+        # Ticket D-03: DSD rechazado -> segundo intento con FLAC 88.2k/24 (misma URL + &pcm=1)
+        if not ok and es_dsd:
+            pcm_path = _dsd_transcode_para_cast(file_path)
+            if pcm_path:
+                ok, mime_used, reason = _cast_try_send_track(
+                    target['control_url'], track, media_url + '&pcm=1', cover_url,
+                    pcm_path, os.path.getsize(pcm_path), _CAST_PCM_MIME_CANDIDATES)
+                transcodificado = ok
+                # Solo se recuerda "sin DSD" si el PCM SI sonó: eso prueba que el
+                # renderer estaba alcanzable y rechazó el formato. Un corte de red
+                # o un renderer apagado NO lo marca (si no, un Yamaha con DSD
+                # nativo quedaria degradado a PCM hasta el proximo reinicio).
+                if ok and target['id'] not in _cast_targets_sin_dsd:
+                    _cast_targets_sin_dsd.add(target['id'])
+                    app.logger.info(f"[cast v1] {target['name']} no acepta DSD nativo — se recuerda, se usa PCM")
+            else:
+                reason = 'No se pudo convertir el DSD a PCM'
 
         if ok:
-            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, user={g.api_user['id']})")
+            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, pcm={transcodificado}, user={g.api_user['id']})")
             conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
             conn.commit()
             global _cast_active_target
             _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
-            return jsonify({'status': 'ok', 'device': target['name']})
+            return jsonify({'status': 'ok', 'device': target['name'], 'transcoded': transcodificado})
 
-        app.logger.warning(f"[cast v1] '{track['title']}' -> {target['name']} FALLÓ: {reason}")
+        # Ticket D-03: sin esto el renderer repetia la pista ANTERIOR y el
+        # cliente creia que sonaba la nueva.
+        _cast_stop(target['control_url'])
+        app.logger.warning(f"[cast v1] '{track['title']}' -> {target['name']} FALLÓ: {reason} (se mandó Stop)")
         return jsonify({'status': 'error', 'message': reason}), 502
     finally:
         conn.close()
