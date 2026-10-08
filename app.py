@@ -9197,6 +9197,15 @@ def api_rebuild_pop_cache():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/mini')
+def mini_dashboard():
+    """Ticket D-02 (pedido por Niko): mini control para el dashboard de Home
+    Assistant (iPad, iframe). Pagina suelta - no extiende base.html (sin
+    reproductor local ni SPA): todo va al receptor DLNA via /api/v1/cast/*,
+    con la cookie de sesion. Protegida por el _require_login de siempre."""
+    return render_template('mini.html')
+
+
 @app.route('/favorites')
 def favorites_page():
     """Favorites page — shows all bookmarked tracks (Ticket 10: ahora
