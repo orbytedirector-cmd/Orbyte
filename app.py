@@ -51,6 +51,8 @@ from email import encoders
 import sqlite3
 import mimetypes
 import subprocess
+import threading
+import shutil
 try:
     import requests as req_lib
 except ImportError:
@@ -3271,6 +3273,235 @@ def api_v1_stream_pcm(track_id):
     resp.headers['Content-Type']      = 'audio/flac'
     resp.headers['X-Transcode-Cache'] = 'hit' if cache_hit else 'miss'
     return resp
+
+# ── Ticket D-16 (pedido por Niko): DSD por segmentos HLS para iOS/Android ───
+# Antes, un DSD en el movil esperaba el archivo COMPLETO: DSD64 bajaba el .dsf
+# entero (~210 MB por 5 min) y DSD128+ esperaba a que ffmpeg convirtiera todo
+# y despues bajaba el FLAC entero (~300 MB). Por Tailscale eso son minutos.
+# Ahora el servidor convierte en trozos de 4 s (HLS, fMP4) a medida que
+# avanza y el cliente arranca con los primeros: AVPlayer (iOS) y ExoPlayer
+# (Android) entienden HLS de forma nativa (buffer, pantalla bloqueada, seek).
+#
+# Calidad: PCM 176.4 kHz / 24 bit sin perdida (ALAC para iOS, FLAC para
+# Android) - misma tasa que /api/v1/stream-pcm; 24 bit cubre de sobra el
+# rango dinamico real de un DSD. Solo lo usan los clientes cuando NO hay un
+# DAC USB conectado (con DAC siguen por el camino de siempre).
+#
+# Aislado: no toca /api/v1/stream ni /api/v1/stream-pcm.
+_HLS_DIR = os.path.join(tempfile.gettempdir(), 'orbyte_hls')
+_HLS_CODECS = {'alac': ('alac', 's32p'), 'flac': ('flac', 's32')}
+_HLS_SEGUNDOS = 4
+_HLS_MAX_HORAS = 12
+_hls_jobs = {}          # dir -> subprocess.Popen en curso
+_hls_lock = threading.Lock()
+_hls_soxr = None
+
+
+def _hls_tiene_soxr():
+    """Una sola prueba por proceso: ¿este ffmpeg trae el remuestreador SoX?"""
+    global _hls_soxr
+    if _hls_soxr is None:
+        try:
+            r = subprocess.run(
+                ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-f', 'lavfi',
+                 '-i', 'anullsrc=r=44100:cl=stereo', '-t', '0.1',
+                 '-af', 'aresample=resampler=soxr', '-f', 'null', '-'],
+                capture_output=True, timeout=20)
+            _hls_soxr = (r.returncode == 0)
+        except Exception:
+            _hls_soxr = False
+    return _hls_soxr
+
+
+def _hls_auth():
+    """Mismo criterio que /api/v1/stream-pcm: token Bearer o ?token= (AVPlayer
+    y ExoPlayer piden playlist y segmentos sin headers propios). Devuelve
+    (user_id, token, None) o (None, None, respuesta_de_error)."""
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
+    if not token:
+        return None, None, (jsonify({'error': 'not_authenticated'}), 401)
+    try:
+        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return None, None, (jsonify({'error': 'invalid_token'}), 401)
+    conn = get_db_connection()
+    try:
+        user = conn.execute('SELECT is_approved FROM users WHERE id=?', (user_id,)).fetchone()
+    finally:
+        conn.close()
+    if not user or not user['is_approved']:
+        return None, None, (jsonify({'error': 'not_authenticated'}), 401)
+    return user_id, token, None
+
+
+def _hls_ruta_pista(track_id):
+    """Ruta absoluta del archivo de la pista (mismo criterio que stream-pcm), o None."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT file_path FROM tracks WHERE id=?', (track_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    relative_path = clean_db_path(row['file_path']).lstrip('/')
+    root = MUSIC_ROOT.strip('/')
+    if relative_path.startswith(root + '/'):
+        relative_path = relative_path[len(root) + 1:]
+    elif relative_path.startswith(root):
+        relative_path = relative_path[len(root):]
+    absolute_path = os.path.join(MUSIC_ROOT, relative_path)
+    return absolute_path if os.path.isfile(absolute_path) else None
+
+
+def _hls_dir(absolute_path, codec):
+    try:
+        mtime = os.path.getmtime(absolute_path)
+    except OSError:
+        mtime = 0
+    key = hashlib.sha1(f'{absolute_path}:{mtime}:{codec}:{_HLS_SEGUNDOS}'.encode('utf-8')).hexdigest()
+    return os.path.join(_HLS_DIR, key)
+
+
+def _hls_limpiar():
+    """Borra conversiones viejas (> _HLS_MAX_HORAS sin uso), nunca una en curso."""
+    try:
+        ahora = time.time()
+        for nombre in os.listdir(_HLS_DIR):
+            d = os.path.join(_HLS_DIR, nombre)
+            job = _hls_jobs.get(d)
+            if job is not None and job.poll() is None:
+                continue
+            if ahora - os.path.getmtime(d) > _HLS_MAX_HORAS * 3600:
+                shutil.rmtree(d, ignore_errors=True)
+                _hls_jobs.pop(d, None)
+    except OSError:
+        pass
+
+
+def _hls_asegurar(absolute_path, codec):
+    """Devuelve el directorio de la conversion, arrancandola si hace falta.
+    Si ya termino (playlist con ENDLIST) no hace nada; si hay un ffmpeg en
+    curso, lo deja seguir; si quedo a medias (p. ej. reinicio del server),
+    empieza de nuevo."""
+    d = _hls_dir(absolute_path, codec)
+    playlist = os.path.join(d, 'index.m3u8')
+    with _hls_lock:
+        job = _hls_jobs.get(d)
+        if job is not None and job.poll() is None:
+            return d
+        if os.path.isfile(playlist):
+            with open(playlist, encoding='utf-8', errors='ignore') as f:
+                if '#EXT-X-ENDLIST' in f.read():
+                    os.utime(d, None)  # marca de uso para la limpieza
+                    return d
+        os.makedirs(_HLS_DIR, exist_ok=True)
+        _hls_limpiar()
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
+        encoder, sample_fmt = _HLS_CODECS[codec]
+        cmd = ['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
+               '-i', absolute_path, '-vn', '-map', '0:a:0']
+        if _hls_tiene_soxr():
+            cmd += ['-af', 'aresample=resampler=soxr:precision=28']
+        cmd += ['-ar', '176400', '-sample_fmt', sample_fmt, '-bits_per_raw_sample', '24',
+                '-c:a', encoder,
+                '-f', 'hls', '-hls_time', str(_HLS_SEGUNDOS), '-hls_list_size', '0',
+                '-hls_playlist_type', 'event', '-hls_segment_type', 'fmp4',
+                '-hls_fmp4_init_filename', 'init.mp4',
+                '-hls_segment_filename', os.path.join(d, 'seg%05d.m4s'),
+                '-hls_flags', 'temp_file', playlist]
+        log = open(os.path.join(d, 'ffmpeg.log'), 'wb')
+        _hls_jobs[d] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log)
+        app.logger.info(f"[hls] conversion iniciada: {os.path.basename(absolute_path)} ({codec})")
+        return d
+
+
+@app.route('/api/v1/hls/<int:track_id>/index.m3u8')
+def api_v1_hls_playlist(track_id):
+    user_id, token, err = _hls_auth()
+    if err:
+        return err
+    codec = request.args.get('c', 'flac')
+    if codec not in _HLS_CODECS:
+        return jsonify({'error': 'codec_no_soportado'}), 400
+    absolute_path = _hls_ruta_pista(track_id)
+    if not absolute_path:
+        return jsonify({'error': 'file_not_found'}), 404
+
+    d = _hls_asegurar(absolute_path, codec)
+    playlist = os.path.join(d, 'index.m3u8')
+    # Esperar al primer segmento (normalmente 1-3 s): el reproductor necesita
+    # al menos uno para arrancar.
+    fin = time.monotonic() + 60
+    texto = ''
+    while time.monotonic() < fin:
+        if os.path.isfile(playlist):
+            with open(playlist, encoding='utf-8', errors='ignore') as f:
+                texto = f.read()
+            if '#EXTINF' in texto:
+                break
+        job = _hls_jobs.get(d)
+        if job is not None and job.poll() is not None and '#EXTINF' not in texto:
+            try:
+                with open(os.path.join(d, 'ffmpeg.log'), encoding='utf-8', errors='ignore') as f:
+                    detalle = f.read()[-400:]
+            except OSError:
+                detalle = ''
+            app.logger.error(f"[hls] track={track_id}: ffmpeg fallo: {detalle}")
+            return jsonify({'error': 'transcode_failed'}), 500
+        time.sleep(0.25)
+    if '#EXTINF' not in texto:
+        return jsonify({'error': 'transcode_timeout'}), 504
+
+    # Las rutas de init/segmentos son relativas a la playlist; se les agrega
+    # el token y el codec (el reproductor no manda headers propios).
+    sufijo = f'?token={quote(token, safe="")}&c={codec}'
+    lineas = []
+    for linea in texto.splitlines():
+        if linea.startswith('#EXT-X-PLAYLIST-TYPE'):
+            # Mientras la conversion sigue (sin ENDLIST) AVPlayer/ExoPlayer la
+            # tratan como "en vivo" y arrancarian cerca del final: esto les
+            # indica empezar desde el segundo 0.
+            lineas.append(linea)
+            lineas.append('#EXT-X-START:TIME-OFFSET=0,PRECISE=YES')
+            continue
+        if linea.startswith('#EXT-X-MAP:'):
+            linea = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{m.group(1)}{sufijo}"', linea)
+        elif linea and not linea.startswith('#'):
+            linea = linea + sufijo
+        lineas.append(linea)
+    resp = Response('\n'.join(lineas) + '\n', mimetype='application/vnd.apple.mpegurl')
+    resp.headers['Cache-Control'] = 'no-cache'
+    return resp
+
+
+@app.route('/api/v1/hls/<int:track_id>/<nombre>')
+def api_v1_hls_segmento(track_id, nombre):
+    if not re.fullmatch(r'init\.mp4|seg\d{5}\.m4s', nombre):
+        return jsonify({'error': 'not_found'}), 404
+    user_id, token, err = _hls_auth()
+    if err:
+        return err
+    codec = request.args.get('c', 'flac')
+    if codec not in _HLS_CODECS:
+        return jsonify({'error': 'codec_no_soportado'}), 400
+    absolute_path = _hls_ruta_pista(track_id)
+    if not absolute_path:
+        return jsonify({'error': 'file_not_found'}), 404
+    d = _hls_dir(absolute_path, codec)
+    ruta = os.path.join(d, nombre)
+    # Un segmento listado ya existe; esto solo cubre carreras raras.
+    fin = time.monotonic() + 20
+    while not os.path.isfile(ruta) and time.monotonic() < fin:
+        job = _hls_jobs.get(d)
+        if job is None or job.poll() is not None:
+            break
+        time.sleep(0.25)
+    if not os.path.isfile(ruta):
+        return jsonify({'error': 'segment_not_found'}), 404
+    return send_file(ruta, mimetype='audio/mp4', max_age=3600)
+
 
 @app.route('/api/v1/alexa/stream/<int:track_id>')
 def api_v1_alexa_stream(track_id):
