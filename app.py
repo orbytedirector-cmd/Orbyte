@@ -7652,7 +7652,13 @@ def cast_token_for_track(track_id):
     return _cast_signer.dumps({'track_id': track_id})
 
 @app.route('/cast-audio/<int:track_id>')
-def cast_audio(track_id):
+# Ticket D-04: version PCM de un DSD por PATH (/pcm/hi, /pcm/cd) en vez de
+# ?pcm=1. El TX-8050 rechazo con HTTP 500 el FLAC 88.2k/24 servido con
+# ?token=...&pcm=1, aunque el FLAC normal (URL sin '&') le funciona: o es el
+# '&' en la URL o la resolucion. Path sin '&' + cascada de perfiles cubre
+# ambas causas. Mismo endpoint 'cast_audio' -> sigue exento de _require_login.
+@app.route('/cast-audio/<int:track_id>/pcm/<perfil>')
+def cast_audio(track_id, perfil=None):
     token = request.args.get('token', '')
     try:
         data = _cast_signer.loads(token, max_age=_CAST_TOKEN_MAX_AGE)
@@ -7675,10 +7681,12 @@ def cast_audio(track_id):
     if not os.path.isfile(path):
         app.logger.warning(f"cast_audio: archivo no encontrado en disco: {path}")
         return "Archivo no encontrado en disco", 404
-    # Ticket D-03: ?pcm=1 -> version FLAC 88.2k/24 de un DSD (ver _dsd_transcode_para_cast).
+    # Ticket D-03/D-04: /pcm/<perfil> -> version FLAC de un DSD (ver _dsd_transcode_para_cast).
     # El token sigue atado al track_id, no hace falta otro.
-    if request.args.get('pcm') == '1' and os.path.splitext(path)[1].lower() in ('.dsf', '.dff'):
-        pcm_path = _dsd_transcode_para_cast(path)
+    if perfil and os.path.splitext(path)[1].lower() in ('.dsf', '.dff'):
+        if perfil not in _CAST_PCM_PERFILES:
+            return "Perfil PCM desconocido", 404
+        pcm_path = _dsd_transcode_para_cast(path, perfil)
         if not pcm_path:
             return "No se pudo convertir el DSD a PCM", 500
         return _serve_audio(pcm_path)
@@ -8288,8 +8296,17 @@ def api_v1_cast_target_delete(target_id):
 # acepta FLAC por encima de 96kHz/24-bit. 88.2k es divisor exacto de
 # DSD64 (2.8224 MHz / 32). Archivo de cache distinto (sufijo .cast.flac)
 # para no pisar el de la PWA/iOS, que tiene otros parametros.
-_CAST_PCM_RATE = '88200'
+# Ticket D-04: perfiles en cascada, del mejor al mas compatible. 'cd' es el
+# mismo formato que el TX-8050 ya reproduce sin problema (FLAC 16/44.1).
+_CAST_PCM_PERFILES = {
+    'hi': {'rate': '88200', 'fmt': ['-sample_fmt', 's32', '-bits_per_raw_sample', '24']},
+    'cd': {'rate': '44100', 'fmt': ['-sample_fmt', 's16']},
+}
+_CAST_PCM_ORDEN = ['hi', 'cd']
 _CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
+# Ultimo perfil que SI sono por renderer (RAM, igual que _cast_targets_sin_dsd):
+# se prueba primero y no se repite el que ya fallo.
+_cast_pcm_perfil_ok = {}
 
 # Renderers que ya rechazaron DSD nativo en esta vida del proceso: se les
 # manda PCM directo y no se pierden ~6s probando los cuatro mime DSD cada
@@ -8298,16 +8315,16 @@ _CAST_PCM_MIME_CANDIDATES = ['audio/flac', 'audio/x-flac']
 _cast_targets_sin_dsd = set()
 
 
-def _dsd_cast_cache_path(absolute_path):
-    """Igual que _dsd_cache_path pero con sufijo propio para la version de cast."""
-    return _dsd_cache_path(absolute_path)[:-len('.flac')] + '.cast.flac'
+def _dsd_cast_cache_path(absolute_path, perfil='hi'):
+    """Igual que _dsd_cache_path pero con sufijo propio por perfil de cast."""
+    return _dsd_cache_path(absolute_path)[:-len('.flac')] + f'.cast-{perfil}.flac'
 
 
-def _dsd_transcode_para_cast(absolute_path):
-    """Devuelve la ruta del FLAC 88.2kHz/24-bit en cache (lo crea si no
-    existe), o None si ffmpeg fallo."""
+def _dsd_transcode_para_cast(absolute_path, perfil='hi'):
+    """Devuelve la ruta del FLAC del perfil pedido (_CAST_PCM_PERFILES) en
+    cache (lo crea si no existe), o None si ffmpeg fallo."""
     _dsd_cache_cleanup()
-    cache_path = _dsd_cast_cache_path(absolute_path)
+    cache_path = _dsd_cast_cache_path(absolute_path, perfil)
     if os.path.isfile(cache_path):
         return cache_path
     tmp_path = f'{cache_path}.{os.getpid()}.tmp'
@@ -8315,8 +8332,8 @@ def _dsd_transcode_para_cast(absolute_path):
         'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
         '-i', absolute_path,
         '-vn',
-        '-ar', _CAST_PCM_RATE,
-        '-sample_fmt', 's32', '-bits_per_raw_sample', '24',
+        '-ar', _CAST_PCM_PERFILES[perfil]['rate'],
+        *_CAST_PCM_PERFILES[perfil]['fmt'],
         '-c:a', 'flac',
         '-compression_level', '0',
         '-f', 'flac',
@@ -8392,31 +8409,43 @@ def api_v1_cast_play():
             ok, mime_used, reason = _cast_try_send_track(
                 target['control_url'], track, media_url, cover_url, file_path, file_size, mime_candidates)
 
-        # Ticket D-03: DSD rechazado -> segundo intento con FLAC 88.2k/24 (misma URL + &pcm=1)
+        # Ticket D-03/D-04: DSD rechazado -> FLAC en cascada de perfiles (hi 88.2k/24,
+        # luego cd 44.1k/16), URL por path sin '&'. Primero el ultimo perfil que
+        # ya funciono en este renderer.
+        perfil_usado = None
         if not ok and es_dsd:
-            pcm_path = _dsd_transcode_para_cast(file_path)
-            if pcm_path:
+            previo = _cast_pcm_perfil_ok.get(target['id'])
+            orden = ([previo] if previo else []) + [x for x in _CAST_PCM_ORDEN if x != previo]
+            for perfil in orden:
+                pcm_path = _dsd_transcode_para_cast(file_path, perfil)
+                if not pcm_path:
+                    reason = 'No se pudo convertir el DSD a PCM'
+                    break
                 ok, mime_used, reason = _cast_try_send_track(
-                    target['control_url'], track, media_url + '&pcm=1', cover_url,
+                    target['control_url'], track,
+                    f"{base}/cast-audio/{track['id']}/pcm/{perfil}?token={token}", cover_url,
                     pcm_path, os.path.getsize(pcm_path), _CAST_PCM_MIME_CANDIDATES)
-                transcodificado = ok
-                # Solo se recuerda "sin DSD" si el PCM SI sonó: eso prueba que el
-                # renderer estaba alcanzable y rechazó el formato. Un corte de red
-                # o un renderer apagado NO lo marca (si no, un Yamaha con DSD
-                # nativo quedaria degradado a PCM hasta el proximo reinicio).
-                if ok and target['id'] not in _cast_targets_sin_dsd:
+                app.logger.info(f"[cast v1] PCM perfil={perfil} -> {target['name']}: {'OK' if ok else reason}")
+                if ok:
+                    perfil_usado = perfil
+                    break
+            transcodificado = ok
+            # Solo se recuerda si el PCM SI sonó: prueba que el renderer estaba
+            # alcanzable y rechazó el formato (un corte de red no lo marca).
+            if ok:
+                _cast_pcm_perfil_ok[target['id']] = perfil_usado
+                if target['id'] not in _cast_targets_sin_dsd:
                     _cast_targets_sin_dsd.add(target['id'])
-                    app.logger.info(f"[cast v1] {target['name']} no acepta DSD nativo — se recuerda, se usa PCM")
-            else:
-                reason = 'No se pudo convertir el DSD a PCM'
+                    app.logger.info(f"[cast v1] {target['name']} no acepta DSD nativo — se recuerda, se usa PCM ({perfil_usado})")
 
         if ok:
-            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, pcm={transcodificado}, user={g.api_user['id']})")
+            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, pcm={perfil_usado or False}, user={g.api_user['id']})")
             conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
             conn.commit()
             global _cast_active_target
             _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
-            return jsonify({'status': 'ok', 'device': target['name'], 'transcoded': transcodificado})
+            return jsonify({'status': 'ok', 'device': target['name'], 'transcoded': transcodificado,
+                            'pcm_profile': perfil_usado})
 
         # Ticket D-03: sin esto el renderer repetia la pista ANTERIOR y el
         # cliente creia que sonaba la nueva.
