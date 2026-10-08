@@ -7923,6 +7923,8 @@ def _cast_send_track(control_url, media_url, didl):
 # Ticket D-07: OP=01 -> seek por rango de bytes; FLAGS = streaming + background
 # transfer + DLNA v1.5 (los mismos que anuncian Gerbera/MiniDLNA).
 _CAST_DLNA_FLAGS = 'DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01500000000000000000000000000000'
+# Ticket D-08: cuanto se espera a que el renderer pase a PLAYING tras cargar una pista.
+_CAST_ARRANQUE_S = 4.0
 
 
 def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, file_size, mime_candidates):
@@ -7941,6 +7943,15 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
     # solo habilitan Seek si el recurso lo declara. Si un renderer rechaza
     # los flags, se reintenta con '*' (comportamiento de siempre).
     intentos = [(m, f) for m in mime_candidates for f in (_CAST_DLNA_FLAGS, '*')]
+    # Ticket D-08: si el renderer esta sonando, Stop ANTES de cargar la pista
+    # nueva. Visto en el TX-8050: SetAVTransportURI+Play sobre una pista en
+    # curso lo deja en STOPPED durante la transicion, y el chequeo lo daba
+    # por rechazado (pasaba al cambiar de pista a mano, no al terminar sola).
+    if _cast_get_transport_state(control_url) in ('PLAYING', 'PAUSED_PLAYBACK', 'TRANSITIONING'):
+        _cast_soap_call(control_url, 'Stop',
+            '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+            '<InstanceID>0</InstanceID></u:Stop>', timeout=4)
+        time.sleep(0.5)
     for mime, flags in intentos:
         protocol_info = f'http-get:*:{mime}:{flags}'
         didl = _cast_build_didl(track['id'], track['title'], track['artist'], protocol_info,
@@ -7951,8 +7962,15 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
         if status != 200:
             last_reason = f'El dispositivo devolvió HTTP {status} para {mime}'
             continue
-        time.sleep(1.2)  # darle tiempo al renderer a intentar arrancar antes de preguntar
+        # Ticket D-08: en vez de UNA consulta a los 1.2 s, se consulta cada
+        # 0.5 s hasta _CAST_ARRANQUE_S: un FLAC hi-res o un renderer lento
+        # puede pasar por STOPPED/TRANSITIONING antes de sonar.
+        deadline = time.monotonic() + _CAST_ARRANQUE_S
+        time.sleep(0.8)
         state = _cast_get_transport_state(control_url)
+        while state != 'PLAYING' and time.monotonic() < deadline:
+            time.sleep(0.5)
+            state = _cast_get_transport_state(control_url)
         app.logger.info(f"[cast] estado tras mime={mime}: {state}")
         if state in ('STOPPED', 'NO_MEDIA_PRESENT', None):
             last_reason = f'El dispositivo no aceptó el formato {mime} (estado: {state or "no se pudo consultar"})'
