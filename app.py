@@ -8420,6 +8420,109 @@ def api_v1_cast_volume():
     return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
 
 
+# ── Ticket D-01 (pedido por Niko): estado del renderer para el mini control
+# del dashboard de Home Assistant (iPad) ──────────────────────────────────
+# Hasta ahora /api/v1/cast/* solo podia MANDAR ordenes (play/transport/seek/
+# volume) pero nunca PREGUNTAR que esta pasando en el dispositivo: el avance
+# de cola y la barra de progreso dependian 100% del reloj local del cliente
+# que inicio la transmision. Un segundo cliente (el iPad del dashboard) no
+# tenia forma de saber si el Onkyo esta sonando, en que segundo va, ni que
+# pista es. Este endpoint solo LEE el renderer (GetTransportInfo +
+# GetPositionInfo) - no cambia nada del flujo de cast existente.
+
+def _cast_hms_a_segundos(valor):
+    """'H:MM:SS' o 'H:MM:SS.mmm' (formato UPnP) -> int segundos. Devuelve
+    None para valores vacios o 'NOT_IMPLEMENTED' que algunos renderers
+    mandan cuando no saben la duracion."""
+    if not valor:
+        return None
+    m = re.match(r'^(\d+):(\d{1,2}):(\d{1,2})', valor.strip())
+    if not m:
+        return None
+    h, mi, se = (int(x) for x in m.groups())
+    return h * 3600 + mi * 60 + se
+
+
+def _cast_get_position_info(control_url, timeout=4):
+    """GetPositionInfo - posicion real, duracion y URI de lo que esta
+    sonando en el renderer. Devuelve dict {position_s, duration_s,
+    track_uri} o None si el dispositivo no respondio."""
+    status, body = _cast_soap_call(
+        control_url, 'GetPositionInfo',
+        '<u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+        '<InstanceID>0</InstanceID></u:GetPositionInfo>', timeout=timeout)
+    if status != 200:
+        return None
+
+    def _tag(nombre):
+        m = re.search(rf'<{nombre}>([^<]*)</{nombre}>', body)
+        return m.group(1) if m else None
+
+    # La URI viene XML-escapada dentro del SOAP (&amp; en el querystring)
+    uri = (_tag('TrackURI') or '').replace('&amp;', '&')
+    return {
+        'position_s': _cast_hms_a_segundos(_tag('RelTime')),
+        'duration_s': _cast_hms_a_segundos(_tag('TrackDuration')),
+        'track_uri':  uri,
+    }
+
+
+@app.route('/api/v1/cast/status')
+@api_login_required
+def api_v1_cast_status():
+    """Estado actual del renderer. target_id opcional: si no viene, usa el
+    dispositivo activo en memoria (_cast_active_target); si tampoco hay,
+    responde state=null sin error (nada transmitiendo).
+
+    track viene solo si la URI que esta sonando es una /cast-audio/<id> de
+    ESTE server - si el renderer reproduce otra cosa (radio, otra app),
+    track=null y el cliente no debe asumir que es suya."""
+    target_id = request.args.get('target_id', type=int)
+    if target_id is None:
+        if not _cast_active_target:
+            return jsonify({'status': 'ok', 'target': None, 'state': None,
+                            'position_s': None, 'duration_s': None, 'track': None})
+        target_id = _cast_active_target['id']
+
+    conn = get_db_connection()
+    try:
+        target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+        if not target:
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+
+        state = _cast_get_transport_state(target['control_url'])
+        if state is None:
+            return jsonify({'status': 'error', 'message': 'El dispositivo no respondió'}), 502
+        pos = _cast_get_position_info(target['control_url']) or {}
+
+        track = None
+        m = re.search(r'/cast-audio/(\d+)', pos.get('track_uri') or '')
+        if m:
+            row = conn.execute(
+                'SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate, '
+                '       t.bit_depth, t.is_mqa, t.codec, t.duration, t.sample_rate_real, '
+                '       a.id AS album_id, a.name AS album_name, a.cover_path '
+                'FROM tracks t LEFT JOIN albums a ON t.album_id = a.id '
+                'WHERE t.id=?', (int(m.group(1)),)).fetchone()
+            if row:
+                track = dict(row)
+                fmt, led = _fmt_format(track)
+                track['format_display'] = fmt
+                track['format_color']   = led
+                track['cover_url']      = cover_url_filter(track.pop('cover_path'))
+
+        return jsonify({
+            'status':     'ok',
+            'target':     {'id': target['id'], 'name': target['name']},
+            'state':      state,
+            'position_s': pos.get('position_s'),
+            'duration_s': pos.get('duration_s') or (track or {}).get('duration'),
+            'track':      track,
+        })
+    finally:
+        conn.close()
+
+
 def parse_range_header(rh, file_size):
     if not rh.startswith('bytes='): return (0, None)
     parts = rh[6:].split('-')
