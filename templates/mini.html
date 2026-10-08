@@ -36,12 +36,14 @@
   /* ---------- Ahora suena ---------- */
   .now { background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 18px;
     display: flex; flex-direction: column; gap: 14px; min-height: 0; }
-  /* Ticket D-10: 3 columnas -> el reloj queda centrado de verdad entre marca y equipo */
-  .topbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; }
-  .topbar .device { justify-self: end; }
-  .reloj { text-align: center; font-family: Orbitron, sans-serif; color: var(--gold2); line-height: 1.15;
-    font-variant-numeric: tabular-nums; }
-  .reloj-hora { font-size: 20px; font-weight: 700; letter-spacing: .08em; }
+  /* Ticket D-10/D-11: el reloj ocupa TODO el espacio libre entre la marca y el
+     selector de equipo y se centra ahi (con grid 1fr/auto/1fr quedaba corrido
+     hacia el selector cuando este era mas ancho que su columna). */
+  .topbar { display: flex; align-items: center; gap: 12px; }
+  .topbar .brand, .topbar .device { flex-shrink: 0; }
+  .reloj { flex: 1 1 auto; min-width: 0; text-align: center; font-family: Orbitron, sans-serif; color: var(--gold2);
+    line-height: 1.2; font-variant-numeric: tabular-nums; }
+  .reloj-hora { font-size: 15px; font-weight: 600; letter-spacing: .06em; }
   .reloj-fecha { font-size: 10px; font-weight: 600; letter-spacing: .14em; color: var(--gold); }
   .brand { font-family: Orbitron, sans-serif; font-weight: 700; letter-spacing: .12em; color: var(--gold); font-size: 13px; }
   .device { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border2);
