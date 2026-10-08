@@ -41,10 +41,17 @@
      hacia el selector cuando este era mas ancho que su columna). */
   .topbar { display: flex; align-items: center; gap: 12px; }
   .topbar .brand, .topbar .device { flex-shrink: 0; }
-  .reloj { flex: 1 1 auto; min-width: 0; text-align: center; font-family: Orbitron, sans-serif; color: var(--gold2);
-    line-height: 1.2; font-variant-numeric: tabular-nums; }
-  .reloj-hora { font-size: 15px; font-weight: 600; letter-spacing: .06em; }
-  .reloj-fecha { font-size: 10px; font-weight: 600; letter-spacing: .14em; color: var(--gold); }
+  /* Ticket D-12: cada cifra en su propia "placa" de ancho fijo. Orbitron no
+     tiene cifras de ancho fijo (tabular-nums no le aplica), asi que al pasar
+     de 1 a 8 el reloj cambiaba de ancho y parecia latir. Tono dorado apagado,
+     sin negrita fuerte: que acompañe, no que llame la atencion. */
+  .reloj { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 4px;
+    font-family: Orbitron, sans-serif; color: var(--gold); }
+  .reloj-hora { display: flex; align-items: center; gap: 2px; font-size: 13px; font-weight: 600; }
+  .dig { display: inline-block; width: 1.3em; text-align: center; line-height: 1.65;
+    background: #110e07; border: 1px solid #221b0b; border-radius: 3px; }
+  .sep { display: inline-block; width: .55em; text-align: center; opacity: .4; }
+  .reloj-fecha { font-size: 10px; font-weight: 600; letter-spacing: .14em; opacity: .8; }
   .brand { font-family: Orbitron, sans-serif; font-weight: 700; letter-spacing: .12em; color: var(--gold); font-size: 13px; }
   .device { display: flex; align-items: center; gap: 8px; background: var(--card2); border: 1px solid var(--border2);
     border-radius: 999px; padding: 6px 12px; font-size: 13px; color: var(--text2); }
@@ -522,11 +529,27 @@ function verTab(v) {
   barra.addEventListener("pointerup", (ev) => { if (rx.dur && rx.track) buscarPos(aSegundos(ev)); });
 })();
 
-// Ticket D-10: reloj 24 h (HH:MM:SS) + fecha DD-MM-YYYY, hora local del iPad
+// Ticket D-10/D-12: reloj 24 h (HH:MM:SS) + fecha DD-MM-YYYY, hora local del iPad.
+// Las placas se arman una sola vez; cada segundo solo cambia el texto de las
+// cifras que de verdad cambiaron (nada se redibuja ni cambia de tamaño).
+const placas = [];
+(function armarReloj() {
+  const h = $("reloj-hora");
+  h.textContent = "";
+  "00:00:00".split("").forEach((c) => {
+    const el = document.createElement("span");
+    el.className = c === ":" ? "sep" : "dig";
+    el.textContent = c;
+    h.appendChild(el);
+    if (c !== ":") placas.push(el);
+  });
+})();
 function reloj() {
   const d = new Date(), z = (n) => String(n).padStart(2, "0");
-  $("reloj-hora").textContent = `${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
-  $("reloj-fecha").textContent = `${z(d.getDate())}-${z(d.getMonth() + 1)}-${d.getFullYear()}`;
+  const cifras = z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
+  for (let i = 0; i < 6; i++) if (placas[i].textContent !== cifras[i]) placas[i].textContent = cifras[i];
+  const f = `${z(d.getDate())}-${z(d.getMonth() + 1)}-${d.getFullYear()}`;
+  if ($("reloj-fecha").textContent !== f) $("reloj-fecha").textContent = f;
 }
 reloj(); setInterval(reloj, 1000);
 
