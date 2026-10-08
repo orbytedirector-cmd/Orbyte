@@ -3293,6 +3293,11 @@ _HLS_CODECS = {'alac': ('alac', 's32p'), 'flac': ('flac', 's32')}
 _HLS_SEGUNDOS = 4
 _HLS_MAX_HORAS = 12
 _hls_jobs = {}          # dir -> subprocess.Popen en curso
+_hls_duraciones = {}    # (ruta, mtime) -> segundos (ffprobe)
+# Ticket D-17: frames de 4096 muestras fijos -> los cortes de ffmpeg son
+# predecibles (ver _hls_playlist_prevista).
+_HLS_FS = 176400
+_HLS_FRAME = 4096
 _hls_lock = threading.Lock()
 _hls_soxr = None
 
@@ -3404,8 +3409,8 @@ def _hls_asegurar(absolute_path, codec):
                '-i', absolute_path, '-vn', '-map', '0:a:0']
         if _hls_tiene_soxr():
             cmd += ['-af', 'aresample=resampler=soxr:precision=28']
-        cmd += ['-ar', '176400', '-sample_fmt', sample_fmt, '-bits_per_raw_sample', '24',
-                '-c:a', encoder,
+        cmd += ['-ar', str(_HLS_FS), '-sample_fmt', sample_fmt, '-bits_per_raw_sample', '24',
+                '-c:a', encoder, '-frame_size', str(_HLS_FRAME),
                 '-f', 'hls', '-hls_time', str(_HLS_SEGUNDOS), '-hls_list_size', '0',
                 '-hls_playlist_type', 'event', '-hls_segment_type', 'fmp4',
                 '-hls_fmp4_init_filename', 'init.mp4',
@@ -3415,6 +3420,40 @@ def _hls_asegurar(absolute_path, codec):
         _hls_jobs[d] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log)
         app.logger.info(f"[hls] conversion iniciada: {os.path.basename(absolute_path)} ({codec})")
         return d
+
+
+def _hls_duracion(absolute_path):
+    """Duracion de la pista segun ffprobe (lee solo la cabecera), en cache."""
+    try:
+        clave = (absolute_path, os.path.getmtime(absolute_path))
+    except OSError:
+        return None
+    if clave not in _hls_duraciones:
+        try:
+            r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                                '-of', 'csv=p=0', absolute_path], capture_output=True, timeout=20)
+            _hls_duraciones[clave] = float(r.stdout.decode().strip())
+        except Exception:
+            return None
+    return _hls_duraciones[clave]
+
+
+def _hls_playlist_prevista(duracion):
+    """Ticket D-17: playlist VOD COMPLETA calculada de antemano. Con frames
+    fijos de _HLS_FRAME muestras, ffmpeg corta el segmento k en el primer
+    frame >= k*_HLS_SEGUNDOS: todas las duraciones salen exactas salvo la
+    ultima (< 0.02 s de diferencia, verificado con DSD64/128, ALAC y FLAC).
+    Un ultimo segmento de menos de 2 frames se descarta (podria no existir).
+    Devuelve [(nombre, segundos), ...]."""
+    total = math.ceil(duracion * _HLS_FS / _HLS_FRAME)
+    segs, a, k = [], 0, 1
+    while a < total:
+        b = min(math.ceil(_HLS_SEGUNDOS * k * _HLS_FS / _HLS_FRAME), total)
+        segs.append([f'seg{k - 1:05d}.m4s', (b - a) * _HLS_FRAME / _HLS_FS])
+        a, k = b, k + 1
+    if len(segs) > 1 and segs[-1][1] < 2 * _HLS_FRAME / _HLS_FS:
+        segs.pop()
+    return segs
 
 
 @app.route('/api/v1/hls/<int:track_id>/index.m3u8')
@@ -3431,46 +3470,59 @@ def api_v1_hls_playlist(track_id):
 
     d = _hls_asegurar(absolute_path, codec)
     playlist = os.path.join(d, 'index.m3u8')
-    # Esperar al primer segmento (normalmente 1-3 s): el reproductor necesita
-    # al menos uno para arrancar.
-    fin = time.monotonic() + 60
-    texto = ''
-    while time.monotonic() < fin:
-        if os.path.isfile(playlist):
-            with open(playlist, encoding='utf-8', errors='ignore') as f:
-                texto = f.read()
-            if '#EXTINF' in texto:
-                break
-        job = _hls_jobs.get(d)
-        if job is not None and job.poll() is not None and '#EXTINF' not in texto:
-            try:
-                with open(os.path.join(d, 'ffmpeg.log'), encoding='utf-8', errors='ignore') as f:
-                    detalle = f.read()[-400:]
-            except OSError:
-                detalle = ''
-            app.logger.error(f"[hls] track={track_id}: ffmpeg fallo: {detalle}")
-            return jsonify({'error': 'transcode_failed'}), 500
-        time.sleep(0.25)
-    if '#EXTINF' not in texto:
-        return jsonify({'error': 'transcode_timeout'}), 504
-
-    # Las rutas de init/segmentos son relativas a la playlist; se les agrega
-    # el token y el codec (el reproductor no manda headers propios).
     sufijo = f'?token={quote(token, safe="")}&c={codec}'
-    lineas = []
-    for linea in texto.splitlines():
-        if linea.startswith('#EXT-X-PLAYLIST-TYPE'):
-            # Mientras la conversion sigue (sin ENDLIST) AVPlayer/ExoPlayer la
-            # tratan como "en vivo" y arrancarian cerca del final: esto les
-            # indica empezar desde el segundo 0.
+
+    def _fallo_ffmpeg():
+        job = _hls_jobs.get(d)
+        return job is not None and job.poll() is not None and not os.path.isfile(os.path.join(d, 'init.mp4'))
+
+    texto = ''
+    if os.path.isfile(playlist):
+        with open(playlist, encoding='utf-8', errors='ignore') as f:
+            texto = f.read()
+    duracion = None if '#EXT-X-ENDLIST' in texto else _hls_duracion(absolute_path)
+
+    if duracion:
+        # Ticket D-17: conversion en curso -> playlist VOD COMPLETA prevista
+        # (duracion real, seek a cualquier punto). Antes se entregaba la
+        # playlist parcial "en vivo" de ffmpeg: el reproductor veia solo lo
+        # ya convertido (Niko: "duracion 12 s") y se trababa esperando mas.
+        # Los segmentos que aun no existen los espera api_v1_hls_segmento.
+        fin = time.monotonic() + 30
+        while not os.path.isfile(os.path.join(d, 'init.mp4')) and time.monotonic() < fin:
+            if _fallo_ffmpeg():
+                app.logger.error(f"[hls] track={track_id}: ffmpeg fallo al arrancar")
+                return jsonify({'error': 'transcode_failed'}), 500
+            time.sleep(0.2)
+        segs = _hls_playlist_prevista(duracion)
+        lineas = ['#EXTM3U', '#EXT-X-VERSION:7',
+                  f'#EXT-X-TARGETDURATION:{max(round(x) for _, x in segs)}',
+                  '#EXT-X-MEDIA-SEQUENCE:0', '#EXT-X-PLAYLIST-TYPE:VOD',
+                  '#EXT-X-INDEPENDENT-SEGMENTS',
+                  f'#EXT-X-MAP:URI="init.mp4{sufijo}"']
+        for nombre, segundos in segs:
+            lineas += [f'#EXTINF:{segundos:.6f},', nombre + sufijo]
+        lineas.append('#EXT-X-ENDLIST')
+    else:
+        # Conversion ya terminada (o sin duracion conocida): la playlist real
+        # de ffmpeg. Sin ENDLIST todavia, esperar al menos un segmento.
+        fin = time.monotonic() + 60
+        while '#EXTINF' not in texto and time.monotonic() < fin:
+            if _fallo_ffmpeg():
+                return jsonify({'error': 'transcode_failed'}), 500
+            time.sleep(0.25)
+            if os.path.isfile(playlist):
+                with open(playlist, encoding='utf-8', errors='ignore') as f:
+                    texto = f.read()
+        if '#EXTINF' not in texto:
+            return jsonify({'error': 'transcode_timeout'}), 504
+        lineas = []
+        for linea in texto.splitlines():
+            if linea.startswith('#EXT-X-MAP:'):
+                linea = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{m.group(1)}{sufijo}"', linea)
+            elif linea and not linea.startswith('#'):
+                linea = linea + sufijo
             lineas.append(linea)
-            lineas.append('#EXT-X-START:TIME-OFFSET=0,PRECISE=YES')
-            continue
-        if linea.startswith('#EXT-X-MAP:'):
-            linea = re.sub(r'URI="([^"]+)"', lambda m: f'URI="{m.group(1)}{sufijo}"', linea)
-        elif linea and not linea.startswith('#'):
-            linea = linea + sufijo
-        lineas.append(linea)
     resp = Response('\n'.join(lineas) + '\n', mimetype='application/vnd.apple.mpegurl')
     resp.headers['Cache-Control'] = 'no-cache'
     return resp
@@ -3491,8 +3543,9 @@ def api_v1_hls_segmento(track_id, nombre):
         return jsonify({'error': 'file_not_found'}), 404
     d = _hls_dir(absolute_path, codec)
     ruta = os.path.join(d, nombre)
-    # Un segmento listado ya existe; esto solo cubre carreras raras.
-    fin = time.monotonic() + 20
+    # Ticket D-17: con la playlist prevista, un segmento puede no existir
+    # todavia (conversion en curso, o seek muy adelante): se espera.
+    fin = time.monotonic() + 90
     while not os.path.isfile(ruta) and time.monotonic() < fin:
         job = _hls_jobs.get(d)
         if job is None or job.poll() is not None:
