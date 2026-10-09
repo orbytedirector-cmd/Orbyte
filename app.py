@@ -8813,7 +8813,17 @@ def api_v1_cast_play():
     track_id = data.get('track_id')
     if not target_id or not track_id:
         return jsonify({'status': 'error', 'message': 'Falta target_id o track_id'}), 400
+    # Ticket D-18: otro cliente (Desktop, iPhone) toma el equipo -> la cola
+    # del servidor deja de avanzar para no pisarle lo que mando.
+    _cast_cola_soltar(int(target_id), 'cast/play directo')
+    payload, codigo = _cast_reproducir(int(target_id), int(track_id),
+                                       request.host_url.rstrip('/'), g.api_user['id'])
+    return jsonify(payload), codigo
 
+
+def _cast_reproducir(target_id, track_id, base, user_id):
+    """Ticket D-18: cuerpo de /api/v1/cast/play sin depender de la request,
+    para que la cola del servidor pueda avanzar sola. Devuelve (dict, http)."""
     conn = get_db_connection()
     try:
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
@@ -8823,21 +8833,20 @@ def api_v1_cast_play():
             FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
             WHERE t.id=?''', (track_id,)).fetchone()
         if not target:
-            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}), 404
+            return {'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}, 404
         if not track:
-            return jsonify({'status': 'error', 'message': 'Pista no encontrada'}), 404
+            return {'status': 'error', 'message': 'Pista no encontrada'}, 404
 
         # Ticket D-09: 'code' para que el cliente distinga "el ARCHIVO no sirve"
         # (saltar a la siguiente) de "el receptor fallo" (mostrar error).
         file_path = clean_db_path(track['file_path'])
         if not os.path.isfile(file_path):
-            return jsonify({'status': 'error', 'code': 'file_missing', 'message': 'El archivo no está en disco'}), 404
+            return {'status': 'error', 'code': 'file_missing', 'message': 'El archivo no está en disco'}, 404
         if os.path.getsize(file_path) == 0:
             app.logger.warning(f"[cast v1] '{track['title']}' archivo vacío (0 bytes): {file_path}")
-            return jsonify({'status': 'error', 'code': 'empty_file', 'message': 'El archivo está vacío (0 bytes)'}), 422
+            return {'status': 'error', 'code': 'empty_file', 'message': 'El archivo está vacío (0 bytes)'}, 422
 
         token = cast_token_for_track(track['id'])
-        base = request.host_url.rstrip('/')
         media_url = f"{base}/cast-audio/{track['id']}?token={token}"
         cover_url = f"{base}/cast-cover/{track['id']}?token={token}" if track['cover_path'] else None
         file_size = os.path.getsize(file_path)
@@ -8901,19 +8910,19 @@ def api_v1_cast_play():
                     app.logger.info(f"[cast v1] {target['name']} no acepta DSD nativo — se recuerda, se usa PCM ({perfil_usado})")
 
         if ok:
-            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, pcm={perfil_usado or False}, user={g.api_user['id']})")
+            app.logger.info(f"[cast v1] '{track['title']}' -> {target['name']} OK (mime={mime_used}, pcm={perfil_usado or False}, user={user_id})")
             conn.execute('UPDATE cast_targets SET last_used_at=? WHERE id=?', (_utcnow_iso(), target_id))
             conn.commit()
             global _cast_active_target
             _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
-            return jsonify({'status': 'ok', 'device': target['name'], 'transcoded': transcodificado,
-                            'pcm_profile': perfil_usado})
+            return {'status': 'ok', 'device': target['name'], 'transcoded': transcodificado,
+                    'pcm_profile': perfil_usado}, 200
 
         # Ticket D-03: sin esto el renderer repetia la pista ANTERIOR y el
         # cliente creia que sonaba la nueva.
         _cast_stop(target['control_url'])
         app.logger.warning(f"[cast v1] '{track['title']}' -> {target['name']} FALLÓ: {reason} (se mandó Stop)")
-        return jsonify({'status': 'error', 'message': reason}), 502
+        return {'status': 'error', 'message': reason}, 502
     finally:
         conn.close()
 
@@ -9010,6 +9019,7 @@ def api_v1_cast_transport():
 
     if action == 'Stop':
         _cast_pausas.pop(target['id'], None)
+        _cast_cola_soltar(target['id'], 'Stop')   # Ticket D-18
 
     body = (f'<u:{action} xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
             f'<InstanceID>0</InstanceID>{"<Speed>1</Speed>" if action == "Play" else ""}</u:{action}>')
@@ -9221,9 +9231,332 @@ def api_v1_cast_status():
             'position_s': pos.get('position_s'),
             'duration_s': pos.get('duration_s') or (track or {}).get('duration'),
             'track':      track,
+            'queue':      _cast_cola_estado(target['id']),   # Ticket D-18
         })
     finally:
         conn.close()
+
+
+# ── Ticket D-18 (pedido por Niko): cola de reproduccion EN EL SERVIDOR ──────
+# Hasta ahora la cola del mini control (/mini) la avanzaba la pagina del iPad:
+# solo funcionaba mientras esa vista estaba visible y con la pantalla
+# encendida (D-13 corta los sondeos de vistas ocultas), asi que al cambiar de
+# vista en HA o al dormirse el iPad la musica se detenia tras la pista actual.
+# Ahora el cliente entrega la lista de ids y el servidor la recorre solo:
+# un hilo vigila el renderer cada _CAST_COLA_TICK s y, cuando la pista que
+# mando termina (STOPPED cerca del final), manda la siguiente. Con aleatorio
+# y repetir (off / all / one). Solo RAM, mismo criterio que _cast_pausas:
+# un reinicio la olvida y el cliente la vuelve a mandar al tocar play.
+# Si otro cliente usa /api/v1/cast/play en ese equipo, o se manda Stop, la
+# cola se "suelta" (deja de avanzar) para no pisar a nadie.
+_CAST_COLA_TICK = 2.0
+_CAST_COLA_FIN_S = 8        # margen para dar por terminada una pista
+_cast_colas = {}            # target_id -> dict (ver _cast_cola_nueva)
+_cast_colas_lock = threading.RLock()
+_cast_cola_hilo = None
+
+
+def _cast_cola_orden(n, shuffle, primero=None):
+    """Orden de reproduccion (indices sobre ids). Con aleatorio, 'primero'
+    va adelante y el resto mezclado."""
+    orden = list(range(n))
+    if shuffle:
+        resto = [i for i in orden if i != primero]
+        random.shuffle(resto)
+        orden = ([primero] if primero is not None else []) + resto
+    return orden
+
+
+def _cast_cola_publica(cola):
+    if not cola:
+        return None
+    return {
+        'ids': cola['ids'],
+        'index': cola['orden'][cola['pos']] if cola['ids'] else -1,
+        'shuffle': cola['shuffle'],
+        'repeat': cola['repeat'],
+        'active': cola['activa'],
+        'stop_after': cola['solo'],
+        'version': cola['version'],
+    }
+
+
+def _cast_cola_estado(target_id):
+    with _cast_colas_lock:
+        return _cast_cola_publica(_cast_colas.get(target_id))
+
+
+def _cast_cola_soltar(target_id, motivo):
+    with _cast_colas_lock:
+        cola = _cast_colas.get(target_id)
+        if cola and cola['activa']:
+            cola['activa'] = False
+            cola['version'] += 1
+            app.logger.info(f"[cast cola] equipo {target_id}: deja de avanzar ({motivo})")
+
+
+def _cast_cola_tocar(target_id, pos, solo=False):
+    """Manda la pista de la posicion 'pos' (sobre el orden). Si el archivo
+    esta roto (vacio / no existe) salta a la siguiente, con tope. Devuelve
+    (payload, http, saltadas)."""
+    saltadas = []
+    with _cast_colas_lock:
+        cola = _cast_colas.get(target_id)
+        if not cola or not cola['ids']:
+            return {'status': 'error', 'message': 'Cola vacía'}, 409, saltadas
+        cola['enviando'] = True
+        n = len(cola['ids'])
+    try:
+        for _ in range(n):
+            with _cast_colas_lock:
+                track_id = cola['ids'][cola['orden'][pos]]
+                cola['pos'] = pos
+                cola['actual'] = track_id
+                cola['solo'] = solo
+                cola['visto'] = False
+                cola['ultimo_pos'] = 0
+                cola['jugado_s'] = 0.0
+                cola['activa'] = True
+                cola['version'] += 1
+            _cast_pausas.pop(target_id, None)
+            payload, codigo = _cast_reproducir(target_id, track_id, cola['base'], cola['user_id'])
+            if codigo == 200 or payload.get('code') not in ('empty_file', 'file_missing'):
+                if codigo != 200:
+                    with _cast_colas_lock:
+                        cola['activa'] = False
+                        cola['version'] += 1
+                payload['skipped'] = saltadas
+                return payload, codigo, saltadas
+            saltadas.append({'track_id': track_id, 'reason': payload.get('message')})
+            sig = _cast_cola_siguiente_pos(cola, natural=False)
+            if sig is None:
+                break
+            pos = sig
+        with _cast_colas_lock:
+            cola['activa'] = False
+            cola['version'] += 1
+        return {'status': 'error', 'code': 'all_skipped', 'message': 'Ninguna pista se pudo reproducir',
+                'skipped': saltadas}, 422, saltadas
+    finally:
+        cola['enviando'] = False
+        cola['ultimo_tick'] = time.monotonic()
+
+
+def _cast_cola_siguiente_pos(cola, natural):
+    """Posicion siguiente segun repetir/aleatorio, o None si se termina.
+    natural=True: la pista acabo sola (ahi aplica 'repetir una')."""
+    if natural and cola['repeat'] == 'one':
+        return cola['pos']
+    if cola['pos'] + 1 < len(cola['orden']):
+        return cola['pos'] + 1
+    if cola['repeat'] in ('all', 'one'):
+        if cola['shuffle']:
+            # nueva vuelta mezclada, sin repetir de entrada la que acaba de sonar
+            ultimo = cola['orden'][cola['pos']]
+            cola['orden'] = _cast_cola_orden(len(cola['ids']), True)
+            if len(cola['orden']) > 1 and cola['orden'][0] == ultimo:
+                cola['orden'].append(cola['orden'].pop(0))
+        return 0
+    return None
+
+
+def _cast_cola_vigilar():
+    """Hilo: detecta fin de pista y avanza. Nunca muere por una excepcion."""
+    while True:
+        time.sleep(_CAST_COLA_TICK)
+        try:
+            with _cast_colas_lock:
+                activas = [(tid, c) for tid, c in _cast_colas.items() if c['activa'] and not c['enviando']]
+            for target_id, cola in activas:
+                _cast_cola_revisar(target_id, cola)
+        except Exception as e:  # noqa: BLE001
+            app.logger.error(f"[cast cola] error en el vigilante: {e}")
+
+
+def _cast_cola_revisar(target_id, cola):
+    control_url = cola['control_url']
+    estado = _cast_get_transport_state(control_url, timeout=3)
+    ahora = time.monotonic()
+    dt = ahora - cola.get('ultimo_tick', ahora)
+    cola['ultimo_tick'] = ahora
+    if estado is None:
+        return  # renderer no responde (apagado/red): no se decide nada
+    pos = _cast_get_position_info(control_url, timeout=3) or {}
+    sonando_id, _perfil = _cast_uri_a_pista(pos.get('track_uri'))
+
+    if estado in ('PLAYING', 'TRANSITIONING'):
+        if sonando_id and sonando_id != cola['actual']:
+            return _cast_cola_soltar(target_id, f'el equipo reproduce otra pista ({sonando_id})')
+        if estado == 'PLAYING':
+            cola['visto'] = True
+            cola['jugado_s'] += dt
+            if pos.get('position_s') is not None:
+                cola['ultimo_pos'] = pos['position_s']
+        return
+
+    if estado not in ('STOPPED', 'NO_MEDIA_PRESENT') or not cola['visto']:
+        return
+    if target_id in _cast_pausas:
+        return  # pausa emulada (D-05): el equipo dice STOPPED pero esta en pausa
+
+    dur = cola.get('duraciones', {}).get(cola['actual']) or 0
+    llevado = max(cola['ultimo_pos'] or 0, 0) + _CAST_COLA_TICK
+    if not cola['ultimo_pos']:
+        llevado = cola['jugado_s']
+    if dur and llevado < dur - _CAST_COLA_FIN_S:
+        # paro antes del final: alguien lo detuvo (control remoto, otra app)
+        return _cast_cola_soltar(target_id, f'detenido en {int(llevado)}s de {int(dur)}s')
+
+    with _cast_colas_lock:
+        if cola['solo']:
+            cola['activa'] = False
+            cola['version'] += 1
+            app.logger.info(f"[cast cola] equipo {target_id}: fin de 'solo esta pista'")
+            return
+        sig = _cast_cola_siguiente_pos(cola, natural=True)
+        if sig is None:
+            cola['activa'] = False
+            cola['version'] += 1
+            app.logger.info(f"[cast cola] equipo {target_id}: fin de la cola")
+            return
+    app.logger.info(f"[cast cola] equipo {target_id}: pista terminada, sigue posicion {sig}")
+    payload, codigo, _ = _cast_cola_tocar(target_id, sig)
+    if codigo != 200:
+        app.logger.warning(f"[cast cola] equipo {target_id}: no se pudo seguir: {payload.get('message')}")
+
+
+def _cast_cola_arrancar_hilo():
+    global _cast_cola_hilo
+    with _cast_colas_lock:
+        if _cast_cola_hilo is None or not _cast_cola_hilo.is_alive():
+            _cast_cola_hilo = threading.Thread(target=_cast_cola_vigilar, name='cast-cola', daemon=True)
+            _cast_cola_hilo.start()
+
+
+def _cast_cola_target(target_id):
+    conn = get_db_connection()
+    try:
+        return conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/cast/queue', methods=['GET', 'POST'])
+@api_login_required
+def api_v1_cast_queue():
+    """GET ?target_id= -> cola actual (o null).
+    POST {target_id, track_ids:[...], index, shuffle, repeat, stop_after, play}
+      index: posicion en track_ids a reproducir (-1 = al azar si shuffle).
+      stop_after: true = "solo esta pista" (suena y se detiene; la cola queda).
+      play: false = solo actualizar la lista (agregar/quitar) sin tocar el equipo."""
+    if request.method == 'GET':
+        target_id = request.args.get('target_id', type=int)
+        with _cast_colas_lock:
+            return jsonify({'status': 'ok', 'queue': _cast_cola_publica(_cast_colas.get(target_id))})
+
+    data = request.get_json(silent=True) or {}
+    try:
+        target_id = int(data.get('target_id'))
+        ids = [int(x) for x in (data.get('track_ids') or [])]
+        index = int(data.get('index', 0))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    if not ids:
+        with _cast_colas_lock:
+            _cast_colas.pop(target_id, None)
+        return jsonify({'status': 'ok', 'queue': None})
+    target = _cast_cola_target(target_id)
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado'}), 404
+    repeat = data.get('repeat') if data.get('repeat') in ('off', 'all', 'one') else 'off'
+    shuffle = bool(data.get('shuffle'))
+    if index < 0 or index >= len(ids):
+        index = random.randrange(len(ids)) if shuffle else 0
+
+    conn = get_db_connection()
+    try:
+        marcas = ','.join('?' * len(ids))
+        duraciones = {r['id']: r['duration'] or 0 for r in conn.execute(
+            f'SELECT id, duration FROM tracks WHERE id IN ({marcas})', ids)}
+    finally:
+        conn.close()
+
+    tocar = data.get('play', True) is not False
+    with _cast_colas_lock:
+        previa = _cast_colas.get(target_id)
+        cola = {
+            'ids': ids, 'shuffle': shuffle, 'repeat': repeat,
+            'orden': _cast_cola_orden(len(ids), shuffle, index), 'pos': 0,
+            'duraciones': duraciones, 'control_url': target['control_url'],
+            'base': request.host_url.rstrip('/'), 'user_id': g.api_user['id'],
+            'actual': None, 'solo': bool(data.get('stop_after')), 'visto': False,
+            'ultimo_pos': 0, 'jugado_s': 0.0, 'activa': False, 'enviando': False,
+            'version': (previa['version'] + 1) if previa else 1,
+        }
+        if not shuffle:
+            cola['pos'] = index
+        if not tocar and previa:
+            # actualizar la lista sin cortar lo que suena: conservar seguimiento
+            for k in ('actual', 'visto', 'ultimo_pos', 'jugado_s', 'activa', 'solo', 'ultimo_tick'):
+                if k in previa:
+                    cola[k] = previa[k]
+        _cast_colas[target_id] = cola
+    _cast_cola_arrancar_hilo()
+    if not tocar:
+        return jsonify({'status': 'ok', 'queue': _cast_cola_publica(cola)})
+    payload, codigo, _ = _cast_cola_tocar(target_id, cola['pos'], solo=cola['solo'])
+    payload['queue'] = _cast_cola_publica(cola)
+    return jsonify(payload), codigo
+
+
+@app.route('/api/v1/cast/queue/step', methods=['POST'])
+@api_login_required
+def api_v1_cast_queue_step():
+    """{target_id, delta: 1|-1} -> siguiente / anterior segun el orden de la cola."""
+    data = request.get_json(silent=True) or {}
+    target_id = data.get('target_id')
+    try:
+        target_id = int(target_id)
+        delta = 1 if int(data.get('delta', 1)) >= 0 else -1
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    with _cast_colas_lock:
+        cola = _cast_colas.get(target_id)
+        if not cola or not cola['ids']:
+            return jsonify({'status': 'error', 'code': 'no_queue', 'message': 'No hay cola en el servidor'}), 409
+        if delta > 0:
+            pos = _cast_cola_siguiente_pos(cola, natural=False)
+        else:
+            pos = cola['pos'] - 1 if cola['pos'] > 0 else (len(cola['orden']) - 1 if cola['repeat'] != 'off' else None)
+        if pos is None:
+            return jsonify({'status': 'error', 'code': 'queue_end', 'message': 'No hay más pistas'}), 409
+    payload, codigo, _ = _cast_cola_tocar(target_id, pos)
+    payload['queue'] = _cast_cola_publica(cola)
+    return jsonify(payload), codigo
+
+
+@app.route('/api/v1/cast/queue/mode', methods=['POST'])
+@api_login_required
+def api_v1_cast_queue_mode():
+    """{target_id, shuffle?, repeat?} -> cambia aleatorio / repetir sin cortar lo que suena."""
+    data = request.get_json(silent=True) or {}
+    try:
+        target_id = int(data.get('target_id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    with _cast_colas_lock:
+        cola = _cast_colas.get(target_id)
+        if not cola:
+            return jsonify({'status': 'ok', 'queue': None})
+        if data.get('repeat') in ('off', 'all', 'one'):
+            cola['repeat'] = data['repeat']
+        if 'shuffle' in data and bool(data['shuffle']) != cola['shuffle']:
+            actual_idx = cola['orden'][cola['pos']]
+            cola['shuffle'] = bool(data['shuffle'])
+            cola['orden'] = _cast_cola_orden(len(cola['ids']), cola['shuffle'], actual_idx)
+            cola['pos'] = 0 if cola['shuffle'] else actual_idx
+        cola['version'] += 1
+        return jsonify({'status': 'ok', 'queue': _cast_cola_publica(cola)})
 
 
 def parse_range_header(rh, file_size):
