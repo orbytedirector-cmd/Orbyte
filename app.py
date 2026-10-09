@@ -4322,6 +4322,26 @@ def _collab_avatar_display(category, fname, name):
     return {'type': 'initials', 'text': _collab_initials(name)}
 
 
+# Ticket C-01 (reportado por Niko): el link del QR se armaba con la direccion
+# por la que estaba conectado el ADMIN (url_for _external). Con el iPhone por
+# Tailscale el QR apuntaba a 100.x y las visitas en el WiFi de la casa no
+# podian abrirlo. Ahora el QR usa SIEMPRE la direccion de la LAN, y ademas se
+# informa la de Tailscale para el caso "invitado que tambien tiene Tailscale"
+# (en el auto). Configurables por variable de entorno.
+_COLLAB_LAN_URL = os.environ.get('ORBYTE_LAN_URL', 'http://192.168.100.14:5001').rstrip('/')
+_COLLAB_TAILSCALE_URL = os.environ.get('ORBYTE_TAILSCALE_URL', 'http://100.127.75.52:5001').rstrip('/')
+
+
+def _collab_join_urls(token):
+    ruta = url_for('collab_join', token=token)
+    return {'lan': _COLLAB_LAN_URL + ruta, 'tailscale': _COLLAB_TAILSCALE_URL + ruta}
+
+
+def _collab_join_url(token, red=None):
+    urls = _collab_join_urls(token)
+    return urls.get(red) or urls['lan']
+
+
 def _collab_active_session(conn):
     row = conn.execute(
         'SELECT * FROM collab_sessions WHERE is_active=1 ORDER BY id DESC LIMIT 1'
@@ -4498,7 +4518,7 @@ def admin_collab():
             dispatched_count = conn.execute(
                 'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=1', (sess['id'],)
             ).fetchone()[0]
-            join_url = url_for('collab_join', token=sess['token'], _external=True)
+            join_url = _collab_join_url(sess['token'])
         return render_template('collab_host.html', collab_session=sess, participants=participants,
                                pending_count=pending_count, dispatched_count=dispatched_count,
                                join_url=join_url, qrcode_available=_QRCODE_AVAILABLE,
@@ -4538,7 +4558,7 @@ def _collab_start_session(admin_user_id, max_tracks=None, window_hours=None):
     finally:
         conn.close()
     return {'token': token, 'max_tracks': max_tracks, 'window_hours': window_hours,
-            'join_url': url_for('collab_join', token=token, _external=True)}
+            'join_url': _collab_join_url(token), 'join_urls': _collab_join_urls(token)}
 
 
 def _collab_stop_active_session():
@@ -4628,7 +4648,7 @@ def admin_collab_qr():
         conn.close()
     if not sess:
         return "No hay una sesión colaborativa activa", 404
-    join_url = url_for('collab_join', token=sess['token'], _external=True)
+    join_url = _collab_join_url(sess['token'], request.args.get('red'))   # ?red=tailscale
     img = qrcode.make(join_url)
     buf = BytesIO()
     img.save(buf, format='PNG')
@@ -4649,7 +4669,11 @@ def api_admin_collab_estado():
         sess = _collab_active_session(conn)
         if not sess:
             return jsonify({'active': False})
-        participants = [dict(r) for r in conn.execute(
+        # Ticket C-01: can_pull como true/false (SQLite lo guarda 0/1 y la app
+        # iOS lo decodifica como Bool: con un solo participante el decode
+        # entero fallaba y el admin dejaba de ver a los invitados).
+        participants = [dict(r, can_pull=bool(r['can_pull']), joined_at=r['joined_at'] or '')
+                        for r in conn.execute(
             'SELECT id, name, joined_at, can_pull FROM collab_participants WHERE session_id=? ORDER BY joined_at',
             (sess['id'],)
         ).fetchall()]
@@ -4671,7 +4695,8 @@ def api_admin_collab_estado():
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
                         'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
                         'token': sess['token'],
-                        'join_url': url_for('collab_join', token=sess['token'], _external=True)})
+                        'join_url': _collab_join_url(sess['token']),
+                        'join_urls': _collab_join_urls(sess['token'])})
     finally:
         conn.close()
 
