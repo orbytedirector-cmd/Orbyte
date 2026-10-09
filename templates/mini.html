@@ -139,6 +139,21 @@
   .orbitron-resp { padding: 10px 16px; font-size: 13px; color: var(--text2); border-bottom: 1px solid var(--border); display: none; gap: 8px; align-items: center; }
   .orbitron-resp.visible { display: flex; }
   .orbitron-resp span { flex: 1; }
+  /* Ticket D-19: pie de Orbitron (Expandir / calificar / guardar) y Playlists */
+  .orb-pie { padding: 14px 16px 22px; display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--border); }
+  .btn-grande { height: 44px; width: 100%; font-size: 15px; }
+  .orb-fb { display: flex; flex-direction: column; gap: 8px; }
+  .orb-fb-tit { font-size: 12px; color: var(--text2); }
+  .estrellas { display: flex; gap: 6px; }
+  .estrellas button { font-size: 26px; color: var(--gold); width: 36px; height: 36px; }
+  .orb-fb input { background: var(--card2); border: 1px solid var(--border2); border-radius: 10px; color: var(--text); padding: 10px 12px; font-size: 15px; outline: none; }
+  .orb-fb-acc { display: flex; gap: 8px; }
+  .orb-fb-acc .btn { height: 40px; flex: 1; }
+  .nota { font-size: 12px; color: var(--text2); }
+  .nota.err { color: var(--danger); }
+  .pl-cab { display: flex; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); min-height: 65px; }
+  .pl-cab .pl-nombre { flex: 1; min-width: 0; font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pl-ico { width: 44px; height: 44px; border-radius: 6px; background: var(--gold-dim); color: var(--gold2); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
   .login { position: fixed; inset: 0; background: rgba(0,0,0,.92); display: none; align-items: center; justify-content: center; flex-direction: column; gap: 16px; text-align: center; padding: 30px; }
   .login.visible { display: flex; }
   .login a { color: #000; background: var(--gold); padding: 14px 26px; border-radius: 12px; font-weight: 600; text-decoration: none; }
@@ -185,6 +200,7 @@
     <div class="tabs">
       <button class="tab activa" data-v="cola" onclick="verTab('cola')">Cola</button>
       <button class="tab" data-v="buscar" onclick="verTab('buscar')">Buscar</button>
+      <button class="tab" data-v="playlists" onclick="verTab('playlists')">Playlists</button>
       <button class="tab" data-v="orbitron" onclick="verTab('orbitron')">Orbitron</button>
     </div>
 
@@ -205,6 +221,11 @@
       <div class="lista" id="lista-buscar"><div class="vacio">Busca en tu biblioteca.</div></div>
     </div>
 
+    <div class="vista" id="v-playlists">
+      <div class="pl-cab" id="pl-cab"></div>
+      <div class="lista" id="lista-playlists"><div class="vacio">Cargando…</div></div>
+    </div>
+
     <div class="vista" id="v-orbitron">
       <form class="buscador" onsubmit="pedirOrbitron(event)">
         <input id="qo" type="text" placeholder="Ej: jazz tranquilo para trabajar" autocomplete="off" enterkeyhint="send">
@@ -212,7 +233,6 @@
       </form>
       <div class="orbitron-resp" id="orb-resp"><span id="orb-txt"></span>
         <button class="btn" style="height:36px" onclick="reproducirOrbitron()">▶ Todo</button>
-        <button class="btn sec" style="height:36px" id="b-expandir" onclick="expandirOrbitron()">+ Más</button>
       </div>
       <div class="lista" id="lista-orbitron"><div class="vacio">Pídele a Orbitron una playlist en tus palabras.<br>Puedes seguir refinando: “más tranquilo”, “solo de los 70”…</div></div>
     </div>
@@ -243,7 +263,9 @@ function guardar() { try { localStorage.setItem(CLAVE, JSON.stringify(st)); } ca
 let rx = { state: null, pos: 0, dur: 0, track: null, perfil: null, t: 0 };
 let enviando = false;      // hay un cast/play en curso
 let ultimoComando = 0;     // estados leidos justo despues de un comando son transitorios
-let orb = { requestId: null, entities: null, tracks: [], texto: "" };
+let orb = { requestId: null, entities: null, tracks: [], texto: "", query: "", hayMas: true,
+            rating: 0, comentario: "", feedbackEnviado: false, guardadaId: null, nota: "", notaErr: false };
+let orbOcupado = { expandir: false, guardar: false, feedback: false };
 // Ticket D-18: la ultima respuesta de Orbitron sobrevive a una recarga del iframe
 const CLAVE_ORB = "orbyte_mini_orb_v1";
 try { Object.assign(orb, JSON.parse(localStorage.getItem(CLAVE_ORB) || "{}")); } catch (e) {}
@@ -607,7 +629,9 @@ async function pedirOrbitron(ev) {
     if (orb.entities) body.prior_entities = orb.entities;   // seguimiento de la conversacion
     const r = await api("/api/v1/ai/playlist", { method: "POST", timeout: 90000, body: JSON.stringify(body) });
     orb = { requestId: r.request_id, entities: r.entities, tracks: r.tracks || [],
-            texto: r.question ? r.question : `${(r.tracks || []).length} pistas para “${q}”` };
+            texto: r.question ? r.question : `${(r.tracks || []).length} pistas para “${q}”`,
+            query: q, hayMas: true, rating: 0, comentario: "", feedbackEnviado: false,
+            guardadaId: null, nota: "", notaErr: false };
     guardarOrb();
     $("orb-txt").textContent = orb.texto;
     $("orb-resp").classList.add("visible");
@@ -617,25 +641,134 @@ async function pedirOrbitron(ev) {
   finally { $("b-orb").disabled = false; }
 }
 function pintarOrbitron() {
-  $("lista-orbitron").innerHTML = orb.tracks.length ? orb.tracks.map((p, i) => filaPista(p, {
+  const el = $("lista-orbitron");
+  if (!orb.tracks.length) { el.innerHTML = '<div class="vacio">Orbitron no encontró pistas.</div>'; return; }
+  const scroll = el.scrollTop;
+  el.innerHTML = orb.tracks.map((p, i) => filaPista(p, {
     tap: `ponerCola(orb.tracks, ${i})`,
     extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(orb.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
-  }, false, "orb", i)).join("") : '<div class="vacio">Orbitron no encontró pistas.</div>';
+  }, false, "orb", i)).join("") + pieOrbitron();
+  el.scrollTop = scroll;
+}
+// Ticket D-19: mismo pie que Desktop/iOS: Expandir, calificar y guardar como playlist
+function pieOrbitron() {
+  const o = orbOcupado;
+  let h = '<div class="orb-pie">';
+  if (orb.requestId && orb.hayMas)
+    h += `<button class="btn sec btn-grande" onclick="expandirOrbitron()" ${o.expandir ? "disabled" : ""}>${o.expandir ? "Buscando más…" : "⊕ Expandir"}</button>`;
+  if (orb.requestId) {
+    h += '<div class="orb-fb"><div class="orb-fb-tit">¿Qué tal estuvo esta playlist?</div><div class="estrellas">';
+    for (let i = 1; i <= 5; i++) h += `<button onclick="calificar(${i})" aria-label="${i} estrellas">${i <= orb.rating ? "★" : "☆"}</button>`;
+    h += `</div><input id="orb-com" type="text" placeholder="Comentario (opcional)" value="${esc(orb.comentario)}" oninput="orb.comentario=this.value;guardarOrb()" ${orb.feedbackEnviado ? "disabled" : ""}>`;
+    h += '<div class="orb-fb-acc">';
+    h += `<button class="btn sec" onclick="enviarFeedback()" ${(!orb.rating || orb.feedbackEnviado || o.feedback) ? "disabled" : ""}>${o.feedback ? "Enviando…" : orb.feedbackEnviado ? "¡Gracias!" : "Enviar feedback"}</button>`;
+    h += `<button class="btn" onclick="guardarOrbitron()" ${(o.guardar || orb.guardadaId !== null) ? "disabled" : ""}>${o.guardar ? "Guardando…" : orb.guardadaId !== null ? "Guardada ✓" : "Guardar como playlist"}</button>`;
+    h += "</div>";
+    if (orb.nota) h += `<div class="nota${orb.notaErr ? " err" : ""}">${esc(orb.nota)}</div>`;
+    h += "</div>";
+  }
+  return h + "</div>";
 }
 function reproducirOrbitron() { if (orb.tracks.length) ponerCola(orb.tracks, st.shuffle ? -1 : 0); }
 async function expandirOrbitron() {
-  if (!orb.requestId) return;
-  $("b-expandir").disabled = true;
+  if (!orb.requestId || orbOcupado.expandir) return;
+  orbOcupado.expandir = true; pintarOrbitron();
+  // si lo que suena es esta misma playlist, las nuevas se suman a la cola
+  const esLaCola = st.cola.length === orb.tracks.length && st.cola.every((p, k) => p.id === orb.tracks[k].id);
   try {
-    const r = await post("/api/v1/ai/playlist/" + orb.requestId + "/expand", {});
+    const r = await api("/api/v1/ai/playlist/" + orb.requestId + "/expand", { method: "POST", timeout: 90000, body: "{}" });
     const nuevas = r.tracks || [];
+    if (!nuevas.length) { orb.hayMas = false; aviso("Orbitron no tiene más pistas para este pedido"); }
     orb.tracks = orb.tracks.concat(nuevas);
-    orb.texto = `${orb.tracks.length} pistas` + (nuevas.length ? "" : " (no hay más)");
+    orb.texto = `${orb.tracks.length} pistas para “${orb.query || "tu pedido"}”`;
+    if (esLaCola && nuevas.length) { st.cola = st.cola.concat(nuevas); guardar(); renderCola(); sincronizarCola(); pintarEstado(); }
     guardarOrb();
     $("orb-txt").textContent = orb.texto;
-    pintarOrbitron();
+  } catch (e) { aviso("No se pudieron traer más resultados: " + e.message, true); }
+  finally { orbOcupado.expandir = false; pintarOrbitron(); }
+}
+function calificar(n) { if (orb.feedbackEnviado) return; orb.rating = n; guardarOrb(); pintarOrbitron(); }
+async function enviarFeedback() {
+  if (!orb.rating || orb.feedbackEnviado || orbOcupado.feedback) return;
+  orbOcupado.feedback = true; pintarOrbitron();
+  try {
+    const body = { rating: orb.rating };
+    if (orb.comentario.trim()) body.comment = orb.comentario.trim();
+    if (orb.guardadaId) body.saved_playlist_id = orb.guardadaId;
+    await post("/api/v1/ai/playlist/" + orb.requestId + "/feedback", body);
+    orb.feedbackEnviado = true; guardarOrb();
+  } catch (e) { aviso("No se pudo enviar el feedback: " + e.message, true); }
+  finally { orbOcupado.feedback = false; pintarOrbitron(); }
+}
+// Mismo flujo que Desktop/iOS: crear "IA: <pedido>", agregar cada pista en
+// orden (una que falla no aborta el resto) y anotar la playlist en el feedback.
+async function guardarOrbitron() {
+  if (orbOcupado.guardar || orb.guardadaId !== null || !orb.tracks.length) return;
+  orbOcupado.guardar = true; orb.nota = ""; pintarOrbitron();
+  try {
+    const pl = await post("/api/v1/playlists", { name: "IA: " + String(orb.query || "Orbitron").slice(0, 40) });
+    let agregadas = 0;
+    for (const p of orb.tracks) {
+      try { await post(`/api/v1/playlists/${pl.id}/tracks`, { track_id: p.id }); agregadas++; } catch (e) {}
+    }
+    orb.guardadaId = pl.id;
+    orb.nota = agregadas < orb.tracks.length ? `Guardada con ${agregadas} de ${orb.tracks.length} pistas.` : `Guardada como “${pl.name}”.`;
+    orb.notaErr = false;
+    if (orb.feedbackEnviado || orb.rating > 0)
+      post("/api/v1/ai/playlist/" + orb.requestId + "/feedback", { saved_playlist_id: pl.id }).catch(() => {});
+    playlists.lista = null;   // la pestaña Playlists se recarga
+  } catch (e) { orb.nota = "No se pudo guardar la playlist. Prueba de nuevo."; orb.notaErr = true; }
+  finally { orbOcupado.guardar = false; guardarOrb(); pintarOrbitron(); }
+}
+
+// =====================================================================
+// Ticket D-19: Playlists guardadas del usuario
+// =====================================================================
+let playlists = { lista: null, abierta: null, cargando: false };
+async function cargarPlaylists() {
+  playlists.abierta = null; pintarPlaylists();
+  playlists.cargando = true;
+  try {
+    const r = await api("/api/v1/playlists?sort=last_played");
+    playlists.lista = r.playlists || [];
+  } catch (e) { playlists.lista = null; $("lista-playlists").innerHTML = `<div class="vacio">${esc(e.message)}</div>`; return; }
+  finally { playlists.cargando = false; }
+  pintarPlaylists();
+}
+function pintarPlaylists() {
+  const cab = $("pl-cab"), el = $("lista-playlists");
+  const a = playlists.abierta;
+  if (a) {
+    cab.innerHTML = `<button class="btn sec" style="height:40px" onclick="cargarPlaylists()">‹</button>
+      <div class="pl-nombre">${esc(a.name)}<div class="fila-s">${a.tracks.length} pistas</div></div>
+      <button class="btn" style="height:40px" onclick="reproducirPlaylist()" ${a.tracks.length ? "" : "disabled"}>▶ Reproducir todo</button>`;
+    el.innerHTML = a.tracks.length ? a.tracks.map((p, i) => filaPista(p, {
+      tap: `ponerCola(playlists.abierta.tracks, ${i})`,
+      extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(playlists.abierta.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
+    }, false, "pl", i)).join("") : '<div class="vacio">Esta playlist está vacía.</div>';
+    return;
+  }
+  cab.innerHTML = `<div class="pl-nombre">Tus playlists</div><button class="btn sec" style="height:40px" onclick="cargarPlaylists()">↻</button>`;
+  if (playlists.lista === null) { el.innerHTML = '<div class="vacio"><div class="spinner" style="margin:auto"></div></div>'; return; }
+  el.innerHTML = playlists.lista.length ? playlists.lista.map((pl) => `<div class="fila" onclick="abrirPlaylist(${pl.id})">
+      <div class="pl-ico">♫</div>
+      <div class="fila-texto"><div class="fila-t">${esc(pl.name)}</div><div class="fila-s">${pl.track_count} pista${pl.track_count === 1 ? "" : "s"}${pl.last_played_at ? " · última vez " + esc(String(pl.last_played_at).slice(0, 10)) : ""}</div></div>
+      <button class="fila-acc" onclick="event.stopPropagation();abrirPlaylist(${pl.id}, true)" aria-label="Reproducir">▶</button></div>`).join("")
+    : '<div class="vacio">Todavía no tienes playlists.<br>Guarda una desde Orbitron o desde las otras apps.</div>';
+}
+async function abrirPlaylist(id, tocar) {
+  aviso(tocar ? "Cargando playlist…" : "");
+  try {
+    const r = await api("/api/v1/playlists/" + id);
+    playlists.abierta = { id: r.id, name: r.name, tracks: (r.tracks || []).map((t) => Object.assign({ artist: t.artist_name }, t)) };
+    pintarPlaylists(); $("lista-playlists").scrollTop = 0;
+    if (tocar) reproducirPlaylist();
   } catch (e) { aviso(e.message, true); }
-  finally { $("b-expandir").disabled = false; }
+}
+function reproducirPlaylist() {
+  const a = playlists.abierta; if (!a || !a.tracks.length) return;
+  ponerCola(a.tracks, st.shuffle ? -1 : 0);
+  post(`/api/v1/playlists/${a.id}/mark-played`, {}).catch(() => {});   // igual que "Reproducir todo" en iOS
 }
 
 // =====================================================================
@@ -644,11 +777,15 @@ async function expandirOrbitron() {
 function verTab(v) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("activa", t.dataset.v === v));
   document.querySelectorAll(".vista").forEach((x) => x.classList.toggle("activa", x.id === "v-" + v));
+  if (v === "playlists" && playlists.lista === null && !playlists.cargando && !playlists.abierta) cargarPlaylists();
 }
 // =====================================================================
 // Ticket D-18: mantener presionada una pista -> menu de opciones
 // =====================================================================
-function pistaDe(lista, i) { return lista === "cola" ? st.cola[i] : lista === "orb" ? orb.tracks[i] : resultados.tracks[i]; }
+function pistaDe(lista, i) {
+  return lista === "cola" ? st.cola[i] : lista === "orb" ? orb.tracks[i]
+       : lista === "pl" ? (playlists.abierta && playlists.abierta.tracks[i]) : resultados.tracks[i];
+}
 function abrirMenu(lista, i) {
   const p = pistaDe(lista, i); if (!p) return;
   const ops = [];
@@ -657,8 +794,9 @@ function abrirMenu(lista, i) {
     ops.push(["Reproducir solo esta pista", `reproducirIndice(${i}, true)`]);
     ops.push(["Quitar de la cola", `quitar(${i})`]);
   } else {
-    const ref = lista === "orb" ? `orb.tracks[${i}]` : `resultados.tracks[${i}]`;
-    if (lista === "orb") ops.push(["▶ Reproducir la playlist desde aquí", `ponerCola(orb.tracks, ${i})`]);
+    const lst = { orb: "orb.tracks", pl: "playlists.abierta.tracks", buscar: "resultados.tracks" }[lista];
+    const ref = `${lst}[${i}]`;
+    if (lista === "orb" || lista === "pl") ops.push(["▶ Reproducir la playlist desde aquí", `ponerCola(${lst}, ${i})`]);
     ops.push(["Reproducir solo esta pista", `soloEsta(${ref})`]);
     ops.push(["Reproducir a continuación", `aContinuacion(${ref})`]);
     ops.push(["Agregar al final de la cola", `agregar(${ref})`]);

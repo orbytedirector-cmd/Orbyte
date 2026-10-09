@@ -9316,6 +9316,8 @@ def _cast_cola_tocar(target_id, pos, solo=False):
                 cola['visto'] = False
                 cola['ultimo_pos'] = 0
                 cola['jugado_s'] = 0.0
+                cola['rel_previo'] = None
+                cola['fin_previsto'] = None
                 cola['activa'] = True
                 cola['version'] += 1
             _cast_pausas.pop(target_id, None)
@@ -9361,19 +9363,56 @@ def _cast_cola_siguiente_pos(cola, natural):
 
 
 def _cast_cola_vigilar():
-    """Hilo: detecta fin de pista y avanza. Nunca muere por una excepcion."""
+    """Hilo: detecta fin de pista y avanza. Nunca muere por una excepcion.
+    Ticket D-19: duerme menos cuando una pista esta por terminar, para
+    mandar la siguiente justo a tiempo (no hasta 2 s tarde)."""
     while True:
-        time.sleep(_CAST_COLA_TICK)
         try:
+            ahora = time.monotonic()
+            with _cast_colas_lock:
+                activas = [(tid, c) for tid, c in _cast_colas.items() if c['activa'] and not c['enviando']]
+            espera = _CAST_COLA_TICK
+            for _tid, c in activas:
+                fin = c.get('fin_previsto')
+                if fin:
+                    espera = min(espera, max(0.2, fin - ahora))
+            time.sleep(espera)
             with _cast_colas_lock:
                 activas = [(tid, c) for tid, c in _cast_colas.items() if c['activa'] and not c['enviando']]
             for target_id, cola in activas:
                 _cast_cola_revisar(target_id, cola)
         except Exception as e:  # noqa: BLE001
             app.logger.error(f"[cast cola] error en el vigilante: {e}")
+            time.sleep(_CAST_COLA_TICK)
+
+
+def _cast_cola_avanzar(target_id, cola, motivo):
+    with _cast_colas_lock:
+        cola['fin_previsto'] = None
+        if cola['solo']:
+            cola['activa'] = False
+            cola['version'] += 1
+            app.logger.info(f"[cast cola] equipo {target_id}: fin de 'solo esta pista' ({motivo})")
+            return
+        sig = _cast_cola_siguiente_pos(cola, natural=True)
+        if sig is None:
+            cola['activa'] = False
+            cola['version'] += 1
+            app.logger.info(f"[cast cola] equipo {target_id}: fin de la cola ({motivo})")
+            return
+    app.logger.info(f"[cast cola] equipo {target_id}: pista {cola['actual']} terminada ({motivo}), sigue posicion {sig}")
+    payload, codigo, _ = _cast_cola_tocar(target_id, sig)
+    if codigo != 200:
+        app.logger.warning(f"[cast cola] equipo {target_id}: no se pudo seguir: {payload.get('message')}")
 
 
 def _cast_cola_revisar(target_id, cola):
+    """Ticket D-19: mismo criterio que Orbyte-Desktop (Lote 42bi), que con el
+    TX-8050 avanza sin problemas: un reloj propio de la pista, alineado con
+    la posicion que informa el receptor; al llegar a la duracion se manda la
+    siguiente, SIN esperar a que el receptor pase a STOPPED (D-18 dependia de
+    eso y a veces el equipo no lo informaba -> la cola no seguia). STOPPED
+    cerca del final tambien cuenta como fin; STOPPED a mitad = lo detuvieron."""
     control_url = cola['control_url']
     estado = _cast_get_transport_state(control_url, timeout=3)
     ahora = time.monotonic()
@@ -9383,46 +9422,44 @@ def _cast_cola_revisar(target_id, cola):
         return  # renderer no responde (apagado/red): no se decide nada
     pos = _cast_get_position_info(control_url, timeout=3) or {}
     sonando_id, _perfil = _cast_uri_a_pista(pos.get('track_uri'))
+    dur_rx = pos.get('duration_s') or 0
+    dur_db = cola.get('duraciones', {}).get(cola['actual']) or 0
+    dur = dur_rx or dur_db   # igual que Desktop: manda la duracion que informa el receptor
+    rel = pos.get('position_s')
 
     if estado in ('PLAYING', 'TRANSITIONING'):
         if sonando_id and sonando_id != cola['actual']:
             return _cast_cola_soltar(target_id, f'el equipo reproduce otra pista ({sonando_id})')
-        if estado == 'PLAYING':
-            cola['visto'] = True
-            cola['jugado_s'] += dt
-            if pos.get('position_s') is not None:
-                cola['ultimo_pos'] = pos['position_s']
+        if estado != 'PLAYING':
+            cola['fin_previsto'] = None
+            return
+        cola['visto'] = True
+        # reloj de la pista: avanza con el tiempo real y se alinea con el
+        # receptor cuando este informa una posicion que se mueve
+        cola['jugado_s'] += dt
+        if rel is not None and rel > 0 and rel != cola.get('rel_previo'):
+            cola['jugado_s'] = float(rel)
+        cola['rel_previo'] = rel
+        cola['ultimo_pos'] = cola['jugado_s']
+        if dur:
+            resto = dur - cola['jugado_s']
+            cola['fin_previsto'] = ahora + resto
+            if resto <= 0.5:
+                return _cast_cola_avanzar(target_id, cola, f'reloj {int(cola["jugado_s"])}s de {int(dur)}s')
         return
 
     if estado not in ('STOPPED', 'NO_MEDIA_PRESENT') or not cola['visto']:
+        cola['fin_previsto'] = None   # PAUSED_PLAYBACK u otro: esperar sin sondear de mas
         return
     if target_id in _cast_pausas:
         return  # pausa emulada (D-05): el equipo dice STOPPED pero esta en pausa
-
-    dur = cola.get('duraciones', {}).get(cola['actual']) or 0
-    llevado = max(cola['ultimo_pos'] or 0, 0) + _CAST_COLA_TICK
-    if not cola['ultimo_pos']:
-        llevado = cola['jugado_s']
+    cola['fin_previsto'] = None
+    llevado = cola['jugado_s'] + min(dt, _CAST_COLA_TICK)
     if dur and llevado < dur - _CAST_COLA_FIN_S:
-        # paro antes del final: alguien lo detuvo (control remoto, otra app)
-        return _cast_cola_soltar(target_id, f'detenido en {int(llevado)}s de {int(dur)}s')
-
-    with _cast_colas_lock:
-        if cola['solo']:
-            cola['activa'] = False
-            cola['version'] += 1
-            app.logger.info(f"[cast cola] equipo {target_id}: fin de 'solo esta pista'")
-            return
-        sig = _cast_cola_siguiente_pos(cola, natural=True)
-        if sig is None:
-            cola['activa'] = False
-            cola['version'] += 1
-            app.logger.info(f"[cast cola] equipo {target_id}: fin de la cola")
-            return
-    app.logger.info(f"[cast cola] equipo {target_id}: pista terminada, sigue posicion {sig}")
-    payload, codigo, _ = _cast_cola_tocar(target_id, sig)
-    if codigo != 200:
-        app.logger.warning(f"[cast cola] equipo {target_id}: no se pudo seguir: {payload.get('message')}")
+        app.logger.info(f"[cast cola] equipo {target_id}: {estado} en {int(llevado)}s de {int(dur)}s "
+                        f"(rx={rel}, dur_rx={dur_rx}, dur_db={dur_db})")
+        return _cast_cola_soltar(target_id, f'detenido a mitad ({int(llevado)}s de {int(dur)}s)')
+    return _cast_cola_avanzar(target_id, cola, f'{estado} en {int(llevado)}s de {int(dur)}s')
 
 
 def _cast_cola_arrancar_hilo():
@@ -9497,7 +9534,8 @@ def api_v1_cast_queue():
             cola['pos'] = index
         if not tocar and previa:
             # actualizar la lista sin cortar lo que suena: conservar seguimiento
-            for k in ('actual', 'visto', 'ultimo_pos', 'jugado_s', 'activa', 'solo', 'ultimo_tick'):
+            for k in ('actual', 'visto', 'ultimo_pos', 'jugado_s', 'activa', 'solo', 'ultimo_tick',
+                      'rel_previo', 'fin_previsto'):
                 if k in previa:
                     cola[k] = previa[k]
         _cast_colas[target_id] = cola
