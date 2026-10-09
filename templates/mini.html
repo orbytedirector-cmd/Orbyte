@@ -11,8 +11,10 @@
   en el iPad, se manda al receptor DLNA (TX-8050) via /api/v1/cast/*.
   Auth: cookie de sesion (mismo host que HA -> same-site, la cookie viaja
   dentro del iframe); api_login_required la acepta en /api/v1/*.
-  La cola vive en este navegador (localStorage): el iPad esta siempre
-  encendido y es quien pide la siguiente pista al terminar la actual.
+  Ticket D-18: la cola la recorre el SERVIDOR (/api/v1/cast/queue): sigue
+  avanzando aunque el iPad cambie de vista o se apague la pantalla. Esta
+  pagina guarda la lista (localStorage) para mostrarla y se la reenvia al
+  servidor al tocar play. Aleatorio / repetir tambien viven en el servidor.
 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -75,13 +77,19 @@
   .barra-fondo { width: 100%; height: 5px; border-radius: 3px; background: var(--border2); overflow: hidden; }
   .barra-relleno { height: 100%; width: 0; background: var(--gold); border-radius: 3px; }
   .tiempos { display: flex; justify-content: space-between; font-size: 12px; color: var(--text2); font-variant-numeric: tabular-nums; }
-  .controles { display: flex; align-items: center; justify-content: center; gap: 26px; }
+  .controles { display: flex; align-items: center; justify-content: center; gap: 18px; }
   .ctl { width: 54px; height: 54px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--text); }
   .ctl:active { background: var(--card2); }
   .ctl svg { width: 26px; height: 26px; fill: currentColor; }
   .ctl.play { width: 74px; height: 74px; background: var(--gold); color: #000; }
   .ctl.play svg { width: 32px; height: 32px; }
   .ctl:disabled { opacity: .3; }
+  /* Ticket D-18: aleatorio / repetir */
+  .ctl.modo { width: 44px; height: 44px; color: var(--text3); position: relative; }
+  .ctl.modo svg { width: 22px; height: 22px; }
+  .ctl.modo.on { color: var(--gold2); }
+  .ctl.modo .uno { position: absolute; top: 6px; right: 5px; font-size: 9px; font-weight: 700; display: none; }
+  .ctl.modo.uno-on .uno { display: block; }
   .volumen { display: flex; align-items: center; gap: 12px; color: var(--text2); }
   .volumen svg { width: 20px; height: 20px; fill: currentColor; flex-shrink: 0; }
   input[type=range] { -webkit-appearance: none; appearance: none; flex: 1; height: 5px; border-radius: 3px; background: var(--border2); outline: none; }
@@ -106,7 +114,19 @@
   .btn:disabled { opacity: .4; }
   .lista { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 6px 0; }
   .seccion { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text3); padding: 12px 16px 6px; }
-  .fila { display: flex; align-items: center; gap: 12px; padding: 8px 16px; }
+  .fila { display: flex; align-items: center; gap: 12px; padding: 8px 16px; -webkit-touch-callout: none; }
+  .fila img { pointer-events: none; -webkit-touch-callout: none; }
+  .cola-cab { display: flex; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--border); }
+  .cola-cab .info { flex: 1; font-size: 12px; color: var(--text3); line-height: 1.3; }
+  /* Ticket D-18: menu al mantener presionada una pista */
+  .menu-fondo { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: flex-end; justify-content: center; z-index: 20; }
+  .menu-fondo.visible { display: flex; }
+  .menu { width: min(460px, 100%); background: var(--card2); border: 1px solid var(--border2); border-radius: 16px 16px 0 0; padding: 8px 0 14px; }
+  .menu-tit { padding: 12px 20px 10px; font-size: 13px; color: var(--text2); border-bottom: 1px solid var(--border2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .menu-tit b { color: var(--text); font-weight: 600; }
+  .menu button { display: block; width: 100%; text-align: left; padding: 15px 20px; font-size: 16px; }
+  .menu button:active { background: var(--border2); }
+  .menu button.cancelar { color: var(--text2); text-align: center; }
   .fila:active { background: var(--card2); }
   .fila.actual { background: var(--gold-dim); }
   .mini-cover { width: 44px; height: 44px; border-radius: 6px; object-fit: cover; background: var(--card2); flex-shrink: 0; }
@@ -146,9 +166,11 @@
       <div class="tiempos"><span id="t-pos">0:00</span><span id="t-dur">0:00</span></div>
     </div>
     <div class="controles">
+      <button class="ctl modo" id="b-shuffle" onclick="alternarAleatorio()" aria-label="Aleatorio"><svg viewBox="0 0 24 24"><path d="M10.59 9.17 5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z"/></svg></button>
       <button class="ctl" id="b-prev" onclick="anterior()" aria-label="Anterior"><svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6 8.5 6V6z"/></svg></button>
       <button class="ctl play" id="b-play" onclick="playPausa()" aria-label="Reproducir"><svg viewBox="0 0 24 24" id="ico-play"><path d="M8 5v14l11-7z"/></svg></button>
       <button class="ctl" id="b-next" onclick="siguiente()" aria-label="Siguiente"><svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+      <button class="ctl modo" id="b-repeat" onclick="cicloRepetir()" aria-label="Repetir"><svg viewBox="0 0 24 24"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg><span class="uno">1</span></button>
     </div>
     <div class="volumen">
       <svg viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.5 4.5 0 0 0 2.5-4z"/></svg>
@@ -167,8 +189,10 @@
     </div>
 
     <div class="vista activa" id="v-cola">
-      <div class="buscador" style="justify-content:flex-end">
-        <button class="btn sec" onclick="vaciarCola()" style="height:40px">Vaciar cola</button>
+      <div class="cola-cab">
+        <button class="btn" id="b-todo" onclick="reproducirTodo()" style="height:40px">▶ Reproducir todo</button>
+        <div class="info" id="cola-info">Mantén presionada una pista para más opciones</div>
+        <button class="btn sec" onclick="vaciarCola()" style="height:40px">Vaciar</button>
       </div>
       <div class="lista" id="lista-cola"></div>
     </div>
@@ -195,6 +219,11 @@
   </section>
 </div>
 
+<div class="menu-fondo" id="menu" onclick="if (event.target === this) cerrarMenu()">
+  <div class="menu"><div class="menu-tit" id="menu-tit"></div><div id="menu-ops"></div>
+    <button class="cancelar" onclick="cerrarMenu()">Cancelar</button></div>
+</div>
+
 <div class="login" id="login">
   <div style="font-family:Orbitron;color:var(--gold);letter-spacing:.12em">ORBYTE</div>
   <div style="color:var(--text2)">La sesión expiró o nunca se inició en este equipo.</div>
@@ -206,18 +235,19 @@
 // Estado (persistido en este navegador)
 // =====================================================================
 const CLAVE = "orbyte_mini_v1";
-let st = { cola: [], idx: -1, destino: null };
+let st = { cola: [], idx: -1, destino: null, shuffle: false, repeat: "off" };
 try { Object.assign(st, JSON.parse(localStorage.getItem(CLAVE) || "{}")); } catch (e) {}
 function guardar() { try { localStorage.setItem(CLAVE, JSON.stringify(st)); } catch (e) {} }
 
 // Lo que dice el receptor (via /api/v1/cast/status) + reloj local entre sondeos
 let rx = { state: null, pos: 0, dur: 0, track: null, perfil: null, t: 0 };
-let mia = null;            // id de la pista que ENVIO esta pagina (solo esa avanza la cola sola)
 let enviando = false;      // hay un cast/play en curso
 let ultimoComando = 0;     // estados leidos justo despues de un comando son transitorios
-let saltosSeguidos = 0;    // tope para no girar en circulo con archivos rotos
-let avisoSalto = "";       // se mantiene visible aunque la siguiente arranque bien
-let orb = { requestId: null, entities: null, tracks: [] };
+let orb = { requestId: null, entities: null, tracks: [], texto: "" };
+// Ticket D-18: la ultima respuesta de Orbitron sobrevive a una recarga del iframe
+const CLAVE_ORB = "orbyte_mini_orb_v1";
+try { Object.assign(orb, JSON.parse(localStorage.getItem(CLAVE_ORB) || "{}")); } catch (e) {}
+function guardarOrb() { try { localStorage.setItem(CLAVE_ORB, JSON.stringify(orb)); } catch (e) {} }
 
 // =====================================================================
 // API (cookie de sesion, mismo origen)
@@ -282,33 +312,43 @@ function cambiarDestino(v) { st.destino = v ? parseInt(v, 10) : null; guardar();
 // =====================================================================
 // Reproduccion
 // =====================================================================
-async function reproducirIndice(i) {
-  if (!st.destino || i < 0 || i >= st.cola.length) return;
-  st.idx = i; guardar(); renderCola();
-  const pista = st.cola[i];
-  mia = pista.id; enviando = true; ultimoComando = Date.now();
-  pintarPista(pista); aviso("Enviando al equipo…");
+// Ticket D-18: se manda la lista completa al servidor y el reproduce la
+// posicion i (i = -1 con aleatorio: arranca por una al azar). solo = true:
+// suena esa pista y se detiene (la cola queda intacta).
+async function reproducirIndice(i, solo = false) {
+  if (!st.destino) return aviso("Elige un equipo arriba", true);
+  if (!st.cola.length) return;
+  if (i >= 0 && st.cola[i]) { st.idx = i; guardar(); renderCola(); pintarPista(st.cola[i]); }
+  enviando = true; ultimoComando = Date.now();
+  aviso("Enviando al equipo…");
   try {
-    const r = await api("/api/v1/cast/play", { method: "POST", timeout: 90000,
-      body: JSON.stringify({ target_id: st.destino, track_id: pista.id }) });
-    saltosSeguidos = 0;
-    aviso(avisoSalto || (r && r.transcoded ? "Convertido para este equipo" : ""), !!avisoSalto);
-    avisoSalto = "";
-    rx = { state: "PLAYING", pos: 0, dur: pista.duration || 0, track: pista, perfil: r && r.pcm_profile, t: Date.now() };
+    const r = await api("/api/v1/cast/queue", { method: "POST", timeout: 180000,
+      body: JSON.stringify({ target_id: st.destino, track_ids: st.cola.map((p) => p.id), index: i,
+        shuffle: st.shuffle, repeat: st.repeat, stop_after: solo }) });
+    tomarRespuesta(r);
   } catch (e) {
-    if (e.code === "empty_file" || e.code === "file_missing") {
-      // Archivo roto: saltar a la siguiente si hay (tope = largo de la cola)
-      saltosSeguidos++;
-      if (i + 1 < st.cola.length && saltosSeguidos < st.cola.length) {
-        avisoSalto = "Saltada (" + e.message + "): " + pista.title;
-        aviso(avisoSalto, true);
-        enviando = false; return reproducirIndice(i + 1);
-      }
-    }
-    saltosSeguidos = 0; mia = null;
-    aviso(e.message, true);
+    aviso(e.code === "all_skipped" ? "Ninguna pista se pudo reproducir (archivos vacíos o faltantes)" : e.message, true);
   } finally { enviando = false; ultimoComando = Date.now(); pintarEstado(); }
 }
+// Respuesta de /cast/queue o /cast/queue/step: posicion real + pistas saltadas
+function tomarRespuesta(r) {
+  if (r && r.queue) aplicarCola(r.queue);
+  const pista = st.cola[st.idx];
+  const saltadas = (r && r.skipped) || [];
+  aviso(saltadas.length ? `Saltada${saltadas.length > 1 ? "s" : ""} ${saltadas.length} (archivo roto)` : (r && r.transcoded ? "Convertido para este equipo" : ""), saltadas.length > 0);
+  if (pista) { rx = { state: "PLAYING", pos: 0, dur: pista.duration || 0, track: pista, perfil: r && r.pcm_profile, t: Date.now() }; pintarPista(pista); }
+  renderCola();
+}
+// Estado de la cola del servidor -> esta pagina (solo si es la misma lista)
+function aplicarCola(q) {
+  if (!q || !q.ids || q.ids.length !== st.cola.length || q.ids.some((id, k) => id !== st.cola[k].id)) return false;
+  let cambio = false;
+  if (q.index !== st.idx) { st.idx = q.index; cambio = true; }
+  if (q.shuffle !== st.shuffle || q.repeat !== st.repeat) { st.shuffle = q.shuffle; st.repeat = q.repeat; cambio = true; }
+  if (cambio) { guardar(); renderCola(); pintarModos(); }
+  return true;
+}
+function reproducirTodo() { if (st.cola.length) reproducirIndice(st.shuffle ? -1 : 0); }
 
 async function playPausa() {
   if (!st.destino) return;
@@ -324,14 +364,64 @@ async function playPausa() {
   } else if (st.idx >= 0) {
     reproducirIndice(st.idx);
   } else if (st.cola.length) {
-    reproducirIndice(0);
+    reproducirTodo();
   }
   ultimoComando = Date.now(); pintarEstado();
 }
-function siguiente() { if (st.idx + 1 < st.cola.length) reproducirIndice(st.idx + 1); }
+// Siguiente/anterior los decide el servidor (respeta aleatorio y repetir).
+// Si el servidor no tiene la cola (se reinicio), se la reenvia.
+async function paso(delta) {
+  if (!st.destino || !st.cola.length) return;
+  enviando = true; ultimoComando = Date.now(); aviso("Enviando al equipo…");
+  try {
+    tomarRespuesta(await api("/api/v1/cast/queue/step", { method: "POST", timeout: 180000,
+      body: JSON.stringify({ target_id: st.destino, delta }) }));
+  } catch (e) {
+    if (e.code === "no_queue") {
+      enviando = false;
+      const j = st.idx + delta;
+      if (j >= 0 && j < st.cola.length) return reproducirIndice(j);
+      if (st.repeat !== "off") return reproducirIndice(delta > 0 ? 0 : st.cola.length - 1);
+      return aviso("");
+    }
+    aviso(e.code === "queue_end" ? "No hay más pistas en la cola" : e.message, e.code !== "queue_end");
+  } finally { enviando = false; ultimoComando = Date.now(); pintarEstado(); }
+}
+function siguiente() { paso(1); }
 function anterior() {
   if (posicionActual() > 5 && st.idx >= 0) return buscarPos(0);
-  if (st.idx > 0) reproducirIndice(st.idx - 1);
+  paso(-1);
+}
+
+// Aleatorio / repetir (off -> todo -> una)
+function pintarModos() {
+  $("b-shuffle").classList.toggle("on", st.shuffle);
+  const b = $("b-repeat");
+  b.classList.toggle("on", st.repeat !== "off");
+  b.classList.toggle("uno-on", st.repeat === "one");
+  b.setAttribute("aria-label", { off: "Repetir: no", all: "Repetir: toda la cola", one: "Repetir: esta pista" }[st.repeat]);
+}
+async function enviarModos(extra) {
+  pintarModos(); guardar(); pintarEstado();
+  if (!st.destino) return;
+  try { const r = await post("/api/v1/cast/queue/mode", Object.assign({ target_id: st.destino }, extra)); if (r.queue) aplicarCola(r.queue); }
+  catch (e) { aviso(e.message, true); }
+}
+function alternarAleatorio() {
+  st.shuffle = !st.shuffle;
+  aviso(st.shuffle ? "Aleatorio activado" : "Aleatorio desactivado");
+  enviarModos({ shuffle: st.shuffle });
+}
+function cicloRepetir() {
+  st.repeat = { off: "all", all: "one", one: "off" }[st.repeat] || "off";
+  aviso({ off: "Repetir desactivado", all: "Repetir toda la cola", one: "Repetir esta pista" }[st.repeat]);
+  enviarModos({ repeat: st.repeat });
+}
+// La lista cambio (agregar/quitar/insertar): avisarle al servidor sin cortar lo que suena
+function sincronizarCola() {
+  if (!st.destino) return;
+  post("/api/v1/cast/queue", { target_id: st.destino, track_ids: st.cola.map((p) => p.id),
+    index: Math.max(0, st.idx), shuffle: st.shuffle, repeat: st.repeat, play: false }).catch(() => {});
 }
 async function buscarPos(seg) {
   if (!st.destino || !rx.track) return;
@@ -376,14 +466,8 @@ async function sondear() {
     const s = await api("/api/v1/cast/status?target_id=" + st.destino, { timeout: 10000 });
     $("dot").className = "dot on";
     if (pedidoEn < ultimoComando + 1500 || enviando) return;   // transitorio tras un comando
-    const antes = { state: rx.state, pos: posicionActual(), dur: rx.dur, track: rx.track };
-    // Fin de pista: el receptor quedo parado cerca del final de la pista que mandamos nosotros
-    if ((s.state === "STOPPED" || s.state === "NO_MEDIA_PRESENT") && antes.state === "PLAYING" &&
-        antes.track && antes.track.id === mia && antes.dur && antes.pos >= antes.dur - 5) {
-      rx.state = "STOPPED";
-      if (st.idx + 1 < st.cola.length) return reproducirIndice(st.idx + 1);
-      mia = null; pintarEstado(); return;
-    }
+    // Ticket D-18: el avance lo hace el servidor; aca solo se refleja su posicion
+    if (s.queue) aplicarCola(s.queue);
     rx.state = s.state;
     rx.pos = s.position_s || 0; rx.t = Date.now();
     rx.dur = s.duration_s || (s.track && s.track.duration) || rx.dur;
@@ -392,7 +476,6 @@ async function sondear() {
       // Si suena algo que no es de nuestra cola (lo mando Desktop/iPhone), se muestra igual
       const enCola = st.cola[st.idx] && st.cola[st.idx].id === s.track.id ? st.cola[st.idx] : null;
       rx.track = Object.assign({}, s.track, enCola || {});
-      if (!enCola) mia = null;
     }
     pintarPista(rx.track); pintarEstado();
   } catch (e) { $("dot").className = "dot err"; }
@@ -421,8 +504,9 @@ function pintarPista(p) {
 function pintarEstado() {
   const sonando = rx.state === "PLAYING";
   $("ico-play").innerHTML = sonando ? '<path d="M6 5h4v14H6zm8 0h4v14h-4z"/>' : '<path d="M8 5v14l11-7z"/>';
-  $("b-next").disabled = !(st.idx + 1 < st.cola.length);
-  $("b-prev").disabled = !(st.idx > 0 || posicionActual() > 5);
+  const vueltas = st.repeat !== "off" || st.shuffle;
+  $("b-next").disabled = !st.cola.length || !(vueltas || st.idx + 1 < st.cola.length);
+  $("b-prev").disabled = !st.cola.length || !(vueltas || st.idx > 0 || posicionActual() > 5);
   tickBarra();
 }
 function tickBarra() {
@@ -430,8 +514,8 @@ function tickBarra() {
   $("relleno").style.width = dur ? Math.min(100, (pos / dur) * 100) + "%" : "0";
   $("t-pos").textContent = fmt(pos); $("t-dur").textContent = fmt(dur);
 }
-function filaPista(p, acciones, actual) {
-  return `<div class="fila${actual ? " actual" : ""}" ${acciones.tap ? `onclick="${acciones.tap}"` : ""}>
+function filaPista(p, acciones, actual, lista, i) {
+  return `<div class="fila${actual ? " actual" : ""}" ${lista ? `data-l="${lista}" data-i="${i}"` : ""} ${acciones.tap ? `onclick="${acciones.tap}"` : ""}>
     ${p.cover_url ? `<img class="mini-cover" loading="lazy" decoding="async" src="${esc(miniatura(p.cover_url, 96))}">` : '<div class="mini-cover"></div>'}
     <div class="fila-texto"><div class="fila-t">${esc(p.title)}</div>
       <div class="fila-s"><span class="led" style="display:inline-block;margin-right:5px;background:${ledColor(p.format_color || p.led_color)}"></span>${esc([p.artist || p.artist_name, p.album_name].filter(Boolean).join(" · "))}${p.duration ? " · " + fmt(p.duration) : ""}</div></div>
@@ -439,24 +523,36 @@ function filaPista(p, acciones, actual) {
 }
 function renderCola() {
   const el = $("lista-cola");
+  $("b-todo").disabled = !st.cola.length;
+  $("cola-info").textContent = st.cola.length
+    ? `${st.cola.length} pista${st.cola.length > 1 ? "s" : ""} · mantén presionada una para más opciones` : "";
   if (!st.cola.length) { el.innerHTML = '<div class="vacio">La cola está vacía.<br>Agrega pistas desde Buscar u Orbitron.</div>'; return; }
   el.innerHTML = st.cola.map((p, i) => filaPista(p, {
     tap: `reproducirIndice(${i})`,
     extra: `<button class="fila-acc" onclick="event.stopPropagation();quitar(${i})" aria-label="Quitar">×</button>`,
-  }, i === st.idx)).join("");
+  }, i === st.idx, "cola", i)).join("");
 }
 
 // =====================================================================
 // Cola
 // =====================================================================
 function ponerCola(pistas, desde = 0) { st.cola = pistas.slice(); st.idx = -1; guardar(); renderCola(); reproducirIndice(desde); verTab("cola"); }
-function agregar(p) { st.cola.push(p); guardar(); renderCola(); aviso("Agregada a la cola: " + p.title); if (st.idx < 0) reproducirIndice(st.cola.length - 1); }
+function agregar(p) { st.cola.push(p); guardar(); renderCola(); aviso("Agregada al final de la cola: " + p.title); if (st.idx < 0) reproducirIndice(st.cola.length - 1); else sincronizarCola(); }
+// Ticket D-18: insertar justo despues de la que suena
+function insertarSiguiente(p) { const j = st.idx >= 0 ? st.idx + 1 : st.cola.length; st.cola.splice(j, 0, p); guardar(); renderCola(); return j; }
+function aContinuacion(p) {
+  const j = insertarSiguiente(p);
+  aviso("Sonará a continuación: " + p.title);
+  if (st.idx < 0) reproducirIndice(j); else sincronizarCola();
+}
+// Suena esa pista y se detiene; la cola queda intacta (se inserta tras la actual)
+function soloEsta(p) { const j = insertarSiguiente(p); reproducirIndice(j, true); }
 function quitar(i) {
   st.cola.splice(i, 1);
   if (i < st.idx) st.idx--; else if (i === st.idx) st.idx = Math.min(st.idx, st.cola.length - 1);
-  guardar(); renderCola(); pintarEstado();
+  guardar(); renderCola(); pintarEstado(); sincronizarCola();
 }
-function vaciarCola() { st.cola = []; st.idx = -1; mia = null; guardar(); renderCola(); pintarEstado(); }
+function vaciarCola() { st.cola = []; st.idx = -1; guardar(); renderCola(); pintarEstado(); sincronizarCola(); }
 
 // =====================================================================
 // Buscar
@@ -481,9 +577,9 @@ async function buscar(ev) {
     if (resultados.tracks.length) {
       h += '<div class="seccion">Canciones</div>';
       h += resultados.tracks.map((p, i) => filaPista(p, {
-        tap: `ponerCola([resultados.tracks[${i}]])`,
+        tap: `soloEsta(resultados.tracks[${i}])`,
         extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(resultados.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
-      })).join("");
+      }, false, "buscar", i)).join("");
     }
     el.innerHTML = h || '<div class="vacio">Sin resultados.</div>';
   } catch (e) { el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`; }
@@ -510,8 +606,10 @@ async function pedirOrbitron(ev) {
     const body = { query: q };
     if (orb.entities) body.prior_entities = orb.entities;   // seguimiento de la conversacion
     const r = await api("/api/v1/ai/playlist", { method: "POST", timeout: 90000, body: JSON.stringify(body) });
-    orb = { requestId: r.request_id, entities: r.entities, tracks: r.tracks || [] };
-    $("orb-txt").textContent = r.question ? r.question : `${orb.tracks.length} pistas para “${q}”`;
+    orb = { requestId: r.request_id, entities: r.entities, tracks: r.tracks || [],
+            texto: r.question ? r.question : `${(r.tracks || []).length} pistas para “${q}”` };
+    guardarOrb();
+    $("orb-txt").textContent = orb.texto;
     $("orb-resp").classList.add("visible");
     $("qo").value = ""; $("qo").placeholder = "Refina: “más tranquilo”, “solo de los 70”…";
     pintarOrbitron();
@@ -522,9 +620,9 @@ function pintarOrbitron() {
   $("lista-orbitron").innerHTML = orb.tracks.length ? orb.tracks.map((p, i) => filaPista(p, {
     tap: `ponerCola(orb.tracks, ${i})`,
     extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(orb.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
-  })).join("") : '<div class="vacio">Orbitron no encontró pistas.</div>';
+  }, false, "orb", i)).join("") : '<div class="vacio">Orbitron no encontró pistas.</div>';
 }
-function reproducirOrbitron() { if (orb.tracks.length) ponerCola(orb.tracks, 0); }
+function reproducirOrbitron() { if (orb.tracks.length) ponerCola(orb.tracks, st.shuffle ? -1 : 0); }
 async function expandirOrbitron() {
   if (!orb.requestId) return;
   $("b-expandir").disabled = true;
@@ -532,7 +630,9 @@ async function expandirOrbitron() {
     const r = await post("/api/v1/ai/playlist/" + orb.requestId + "/expand", {});
     const nuevas = r.tracks || [];
     orb.tracks = orb.tracks.concat(nuevas);
-    $("orb-txt").textContent = `${orb.tracks.length} pistas` + (nuevas.length ? "" : " (no hay más)");
+    orb.texto = `${orb.tracks.length} pistas` + (nuevas.length ? "" : " (no hay más)");
+    guardarOrb();
+    $("orb-txt").textContent = orb.texto;
     pintarOrbitron();
   } catch (e) { aviso(e.message, true); }
   finally { $("b-expandir").disabled = false; }
@@ -545,6 +645,55 @@ function verTab(v) {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("activa", t.dataset.v === v));
   document.querySelectorAll(".vista").forEach((x) => x.classList.toggle("activa", x.id === "v-" + v));
 }
+// =====================================================================
+// Ticket D-18: mantener presionada una pista -> menu de opciones
+// =====================================================================
+function pistaDe(lista, i) { return lista === "cola" ? st.cola[i] : lista === "orb" ? orb.tracks[i] : resultados.tracks[i]; }
+function abrirMenu(lista, i) {
+  const p = pistaDe(lista, i); if (!p) return;
+  const ops = [];
+  if (lista === "cola") {
+    ops.push(["▶ Reproducir desde aquí", `reproducirIndice(${i})`]);
+    ops.push(["Reproducir solo esta pista", `reproducirIndice(${i}, true)`]);
+    ops.push(["Quitar de la cola", `quitar(${i})`]);
+  } else {
+    const ref = lista === "orb" ? `orb.tracks[${i}]` : `resultados.tracks[${i}]`;
+    if (lista === "orb") ops.push(["▶ Reproducir la playlist desde aquí", `ponerCola(orb.tracks, ${i})`]);
+    ops.push(["Reproducir solo esta pista", `soloEsta(${ref})`]);
+    ops.push(["Reproducir a continuación", `aContinuacion(${ref})`]);
+    ops.push(["Agregar al final de la cola", `agregar(${ref})`]);
+  }
+  $("menu-tit").innerHTML = `<b>${esc(p.title)}</b> · ${esc(p.artist || p.artist_name || "")}`;
+  $("menu-ops").innerHTML = ops.map(([t, f]) => `<button onclick="cerrarMenu();${f}">${esc(t)}</button>`).join("");
+  $("menu").classList.add("visible");
+}
+function cerrarMenu() { $("menu").classList.remove("visible"); }
+(function () {
+  // tras abrir el menu, el "click" de soltar el dedo no debe tocar nada
+  // (ventana corta: iOS a veces ni lo manda, y no hay que tragarse el siguiente)
+  let lp = null, disparado = false, ignorarHasta = 0;
+  const cancelar = () => { if (lp) { clearTimeout(lp.t); lp = null; } };
+  document.addEventListener("pointerdown", (e) => {
+    const f = e.target.closest(".fila[data-l]");
+    if (!f || e.target.closest(".fila-acc")) return;
+    cancelar();
+    lp = { x: e.clientX, y: e.clientY, t: setTimeout(() => {
+      lp = null; disparado = true; ignorarHasta = Date.now() + 5000;
+      if (navigator.vibrate) navigator.vibrate(10);
+      abrirMenu(f.dataset.l, parseInt(f.dataset.i, 10));
+    }, 480) };
+  });
+  document.addEventListener("pointermove", (e) => { if (lp && Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 10) cancelar(); });
+  const soltar = () => { cancelar(); if (disparado) { disparado = false; ignorarHasta = Date.now() + 350; } };
+  document.addEventListener("pointerup", soltar);
+  document.addEventListener("pointercancel", soltar);
+  document.addEventListener("click", (e) => { if (Date.now() < ignorarHasta) { e.stopPropagation(); e.preventDefault(); } }, true);
+  document.addEventListener("contextmenu", (e) => {
+    const f = e.target.closest(".fila[data-l]"); if (!f) return;
+    e.preventDefault(); cancelar(); abrirMenu(f.dataset.l, parseInt(f.dataset.i, 10));
+  });
+})();
+
 // Tocar/arrastrar en la barra = seek
 (function () {
   const barra = $("barra");
@@ -577,7 +726,9 @@ function reloj() {
 reloj(); setInterval(reloj, 1000);
 
 renderCola();
-if (st.idx >= 0 && st.cola[st.idx]) { rx.track = st.cola[st.idx]; mia = st.cola[st.idx].id; pintarPista(rx.track); }
+if (st.idx >= 0 && st.cola[st.idx]) { rx.track = st.cola[st.idx]; pintarPista(rx.track); }
+if (orb.tracks && orb.tracks.length) { $("orb-txt").textContent = orb.texto || `${orb.tracks.length} pistas`; $("orb-resp").classList.add("visible"); pintarOrbitron(); }
+pintarModos();
 pintarEstado();
 cargarDestinos().then(sondear);
 setInterval(sondear, 2000);
