@@ -1179,6 +1179,10 @@ def _touch_user_activity(user_id):
 # tiene reproductor). Todo lo demás (home, artist, album, track, search,
 # browse, búsqueda avanzada y sus /api/ de lectura) queda accesible tal cual
 # ya está, sin tocar esos templates.
+# Ticket C-03: paginas que SI ve un invitado (el resto redirige a /colab/app).
+_COLLAB_GUEST_PAGES = {'collab_guest_app', 'collab_join', 'collab_leave', 'cover_file', 'cover',
+                       'cast_cover', 'static', 'service_worker'}
+
 _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'admin_dashboard', 'admin_users', 'admin_users_estado', 'admin_approve_user',
     'admin_reject_user', 'admin_revoke_user',
@@ -1216,6 +1220,11 @@ def _require_login():
             if request.path.startswith('/api/'):
                 return jsonify({'error': 'not_authorized_guest'}), 403
             return "No autorizado para invitados de la playlist colaborativa", 403
+        # Ticket C-03: el invitado ya no navega la web antigua (se rompía en
+        # el celular): cualquier PAGINA lo lleva a la web de invitados.
+        if (not request.path.startswith('/api/') and ep not in _COLLAB_GUEST_PAGES
+                and request.method == 'GET'):
+            return redirect(url_for('collab_guest_app'))
         return
     if not session.get('user_id'):
         if request.path.startswith('/api/'):
@@ -1428,11 +1437,39 @@ def api_login_required(view):
                 user = dict(row) if row else None
             finally:
                 conn.close()
+        elif session.get('is_collab_guest') and request.endpoint in _COLLAB_GUEST_API_READ:
+            # Ticket C-03: el invitado de la playlist colaborativa (cookie, sin
+            # cuenta) puede LEER la biblioteca con estos mismos endpoints, para
+            # la web de invitados (/colab/app). Actúa como el anfitrión (dueño
+            # de la sesión) solo para lo que esas lecturas necesitan (tamaño de
+            # página de sus ajustes); nunca como admin.
+            conn = get_db_connection()
+            try:
+                sess = _collab_active_session(conn)
+                row = None
+                if sess and sess['id'] == session.get('collab_session_id'):
+                    row = conn.execute('SELECT * FROM users WHERE id=?', (sess['created_by'],)).fetchone()
+            finally:
+                conn.close()
+            if not row:
+                return jsonify({'error': 'collab_session_ended'}), 401
+            user = dict(row, is_admin=0, is_collab_guest=True)
         if not user or not user['is_approved']:
             return jsonify({'error': 'not_authenticated'}), 401
         g.api_user = user
         return view(*args, **kwargs)
     return wrapped
+
+
+# Ticket C-03: endpoints /api/v1 de SOLO LECTURA que puede usar un invitado
+# de la playlist colaborativa (ver api_login_required). Cualquier otro
+# /api/v1 sigue exigiendo una cuenta real.
+_COLLAB_GUEST_API_READ = {
+    'api_v1_home_facets', 'api_v1_albums', 'api_v1_meta_tracks', 'api_v1_album_tracks',
+    'api_v1_album_detail', 'api_v1_artist_detail', 'api_v1_artist_tracks',
+    'api_v1_search', 'api_v1_search_advanced', 'api_v1_search_advanced_options',
+    'api_v1_avatars',
+}
 
 def api_admin_required(view):
     """Como api_login_required (Bearer o cookie, siempre JSON, nunca
@@ -4829,7 +4866,7 @@ def collab_join(token):
         session['collab_name']           = participant['name']
         session['collab_avatar']         = avatar or {'type': 'initials',
                                                         'text': _collab_initials(participant['name'])}
-        return redirect(url_for('home'))
+        return redirect(url_for('collab_guest_app'))   # Ticket C-03
     finally:
         conn.close()
 
@@ -4838,6 +4875,116 @@ def collab_join(token):
 def collab_leave():
     session.clear()
     return redirect(url_for('login'))
+
+
+# ── Ticket C-03 (pedido por Niko): web de invitados con el diseño de Desktop ──
+# Página única para celular (templates/colab_app.html + static/web/*). Lee la
+# biblioteca con los mismos /api/v1 que usan las apps (_COLLAB_GUEST_API_READ)
+# y agrega pistas con /api/collab/add. Sin reproductor ni configuración.
+
+def _collab_guest_ctx(conn):
+    """(sesión activa, fila del participante) del invitado actual, o (None, None)."""
+    if not session.get('is_collab_guest'):
+        return None, None
+    sess = _collab_active_session(conn)
+    if not sess or sess['id'] != session.get('collab_session_id'):
+        return None, None
+    row = conn.execute('SELECT * FROM collab_participants WHERE id=?',
+                       (session.get('collab_participant_id'),)).fetchone()
+    return sess, (dict(row) if row else None)
+
+
+@app.route('/colab/app')
+def collab_guest_app():
+    if not session.get('is_collab_guest'):
+        return redirect(url_for('login'))
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_guest_ctx(conn)
+    finally:
+        conn.close()
+    return render_template('colab_app.html', sesion_activa=bool(sess and part))
+
+
+@app.route('/api/collab/yo')
+def api_collab_yo():
+    """Estado del invitado: nombre, avatar, cupo, permiso de delegado, sus
+    pistas agregadas (con si ya llegaron al anfitrión) y la cola de la sesión."""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_guest_ctx(conn)
+        if not sess or not part:
+            return jsonify({'active': False})
+        usados = _collab_window_count(conn, sess, part['id'])
+        rows = conn.execute(
+            '''SELECT cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id,
+                      t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
+                      t.is_mqa, t.codec, t.sample_rate_real,
+                      al.id AS album_id, al.name AS album_name, al.cover_path,
+                      ar.id AS artist_id, ar.name AS artist_name,
+                      cp.name AS added_by, cp.avatar_category, cp.avatar_file
+               FROM collab_queue_items cqi
+               JOIN tracks t ON t.id = cqi.track_id
+               LEFT JOIN albums al ON al.id = t.album_id
+               LEFT JOIN artists ar ON ar.id = al.artist_id
+               JOIN collab_participants cp ON cp.id = cqi.participant_id
+               WHERE cqi.session_id=? ORDER BY cqi.added_at''', (sess['id'],)).fetchall()
+        mias, sesion = [], []
+        for r in rows:
+            d = dict(r)
+            fmt, led = _fmt_format(d)
+            item = {
+                'id': d['track_id'], 'title': d['title'], 'duration': d['duration'],
+                'format_display': fmt, 'format_color': led,
+                'album_id': d['album_id'], 'album_name': d['album_name'],
+                'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
+                'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
+                'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
+                'added_by': d['added_by'],
+                'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by']),
+            }
+            sesion.append(item)
+            if d['participant_id'] == part['id']:
+                mias.append(item)
+        return jsonify({
+            'active': True,
+            'name': part['name'],
+            'avatar': _collab_avatar_display(part.get('avatar_category'), part.get('avatar_file'), part['name']),
+            'avatar_category': part.get('avatar_category'), 'avatar_file': part.get('avatar_file'),
+            'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
+            'used': usados, 'remaining': max(0, sess['max_tracks'] - usados),
+            'can_pull': bool(part.get('can_pull')),
+            'mine': mias, 'session_tracks': sesion,
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/collab/perfil', methods=['POST'])
+def api_collab_perfil():
+    """El invitado cambia su apodo y/o avatar (extracto del perfil de un
+    usuario normal). Mismas validaciones que el formulario de ingreso."""
+    data = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_guest_ctx(conn)
+        if not sess or not part:
+            return jsonify({'status': 'error', 'message': 'La sesión colaborativa ya terminó.'}), 410
+        name = (data.get('name') or '').strip()[:40] or part['name']
+        if 'avatar_category' in data or 'avatar_file' in data:
+            cat, fname = _collab_resolve_avatar_ref(data)
+        else:
+            cat, fname = part.get('avatar_category'), part.get('avatar_file')
+        conn.execute('UPDATE collab_participants SET name=?, avatar_category=?, avatar_file=? WHERE id=?',
+                     (name, cat, fname, part['id']))
+        conn.commit()
+        avatar = _collab_avatar_display(cat, fname, name)
+        session['collab_name'] = name
+        session['collab_avatar'] = avatar
+        return jsonify({'status': 'ok', 'name': name, 'avatar': avatar,
+                        'avatar_category': cat, 'avatar_file': fname})
+    finally:
+        conn.close()
 
 
 @app.route('/api/collab/add', methods=['POST'])
