@@ -4762,6 +4762,13 @@ def api_admin_collab_pull():
                 continue
             d = track_to_json(by_id[it['track_id']])
             d['collab_added_by'] = added_by_map.get(it['participant_id'])
+            # Ticket C-02 (reportado por Niko): track_to_json es el formato de
+            # la WEB (audio_url) y no trae stream_url, que la app iOS exige
+            # (OrbyteTrack.streamURL no opcional): el decode de toda la cola
+            # fallaba y "Recargar cola" nunca agregaba nada. Mismos campos que
+            # el resto de /api/v1 (ver favoritos / busqueda).
+            d['stream_url']    = f'/api/v1/stream/{d["id"]}'
+            d['container_ext'] = _container_ext(d)
             result.append(d)
 
         item_ids = [it['id'] for it in ordered_items]
