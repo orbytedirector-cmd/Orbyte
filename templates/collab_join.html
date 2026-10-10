@@ -1,144 +1,124 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <title>Unirse a la playlist — Orbyte</title>
-
-  <link rel="manifest" href="/static/manifest.json">
-  <meta name="theme-color" content="#0a0a0a">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Orbyte">
-  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
-
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Orbyte · Unirme a la playlist</title>
+<!-- Ticket C-03: ingreso del invitado con el diseño de Orbyte-Desktop
+     (extracto de "Editar perfil": apodo + avatar). Mismos campos del
+     formulario de siempre (name, avatar_category, avatar_file). -->
+<link rel="icon" href="{{ url_for('static', filename='web/assets/logo-icon.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='web/orbyte.css') }}?v=c03">
+<style>
+  .join-wrap { min-height: 100%; overflow-y: auto; padding: calc(var(--safe-top) + 28px) var(--pad) calc(var(--safe-bottom) + 28px); max-width: 520px; margin: 0 auto; }
+  .join-brand { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 22px; }
+  .join-brand img { height: 34px; }
+  .join-brand .brand-title { font-size: 26px; }
+  .join-intro { color: var(--text-secondary); font-size: 14px; line-height: 1.5; text-align: center; margin: 0 0 22px; }
+  .join-intro b { color: var(--accent-bright); font-weight: 600; }
+  .join-preview { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 18px; }
+  .join-submit { margin-top: 4px; }
+  .join-error { border: 1px solid #5A1D1D; color: #FF6B6B; background: rgba(255,69,58,0.06); border-radius: 12px; padding: 14px; font-size: 14px; line-height: 1.5; text-align: center; }
+  body { overflow-y: auto; }
+</style>
 </head>
-<body class="auth-body">
-  <div class="auth-wrap">
-    <div class="auth-card">
-      <img src="/static/logo-full.png" alt="Orbyte" class="auth-logo">
-
-      {% if error == 'invalid' %}
-      <div class="auth-notice auth-notice-error">
-        Este QR ya no es válido — la sesión colaborativa terminó o nunca existió.
-        Pedile al anfitrión que genere uno nuevo.
-      </div>
-      {% else %}
-      <p style="color:var(--text-secondary);margin:0 0 1rem;text-align:center">
-        Te vas a unir a la playlist colaborativa. Vas a poder navegar la biblioteca
-        y añadir pistas a la cola — hasta
-        {{ collab_session.max_tracks }} pistas cada {{ collab_session.window_hours }}h.
-      </p>
-      <form method="POST" class="auth-form" id="collab-join-form">
-        <label class="auth-label" for="collab-name">¿Cómo te llamamos?</label>
-        <input type="text" id="collab-name" name="name" class="auth-input" maxlength="40"
-               placeholder="Tu nombre" required autofocus autocomplete="off">
-
-        <label class="auth-label">Elegí tu avatar (opcional)</label>
-        <div class="avatar-picker">
-          <div class="avatar-picker-preview">
-            <span class="avatar-circle avatar-circle-lg" id="avatar-preview"><span>?</span></span>
-            <button type="button" class="track-btn ghost avatar-picker-clear" id="avatar-clear-btn" style="display:none">
-              Usar iniciales
-            </button>
-          </div>
-          <div class="avatar-picker-tabs">
-            <button type="button" class="avatar-tab-btn active" data-tab="femeninos">Femeninos</button>
-            <button type="button" class="avatar-tab-btn" data-tab="masculinos">Masculinos</button>
-          </div>
-          <div class="avatar-picker-grid" data-tab-panel="femeninos">
-            {% for f in avatar_catalog.femeninos %}
-            <button type="button" class="avatar-option" data-category="femeninos" data-file="{{ f }}" aria-label="Avatar femenino {{ loop.index }}">
-              <img src="{{ url_for('static', filename='avatares/femeninos/' ~ f) }}" alt="" loading="lazy">
-            </button>
-            {% endfor %}
-          </div>
-          <div class="avatar-picker-grid" data-tab-panel="masculinos" hidden>
-            {% for f in avatar_catalog.masculinos %}
-            <button type="button" class="avatar-option" data-category="masculinos" data-file="{{ f }}" aria-label="Avatar masculino {{ loop.index }}">
-              <img src="{{ url_for('static', filename='avatares/masculinos/' ~ f) }}" alt="" loading="lazy">
-            </button>
-            {% endfor %}
-          </div>
-        </div>
-        <input type="hidden" name="avatar_category" id="avatar-category-input">
-        <input type="hidden" name="avatar_file" id="avatar-file-input">
-
-        <button type="submit" class="track-btn primary auth-submit">Unirme</button>
-      </form>
-      {% endif %}
-    </div>
+<body>
+<div class="join-wrap">
+  <div class="join-brand">
+    <img src="{{ url_for('static', filename='web/assets/logo-icon.png') }}" alt="">
+    <div class="brand-title">ORBYTE</div>
   </div>
+  <div class="page-title gold-text" style="text-align:center">Playlist colaborativa</div>
 
-  <script>
-  (function () {
-    'use strict';
-    var nameInput = document.getElementById('collab-name');
-    var preview   = document.getElementById('avatar-preview');
-    var clearBtn  = document.getElementById('avatar-clear-btn');
-    var catInput  = document.getElementById('avatar-category-input');
-    var fileInput = document.getElementById('avatar-file-input');
-    var tabBtns   = document.querySelectorAll('.avatar-tab-btn');
-    var panels    = document.querySelectorAll('[data-tab-panel]');
-    var options   = document.querySelectorAll('.avatar-option');
-    if (!nameInput || !preview) return; // pantalla de error (QR inválido) — no hay form
+  {% if error == 'invalid' %}
+  <div class="join-error">Este QR ya no es válido: la sesión colaborativa terminó o nunca existió.
+    Pedile al anfitrión que genere uno nuevo.</div>
+  {% else %}
+  <p class="join-intro">Vas a poder explorar la biblioteca y sumar canciones a la música de la reunión:
+    hasta <b>{{ collab_session.max_tracks }} pistas</b> cada <b>{{ '%g'|format(collab_session.window_hours) }} h</b>.</p>
 
-    // Mismo criterio que _collab_initials() en app.py: nombre y apellido ->
-    // primera letra de cada uno; una sola palabra -> sus 2 primeras letras.
-    function computeInitials(name) {
-      var words = (name || '').trim().split(/\s+/).filter(Boolean);
-      if (!words.length) return '?';
-      if (words.length === 1) {
-        var w = words[0];
-        return (w.length >= 2 ? w.slice(0, 2) : w[0] + w[0]).toUpperCase();
-      }
-      return (words[0][0] + words[words.length - 1][0]).toUpperCase();
-    }
+  <form method="POST" id="collab-join-form">
+    <div class="join-preview">
+      <div class="prof-avatar" id="avatar-preview" style="width:76px;height:76px;font-size:28px">?</div>
+    </div>
 
-    function showInitials() {
-      preview.innerHTML = '<span>' + computeInitials(nameInput.value) + '</span>';
-      preview.classList.remove('has-image');
-      clearBtn.style.display = 'none';
-      catInput.value = '';
-      fileInput.value = '';
-      options.forEach(function (o) { o.classList.remove('is-selected'); });
-    }
+    <div class="cfg-section">
+      <div class="cfg-header">Apodo</div>
+      <div class="cfg-card prof-card-pad">
+        <input type="text" id="collab-name" name="name" class="prof-input" maxlength="40"
+               placeholder="Cómo te van a ver los demás" required autocomplete="off" autocapitalize="words">
+      </div>
+    </div>
 
-    function selectAvatar(opt) {
-      options.forEach(function (o) { o.classList.remove('is-selected'); });
-      opt.classList.add('is-selected');
-      preview.innerHTML = '<img src="' + opt.querySelector('img').src + '" alt="">';
-      preview.classList.add('has-image');
-      clearBtn.style.display = '';
-      catInput.value = opt.dataset.category;
-      fileInput.value = opt.dataset.file;
-    }
-
-    nameInput.addEventListener('input', function () {
-      if (!preview.classList.contains('has-image')) showInitials();
+    <div class="cfg-section">
+      <div class="cfg-header">Avatar (opcional)</div>
+      <div class="cfg-card prof-card-pad">
+        <div class="cfg-seg">
+          <button type="button" class="on" data-tab="femeninos">Femeninos</button>
+          <button type="button" data-tab="masculinos">Masculinos</button>
+        </div>
+        {% for cat in ('femeninos', 'masculinos') %}
+        <div class="prof-avatar-grid" data-panel="{{ cat }}" {% if cat != 'femeninos' %}hidden{% endif %}>
+          <div class="prof-avatar-cell on" data-category="" data-file="" title="Sin imagen (iniciales)">Aa</div>
+          {% for f in avatar_catalog[cat] %}
+          <div class="prof-avatar-cell" data-category="{{ cat }}" data-file="{{ f }}">
+            <img src="{{ url_for('static', filename='avatares/' ~ cat ~ '/' ~ f) }}" alt="" loading="lazy">
+          </div>
+          {% endfor %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    <input type="hidden" name="avatar_category" id="avatar-category-input">
+    <input type="hidden" name="avatar_file" id="avatar-file-input">
+    <button type="submit" class="orbitron-big-btn join-submit">Unirme</button>
+  </form>
+  {% endif %}
+</div>
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("collab-join-form");
+  if (!form) return;
+  var name = document.getElementById("collab-name");
+  var preview = document.getElementById("avatar-preview");
+  var catIn = document.getElementById("avatar-category-input");
+  var fileIn = document.getElementById("avatar-file-input");
+  var chosenImg = null;
+  function initials(s) {
+    var p = (s || "").trim().split(/\s+/).filter(Boolean);
+    return p.length ? p.map(function (w) { return w[0]; }).join("").slice(0, 2).toUpperCase() : "?";
+  }
+  function paint() {
+    if (chosenImg) preview.innerHTML = '<img src="' + chosenImg + '" alt="">';
+    else preview.textContent = initials(name.value);
+  }
+  document.querySelectorAll(".cfg-seg button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      document.querySelectorAll(".cfg-seg button").forEach(function (x) { x.classList.toggle("on", x === b); });
+      document.querySelectorAll(".prof-avatar-grid").forEach(function (g) { g.hidden = g.dataset.panel !== b.dataset.tab; });
     });
-
-    tabBtns.forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        tabBtns.forEach(function (b) { b.classList.remove('active'); });
-        btn.classList.add('active');
-        panels.forEach(function (p) { p.hidden = p.getAttribute('data-tab-panel') !== btn.dataset.tab; });
-      });
+  });
+  document.querySelectorAll(".prof-avatar-cell").forEach(function (c) {
+    c.addEventListener("click", function () {
+      document.querySelectorAll(".prof-avatar-cell").forEach(function (x) { x.classList.remove("on"); });
+      // "Aa" (iniciales) queda marcado en las dos pestañas
+      if (!c.dataset.file) document.querySelectorAll('.prof-avatar-cell[data-file=""]').forEach(function (x) { x.classList.add("on"); });
+      else c.classList.add("on");
+      catIn.value = c.dataset.category; fileIn.value = c.dataset.file;
+      var img = c.querySelector("img"); chosenImg = img ? img.src : null;
+      paint();
     });
-
-    options.forEach(function (opt) {
-      opt.addEventListener('click', function () {
-        opt.classList.contains('is-selected') ? showInitials() : selectAvatar(opt);
-      });
-    });
-
-    clearBtn.addEventListener('click', showInitials);
-
-    showInitials();
-  })();
-  </script>
+  });
+  name.addEventListener("input", paint);
+  form.addEventListener("submit", function (e) {
+    if (!name.value.trim()) { e.preventDefault(); name.focus(); }
+  });
+  paint();
+})();
+</script>
 </body>
 </html>

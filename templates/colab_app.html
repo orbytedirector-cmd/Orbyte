@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Orbyte · Playlist colaborativa</title>
+<!-- Ticket C-03 (pedido por Niko): web de invitados con el diseño de
+     Orbyte-Desktop, pensada para celular. Solo lo que un invitado puede
+     usar: explorar, buscar y sumar pistas. Sin reproductor ni ajustes. -->
+<link rel="icon" href="{{ url_for('static', filename='web/assets/logo-icon.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='web/orbyte.css') }}?v=c03">
+</head>
+<body>
+<div id="app-shell">
+{% if sesion_activa %}
+  <header class="app-header">
+    <img class="brand-icon" src="{{ url_for('static', filename='web/assets/logo-icon.png') }}" alt="">
+    <div class="brand-title">ORBYTE</div>
+    <div class="spacer"></div>
+    <div class="user-email" id="user-name"></div>
+    <div class="avatar" id="avatar" title="Tu perfil">?</div>
+  </header>
+  <div class="tabs-wrap">
+    <nav class="main-tabs">
+      <button class="main-tab active" data-tab="home"><span class="ico">⊞</span>Inicio</button>
+      <button class="main-tab" data-tab="search"><span class="ico">⌕</span>Buscar</button>
+      <button class="main-tab" data-tab="mine"><span class="ico">♫</span>Mis pistas<span class="tab-badge hidden" id="mine-badge"></span></button>
+    </nav>
+  </div>
+  <div class="tab-root" id="tab-home">
+    <div class="quota-banner" id="quota-banner"></div>
+    <div id="home-body"></div>
+  </div>
+  <div class="tab-root hidden" id="tab-search"></div>
+  <div class="tab-root hidden" id="tab-mine"></div>
+{% else %}
+  <div class="full-state">
+    <img class="logo" src="{{ url_for('static', filename='web/assets/logo-icon.png') }}" alt="">
+    <div class="page-title gold-text">Sesión terminada</div>
+    <div>Esta playlist colaborativa ya no está activa. Pedile al anfitrión el QR nuevo.</div>
+  </div>
+{% endif %}
+</div>
+<script src="{{ url_for('static', filename='web/core.js') }}?v=c03"></script>
+<script src="{{ url_for('static', filename='web/guest.js') }}?v=c03"></script>
+</body>
+</html>
