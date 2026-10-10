@@ -536,8 +536,10 @@ function tickBarra() {
   $("relleno").style.width = dur ? Math.min(100, (pos / dur) * 100) + "%" : "0";
   $("t-pos").textContent = fmt(pos); $("t-dur").textContent = fmt(dur);
 }
+// Ticket D-21 (pedido por Niko): tocar una pista NO reproduce nada; todo se
+// hace desde el menú (mantener presionado). Evita reproducir sin querer.
 function filaPista(p, acciones, actual, lista, i) {
-  return `<div class="fila${actual ? " actual" : ""}" ${lista ? `data-l="${lista}" data-i="${i}"` : ""} ${acciones.tap ? `onclick="${acciones.tap}"` : ""}>
+  return `<div class="fila${actual ? " actual" : ""}" ${lista ? `data-l="${lista}" data-i="${i}"` : ""}>
     ${p.cover_url ? `<img class="mini-cover" loading="lazy" decoding="async" src="${esc(miniatura(p.cover_url, 96))}">` : '<div class="mini-cover"></div>'}
     <div class="fila-texto"><div class="fila-t">${esc(p.title)}</div>
       <div class="fila-s"><span class="led" style="display:inline-block;margin-right:5px;background:${ledColor(p.format_color || p.led_color)}"></span>${esc([p.artist || p.artist_name, p.album_name].filter(Boolean).join(" · "))}${p.duration ? " · " + fmt(p.duration) : ""}</div></div>
@@ -550,7 +552,6 @@ function renderCola() {
     ? `${st.cola.length} pista${st.cola.length > 1 ? "s" : ""} · mantén presionada una para más opciones` : "";
   if (!st.cola.length) { el.innerHTML = '<div class="vacio">La cola está vacía.<br>Agrega pistas desde Buscar u Orbitron.</div>'; return; }
   el.innerHTML = st.cola.map((p, i) => filaPista(p, {
-    tap: `reproducirIndice(${i})`,
     extra: `<button class="fila-acc" onclick="event.stopPropagation();quitar(${i})" aria-label="Quitar">×</button>`,
   }, i === st.idx, "cola", i)).join("");
 }
@@ -559,13 +560,13 @@ function renderCola() {
 // Cola
 // =====================================================================
 function ponerCola(pistas, desde = 0) { st.cola = pistas.slice(); st.idx = -1; guardar(); renderCola(); reproducirIndice(desde); verTab("cola"); }
-function agregar(p) { st.cola.push(p); guardar(); renderCola(); aviso("Agregada al final de la cola: " + p.title); if (st.idx < 0) reproducirIndice(st.cola.length - 1); else sincronizarCola(); }
+function agregar(p) { st.cola.push(p); guardar(); renderCola(); aviso("Agregada al final de la cola: " + p.title); if (st.idx >= 0) sincronizarCola(); }
 // Ticket D-18: insertar justo despues de la que suena
 function insertarSiguiente(p) { const j = st.idx >= 0 ? st.idx + 1 : st.cola.length; st.cola.splice(j, 0, p); guardar(); renderCola(); return j; }
 function aContinuacion(p) {
   const j = insertarSiguiente(p);
   aviso("Sonará a continuación: " + p.title);
-  if (st.idx < 0) reproducirIndice(j); else sincronizarCola();
+  if (st.idx >= 0) sincronizarCola();
 }
 // Suena esa pista y se detiene; la cola queda intacta (se inserta tras la actual)
 function soloEsta(p) { const j = insertarSiguiente(p); reproducirIndice(j, true); }
@@ -591,29 +592,55 @@ async function buscar(ev) {
     let h = "";
     if (resultados.albums.length) {
       h += '<div class="seccion">Álbumes</div>';
-      h += resultados.albums.slice(0, 12).map((a, i) => `<div class="fila" onclick="abrirAlbum(${i})">
+      h += resultados.albums.slice(0, 12).map((a, i) => `<div class="fila" data-l="album" data-i="${i}" onclick="abrirAlbum(${i})">
         ${a.cover_url ? `<img class="mini-cover" loading="lazy" decoding="async" src="${esc(miniatura(a.cover_url, 96))}">` : '<div class="mini-cover"></div>'}
         <div class="fila-texto"><div class="fila-t">${esc(a.name)}</div><div class="fila-s">${esc([a.artist_name, a.year, a.track_count && a.track_count + " pistas"].filter(Boolean).join(" · "))}</div></div>
-        <button class="fila-acc" aria-label="Reproducir álbum">▶</button></div>`).join("");
+        <span class="fila-acc" style="display:flex;align-items:center;justify-content:center">›</span></div>`).join("");
     }
     if (resultados.tracks.length) {
       h += '<div class="seccion">Canciones</div>';
       h += resultados.tracks.map((p, i) => filaPista(p, {
-        tap: `soloEsta(resultados.tracks[${i}])`,
-        extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(resultados.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
       }, false, "buscar", i)).join("");
     }
     el.innerHTML = h || '<div class="vacio">Sin resultados.</div>';
+    htmlResultados = el.innerHTML;
   } catch (e) { el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`; }
 }
+// Ticket D-21: abrir un álbum muestra sus pistas, NO lo reproduce.
+let htmlResultados = "", albumAbierto = null;
+async function pistasDeAlbum(a) {
+  const r = await api("/api/v1/albums/" + a.id + "/tracks");
+  return (r.tracks || []).map((t) => Object.assign({ artist: a.artist_name }, t));
+}
 async function abrirAlbum(i) {
+  const a = resultados.albums[i], el = $("lista-buscar");
+  el.innerHTML = '<div class="vacio"><div class="spinner" style="margin:auto"></div></div>';
+  try {
+    const pistas = await pistasDeAlbum(a);
+    albumAbierto = { a, pistas };
+    el.innerHTML = `<div class="fila" onclick="volverResultados()" style="color:var(--gold2)">‹&nbsp; Volver a los resultados</div>
+      <div class="seccion">${esc(a.name)}${a.artist_name ? " · " + esc(a.artist_name) : ""}</div>` +
+      (pistas.length ? pistas.map((p, k) => filaPista(p, {}, false, "alb", k)).join("") : '<div class="vacio">El álbum no tiene pistas.</div>') +
+      '<div class="vacio" style="padding:14px">Mantén presionada una pista para reproducirla.</div>';
+    el.scrollTop = 0;
+  } catch (e) { el.innerHTML = `<div class="vacio">${esc(e.message)}</div>`; }
+}
+function volverResultados() { albumAbierto = null; $("lista-buscar").innerHTML = htmlResultados; }
+// Opciones de un álbum completo (mantener presionado sobre el álbum)
+async function albumAccion(i, modo) {
   const a = resultados.albums[i]; aviso("Cargando álbum…");
   try {
-    const r = await api("/api/v1/albums/" + a.id + "/tracks");
-    const pistas = (r.tracks || []).map((t) => Object.assign({ artist: a.artist_name }, t));
+    const pistas = await pistasDeAlbum(a);
     if (!pistas.length) return aviso("El álbum no tiene pistas", true);
-    ponerCola(pistas, 0);
+    if (modo === "play") return ponerCola(pistas, 0);
+    insertarVarias(pistas, modo === "next");
+    aviso(modo === "next" ? `Sonará a continuación: ${a.name}` : `Agregado al final de la cola: ${a.name}`);
   } catch (e) { aviso(e.message, true); }
+}
+function insertarVarias(pistas, despuesDeLaActual) {
+  const j = despuesDeLaActual && st.idx >= 0 ? st.idx + 1 : st.cola.length;
+  st.cola.splice(j, 0, ...pistas); guardar(); renderCola();
+  if (st.idx < 0) aviso("Agregado a la cola. Toca ▶ para reproducir."); else sincronizarCola();
 }
 
 // =====================================================================
@@ -645,8 +672,6 @@ function pintarOrbitron() {
   if (!orb.tracks.length) { el.innerHTML = '<div class="vacio">Orbitron no encontró pistas.</div>'; return; }
   const scroll = el.scrollTop;
   el.innerHTML = orb.tracks.map((p, i) => filaPista(p, {
-    tap: `ponerCola(orb.tracks, ${i})`,
-    extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(orb.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
   }, false, "orb", i)).join("") + pieOrbitron();
   el.scrollTop = scroll;
 }
@@ -743,17 +768,15 @@ function pintarPlaylists() {
       <div class="pl-nombre">${esc(a.name)}<div class="fila-s">${a.tracks.length} pistas</div></div>
       <button class="btn" style="height:40px" onclick="reproducirPlaylist()" ${a.tracks.length ? "" : "disabled"}>▶ Reproducir todo</button>`;
     el.innerHTML = a.tracks.length ? a.tracks.map((p, i) => filaPista(p, {
-      tap: `ponerCola(playlists.abierta.tracks, ${i})`,
-      extra: `<button class="fila-acc" onclick="event.stopPropagation();agregar(playlists.abierta.tracks[${i}])" aria-label="Agregar a la cola">+</button>`,
     }, false, "pl", i)).join("") : '<div class="vacio">Esta playlist está vacía.</div>';
     return;
   }
   cab.innerHTML = `<div class="pl-nombre">Tus playlists</div><button class="btn sec" style="height:40px" onclick="cargarPlaylists()">↻</button>`;
   if (playlists.lista === null) { el.innerHTML = '<div class="vacio"><div class="spinner" style="margin:auto"></div></div>'; return; }
-  el.innerHTML = playlists.lista.length ? playlists.lista.map((pl) => `<div class="fila" onclick="abrirPlaylist(${pl.id})">
+  el.innerHTML = playlists.lista.length ? playlists.lista.map((pl, k) => `<div class="fila" data-l="plist" data-i="${k}" onclick="abrirPlaylist(${pl.id})">
       <div class="pl-ico">♫</div>
       <div class="fila-texto"><div class="fila-t">${esc(pl.name)}</div><div class="fila-s">${pl.track_count} pista${pl.track_count === 1 ? "" : "s"}${pl.last_played_at ? " · última vez " + esc(String(pl.last_played_at).slice(0, 10)) : ""}</div></div>
-      <button class="fila-acc" onclick="event.stopPropagation();abrirPlaylist(${pl.id}, true)" aria-label="Reproducir">▶</button></div>`).join("")
+      <span class="fila-acc" style="display:flex;align-items:center;justify-content:center">›</span></div>`).join("")
     : '<div class="vacio">Todavía no tienes playlists.<br>Guarda una desde Orbitron o desde las otras apps.</div>';
 }
 async function abrirPlaylist(id, tocar) {
@@ -763,6 +786,16 @@ async function abrirPlaylist(id, tocar) {
     playlists.abierta = { id: r.id, name: r.name, tracks: (r.tracks || []).map((t) => Object.assign({ artist: t.artist_name }, t)) };
     pintarPlaylists(); $("lista-playlists").scrollTop = 0;
     if (tocar) reproducirPlaylist();
+  } catch (e) { aviso(e.message, true); }
+}
+async function playlistAccion(id, modo) {
+  try {
+    const r = await api("/api/v1/playlists/" + id);
+    const pistas = (r.tracks || []).map((t) => Object.assign({ artist: t.artist_name }, t));
+    if (!pistas.length) return aviso("La playlist está vacía", true);
+    if (modo === "play") { ponerCola(pistas, st.shuffle ? -1 : 0); post(`/api/v1/playlists/${id}/mark-played`, {}).catch(() => {}); return; }
+    insertarVarias(pistas, modo === "next");
+    aviso(modo === "next" ? `Sonará a continuación: ${r.name}` : `Agregada al final de la cola: ${r.name}`);
   } catch (e) { aviso(e.message, true); }
 }
 function reproducirPlaylist() {
@@ -784,9 +817,23 @@ function verTab(v) {
 // =====================================================================
 function pistaDe(lista, i) {
   return lista === "cola" ? st.cola[i] : lista === "orb" ? orb.tracks[i]
-       : lista === "pl" ? (playlists.abierta && playlists.abierta.tracks[i]) : resultados.tracks[i];
+       : lista === "pl" ? (playlists.abierta && playlists.abierta.tracks[i])
+       : lista === "alb" ? (albumAbierto && albumAbierto.pistas[i]) : resultados.tracks[i];
 }
 function abrirMenu(lista, i) {
+  // Ticket D-21: álbum y playlist completos (mantener presionado sobre ellos)
+  if (lista === "album" || lista === "plist") {
+    const item = lista === "album" ? resultados.albums[i] : (playlists.lista || [])[i];
+    if (!item) return;
+    const f = lista === "album" ? (m) => `albumAccion(${i}, '${m}')` : (m) => `playlistAccion(${item.id}, '${m}')`;
+    const ops = [["▶ Reproducir " + (lista === "album" ? "el álbum completo" : "la playlist"), f("play")],
+                 ["Reproducir a continuación", f("next")], ["Agregar al final de la cola", f("end")],
+                 [lista === "album" ? "Ver pistas" : "Ver la playlist", lista === "album" ? `abrirAlbum(${i})` : `abrirPlaylist(${item.id})`]];
+    $("menu-tit").innerHTML = `<b>${esc(item.name)}</b>${item.artist_name ? " · " + esc(item.artist_name) : ""}`;
+    $("menu-ops").innerHTML = ops.map(([t, fn]) => `<button onclick="cerrarMenu();${fn}">${esc(t)}</button>`).join("");
+    $("menu").classList.add("visible");
+    return;
+  }
   const p = pistaDe(lista, i); if (!p) return;
   const ops = [];
   if (lista === "cola") {
@@ -794,9 +841,10 @@ function abrirMenu(lista, i) {
     ops.push(["Reproducir solo esta pista", `reproducirIndice(${i}, true)`]);
     ops.push(["Quitar de la cola", `quitar(${i})`]);
   } else {
-    const lst = { orb: "orb.tracks", pl: "playlists.abierta.tracks", buscar: "resultados.tracks" }[lista];
+    const lst = { orb: "orb.tracks", pl: "playlists.abierta.tracks", buscar: "resultados.tracks", alb: "albumAbierto.pistas" }[lista];
     const ref = `${lst}[${i}]`;
     if (lista === "orb" || lista === "pl") ops.push(["▶ Reproducir la playlist desde aquí", `ponerCola(${lst}, ${i})`]);
+    if (lista === "alb") ops.push(["▶ Reproducir el álbum desde aquí", `ponerCola(${lst}, ${i})`]);
     ops.push(["Reproducir solo esta pista", `soloEsta(${ref})`]);
     ops.push(["Reproducir a continuación", `aContinuacion(${ref})`]);
     ops.push(["Agregar al final de la cola", `agregar(${ref})`]);
