@@ -8514,7 +8514,8 @@ def _cast_try_send_track(control_url, track, media_url, cover_url, file_path, fi
         status, body = _cast_send_track(control_url, media_url, didl)
         app.logger.info(f"[cast] SetAVTransportURI+Play mime={mime} dlna={'si' if flags != '*' else 'no'} -> HTTP {status}")
         if status != 200:
-            last_reason = f'El dispositivo devolvió HTTP {status} para {mime}'
+            last_reason = ('El equipo no responde (su servicio de red DLNA no contesta)' if status is None
+                           else f'El dispositivo devolvió HTTP {status} para {mime}')
             continue
         # Ticket D-08: en vez de UNA consulta a los 1.2 s, se consulta cada
         # 0.5 s hasta _CAST_ARRANQUE_S: un FLAC hi-res o un renderer lento
@@ -9002,6 +9003,9 @@ def api_v1_cast_play():
 
 _cast_envio_locks = {}            # Ticket D-20: target_id -> Lock
 _cast_envio_locks_guard = threading.Lock()
+_cast_envio_gen = {}              # Ticket D-22: target_id -> n° del ultimo pedido
+_cast_ultimo_envio = {}           # Ticket D-22: target_id -> monotonic de la ultima carga
+_CAST_ENVIO_MIN_S = 5.0           # Ticket D-22: separacion minima entre cargas al mismo equipo
 
 
 def _cast_reproducir(target_id, track_id, base, user_id):
@@ -9010,10 +9014,34 @@ def _cast_reproducir(target_id, track_id, base, user_id):
     Ticket D-20: un solo envio a la vez por equipo — antes un toque del
     usuario y un avance automatico podian mandarle dos pistas al mismo tiempo
     (Stop/SetAVTransportURI/Play cruzados)."""
+    # Ticket D-22 (log real de Niko, 10/10): en las dos caidas del TX-8050 le
+    # llego Stop + pista nueva mientras aun cargaba la anterior (18:51) o a la
+    # decima de segundo de empezar a sonar (20:09); ahi su servicio UPnP dejo
+    # de responder (en el 2do caso rechazo la conexion en 2 ms). Por eso:
+    # 1) si mientras se espera llega un pedido mas nuevo, este se descarta
+    #    (no se encadenan cargas viejas); 2) entre una carga y la siguiente al
+    #    mismo equipo pasan al menos _CAST_ENVIO_MIN_S segundos.
     with _cast_envio_locks_guard:
         lock = _cast_envio_locks.setdefault(target_id, threading.Lock())
+        gen = _cast_envio_gen.get(target_id, 0) + 1
+        _cast_envio_gen[target_id] = gen
     with lock:
-        return _cast_reproducir_sin_lock(target_id, track_id, base, user_id)
+        if _cast_envio_gen.get(target_id) != gen:
+            app.logger.info(f"[cast] pedido de la pista {track_id} descartado: llegó otro más nuevo")
+            return {'status': 'error', 'code': 'superseded',
+                    'message': 'Se reemplazó por un pedido más nuevo'}, 409
+        espera = _cast_ultimo_envio.get(target_id, 0) + _CAST_ENVIO_MIN_S - time.monotonic()
+        if espera > 0:
+            app.logger.info(f"[cast] esperando {espera:.1f}s antes de cargar otra pista (el equipo recién cargó una)")
+            time.sleep(espera)
+            if _cast_envio_gen.get(target_id) != gen:
+                app.logger.info(f"[cast] pedido de la pista {track_id} descartado: llegó otro más nuevo")
+                return {'status': 'error', 'code': 'superseded',
+                        'message': 'Se reemplazó por un pedido más nuevo'}, 409
+        try:
+            return _cast_reproducir_sin_lock(target_id, track_id, base, user_id)
+        finally:
+            _cast_ultimo_envio[target_id] = time.monotonic()
 
 
 def _cast_reproducir_sin_lock(target_id, track_id, base, user_id):
@@ -9240,7 +9268,7 @@ def api_v1_cast_transport():
         else:
             _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
         return jsonify({'status': 'ok'})
-    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+    return jsonify({'status': 'error', 'message': 'El equipo no responde' if status is None else f'HTTP {status}'}), 502
 
 
 @app.route('/api/v1/cast/seek', methods=['POST'])
@@ -9267,7 +9295,7 @@ def api_v1_cast_seek():
     app.logger.info(f"[cast v1] Seek {seconds}s -> {target['name']}: HTTP {status}")
     if status == 200:
         return jsonify({'status': 'ok'})
-    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+    return jsonify({'status': 'error', 'message': 'El equipo no responde' if status is None else f'HTTP {status}'}), 502
 
 
 @app.route('/api/v1/cast/volume', methods=['GET', 'POST'])
@@ -9309,7 +9337,7 @@ def api_v1_cast_volume():
     app.logger.info(f"[cast v1] SetVolume {volume} -> {target['name']}: HTTP {status}")
     if status == 200:
         return jsonify({'status': 'ok'})
-    return jsonify({'status': 'error', 'message': f'HTTP {status}'}), 502
+    return jsonify({'status': 'error', 'message': 'El equipo no responde' if status is None else f'HTTP {status}'}), 502
 
 
 # ── Ticket D-01 (pedido por Niko): estado del renderer para el mini control
@@ -9750,6 +9778,11 @@ def api_v1_cast_queue():
         conn.close()
 
     tocar = data.get('play', True) is not False
+    if tocar:
+        # Ticket D-22: diagnostico — que accion de la pantalla pidio reproducir
+        app.logger.info(f"[cast cola] pedido de reproducción equipo {target_id} pos {index} "
+                        f"solo={bool(data.get('stop_after'))} desde {request.remote_addr} "
+                        f"origen={str(data.get('origen') or '-')[:160]}")
     with _cast_colas_lock:
         previa = _cast_colas.get(target_id)
         cola = {

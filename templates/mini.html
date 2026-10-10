@@ -337,6 +337,16 @@ function cambiarDestino(v) { st.destino = v ? parseInt(v, 10) : null; guardar();
 // Ticket D-18: se manda la lista completa al servidor y el reproduce la
 // posicion i (i = -1 con aleatorio: arranca por una al azar). solo = true:
 // suena esa pista y se detiene (la cola queda intacta).
+// Ticket D-22: diagnóstico — qué acción de la pantalla pidió reproducir
+// (cadena de funciones + tipo de evento). Se ve en el log del servidor como
+// "[cast cola] pedido de reproducción ... origen=...".
+let pedidosEnviados = 0;
+function origenPedido() {
+  const pila = (new Error().stack || "").split("\n").slice(2, 6)
+    .map((l) => (l.trim().replace(/^at\s+/, "").split(/[@ (]/)[0] || "?")).join("<");
+  const ev = window.event ? `${window.event.type}${window.event.isTrusted ? "" : "(sintético)"}` : "sin-evento";
+  return `${pila} | ${ev} | n${++pedidosEnviados}`;
+}
 async function reproducirIndice(i, solo = false) {
   if (!st.destino) return aviso("Elige un equipo arriba", true);
   if (!st.cola.length) return;
@@ -346,9 +356,10 @@ async function reproducirIndice(i, solo = false) {
   try {
     const r = await api("/api/v1/cast/queue", { method: "POST", timeout: 180000,
       body: JSON.stringify({ target_id: st.destino, track_ids: st.cola.map((p) => p.id), index: i,
-        shuffle: st.shuffle, repeat: st.repeat, stop_after: solo }) });
+        shuffle: st.shuffle, repeat: st.repeat, stop_after: solo, origen: origenPedido() }) });
     tomarRespuesta(r);
   } catch (e) {
+    if (e.code === "superseded") return;   // Ticket D-22: lo reemplazó un pedido más nuevo; no es un error
     aviso(e.code === "all_skipped" ? "Ninguna pista se pudo reproducir (archivos vacíos o faltantes)" : e.message, true);
   } finally { enviando = false; ultimoComando = Date.now(); pintarEstado(); }
 }
@@ -399,6 +410,7 @@ async function paso(delta) {
     tomarRespuesta(await api("/api/v1/cast/queue/step", { method: "POST", timeout: 180000,
       body: JSON.stringify({ target_id: st.destino, delta }) }));
   } catch (e) {
+    if (e.code === "superseded") return;   // Ticket D-22
     if (e.code === "no_queue") {
       enviando = false;
       const j = st.idx + delta;
@@ -500,7 +512,13 @@ async function sondear() {
       rx.track = Object.assign({}, s.track, enCola || {});
     }
     pintarPista(rx.track); pintarEstado();
-  } catch (e) { $("dot").className = "dot err"; }
+  } catch (e) {
+    // Ticket D-22: si no hay nada sonando, que el equipo no responda no es un
+    // error (puede estar en standby o en otra entrada): punto gris, no rojo.
+    const activo = enviando || rx.state === "PLAYING";
+    $("dot").className = activo ? "dot err" : "dot";
+    $("dot").title = activo ? "El equipo no responde" : "Equipo en espera o en otra entrada";
+  }
   finally { sondeando = false; }
 }
 
