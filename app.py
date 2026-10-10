@@ -9000,9 +9000,23 @@ def api_v1_cast_play():
     return jsonify(payload), codigo
 
 
+_cast_envio_locks = {}            # Ticket D-20: target_id -> Lock
+_cast_envio_locks_guard = threading.Lock()
+
+
 def _cast_reproducir(target_id, track_id, base, user_id):
     """Ticket D-18: cuerpo de /api/v1/cast/play sin depender de la request,
-    para que la cola del servidor pueda avanzar sola. Devuelve (dict, http)."""
+    para que la cola del servidor pueda avanzar sola. Devuelve (dict, http).
+    Ticket D-20: un solo envio a la vez por equipo — antes un toque del
+    usuario y un avance automatico podian mandarle dos pistas al mismo tiempo
+    (Stop/SetAVTransportURI/Play cruzados)."""
+    with _cast_envio_locks_guard:
+        lock = _cast_envio_locks.setdefault(target_id, threading.Lock())
+    with lock:
+        return _cast_reproducir_sin_lock(target_id, track_id, base, user_id)
+
+
+def _cast_reproducir_sin_lock(target_id, track_id, base, user_id):
     conn = get_db_connection()
     try:
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
@@ -9430,6 +9444,8 @@ def api_v1_cast_status():
 # cola se "suelta" (deja de avanzar) para no pisar a nadie.
 _CAST_COLA_TICK = 2.0
 _CAST_COLA_FIN_S = 8        # margen para dar por terminada una pista
+_CAST_COLA_GRACIA_S = 8     # Ticket D-20: tras cargar una pista, no decidir nada
+_CAST_COLA_PREMATURO_S = 20 # Ticket D-20: fin antes de esto = sospechoso (freno)
 _cast_colas = {}            # target_id -> dict (ver _cast_cola_nueva)
 _cast_colas_lock = threading.RLock()
 _cast_cola_hilo = None
@@ -9501,6 +9517,7 @@ def _cast_cola_tocar(target_id, pos, solo=False):
                 cola['version'] += 1
             _cast_pausas.pop(target_id, None)
             payload, codigo = _cast_reproducir(target_id, track_id, cola['base'], cola['user_id'])
+            cola['inicio'] = time.monotonic()   # Ticket D-20: ventana de gracia
             if codigo == 200 or payload.get('code') not in ('empty_file', 'file_missing'):
                 if codigo != 200:
                     with _cast_colas_lock:
@@ -9554,11 +9571,15 @@ def _cast_cola_vigilar():
             for _tid, c in activas:
                 fin = c.get('fin_previsto')
                 if fin:
-                    espera = min(espera, max(0.2, fin - ahora))
+                    # Ticket D-20: nunca menos de 1 s (antes 0.2 s) — el TX-8050
+                    # tiene un servidor UPnP muy limitado.
+                    espera = min(espera, max(1.0, fin - ahora))
             time.sleep(espera)
             with _cast_colas_lock:
                 activas = [(tid, c) for tid, c in _cast_colas.items() if c['activa'] and not c['enviando']]
             for target_id, cola in activas:
+                if time.monotonic() < cola.get('pausa_hasta', 0):
+                    continue
                 _cast_cola_revisar(target_id, cola)
         except Exception as e:  # noqa: BLE001
             app.logger.error(f"[cast cola] error en el vigilante: {e}")
@@ -9566,6 +9587,19 @@ def _cast_cola_vigilar():
 
 
 def _cast_cola_avanzar(target_id, cola, motivo):
+    # Ticket D-20: freno de seguridad. Un avance "prematuro" = una pista de
+    # mas de 30 s dada por terminada a los menos de 20 s de cargarla (posicion
+    # o duracion erronea del receptor). Dos en un minuto -> se detiene la cola
+    # en vez de seguir encadenando cargas contra el equipo.
+    ahora = time.monotonic()
+    dur_db = cola.get('duraciones', {}).get(cola['actual']) or 0
+    if dur_db > 30 and ahora - cola.get('inicio', 0) < _CAST_COLA_PREMATURO_S:
+        recientes = [t for t in cola.get('prematuros', []) if ahora - t < 60] + [ahora]
+        cola['prematuros'] = recientes
+        app.logger.warning(f"[cast cola] equipo {target_id}: avance prematuro de la pista {cola['actual']} "
+                           f"a los {int(ahora - cola.get('inicio', 0))}s de {int(dur_db)}s ({motivo})")
+        if len(recientes) >= 2:
+            return _cast_cola_soltar(target_id, 'avances prematuros en cadena (freno de seguridad)')
     with _cast_colas_lock:
         cola['fin_previsto'] = None
         if cola['solo']:
@@ -9598,7 +9632,20 @@ def _cast_cola_revisar(target_id, cola):
     dt = ahora - cola.get('ultimo_tick', ahora)
     cola['ultimo_tick'] = ahora
     if estado is None:
+        # Ticket D-20: renderer que no responde -> no insistir cada 2 s
+        cola['sin_respuesta'] = cola.get('sin_respuesta', 0) + 1
+        if cola['sin_respuesta'] >= 2:
+            cola['pausa_hasta'] = ahora + 10
+            if cola['sin_respuesta'] == 2:
+                app.logger.warning(f"[cast cola] equipo {target_id}: no responde, se espacian las consultas")
         return  # renderer no responde (apagado/red): no se decide nada
+    cola['sin_respuesta'] = 0
+    # Ticket D-20: los primeros segundos tras cargar una pista el receptor
+    # puede seguir informando la posicion/duracion/estado de la ANTERIOR.
+    # Antes eso podia dar la pista nueva por terminada al instante y encadenar
+    # cargas cada 1-2 s hasta colgar el servicio UPnP del TX-8050. En esa
+    # ventana no se decide nada ni se usa la posicion del receptor.
+    en_gracia = ahora - cola.get('inicio', 0) < _CAST_COLA_GRACIA_S
     pos = _cast_get_position_info(control_url, timeout=3) or {}
     sonando_id, _perfil = _cast_uri_a_pista(pos.get('track_uri'))
     dur_rx = pos.get('duration_s') or 0
@@ -9616,6 +9663,9 @@ def _cast_cola_revisar(target_id, cola):
         # reloj de la pista: avanza con el tiempo real y se alinea con el
         # receptor cuando este informa una posicion que se mueve
         cola['jugado_s'] += dt
+        if en_gracia:
+            cola['rel_previo'] = rel
+            return
         if rel is not None and rel > 0 and rel != cola.get('rel_previo'):
             cola['jugado_s'] = float(rel)
         cola['rel_previo'] = rel
@@ -9632,6 +9682,8 @@ def _cast_cola_revisar(target_id, cola):
         return
     if target_id in _cast_pausas:
         return  # pausa emulada (D-05): el equipo dice STOPPED pero esta en pausa
+    if en_gracia:
+        return  # STOPPED transitorio mientras el receptor carga la pista nueva
     cola['fin_previsto'] = None
     llevado = cola['jugado_s'] + min(dt, _CAST_COLA_TICK)
     if dur and llevado < dur - _CAST_COLA_FIN_S:
