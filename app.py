@@ -4744,6 +4744,10 @@ def api_admin_collab_estado():
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
         ).fetchone()[0]
+        # Ticket C-04: total agregado en la sesión (para el acceso a "Lo agregado")
+        total = conn.execute(
+            'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=?', (sess['id'],)
+        ).fetchone()[0]
         # Pedido remoto de actualización (ver /api/collab/solicitar-pull): el
         # delegado lo dispara desde su celular, este poll (cada 6s) es lo que
         # se lo hace llegar al dispositivo del anfitrión sin que tenga que
@@ -4756,6 +4760,7 @@ def api_admin_collab_estado():
             ).fetchone()
             pull_requested_by_name = req['name'] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
+                        'total_count': total,
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
                         'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
                         'token': sess['token'],
