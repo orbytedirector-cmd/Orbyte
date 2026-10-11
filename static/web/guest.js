@@ -202,6 +202,134 @@
     ORB.toast("Recarga en curso: la cola se actualizará en unos segundos.");
   }
 
+
+  // ---------- Reproductor de solo lectura (Ticket C-04) ----------
+  // Lo que suena en el reproductor del anfitrión, sin ningún control: barra
+  // abajo (como la vincha de la app) y, al tocarla, la pantalla "Sonando
+  // ahora" con artista, álbum, formato, progreso, quién la agregó y lo que
+  // viene. El progreso avanza solo entre consultas (cada 5 s).
+  const NP = { d: null, at: 0, view: null, trackId: null };
+  function npPos() {
+    const d = NP.d; if (!d) return 0;
+    const p = d.position + (d.playing ? (Date.now() - NP.at) / 1000 : 0);
+    return d.duration ? Math.min(p, d.duration) : p;
+  }
+  async function loadNowPlaying() {
+    let r;
+    try { r = await ORB.api("/api/collab/sonando"); } catch (e) { return; }
+    if (!r || !r.active) return;   // loadMe se encarga de "sesión terminada"
+    NP.d = r.track ? r : null; NP.at = Date.now();
+    paintMini();
+    if (NP.view) paintNowPlaying();
+  }
+  function avatarCircle(av, name, size) {
+    const a = el("span", "np-by-av" + (av && av.type === "infinito" ? " inf" : ""), avatarHtml(av, name));
+    if (size) { a.style.width = a.style.height = size + "px"; a.style.fontSize = Math.round(size * 0.36) + "px"; }
+    return a;
+  }
+  function byLabel(t) {
+    if (t.added_by_avatar && t.added_by_avatar.type === "infinito") return "Elegida por el modo infinito";
+    if (t.added_by_host) return "Anfitrión";
+    return G.me && t.added_by === G.me.name ? "Vos la agregaste" : "Invitado";
+  }
+  function paintMini() {
+    const bar = document.getElementById("guest-mini"); if (!bar) return;
+    const d = NP.d;
+    document.getElementById("app-shell").classList.toggle("has-mini", !!d);
+    bar.classList.toggle("hidden", !d);
+    if (!d) return;
+    const t = d.track;
+    if (bar.dataset.trackId !== String(t.id)) {
+      bar.dataset.trackId = String(t.id);
+      const cover = bar.querySelector(".cover"); cover.style.backgroundImage = ""; cover.textContent = "♪";
+      ORB.setCover(cover, t.cover_url, 120);
+      bar.querySelector(".title").textContent = t.title;
+      bar.querySelector(".artist").textContent = t.artist_name || "";
+      const by = bar.querySelector(".by"); by.innerHTML = "";
+      by.appendChild(avatarCircle(t.added_by_avatar, t.added_by, 26));
+      by.title = "Agregada por " + t.added_by;
+    }
+    bar.querySelector(".state").innerHTML = d.playing ? '<span class="eq"><i></i><i></i><i></i></span>' : "❚❚";
+    tickMini();
+  }
+  function tickMini() {
+    const bar = document.getElementById("guest-mini"); if (!bar || !NP.d) return;
+    const pct = NP.d.duration ? Math.min(100, (npPos() / NP.d.duration) * 100) : 0;
+    bar.querySelector(".mini-line span").style.width = pct + "%";
+  }
+  function openNowPlaying() {
+    if (!NP.d || NP.view) return;
+    const v = ORB.openOverlay({ title: "Sonando ahora", subtitle: "Playlist colaborativa · solo lectura" });
+    v.node.classList.add("np-view");
+    v.onClose = () => { NP.view = null; NP.trackId = null; };
+    NP.view = v; NP.trackId = null;
+    paintNowPlaying();
+  }
+  function paintNowPlaying() {
+    const v = NP.view; if (!v) return;
+    const d = NP.d;
+    if (!d) {
+      NP.trackId = null;
+      v.scroll.innerHTML = '<div class="filtered-empty">En este momento no está sonando nada.</div>';
+      return;
+    }
+    if (NP.trackId === d.track.id) { tickNowPlaying(); return; }
+    NP.trackId = d.track.id;
+    const t = d.track;
+    const card = el("div", "np-card");
+    const cover = el("div", "np-cover", "♪"); ORB.setCover(cover, t.cover_url, 900);
+    card.appendChild(cover);
+    const tb = el("div", "np-title-block");
+    tb.appendChild(el("div", "np-title", escapeHtml(t.title)));
+    if (t.artist_name) {
+      const ar = el("button", "np-link np-artist", escapeHtml(t.artist_name));
+      ar.onclick = () => t.artist_id && ORB.openArtist(t.artist_id, t.artist_name);
+      tb.appendChild(ar);
+    }
+    if (t.album_name) {
+      const al = el("button", "np-link np-album", escapeHtml(t.album_name) + (t.album_year ? ` · ${escapeHtml(t.album_year)}` : ""));
+      al.onclick = () => t.album_id && ORB.openAlbum({ id: t.album_id, name: t.album_name, artist_name: t.artist_name, artist_id: t.artist_id });
+      tb.appendChild(al);
+    }
+    const badges = el("div", "np-badge-row");
+    if (t.format_display) {
+      const c = ORB.ledColor(t.format_color);
+      badges.appendChild(el("span", "format-pill", (c ? `<span class="np-led-dot" style="background:${c}"></span>` : "") + escapeHtml(t.format_display)));
+    }
+    if (t.genre) badges.appendChild(el("span", "format-pill muted", escapeHtml(t.genre)));
+    if (badges.children.length) tb.appendChild(badges);
+    card.appendChild(tb);
+    card.appendChild(el("div", "np-progress", `<div class="np-bar"><span></span></div>
+      <div class="np-times"><span class="pos">0:00</span><span class="state"></span><span class="dur">${ORB.formatTime(d.duration)}</span></div>`));
+    const by = el("div", "np-by-card");
+    by.appendChild(avatarCircle(t.added_by_avatar, t.added_by, 44));
+    by.appendChild(el("div", "np-by-txt", `<div class="k">Agregada por</div><div class="v">${escapeHtml(t.added_by)}</div><div class="s">${escapeHtml(byLabel(t))}</div>`));
+    card.appendChild(by);
+    const acts = el("div", "np-acts");
+    if (t.artist_id) { const b = el("button", "pl-action-btn", "♫ Ver artista"); b.onclick = () => ORB.openArtist(t.artist_id, t.artist_name); acts.appendChild(b); }
+    if (t.album_id) { const b = el("button", "pl-action-btn", "◫ Ver álbum"); b.onclick = () => ORB.openAlbum({ id: t.album_id, name: t.album_name, artist_name: t.artist_name, artist_id: t.artist_id }); acts.appendChild(b); }
+    if (acts.children.length) card.appendChild(acts);
+    if (d.next && d.next.length) {
+      const sec = el("div", "cfg-section np-next", `<div class="cfg-header">A continuación</div>`);
+      d.next.forEach((n) => {
+        const row = ORB.makeTrackRow(n, { right: el("span"), below: byLine(n) });
+        row.onclick = () => ORB.openTrackMenu(n);
+        sec.appendChild(row);
+      });
+      card.appendChild(sec);
+    }
+    v.scroll.innerHTML = ""; v.scroll.appendChild(card);
+    tickNowPlaying();
+  }
+  function tickNowPlaying() {
+    const v = NP.view; if (!v || !NP.d) return;
+    const d = NP.d, pos = npPos();
+    const bar = v.scroll.querySelector(".np-bar span"); if (!bar) return;
+    bar.style.width = (d.duration ? Math.min(100, (pos / d.duration) * 100) : 0) + "%";
+    v.scroll.querySelector(".np-times .pos").textContent = ORB.formatTime(pos);
+    v.scroll.querySelector(".np-times .state").textContent = d.playing ? "" : "En pausa";
+  }
+
   // ---------- Perfil (apodo + avatar) ----------
   async function openProfile() {
     const me = G.me; if (!me) return;
@@ -264,6 +392,13 @@
     document.getElementById("user-name").onclick = openProfile;
     ORB.mountSearch(document.getElementById("tab-search"));
     loadHome(); loadMe();
+    // Ticket C-04: reproductor de solo lectura
+    const mini = document.getElementById("guest-mini");
+    if (mini) mini.onclick = openNowPlaying;
+    loadNowPlaying();
+    setInterval(() => { if (!document.hidden) loadNowPlaying(); }, 5000);
+    setInterval(() => { if (!document.hidden && NP.d && NP.d.playing) { tickMini(); tickNowPlaying(); } }, 1000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) loadNowPlaying(); });
     // estado de "en espera"/"en la cola" y cupo, sin recargar la página
     setInterval(() => { if (!document.hidden) loadMe(); }, 20000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) loadMe(); });

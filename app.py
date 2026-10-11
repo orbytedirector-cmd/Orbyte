@@ -4844,6 +4844,15 @@ def api_admin_collab_pull():
         conn.close()
 
 
+def _collab_sesion_del_anfitrion(conn):
+    """Sesión colaborativa activa si quien llama es el anfitrión que la creó
+    (app con Bearer o web con cookie; nunca un invitado). Si no, None."""
+    sess = _collab_active_session(conn)
+    if not sess or session.get('is_collab_guest') or sess['created_by'] != g.api_user['id']:
+        return None
+    return sess
+
+
 @app.route('/api/v1/collab/infinito', methods=['POST'])
 @api_login_required
 def api_v1_collab_infinito():
@@ -4861,8 +4870,8 @@ def api_v1_collab_infinito():
             pass
     conn = get_db_connection()
     try:
-        sess = _collab_active_session(conn)
-        if not sess or session.get('is_collab_guest') or sess['created_by'] != g.api_user['id']:
+        sess = _collab_sesion_del_anfitrion(conn)
+        if not sess:
             return jsonify({'status': 'ignored', 'added': 0})
         if not ids:
             return jsonify({'status': 'ok', 'added': 0})
@@ -4882,6 +4891,137 @@ def api_v1_collab_infinito():
             agregadas += 1
         conn.commit()
         return jsonify({'status': 'ok', 'added': agregadas})
+    finally:
+        conn.close()
+
+
+# ── Ticket C-04 (pedido por Niko): reproductor de solo lectura para invitados ──
+# La app del anfitrión (iOS / Desktop) informa qué está sonando mientras hay
+# una sesión colaborativa: al cambiar de pista, al pausar/reanudar y cada ~6 s.
+# Se guarda en memoria (igual que la cola de cast): es efímero, si el servidor
+# se reinicia el próximo aviso lo repone. Los invitados lo consultan con
+# /api/collab/sonando y ven pista, artista, álbum, formato, progreso, quién la
+# agregó y lo que viene — sin ningún control.
+_collab_sonando = {}            # session_id -> {track_id, position, duration, playing, next_ids, at}
+_COLLAB_SONANDO_VIGENCIA_S = 45  # sin avisos por más que esto = no se sabe qué suena
+
+
+@app.route('/api/v1/collab/sonando', methods=['POST'])
+@api_login_required
+def api_v1_collab_sonando_post():
+    """Body: {track_id|null, position, duration, playing, next_ids: [...]}."""
+    data = request.get_json(silent=True) or {}
+
+    def _num(v):
+        try:
+            v = float(v)
+            return v if math.isfinite(v) and v >= 0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        track_id = int(data['track_id']) if data.get('track_id') is not None else None
+    except (TypeError, ValueError):
+        track_id = None
+    next_ids = []
+    for x in (data.get('next_ids') or [])[:5]:
+        try:
+            next_ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    conn = get_db_connection()
+    try:
+        sess = _collab_sesion_del_anfitrion(conn)
+    finally:
+        conn.close()
+    if not sess:
+        return jsonify({'status': 'ignored'})
+    _collab_sonando[sess['id']] = {
+        'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
+        'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time(),
+    }
+    return jsonify({'status': 'ok'})
+
+
+def _collab_anfitrion_display(conn, sess):
+    """Nombre y avatar del anfitrión, para las pistas que puso él mismo."""
+    row = conn.execute('SELECT nickname, avatar FROM users WHERE id=?', (sess['created_by'],)).fetchone()
+    nombre = ((row['nickname'] if row else None) or '').strip() or 'Anfitrión'
+    av = (row['avatar'] if row else None) or ''
+    if av and '/' in av:
+        cat, fname = av.split('/', 1)
+        avatar = _collab_avatar_display(cat, fname, nombre)
+    else:
+        avatar = {'type': 'initials', 'text': _collab_initials(nombre)}
+    return nombre, avatar
+
+
+def _collab_pistas_detalle(conn, sess, ids):
+    """Detalle de las pistas `ids` (en ese orden) con quién las agregó: el
+    invitado (o "Modo infinito") si están en la playlist colaborativa, o el
+    anfitrión si las puso él."""
+    if not ids:
+        return []
+    ph = ','.join('?' * len(ids))
+    rows = {r['id']: dict(r) for r in conn.execute(
+        f'''SELECT t.id, t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
+                   t.is_mqa, t.codec, t.sample_rate_real, t.genre,
+                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
+                   ar.id AS artist_id, ar.name AS artist_name
+            FROM tracks t
+            LEFT JOIN albums al ON al.id = t.album_id
+            LEFT JOIN artists ar ON ar.id = al.artist_id
+            WHERE t.id IN ({ph})''', ids)}
+    quien = {r['track_id']: dict(r) for r in conn.execute(
+        f'''SELECT cqi.track_id, cp.name, cp.avatar_category, cp.avatar_file, cp.device_key
+            FROM collab_queue_items cqi JOIN collab_participants cp ON cp.id = cqi.participant_id
+            WHERE cqi.session_id=? AND cqi.track_id IN ({ph})''', [sess['id']] + list(ids))}
+    host_nombre = host_avatar = None
+    out = []
+    for tid in ids:
+        d = rows.get(tid)
+        if not d:
+            continue
+        fmt, led = _fmt_format(d)
+        q = quien.get(tid)
+        if q:
+            by, by_av, by_host = q['name'], _collab_avatar_display(q['avatar_category'], q['avatar_file'],
+                                                                   q['name'], q['device_key']), False
+        else:
+            if host_nombre is None:
+                host_nombre, host_avatar = _collab_anfitrion_display(conn, sess)
+            by, by_av, by_host = host_nombre, host_avatar, True
+        out.append({
+            'id': tid, 'title': d['title'], 'duration': d['duration'],
+            'format_display': fmt, 'format_color': led, 'genre': d['genre'],
+            'album_id': d['album_id'], 'album_name': d['album_name'], 'album_year': d['album_year'],
+            'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
+            'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
+            'added_by': by, 'added_by_avatar': by_av, 'added_by_host': by_host,
+        })
+    return out
+
+
+@app.route('/api/collab/sonando')
+def api_collab_sonando():
+    """Para la web de invitados: lo que suena en el reproductor del anfitrión."""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_guest_ctx(conn)
+        if not sess or not part:
+            return jsonify({'active': False})
+        st = _collab_sonando.get(sess['id'])
+        ahora = time.time()
+        if not st or not st['track_id'] or ahora - st['at'] > _COLLAB_SONANDO_VIGENCIA_S:
+            return jsonify({'active': True, 'track': None})
+        detalle = _collab_pistas_detalle(conn, sess, [st['track_id']] + st['next_ids'])
+        if not detalle or detalle[0]['id'] != st['track_id']:
+            return jsonify({'active': True, 'track': None})
+        pos = st['position'] + ((ahora - st['at']) if st['playing'] else 0)
+        dur = st['duration'] or (detalle[0]['duration'] or 0)
+        if dur:
+            pos = min(pos, dur)
+        return jsonify({'active': True, 'track': detalle[0], 'next': detalle[1:],
+                        'position': round(pos, 1), 'duration': dur, 'playing': st['playing']})
     finally:
         conn.close()
 
