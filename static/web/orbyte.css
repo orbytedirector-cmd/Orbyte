@@ -388,3 +388,6 @@ header.app-header {
 .np-acts { display: flex; gap: 10px; }
 .np-acts .pl-action-btn { flex: 1; padding: 11px 10px; }
 .np-next { margin-top: 4px; }
+
+/* Ticket C-05: etiqueta Admin del anfitrión */
+.by-badge { font-size: 9px; font-weight: 800; letter-spacing: 0.4px; color: #000; background: var(--accent-bright); border-radius: 4px; padding: 1px 5px; margin-left: 4px; }

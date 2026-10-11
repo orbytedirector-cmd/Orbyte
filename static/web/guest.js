@@ -14,7 +14,7 @@
     let r;
     try { r = await ORB.api("/api/collab/yo"); } catch (e) { return; }
     if (!r || !r.active) { sessionEnded(); return; }
-    G.me = r;
+    G.me = r; G.meAt = Date.now();
     G.inSession = new Map((r.session_tracks || []).map((t) => [t.id, t]));
     paintHeader(); paintQuota(); refreshAddButtons();
     if (!document.getElementById("tab-mine").classList.contains("hidden")) renderMine();
@@ -46,11 +46,27 @@
     badge.textContent = n;
     badge.classList.toggle("hidden", !n);
   }
+  // Ticket C-05: cupo fijo con bloqueo. Al usar la última pista del cupo
+  // empieza el bloqueo (window_hours); cumplido, vuelve el cupo completo.
+  function esperaRestante() {
+    const me = G.me; if (!me || !me.blocked_seconds) return 0;
+    return Math.max(0, me.blocked_seconds - (Date.now() - (G.meAt || Date.now())) / 1000);
+  }
+  function fmtEspera(seg) {
+    const m = Math.max(1, Math.round(seg / 60));
+    if (m < 60) return `${m} min`;
+    const h = Math.floor(m / 60), r = m % 60;
+    return r ? `${h} h ${r} min` : `${h} h`;
+  }
+  function horasTxt(me) { return me.window_hours === 1 ? "1 hora" : `${me.window_hours} horas`; }
   function paintQuota() {
     const me = G.me, q = document.getElementById("quota-banner"); if (!me || !q) return;
-    const h = me.window_hours === 1 ? "1 hora" : `${me.window_hours} horas`;
+    const espera = esperaRestante();
+    const sub = espera > 0
+      ? `Usaste tus ${me.max_tracks} pistas · <b style="color:var(--accent-bright)">Cupo nuevo en ${fmtEspera(espera)}</b>`
+      : `Tocá <b style="color:var(--accent-bright)">+</b> en una pista para sumarla · Agregadas ${me.used} · Restantes ${me.remaining}`;
     q.innerHTML = `<div class="star">✦</div><div class="txt"><div class="title">Playlist colaborativa</div>
-      <div class="subtitle">Tocá <b style="color:var(--accent-bright)">+</b> en una pista para sumarla · máx. ${me.max_tracks} cada ${h}</div></div>
+      <div class="subtitle">${sub}</div></div>
       <div class="num">${me.remaining}</div>`;
     q.onclick = () => switchTab("mine");
   }
@@ -86,8 +102,14 @@
     G.busy.delete(t.id);
     if (r.status === "ok") {
       G.inSession.set(t.id, Object.assign({}, t, { added_by: G.me ? G.me.name : "vos", dispatched: false }));
-      if (G.me) { G.me.remaining = r.remaining; G.me.used += 1; G.me.mine = (G.me.mine || []).concat([G.inSession.get(t.id)]); }
-      ORB.toast(`Agregada ✓ · te quedan ${r.remaining}`);
+      if (G.me) {
+        G.me.remaining = r.remaining; G.me.used = r.used != null ? r.used : G.me.used + 1;
+        G.me.blocked_seconds = r.blocked_seconds || 0; G.meAt = Date.now();
+        G.me.mine = (G.me.mine || []).concat([G.inSession.get(t.id)]);
+      }
+      ORB.toast(r.blocked_seconds
+        ? `Agregada ✓ · Usaste tus ${G.me ? G.me.max_tracks : ""} pistas: cupo nuevo en ${fmtEspera(r.blocked_seconds)}`
+        : `Agregada ✓ · Restantes ${r.remaining}`);
       paintHeader(); paintQuota(); refreshAddButtons();
       loadMe();
       return;
@@ -99,7 +121,7 @@
     } else if (r.status === "duplicate") {
       ORB.toast(r.message); loadMe();
     } else if (r.status === "limit") {
-      ORB.modal("Llegaste a tu cupo", r.message);
+      ORB.modal("Usaste tu cupo", r.message); loadMe();
     } else if (r.status === "expired") {
       sessionEnded();
     } else {
@@ -141,19 +163,25 @@
   function stateChip(t) {
     return el("span", "state-chip " + (t.dispatched ? "ok" : "wait"), t.dispatched ? "En la cola" : "En espera");
   }
+  // Ticket C-05: el anfitrión aparece con la etiqueta Admin.
+  function badgeHtml(av) {
+    return av && av.badge === "admin" ? ' <span class="by-badge">Admin</span>' : "";
+  }
   function byLine(t) {
-    return el("div", "track-by", `<span class="mini-av">${avatarHtml(t.added_by_avatar, t.added_by)}</span>${escapeHtml(t.added_by)}`);
+    return el("div", "track-by", `<span class="mini-av">${avatarHtml(t.added_by_avatar, t.added_by)}</span>${escapeHtml(t.added_by)}${badgeHtml(t.added_by_avatar)}`);
   }
   function renderMine() {
     const root = document.getElementById("tab-mine"), me = G.me;
     if (!me) { root.innerHTML = '<div class="filtered-loading">Cargando...</div>'; return; }
     root.innerHTML = "";
     const pct = me.max_tracks ? Math.min(100, Math.round((me.used / me.max_tracks) * 100)) : 0;
-    const h = me.window_hours === 1 ? "1 hora" : `${me.window_hours} horas`;
+    const espera = esperaRestante();
     const quota = el("div", "cfg-section", `<div class="cfg-header">Tu cupo</div>
-      <div class="cfg-card"><div class="info-row"><span class="k">Te quedan</span><span><b style="color:var(--accent-bright)">${me.remaining}</b> de ${me.max_tracks}</span></div>
+      <div class="cfg-card"><div class="info-row"><span class="k">Agregadas</span><span><b style="color:var(--accent-bright)">${me.used}</b> de ${me.max_tracks}</span></div>
+      <div class="info-row"><span class="k">Restantes</span><span><b style="color:var(--accent-bright)">${me.remaining}</b></span></div>
+      ${espera > 0 ? `<div class="info-row"><span class="k">Cupo nuevo en</span><span><b style="color:var(--accent-bright)">${fmtEspera(espera)}</b></span></div>` : ""}
       <div class="info-row" style="display:block"><div class="quota-track"><span style="width:${pct}%"></span></div></div></div>
-      <div class="cfg-footer">El cupo se libera solo: cuenta lo que agregaste en las últimas ${h}.</div>`);
+      <div class="cfg-footer">Tienes ${me.max_tracks} pistas. Al usar la última, tu cupo se renueva completo ${horasTxt(me)} después.</div>`);
     root.appendChild(quota);
     if (me.can_pull) {
       // Ticket C-04: el botón recarga la cola del anfitrión directamente. No
@@ -229,7 +257,7 @@
   }
   function byLabel(t) {
     if (t.added_by_avatar && t.added_by_avatar.type === "infinito") return "Elegida por el modo infinito";
-    if (t.added_by_host) return "Anfitrión";
+    if (t.added_by_host || (t.added_by_avatar && t.added_by_avatar.badge === "admin")) return "Anfitrión · Admin";
     return G.me && t.added_by === G.me.name ? "Vos la agregaste" : "Invitado";
   }
   function paintMini() {
@@ -303,7 +331,7 @@
       <div class="np-times"><span class="pos">0:00</span><span class="state"></span><span class="dur">${ORB.formatTime(d.duration)}</span></div>`));
     const by = el("div", "np-by-card");
     by.appendChild(avatarCircle(t.added_by_avatar, t.added_by, 44));
-    by.appendChild(el("div", "np-by-txt", `<div class="k">Agregada por</div><div class="v">${escapeHtml(t.added_by)}</div><div class="s">${escapeHtml(byLabel(t))}</div>`));
+    by.appendChild(el("div", "np-by-txt", `<div class="k">Agregada por</div><div class="v">${escapeHtml(t.added_by)}${badgeHtml(t.added_by_avatar)}</div><div class="s">${escapeHtml(byLabel(t))}</div>`));
     card.appendChild(by);
     const acts = el("div", "np-acts");
     if (t.artist_id) { const b = el("button", "pl-action-btn", "♫ Ver artista"); b.onclick = () => ORB.openArtist(t.artist_id, t.artist_name); acts.appendChild(b); }
@@ -401,6 +429,13 @@
     document.addEventListener("visibilitychange", () => { if (!document.hidden) loadNowPlaying(); });
     // estado de "en espera"/"en la cola" y cupo, sin recargar la página
     setInterval(() => { if (!document.hidden) loadMe(); }, 20000);
+    // Ticket C-05: cuenta regresiva del cupo nuevo; al cumplirse, recargar el estado.
+    setInterval(() => {
+      if (document.hidden || !G.me || !G.me.blocked_seconds) return;
+      if (esperaRestante() <= 0) { loadMe(); return; }
+      paintQuota();
+      if (!document.getElementById("tab-mine").classList.contains("hidden")) renderMine();
+    }, 30000);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) loadMe(); });
   });
 })();
