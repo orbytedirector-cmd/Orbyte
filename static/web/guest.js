@@ -162,7 +162,7 @@
       const sec = el("div", "cfg-section", `<div class="cfg-header">Delegado</div>`);
       const pend = me.pending_count || 0;
       const btn = el("button", "orbitron-big-btn",
-        me.pull_pending ? "Recargando cola…" : `↻&nbsp; Recargar cola${pend ? ` (${pend} nueva${pend > 1 ? "s" : ""})` : ""}`);
+        me.pull_pending ? "Recargando cola…" : "↻&nbsp; Recargar cola");
       btn.disabled = me.pull_pending || !pend;
       btn.onclick = async () => {
         btn.disabled = true; btn.textContent = "Recargando cola…";
@@ -172,8 +172,8 @@
       };
       sec.appendChild(btn);
       sec.appendChild(el("div", "cfg-footer", pend
-        ? "Carga en la cola del anfitrión las pistas que sumaron todos y todavía no están en la cola."
-        : "No hay pistas nuevas por cargar: todo lo agregado ya está en la cola."));
+        ? `${pend} pista${pend > 1 ? "s" : ""} nueva${pend > 1 ? "s" : ""} por cargar.`
+        : "No hay pistas nuevas por cargar."));
       root.appendChild(sec);
     }
     const mine = el("div", "cfg-section", `<div class="cfg-header">Tus pistas (${me.mine.length})</div>`);
@@ -199,7 +199,7 @@
         return;
       }
     }
-    ORB.toast("La app del anfitrión no respondió todavía; se cargará apenas la abra.");
+    ORB.toast("Recarga en curso: la cola se actualizará en unos segundos.");
   }
 
   // ---------- Perfil (apodo + avatar) ----------
