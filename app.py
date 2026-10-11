@@ -4954,6 +4954,11 @@ def api_collab_yo():
             'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
             'used': usados, 'remaining': max(0, sess['max_tracks'] - usados),
             'can_pull': bool(part.get('can_pull')),
+            # Ticket C-04: para el botón del delegado — cuántas pistas de la
+            # sesión todavía no llegaron al reproductor del anfitrión y si hay
+            # una recarga pedida que la app del anfitrión aún no atendió.
+            'pending_count': sum(1 for t in sesion if not t['dispatched']),
+            'pull_pending': bool(sess.get('pull_requested_at')),
             'mine': mias, 'session_tracks': sesion,
         })
     finally:

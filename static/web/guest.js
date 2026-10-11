@@ -149,16 +149,24 @@
       <div class="cfg-footer">El cupo se libera solo: cuenta lo que agregaste en las últimas ${h}.</div>`);
     root.appendChild(quota);
     if (me.can_pull) {
+      // Ticket C-04: el botón recarga la cola del anfitrión directamente. No
+      // hay que avisarle a nadie: su app revisa este pedido cada ~6 s y carga
+      // sola las pistas nuevas en su reproductor.
       const sec = el("div", "cfg-section", `<div class="cfg-header">Delegado</div>`);
-      const btn = el("button", "orbitron-big-btn", "↻&nbsp; Pedir al anfitrión que cargue la cola");
+      const pend = me.pending_count || 0;
+      const btn = el("button", "orbitron-big-btn",
+        me.pull_pending ? "Recargando cola…" : `↻&nbsp; Recargar cola${pend ? ` (${pend} nueva${pend > 1 ? "s" : ""})` : ""}`);
+      btn.disabled = me.pull_pending || !pend;
       btn.onclick = async () => {
-        btn.disabled = true;
-        try { await ORB.api("/api/collab/solicitar-pull", { method: "POST", body: {} }); ORB.toast("Listo: el anfitrión va a cargar las pistas nuevas"); }
-        catch (e) { ORB.toast(e.message); }
-        setTimeout(() => { btn.disabled = false; loadMe(); }, 4000);
+        btn.disabled = true; btn.textContent = "Recargando cola…";
+        try { await ORB.api("/api/collab/solicitar-pull", { method: "POST", body: {} }); }
+        catch (e) { ORB.toast(e.message); loadMe(); return; }
+        esperarRecarga(pend);
       };
       sec.appendChild(btn);
-      sec.appendChild(el("div", "cfg-footer", "El anfitrión te dio permiso para actualizar su cola cuando haya pistas nuevas."));
+      sec.appendChild(el("div", "cfg-footer", pend
+        ? "Carga en la cola del anfitrión las pistas que sumaron todos y todavía no están en la cola."
+        : "No hay pistas nuevas por cargar: todo lo agregado ya está en la cola."));
       root.appendChild(sec);
     }
     const mine = el("div", "cfg-section", `<div class="cfg-header">Tus pistas (${me.mine.length})</div>`);
@@ -171,6 +179,20 @@
       others.slice().reverse().forEach((t) => all.appendChild(ORB.makeTrackRow(t, { right: stateChip(t), below: byLine(t) })));
       root.appendChild(all);
     }
+  }
+
+  // Ticket C-04: tras "Recargar cola", confirmar cuando la app del anfitrión
+  // efectivamente cargó las pistas (o avisar si no respondió).
+  async function esperarRecarga(cuantas) {
+    for (let i = 0; i < 12; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      await loadMe();
+      if (G.me && !G.me.pull_pending) {
+        ORB.toast(cuantas ? `Cola actualizada ✓ (${cuantas} pista${cuantas > 1 ? "s" : ""})` : "Cola actualizada ✓");
+        return;
+      }
+    }
+    ORB.toast("La app del anfitrión no respondió todavía; se cargará apenas la abra.");
   }
 
   // ---------- Perfil (apodo + avatar) ----------
