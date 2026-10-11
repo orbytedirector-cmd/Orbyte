@@ -39,9 +39,12 @@
     const me = G.me; if (!me) return;
     document.getElementById("user-name").textContent = me.name;
     document.getElementById("avatar").innerHTML = avatarHtml(me.avatar, me.name);
+    // Ticket C-04: el número de "Mis pistas" son las que ya agregó (no las
+    // que le quedan; el cupo restante sigue en el banner de Inicio).
     const badge = document.getElementById("mine-badge");
-    badge.textContent = me.remaining;
-    badge.classList.remove("hidden");
+    const n = (me.mine || []).length;
+    badge.textContent = n;
+    badge.classList.toggle("hidden", !n);
   }
   function paintQuota() {
     const me = G.me, q = document.getElementById("quota-banner"); if (!me || !q) return;
@@ -83,7 +86,7 @@
     G.busy.delete(t.id);
     if (r.status === "ok") {
       G.inSession.set(t.id, Object.assign({}, t, { added_by: G.me ? G.me.name : "vos", dispatched: false }));
-      if (G.me) { G.me.remaining = r.remaining; G.me.used += 1; }
+      if (G.me) { G.me.remaining = r.remaining; G.me.used += 1; G.me.mine = (G.me.mine || []).concat([G.inSession.get(t.id)]); }
       ORB.toast(`Agregada ✓ · te quedan ${r.remaining}`);
       paintHeader(); paintQuota(); refreshAddButtons();
       loadMe();
