@@ -27,7 +27,11 @@
   }
   ORB.onAuthLost = (data) => { if (data && data.error === "collab_session_ended") sessionEnded(); };
 
+  // Ticket C-04: las pistas del modo infinito del anfitrión llegan como de un
+  // participante más ("Modo infinito"); su avatar es el mismo ∞ del botón.
+  const INFINITO_SVG = '<svg class="av-infinito" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 12c-2-2.67-4-4-6-4a4 4 0 1 0 0 8c2 0 4-1.33 6-4Zm0 0c2 2.67 4 4 6 4a4 4 0 0 0 0-8c-2 0-4 1.33-6 4Z"/></svg>';
   function avatarHtml(av, name) {
+    if (av && av.type === "infinito") return INFINITO_SVG;
     if (av && av.type === "image" && av.url) return `<img src="${escapeHtml(av.url)}" alt="">`;
     return escapeHtml((av && av.text) || (name || "?").slice(0, 2).toUpperCase());
   }

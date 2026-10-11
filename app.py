@@ -4347,16 +4347,41 @@ def _collab_resolve_avatar_ref(form):
             return category, safe_fname
     return None, None
 
-def _collab_avatar_display(category, fname, name):
+def _collab_avatar_display(category, fname, name, device_key=None):
     """Arma el dict {'type': 'image'|'initials', ...} listo para renderizar,
     a partir de la referencia guardada en collab_participants (avatar_category
     + avatar_file). No depende de ninguna cookie de sesión — por eso sirve
     tanto para el header del propio invitado como para el badge "agregado
     por" en el player del admin (otro navegador — ver ticket)."""
+    if device_key == _COLLAB_INFINITO_KEY:
+        return {'type': 'infinito', 'text': '∞'}   # Ticket C-04
     if category and fname:
         return {'type': 'image',
                 'url': url_for('static', filename=f'avatares/{category}/{fname}')}
     return {'type': 'initials', 'text': _collab_initials(name)}
+
+
+# Ticket C-04 (pedido por Niko): las pistas que suma el modo infinito del
+# anfitrión se muestran en la playlist colaborativa como si las hubiera
+# agregado un participante más, "Modo infinito", con el símbolo ∞ de avatar.
+# Ese participante es una fila especial (device_key fijo): no aparece en la
+# lista de participantes, no puede ser delegado y no tiene cupo. Sus pistas
+# entran ya como entregadas (dispatched=1): están en la cola del anfitrión
+# desde antes de avisarlas, así que "Recargar cola" nunca las vuelve a cargar.
+_COLLAB_INFINITO_KEY = '__modo_infinito__'
+_COLLAB_INFINITO_NOMBRE = 'Modo infinito'
+
+
+def _collab_participante_infinito(conn, session_id):
+    row = conn.execute('SELECT id FROM collab_participants WHERE session_id=? AND device_key=?',
+                       (session_id, _COLLAB_INFINITO_KEY)).fetchone()
+    if row:
+        return row['id']
+    cur = conn.execute(
+        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (session_id, _COLLAB_INFINITO_KEY, _COLLAB_INFINITO_NOMBRE, _utcnow_iso(), _utcnow_iso()))
+    return cur.lastrowid
 
 
 # Ticket C-01 (reportado por Niko): el link del QR se armaba con la direccion
@@ -4547,7 +4572,8 @@ def admin_collab():
         participants, pending_count, dispatched_count, join_url = [], 0, 0, None
         if sess:
             participants = [dict(r) for r in conn.execute(
-                'SELECT * FROM collab_participants WHERE session_id=? ORDER BY joined_at', (sess['id'],)
+                'SELECT * FROM collab_participants WHERE session_id=? AND device_key<>? ORDER BY joined_at',
+                (sess['id'], _COLLAB_INFINITO_KEY)
             ).fetchall()]
             pending_count = conn.execute(
                 'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
@@ -4661,8 +4687,8 @@ def admin_collab_permiso(participant_id):
         if not sess:
             return jsonify({'status': 'error', 'message': 'No hay sesión activa.'}), 404
         row = conn.execute(
-            'SELECT * FROM collab_participants WHERE id=? AND session_id=?',
-            (participant_id, sess['id'])
+            'SELECT * FROM collab_participants WHERE id=? AND session_id=? AND device_key<>?',
+            (participant_id, sess['id'], _COLLAB_INFINITO_KEY)
         ).fetchone()
         if not row:
             return jsonify({'status': 'error', 'message': 'Participante no encontrado.'}), 404
@@ -4711,8 +4737,9 @@ def api_admin_collab_estado():
         # entero fallaba y el admin dejaba de ver a los invitados).
         participants = [dict(r, can_pull=bool(r['can_pull']), joined_at=r['joined_at'] or '')
                         for r in conn.execute(
-            'SELECT id, name, joined_at, can_pull FROM collab_participants WHERE session_id=? ORDER BY joined_at',
-            (sess['id'],)
+            'SELECT id, name, joined_at, can_pull FROM collab_participants '
+            'WHERE session_id=? AND device_key<>? ORDER BY joined_at',
+            (sess['id'], _COLLAB_INFINITO_KEY)
         ).fetchall()]
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
@@ -4813,6 +4840,48 @@ def api_admin_collab_pull():
         conn.execute(f'UPDATE collab_queue_items SET dispatched=1 WHERE id IN ({placeholders2})', item_ids)
         conn.commit()
         return jsonify(result)
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/infinito', methods=['POST'])
+@api_login_required
+def api_v1_collab_infinito():
+    """Ticket C-04: la app del anfitrión (iOS / Desktop) avisa las pistas que
+    acaba de sumar su modo infinito. Body: {track_ids: [...]}. Se registran en
+    la playlist colaborativa como agregadas por "Modo infinito" — solo si hay
+    sesión activa y quien avisa es el anfitrión que la creó; si no, se ignora
+    (las apps avisan siempre, sin tener que saber si hay sesión)."""
+    data = request.get_json(silent=True) or {}
+    ids = []
+    for x in (data.get('track_ids') or [])[:50]:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess or session.get('is_collab_guest') or sess['created_by'] != g.api_user['id']:
+            return jsonify({'status': 'ignored', 'added': 0})
+        if not ids:
+            return jsonify({'status': 'ok', 'added': 0})
+        pid = _collab_participante_infinito(conn, sess['id'])
+        ya = {r['track_id'] for r in conn.execute(
+            'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+        validos = {r['id'] for r in conn.execute(
+            f"SELECT id FROM tracks WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        agregadas = 0
+        for tid in ids:
+            if tid in ya or tid not in validos:
+                continue
+            ya.add(tid)
+            conn.execute('INSERT INTO collab_queue_items '
+                         '(session_id, participant_id, track_id, added_at, dispatched) VALUES (?, ?, ?, ?, 1)',
+                         (sess['id'], pid, tid, _utcnow_iso()))
+            agregadas += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'added': agregadas})
     finally:
         conn.close()
 
@@ -4922,7 +4991,7 @@ def api_collab_yo():
                       t.is_mqa, t.codec, t.sample_rate_real,
                       al.id AS album_id, al.name AS album_name, al.cover_path,
                       ar.id AS artist_id, ar.name AS artist_name,
-                      cp.name AS added_by, cp.avatar_category, cp.avatar_file
+                      cp.name AS added_by, cp.avatar_category, cp.avatar_file, cp.device_key
                FROM collab_queue_items cqi
                JOIN tracks t ON t.id = cqi.track_id
                LEFT JOIN albums al ON al.id = t.album_id
@@ -4941,7 +5010,8 @@ def api_collab_yo():
                 'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
                 'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
                 'added_by': d['added_by'],
-                'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by']),
+                'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by'],
+                                                         d['device_key']),
             }
             sesion.append(item)
             if d['participant_id'] == part['id']:
