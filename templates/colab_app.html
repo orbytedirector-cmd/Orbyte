@@ -11,7 +11,7 @@
      Orbyte-Desktop, pensada para celular. Solo lo que un invitado puede
      usar: explorar, buscar y sumar pistas. Sin reproductor ni ajustes. -->
 <link rel="icon" href="{{ url_for('static', filename='web/assets/logo-icon.png') }}">
-<link rel="stylesheet" href="{{ url_for('static', filename='web/orbyte.css') }}?v=c03">
+<link rel="stylesheet" href="{{ url_for('static', filename='web/orbyte.css') }}?v=c04b">
 </head>
 <body>
 <div id="app-shell">
@@ -36,6 +36,16 @@
   </div>
   <div class="tab-root hidden" id="tab-search"></div>
   <div class="tab-root hidden" id="tab-mine"></div>
+  <!-- Ticket C-04: lo que suena en el anfitrión (solo lectura) -->
+  <div class="guest-mini hidden" id="guest-mini" role="button" aria-label="Ver lo que está sonando">
+    <div class="mini-line"><span></span></div>
+    <div class="mini-row">
+      <div class="cover">♪</div>
+      <div class="info"><div class="title"></div><div class="artist"></div></div>
+      <div class="by"></div>
+      <div class="state"></div>
+    </div>
+  </div>
 {% else %}
   <div class="full-state">
     <img class="logo" src="{{ url_for('static', filename='web/assets/logo-icon.png') }}" alt="">
@@ -44,7 +54,7 @@
   </div>
 {% endif %}
 </div>
-<script src="{{ url_for('static', filename='web/core.js') }}?v=c03"></script>
-<script src="{{ url_for('static', filename='web/guest.js') }}?v=c03"></script>
+<script src="{{ url_for('static', filename='web/core.js') }}?v=c04b"></script>
+<script src="{{ url_for('static', filename='web/guest.js') }}?v=c04b"></script>
 </body>
 </html>

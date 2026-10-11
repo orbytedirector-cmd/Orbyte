@@ -4347,16 +4347,41 @@ def _collab_resolve_avatar_ref(form):
             return category, safe_fname
     return None, None
 
-def _collab_avatar_display(category, fname, name):
+def _collab_avatar_display(category, fname, name, device_key=None):
     """Arma el dict {'type': 'image'|'initials', ...} listo para renderizar,
     a partir de la referencia guardada en collab_participants (avatar_category
     + avatar_file). No depende de ninguna cookie de sesión — por eso sirve
     tanto para el header del propio invitado como para el badge "agregado
     por" en el player del admin (otro navegador — ver ticket)."""
+    if device_key == _COLLAB_INFINITO_KEY:
+        return {'type': 'infinito', 'text': '∞'}   # Ticket C-04
     if category and fname:
         return {'type': 'image',
                 'url': url_for('static', filename=f'avatares/{category}/{fname}')}
     return {'type': 'initials', 'text': _collab_initials(name)}
+
+
+# Ticket C-04 (pedido por Niko): las pistas que suma el modo infinito del
+# anfitrión se muestran en la playlist colaborativa como si las hubiera
+# agregado un participante más, "Modo infinito", con el símbolo ∞ de avatar.
+# Ese participante es una fila especial (device_key fijo): no aparece en la
+# lista de participantes, no puede ser delegado y no tiene cupo. Sus pistas
+# entran ya como entregadas (dispatched=1): están en la cola del anfitrión
+# desde antes de avisarlas, así que "Recargar cola" nunca las vuelve a cargar.
+_COLLAB_INFINITO_KEY = '__modo_infinito__'
+_COLLAB_INFINITO_NOMBRE = 'Modo infinito'
+
+
+def _collab_participante_infinito(conn, session_id):
+    row = conn.execute('SELECT id FROM collab_participants WHERE session_id=? AND device_key=?',
+                       (session_id, _COLLAB_INFINITO_KEY)).fetchone()
+    if row:
+        return row['id']
+    cur = conn.execute(
+        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen) '
+        'VALUES (?, ?, ?, ?, ?)',
+        (session_id, _COLLAB_INFINITO_KEY, _COLLAB_INFINITO_NOMBRE, _utcnow_iso(), _utcnow_iso()))
+    return cur.lastrowid
 
 
 # Ticket C-01 (reportado por Niko): el link del QR se armaba con la direccion
@@ -4547,7 +4572,8 @@ def admin_collab():
         participants, pending_count, dispatched_count, join_url = [], 0, 0, None
         if sess:
             participants = [dict(r) for r in conn.execute(
-                'SELECT * FROM collab_participants WHERE session_id=? ORDER BY joined_at', (sess['id'],)
+                'SELECT * FROM collab_participants WHERE session_id=? AND device_key<>? ORDER BY joined_at',
+                (sess['id'], _COLLAB_INFINITO_KEY)
             ).fetchall()]
             pending_count = conn.execute(
                 'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
@@ -4661,8 +4687,8 @@ def admin_collab_permiso(participant_id):
         if not sess:
             return jsonify({'status': 'error', 'message': 'No hay sesión activa.'}), 404
         row = conn.execute(
-            'SELECT * FROM collab_participants WHERE id=? AND session_id=?',
-            (participant_id, sess['id'])
+            'SELECT * FROM collab_participants WHERE id=? AND session_id=? AND device_key<>?',
+            (participant_id, sess['id'], _COLLAB_INFINITO_KEY)
         ).fetchone()
         if not row:
             return jsonify({'status': 'error', 'message': 'Participante no encontrado.'}), 404
@@ -4711,11 +4737,16 @@ def api_admin_collab_estado():
         # entero fallaba y el admin dejaba de ver a los invitados).
         participants = [dict(r, can_pull=bool(r['can_pull']), joined_at=r['joined_at'] or '')
                         for r in conn.execute(
-            'SELECT id, name, joined_at, can_pull FROM collab_participants WHERE session_id=? ORDER BY joined_at',
-            (sess['id'],)
+            'SELECT id, name, joined_at, can_pull FROM collab_participants '
+            'WHERE session_id=? AND device_key<>? ORDER BY joined_at',
+            (sess['id'], _COLLAB_INFINITO_KEY)
         ).fetchall()]
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
+        ).fetchone()[0]
+        # Ticket C-04: total agregado en la sesión (para el acceso a "Lo agregado")
+        total = conn.execute(
+            'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=?', (sess['id'],)
         ).fetchone()[0]
         # Pedido remoto de actualización (ver /api/collab/solicitar-pull): el
         # delegado lo dispara desde su celular, este poll (cada 6s) es lo que
@@ -4729,6 +4760,7 @@ def api_admin_collab_estado():
             ).fetchone()
             pull_requested_by_name = req['name'] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
+                        'total_count': total,
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
                         'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
                         'token': sess['token'],
@@ -4813,6 +4845,227 @@ def api_admin_collab_pull():
         conn.execute(f'UPDATE collab_queue_items SET dispatched=1 WHERE id IN ({placeholders2})', item_ids)
         conn.commit()
         return jsonify(result)
+    finally:
+        conn.close()
+
+
+def _collab_sesion_del_anfitrion(conn):
+    """Sesión colaborativa activa si quien llama es el anfitrión que la creó
+    (app con Bearer o web con cookie; nunca un invitado). Si no, None."""
+    sess = _collab_active_session(conn)
+    if not sess or session.get('is_collab_guest') or sess['created_by'] != g.api_user['id']:
+        return None
+    return sess
+
+
+@app.route('/api/v1/admin/collab/pistas')
+@api_admin_required
+def api_v1_admin_collab_pistas():
+    """Ticket C-04 (pedido por Niko): vista del anfitrión con TODO lo que se
+    fue agregando a la playlist colaborativa — quién, cuándo, si ya está en la
+    cola o en espera — y el resumen por participante. La app la consulta en
+    vivo (cada pocos segundos) mientras la pantalla está abierta."""
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify({'active': False})
+        items = _collab_items_sesion(conn, sess)
+        parts = {}
+        for r in conn.execute('SELECT id, name, avatar_category, avatar_file, device_key FROM collab_participants '
+                              'WHERE session_id=? ORDER BY joined_at', (sess['id'],)):
+            parts[r['id']] = {'id': r['id'], 'name': r['name'],
+                              'avatar': _collab_avatar_display(r['avatar_category'], r['avatar_file'],
+                                                               r['name'], r['device_key']),
+                              'infinito': r['device_key'] == _COLLAB_INFINITO_KEY,
+                              'total': 0, 'pending': 0}
+        for t in items:
+            p = parts.get(t['participant_id'])
+            if p:
+                p['total'] += 1
+                p['pending'] += 0 if t['dispatched'] else 1
+        resumen = sorted((p for p in parts.values() if p['total'] or not p['infinito']),
+                         key=lambda p: (p['infinito'], -p['total'], p['name'].lower()))
+        pend = sum(1 for t in items if not t['dispatched'])
+        return jsonify({
+            'active': True,
+            'total': len(items), 'pending': pend, 'dispatched': len(items) - pend,
+            'participants': resumen,
+            'tracks': list(reversed(items)),   # lo más nuevo primero
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/infinito', methods=['POST'])
+@api_login_required
+def api_v1_collab_infinito():
+    """Ticket C-04: la app del anfitrión (iOS / Desktop) avisa las pistas que
+    acaba de sumar su modo infinito. Body: {track_ids: [...]}. Se registran en
+    la playlist colaborativa como agregadas por "Modo infinito" — solo si hay
+    sesión activa y quien avisa es el anfitrión que la creó; si no, se ignora
+    (las apps avisan siempre, sin tener que saber si hay sesión)."""
+    data = request.get_json(silent=True) or {}
+    ids = []
+    for x in (data.get('track_ids') or [])[:50]:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    conn = get_db_connection()
+    try:
+        sess = _collab_sesion_del_anfitrion(conn)
+        if not sess:
+            return jsonify({'status': 'ignored', 'added': 0})
+        if not ids:
+            return jsonify({'status': 'ok', 'added': 0})
+        pid = _collab_participante_infinito(conn, sess['id'])
+        ya = {r['track_id'] for r in conn.execute(
+            'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+        validos = {r['id'] for r in conn.execute(
+            f"SELECT id FROM tracks WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        agregadas = 0
+        for tid in ids:
+            if tid in ya or tid not in validos:
+                continue
+            ya.add(tid)
+            conn.execute('INSERT INTO collab_queue_items '
+                         '(session_id, participant_id, track_id, added_at, dispatched) VALUES (?, ?, ?, ?, 1)',
+                         (sess['id'], pid, tid, _utcnow_iso()))
+            agregadas += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'added': agregadas})
+    finally:
+        conn.close()
+
+
+# ── Ticket C-04 (pedido por Niko): reproductor de solo lectura para invitados ──
+# La app del anfitrión (iOS / Desktop) informa qué está sonando mientras hay
+# una sesión colaborativa: al cambiar de pista, al pausar/reanudar y cada ~6 s.
+# Se guarda en memoria (igual que la cola de cast): es efímero, si el servidor
+# se reinicia el próximo aviso lo repone. Los invitados lo consultan con
+# /api/collab/sonando y ven pista, artista, álbum, formato, progreso, quién la
+# agregó y lo que viene — sin ningún control.
+_collab_sonando = {}            # session_id -> {track_id, position, duration, playing, next_ids, at}
+_COLLAB_SONANDO_VIGENCIA_S = 45  # sin avisos por más que esto = no se sabe qué suena
+
+
+@app.route('/api/v1/collab/sonando', methods=['POST'])
+@api_login_required
+def api_v1_collab_sonando_post():
+    """Body: {track_id|null, position, duration, playing, next_ids: [...]}."""
+    data = request.get_json(silent=True) or {}
+
+    def _num(v):
+        try:
+            v = float(v)
+            return v if math.isfinite(v) and v >= 0 else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        track_id = int(data['track_id']) if data.get('track_id') is not None else None
+    except (TypeError, ValueError):
+        track_id = None
+    next_ids = []
+    for x in (data.get('next_ids') or [])[:5]:
+        try:
+            next_ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    conn = get_db_connection()
+    try:
+        sess = _collab_sesion_del_anfitrion(conn)
+    finally:
+        conn.close()
+    if not sess:
+        return jsonify({'status': 'ignored'})
+    _collab_sonando[sess['id']] = {
+        'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
+        'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time(),
+    }
+    return jsonify({'status': 'ok'})
+
+
+def _collab_anfitrion_display(conn, sess):
+    """Nombre y avatar del anfitrión, para las pistas que puso él mismo."""
+    row = conn.execute('SELECT nickname, avatar FROM users WHERE id=?', (sess['created_by'],)).fetchone()
+    nombre = ((row['nickname'] if row else None) or '').strip() or 'Anfitrión'
+    av = (row['avatar'] if row else None) or ''
+    if av and '/' in av:
+        cat, fname = av.split('/', 1)
+        avatar = _collab_avatar_display(cat, fname, nombre)
+    else:
+        avatar = {'type': 'initials', 'text': _collab_initials(nombre)}
+    return nombre, avatar
+
+
+def _collab_pistas_detalle(conn, sess, ids):
+    """Detalle de las pistas `ids` (en ese orden) con quién las agregó: el
+    invitado (o "Modo infinito") si están en la playlist colaborativa, o el
+    anfitrión si las puso él."""
+    if not ids:
+        return []
+    ph = ','.join('?' * len(ids))
+    rows = {r['id']: dict(r) for r in conn.execute(
+        f'''SELECT t.id, t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
+                   t.is_mqa, t.codec, t.sample_rate_real, t.genre,
+                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
+                   ar.id AS artist_id, ar.name AS artist_name
+            FROM tracks t
+            LEFT JOIN albums al ON al.id = t.album_id
+            LEFT JOIN artists ar ON ar.id = al.artist_id
+            WHERE t.id IN ({ph})''', ids)}
+    quien = {r['track_id']: dict(r) for r in conn.execute(
+        f'''SELECT cqi.track_id, cp.name, cp.avatar_category, cp.avatar_file, cp.device_key
+            FROM collab_queue_items cqi JOIN collab_participants cp ON cp.id = cqi.participant_id
+            WHERE cqi.session_id=? AND cqi.track_id IN ({ph})''', [sess['id']] + list(ids))}
+    host_nombre = host_avatar = None
+    out = []
+    for tid in ids:
+        d = rows.get(tid)
+        if not d:
+            continue
+        fmt, led = _fmt_format(d)
+        q = quien.get(tid)
+        if q:
+            by, by_av, by_host = q['name'], _collab_avatar_display(q['avatar_category'], q['avatar_file'],
+                                                                   q['name'], q['device_key']), False
+        else:
+            if host_nombre is None:
+                host_nombre, host_avatar = _collab_anfitrion_display(conn, sess)
+            by, by_av, by_host = host_nombre, host_avatar, True
+        out.append({
+            'id': tid, 'title': d['title'], 'duration': d['duration'],
+            'format_display': fmt, 'format_color': led, 'genre': d['genre'],
+            'album_id': d['album_id'], 'album_name': d['album_name'], 'album_year': d['album_year'],
+            'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
+            'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
+            'added_by': by, 'added_by_avatar': by_av, 'added_by_host': by_host,
+        })
+    return out
+
+
+@app.route('/api/collab/sonando')
+def api_collab_sonando():
+    """Para la web de invitados: lo que suena en el reproductor del anfitrión."""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_guest_ctx(conn)
+        if not sess or not part:
+            return jsonify({'active': False})
+        st = _collab_sonando.get(sess['id'])
+        ahora = time.time()
+        if not st or not st['track_id'] or ahora - st['at'] > _COLLAB_SONANDO_VIGENCIA_S:
+            return jsonify({'active': True, 'track': None})
+        detalle = _collab_pistas_detalle(conn, sess, [st['track_id']] + st['next_ids'])
+        if not detalle or detalle[0]['id'] != st['track_id']:
+            return jsonify({'active': True, 'track': None})
+        pos = st['position'] + ((ahora - st['at']) if st['playing'] else 0)
+        dur = st['duration'] or (detalle[0]['duration'] or 0)
+        if dur:
+            pos = min(pos, dur)
+        return jsonify({'active': True, 'track': detalle[0], 'next': detalle[1:],
+                        'position': round(pos, 1), 'duration': dur, 'playing': st['playing']})
     finally:
         conn.close()
 
@@ -4906,6 +5159,45 @@ def collab_guest_app():
     return render_template('colab_app.html', sesion_activa=bool(sess and part))
 
 
+def _collab_items_sesion(conn, sess):
+    """Todas las pistas de la playlist colaborativa activa, en el orden en que
+    se agregaron, con quién las agregó (avatar listo para mostrar) y si ya
+    llegaron al reproductor del anfitrión. Lo usan la web de invitados
+    (/api/collab/yo) y la vista del anfitrión (/api/v1/admin/collab/pistas)."""
+    rows = conn.execute(
+        '''SELECT cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id,
+                  t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
+                  t.is_mqa, t.codec, t.sample_rate_real,
+                  al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
+                  ar.id AS artist_id, ar.name AS artist_name,
+                  cp.name AS added_by, cp.avatar_category, cp.avatar_file, cp.device_key
+           FROM collab_queue_items cqi
+           JOIN tracks t ON t.id = cqi.track_id
+           LEFT JOIN albums al ON al.id = t.album_id
+           LEFT JOIN artists ar ON ar.id = al.artist_id
+           JOIN collab_participants cp ON cp.id = cqi.participant_id
+           WHERE cqi.session_id=? ORDER BY cqi.added_at''', (sess['id'],)).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        fmt, led = _fmt_format(d)
+        out.append({
+            'id': d['track_id'], 'title': d['title'], 'duration': d['duration'],
+            'duration_fmt': _fmt_seconds(d['duration']),
+            'format_display': fmt, 'format_color': led,
+            'album_id': d['album_id'], 'album_name': d['album_name'], 'album_year': d['album_year'],
+            'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
+            'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
+            'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
+            'participant_id': d['participant_id'],
+            'added_by': d['added_by'],
+            'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by'],
+                                                     d['device_key']),
+            'added_by_infinito': d['device_key'] == _COLLAB_INFINITO_KEY,
+        })
+    return out
+
+
 @app.route('/api/collab/yo')
 def api_collab_yo():
     """Estado del invitado: nombre, avatar, cupo, permiso de delegado, sus
@@ -4916,36 +5208,8 @@ def api_collab_yo():
         if not sess or not part:
             return jsonify({'active': False})
         usados = _collab_window_count(conn, sess, part['id'])
-        rows = conn.execute(
-            '''SELECT cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id,
-                      t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
-                      t.is_mqa, t.codec, t.sample_rate_real,
-                      al.id AS album_id, al.name AS album_name, al.cover_path,
-                      ar.id AS artist_id, ar.name AS artist_name,
-                      cp.name AS added_by, cp.avatar_category, cp.avatar_file
-               FROM collab_queue_items cqi
-               JOIN tracks t ON t.id = cqi.track_id
-               LEFT JOIN albums al ON al.id = t.album_id
-               LEFT JOIN artists ar ON ar.id = al.artist_id
-               JOIN collab_participants cp ON cp.id = cqi.participant_id
-               WHERE cqi.session_id=? ORDER BY cqi.added_at''', (sess['id'],)).fetchall()
-        mias, sesion = [], []
-        for r in rows:
-            d = dict(r)
-            fmt, led = _fmt_format(d)
-            item = {
-                'id': d['track_id'], 'title': d['title'], 'duration': d['duration'],
-                'format_display': fmt, 'format_color': led,
-                'album_id': d['album_id'], 'album_name': d['album_name'],
-                'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
-                'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
-                'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
-                'added_by': d['added_by'],
-                'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by']),
-            }
-            sesion.append(item)
-            if d['participant_id'] == part['id']:
-                mias.append(item)
+        sesion = _collab_items_sesion(conn, sess)
+        mias = [t for t in sesion if t['participant_id'] == part['id']]
         return jsonify({
             'active': True,
             'name': part['name'],
@@ -4954,6 +5218,11 @@ def api_collab_yo():
             'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
             'used': usados, 'remaining': max(0, sess['max_tracks'] - usados),
             'can_pull': bool(part.get('can_pull')),
+            # Ticket C-04: para el botón del delegado — cuántas pistas de la
+            # sesión todavía no llegaron al reproductor del anfitrión y si hay
+            # una recarga pedida que la app del anfitrión aún no atendió.
+            'pending_count': sum(1 for t in sesion if not t['dispatched']),
+            'pull_pending': bool(sess.get('pull_requested_at')),
             'mine': mias, 'session_tracks': sesion,
         })
     finally:
