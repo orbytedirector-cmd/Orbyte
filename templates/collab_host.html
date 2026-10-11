@@ -36,9 +36,13 @@
       <div>
         <p style="margin:0 0 0.4rem;color:var(--text-secondary);font-size:0.85rem">Link directo (por si el QR no anda):</p>
         <p style="word-break:break-all;font-size:0.85rem"><a href="{{ join_url }}">{{ join_url }}</a></p>
+        {% if collab_session.code %}
+        <p style="margin:0.75rem 0 0;font-size:0.85rem;color:var(--text-secondary)">Código:
+          <strong style="color:var(--text-gold);font-size:1.3rem;letter-spacing:3px">{{ collab_session.code[:3] }}-{{ collab_session.code[3:] }}</strong></p>
+        {% endif %}
         <p style="margin:0.75rem 0 0;font-size:0.85rem;color:var(--text-secondary)">
-          Límite: <strong style="color:var(--text-gold)">{{ collab_session.max_tracks }}</strong> pistas cada
-          <strong style="color:var(--text-gold)">{{ collab_session.window_hours }}h</strong> por dispositivo.
+          Cupo: <strong style="color:var(--text-gold)">{{ collab_session.max_tracks }}</strong> pistas por participante;
+          al usarlas se renueva <strong style="color:var(--text-gold)">{{ collab_session.window_hours }}h</strong> después.
         </p>
       </div>
     </div>

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Orbyte · Entrar con código</title>
+<!-- Ticket C-05: entrar a la playlist colaborativa escribiendo el código de
+     6 caracteres que muestra el anfitrión (para quien no puede escanear el
+     QR). Lleva al mismo ingreso que el QR (/colab/join/<token>). -->
+<link rel="icon" href="{{ url_for('static', filename='web/assets/logo-icon.png') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='web/orbyte.css') }}?v=c05">
+<style>
+  body { overflow-y: auto; }
+  .code-wrap { min-height: 100%; padding: calc(var(--safe-top) + 28px) var(--pad) calc(var(--safe-bottom) + 28px); max-width: 520px; margin: 0 auto; }
+  .code-brand { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 22px; }
+  .code-brand img { height: 34px; }
+  .code-brand .brand-title { font-size: 26px; }
+  .code-intro { color: var(--text-secondary); font-size: 14px; line-height: 1.5; text-align: center; margin: 0 0 22px; }
+  .code-input { text-align: center; font-family: 'Orbitron', sans-serif; font-size: 26px; letter-spacing: 6px; text-transform: uppercase; }
+  .code-error { border: 1px solid #5A1D1D; color: #FF6B6B; background: rgba(255,69,58,0.06); border-radius: 12px; padding: 12px 14px; font-size: 14px; line-height: 1.5; text-align: center; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="code-wrap">
+  <div class="code-brand">
+    <img src="{{ url_for('static', filename='web/assets/logo-icon.png') }}" alt="">
+    <div class="brand-title">ORBYTE</div>
+  </div>
+  <div class="page-title gold-text" style="text-align:center">Playlist colaborativa</div>
+  <p class="code-intro">Escribe el código que te muestra el anfitrión (por ejemplo <b style="color:var(--accent-bright)">K7F-Q2M</b>).</p>
+  {% if error %}<div class="code-error">{{ error }}</div>{% endif %}
+  <form method="POST" id="code-form">
+    <div class="cfg-section">
+      <div class="cfg-header">Código</div>
+      <div class="cfg-card prof-card-pad">
+        <input type="text" name="code" id="code" class="prof-input code-input" maxlength="8" value="{{ code }}"
+               placeholder="ABC-123" required autocomplete="off" autocapitalize="characters" spellcheck="false">
+      </div>
+    </div>
+    <button type="submit" class="orbitron-big-btn">Entrar</button>
+  </form>
+</div>
+<script>
+(function () {
+  "use strict";
+  var input = document.getElementById("code");
+  input.addEventListener("input", function () {
+    var v = input.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
+    input.value = v.length > 3 ? v.slice(0, 3) + "-" + v.slice(3) : v;
+  });
+  input.focus();
+})();
+</script>
+</body>
+</html>

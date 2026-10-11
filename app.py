@@ -892,6 +892,21 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass  # Columna ya existe
+    # Lazy migration: Ticket C-05 (Modo Colaborativo para usuarios con la
+    # app). code = código corto de la sesión (para entrar sin escanear el
+    # QR); user_id = participante con cuenta (nulo para invitados web);
+    # cupo_desde/bloqueado_hasta = nuevo cupo fijo con bloqueo; activo = el
+    # usuario con cuenta puede salir del modo y volver a entrar.
+    for _sql in ("ALTER TABLE collab_sessions ADD COLUMN code TEXT",
+                 "ALTER TABLE collab_participants ADD COLUMN user_id INTEGER",
+                 "ALTER TABLE collab_participants ADD COLUMN cupo_desde TEXT",
+                 "ALTER TABLE collab_participants ADD COLUMN bloqueado_hasta TEXT",
+                 "ALTER TABLE collab_participants ADD COLUMN activo INTEGER DEFAULT 1"):
+        try:
+            conn.execute(_sql)
+            conn.commit()
+        except Exception:
+            pass  # Columna ya existe
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -1180,7 +1195,7 @@ def _touch_user_activity(user_id):
 # browse, búsqueda avanzada y sus /api/ de lectura) queda accesible tal cual
 # ya está, sin tocar esos templates.
 # Ticket C-03: paginas que SI ve un invitado (el resto redirige a /colab/app).
-_COLLAB_GUEST_PAGES = {'collab_guest_app', 'collab_join', 'collab_leave', 'cover_file', 'cover',
+_COLLAB_GUEST_PAGES = {'collab_guest_app', 'collab_join', 'collab_leave', 'collab_codigo', 'cover_file', 'cover',
                        'cast_cover', 'static', 'service_worker'}
 
 _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
@@ -1205,7 +1220,7 @@ def _require_login():
     # 'cover': mismo criterio que 'cast_cover' (ya exento arriba) — una
     # carátula de álbum no es información sensible, y el cliente nativo no
     # maneja cookies de sesión persistentes entre lanzamientos de la app.
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'cast_audio', 'cast_cover', 'cover_file') or request.path.startswith('/static/'):
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file') or request.path.startswith('/static/'):
         return
     # /api/v1/*: API del cliente nativo (Orbyte-iOS). Usa token Bearer propio
     # en vez de la cookie de sesión — se protege endpoint por endpoint con
@@ -4373,15 +4388,169 @@ _COLLAB_INFINITO_NOMBRE = 'Modo infinito'
 
 
 def _collab_participante_infinito(conn, session_id):
+    return _collab_participante_especial(conn, session_id, _COLLAB_INFINITO_KEY, _COLLAB_INFINITO_NOMBRE)
+
+
+# ── Ticket C-05: participantes especiales, usuarios con cuenta y cupo ──
+# "Anfitrión": las pistas que el anfitrión agrega a su cola durante la sesión
+# (su avatar + etiqueta Admin, sin cupo). Igual que "Modo infinito", es una
+# fila especial que no aparece como participante ni puede ser delegado.
+_COLLAB_ANFITRION_KEY = '__anfitrion__'
+_COLLAB_KEYS_ESPECIALES = (_COLLAB_INFINITO_KEY, _COLLAB_ANFITRION_KEY)
+_COLLAB_SQL_NO_ESPECIAL = "cp.device_key NOT IN ('__modo_infinito__', '__anfitrion__')"
+# Columnas del perfil del usuario (participantes con cuenta y anfitrión): el
+# nombre y el avatar se leen del perfil en cada consulta.
+_COLLAB_SQL_USER_COLS = "u.nickname AS u_nickname, u.avatar AS u_avatar, u.email AS u_email"
+_COLLAB_SQL_USER_JOIN = "LEFT JOIN users u ON u.id = cp.user_id"
+
+
+def _collab_user_key(user_id):
+    return f'user:{int(user_id)}'
+
+
+def _collab_nombre_usuario(nickname, email):
+    nick = (nickname or '').strip()
+    if nick:
+        return nick
+    return ((email or '').split('@')[0] or 'Usuario')[:40]
+
+
+def _collab_avatar_usuario(avatar_path, nombre):
+    """Avatar del perfil de un usuario ('femeninos/x.png' → imagen; sin
+    avatar → iniciales)."""
+    if avatar_path and '/' in avatar_path:
+        cat, fname = avatar_path.split('/', 1)
+        av = _collab_avatar_display(cat, fname, nombre)
+        if av.get('type') == 'image':
+            return av
+    return {'type': 'initials', 'text': _collab_initials(nombre)}
+
+
+def _collab_part_view(p):
+    """(nombre, avatar con 'badge') de un participante — `p` es la fila de
+    collab_participants, idealmente con las columnas u_* del perfil
+    (_COLLAB_SQL_USER_COLS). badge: 'admin' (anfitrión), 'usuario' (con
+    cuenta), 'infinito' o None (invitado web)."""
+    p = dict(p)
+    key = p.get('device_key') or ''
+    if key == _COLLAB_INFINITO_KEY:
+        return _COLLAB_INFINITO_NOMBRE, {'type': 'infinito', 'text': '∞', 'badge': 'infinito'}
+    if p.get('user_id') is not None and (key == _COLLAB_ANFITRION_KEY or key.startswith('user:')):
+        nombre = _collab_nombre_usuario(p.get('u_nickname'), p.get('u_email'))
+        av = dict(_collab_avatar_usuario(p.get('u_avatar'), nombre))
+        av['badge'] = 'admin' if key == _COLLAB_ANFITRION_KEY else 'usuario'
+        return nombre, av
+    nombre = p.get('name') or 'Invitado'
+    av = dict(_collab_avatar_display(p.get('avatar_category'), p.get('avatar_file'), nombre))
+    av['badge'] = None
+    return nombre, av
+
+
+def _collab_participante_especial(conn, session_id, key, nombre, user_id=None):
     row = conn.execute('SELECT id FROM collab_participants WHERE session_id=? AND device_key=?',
-                       (session_id, _COLLAB_INFINITO_KEY)).fetchone()
+                       (session_id, key)).fetchone()
     if row:
         return row['id']
     cur = conn.execute(
-        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen) '
-        'VALUES (?, ?, ?, ?, ?)',
-        (session_id, _COLLAB_INFINITO_KEY, _COLLAB_INFINITO_NOMBRE, _utcnow_iso(), _utcnow_iso()))
+        'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen, user_id) '
+        'VALUES (?, ?, ?, ?, ?, ?)',
+        (session_id, key, nombre, _utcnow_iso(), _utcnow_iso(), user_id))
     return cur.lastrowid
+
+
+# Código corto de la sesión: 6 caracteres sin letras/números confusos (sin
+# I, L, O, 0, 1). Se muestra como K7F-Q2M y se acepta con o sin guion.
+_COLLAB_CODE_ALFABETO = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+
+
+def _collab_generar_codigo(conn):
+    while True:
+        code = ''.join(secrets.choice(_COLLAB_CODE_ALFABETO) for _ in range(6))
+        if not conn.execute('SELECT 1 FROM collab_sessions WHERE is_active=1 AND code=?', (code,)).fetchone():
+            return code
+
+
+def _collab_codigo_display(code):
+    return f'{code[:3]}-{code[3:]}' if code and len(code) == 6 else (code or None)
+
+
+def _collab_normalizar_codigo(raw):
+    return re.sub(r'[^A-Z0-9]', '', (raw or '').upper())
+
+
+def _collab_sesion_por_codigo(conn, raw):
+    code = _collab_normalizar_codigo(raw)
+    if len(code) != 6:
+        return None
+    row = conn.execute('SELECT * FROM collab_sessions WHERE is_active=1 AND code=?', (code,)).fetchone()
+    return dict(row) if row else None
+
+
+# Límite de intentos de código (por IP o cuenta): 10 por minuto.
+_collab_intentos_codigo = {}
+
+
+def _collab_intento_codigo_permitido(clave):
+    ahora = time.time()
+    lista = [t for t in _collab_intentos_codigo.get(clave, []) if ahora - t < 60]
+    permitido = len(lista) < 10
+    if permitido:
+        lista.append(ahora)
+    _collab_intentos_codigo[clave] = lista
+    return permitido
+
+
+def _collab_parse_utc(iso):
+    try:
+        return datetime.fromisoformat(str(iso).replace('Z', '').replace(' ', 'T'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _collab_fmt_espera(segundos):
+    m = max(1, int(round(segundos / 60.0)))
+    if m < 60:
+        return f'{m} min'
+    h, r = divmod(m, 60)
+    return f'{h} h {r} min' if r else f'{h} h'
+
+
+def _collab_cupo(conn, sess, part):
+    """Ticket C-05 — cupo fijo con bloqueo (reemplaza la ventana móvil):
+    cada participante tiene max_tracks pistas sin importar cuánto tarde en
+    usarlas; al agregar la última empieza un bloqueo de window_hours y,
+    cumplido, vuelve a tener max_tracks completas. Anfitrión y Modo infinito
+    no tienen cupo. Si el bloqueo ya venció, lo libera (y lo guarda)."""
+    part = dict(part)
+    maximo = int(sess['max_tracks'])
+    if (part.get('device_key') or '') in _COLLAB_KEYS_ESPECIALES:
+        return {'max_tracks': maximo, 'used': 0, 'remaining': maximo, 'unlimited': True,
+                'blocked_until': None, 'blocked_seconds': 0}
+    ahora = datetime.now(timezone.utc).replace(tzinfo=None)
+    desde, hasta = part.get('cupo_desde'), part.get('bloqueado_hasta')
+    hasta_dt = _collab_parse_utc(hasta) if hasta else None
+    if hasta and (hasta_dt is None or hasta_dt <= ahora):
+        # Bloqueo cumplido: cupo completo de nuevo, contando desde ahora.
+        desde, hasta, hasta_dt = ahora.isoformat(), None, None
+        conn.execute('UPDATE collab_participants SET cupo_desde=?, bloqueado_hasta=NULL WHERE id=?',
+                     (desde, part['id']))
+        conn.commit()
+    if desde:
+        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=? AND added_at>=?',
+                              (part['id'], desde)).fetchone()[0]
+    else:
+        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=?',
+                              (part['id'],)).fetchone()[0]
+    if hasta_dt is None and usadas >= maximo:
+        # Llegó al tope sin bloqueo registrado (datos de antes del cambio o se
+        # bajó el máximo): el bloqueo empieza ahora.
+        hasta_dt = ahora + timedelta(hours=float(sess['window_hours']))
+        hasta = hasta_dt.isoformat()
+        conn.execute('UPDATE collab_participants SET bloqueado_hasta=? WHERE id=?', (hasta, part['id']))
+        conn.commit()
+    segundos = max(0, int((hasta_dt - ahora).total_seconds())) if hasta_dt else 0
+    return {'max_tracks': maximo, 'used': min(usadas, maximo), 'remaining': 0 if hasta_dt else max(0, maximo - usadas),
+            'unlimited': False, 'blocked_until': hasta, 'blocked_seconds': segundos}
 
 
 # Ticket C-01 (reportado por Niko): el link del QR se armaba con la direccion
@@ -4528,21 +4697,30 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
     if not track:
         return {'status': 'error', 'message': 'Pista no encontrada.'}
 
-    count = _collab_window_count(conn, sess, participant_id)
-    if count >= sess['max_tracks']:
-        return {'status': 'limit', 'message':
-                f"Llegaste al máximo de {sess['max_tracks']} pistas cada {sess['window_hours']:g}h. "
-                f"Esperá un poco — el cupo se libera solo con el tiempo."}
+    # Ticket C-05: cupo fijo con bloqueo (ver _collab_cupo).
+    part = conn.execute('SELECT * FROM collab_participants WHERE id=? AND session_id=?',
+                        (participant_id, session_id)).fetchone()
+    if not part:
+        return {'status': 'expired', 'message': 'La sesión colaborativa ya terminó.'}
+    cupo = _collab_cupo(conn, sess, part)
+    if not cupo['unlimited'] and cupo['remaining'] <= 0:
+        espera = _collab_fmt_espera(cupo['blocked_seconds']) if cupo['blocked_seconds'] else None
+        return {'status': 'limit', 'blocked_until': cupo['blocked_until'], 'blocked_seconds': cupo['blocked_seconds'],
+                'message': f"Usaste tus {sess['max_tracks']} pistas."
+                           + (f" Cupo nuevo en {espera}." if espera else "")}
+    count = cupo['used']
 
     dup = conn.execute(
-        '''SELECT cp.name FROM collab_queue_items cqi
+        f'''SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_queue_items cqi
            JOIN collab_participants cp ON cp.id = cqi.participant_id
+           {_COLLAB_SQL_USER_JOIN}
            WHERE cqi.session_id=? AND cqi.track_id=? LIMIT 1''',
         (session_id, track_id)
     ).fetchone()
     if dup:
-        return {'status': 'duplicate', 'added_by': dup['name'],
-                'message': f"«{track['title']}» ya está en la playlist colaborativa (la agregó {dup['name']})."}
+        dup_nombre = _collab_part_view(dup)[0]
+        return {'status': 'duplicate', 'added_by': dup_nombre,
+                'message': f"«{track['title']}» ya está en la playlist colaborativa (la agregó {dup_nombre})."}
 
     if track['album_id'] and not confirm_album:
         album_count = conn.execute(
@@ -4555,12 +4733,22 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
                     'message': f"Ya agregaste {album_count} pistas de este álbum — "
                                f"probá sumar variedad, tu cupo de pistas es limitado."}
 
+    ahora = _utcnow_iso()
     conn.execute(
         'INSERT INTO collab_queue_items (session_id, participant_id, track_id, added_at) VALUES (?, ?, ?, ?)',
-        (session_id, participant_id, track_id, _utcnow_iso())
+        (session_id, participant_id, track_id, ahora)
     )
+    restantes = sess['max_tracks'] - (count + 1)
+    bloqueado_hasta = None
+    if not cupo['unlimited'] and restantes <= 0:
+        # Ticket C-05: usó la última de su cupo → empieza el bloqueo.
+        bloqueado_hasta = (datetime.now(timezone.utc).replace(tzinfo=None)
+                           + timedelta(hours=float(sess['window_hours']))).isoformat()
+        conn.execute('UPDATE collab_participants SET bloqueado_hasta=? WHERE id=?', (bloqueado_hasta, participant_id))
     conn.commit()
-    return {'status': 'ok', 'remaining': sess['max_tracks'] - (count + 1)}
+    return {'status': 'ok', 'remaining': max(0, restantes) if not cupo['unlimited'] else sess['max_tracks'],
+            'used': count + 1, 'blocked_until': bloqueado_hasta,
+            'blocked_seconds': int(float(sess['window_hours']) * 3600) if bloqueado_hasta else 0}
 
 
 @app.route('/admin/colaborativa')
@@ -4572,8 +4760,9 @@ def admin_collab():
         participants, pending_count, dispatched_count, join_url = [], 0, 0, None
         if sess:
             participants = [dict(r) for r in conn.execute(
-                'SELECT * FROM collab_participants WHERE session_id=? AND device_key<>? ORDER BY joined_at',
-                (sess['id'], _COLLAB_INFINITO_KEY)
+                f'SELECT cp.* FROM collab_participants cp WHERE cp.session_id=? AND {_COLLAB_SQL_NO_ESPECIAL} '
+                'AND COALESCE(cp.activo, 1)=1 ORDER BY cp.joined_at',
+                (sess['id'],)
             ).fetchall()]
             pending_count = conn.execute(
                 'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
@@ -4612,15 +4801,17 @@ def _collab_start_session(admin_user_id, max_tracks=None, window_hours=None):
     try:
         conn.execute('UPDATE collab_sessions SET is_active=0, closed_at=? WHERE is_active=1', (_utcnow_iso(),))
         token = secrets.token_urlsafe(16)
+        code = _collab_generar_codigo(conn)   # Ticket C-05
         conn.execute(
-            'INSERT INTO collab_sessions (token, created_by, max_tracks, window_hours, is_active, created_at) '
-            'VALUES (?, ?, ?, ?, 1, ?)',
-            (token, admin_user_id, max_tracks, window_hours, _utcnow_iso())
+            'INSERT INTO collab_sessions (token, created_by, max_tracks, window_hours, is_active, created_at, code) '
+            'VALUES (?, ?, ?, ?, 1, ?, ?)',
+            (token, admin_user_id, max_tracks, window_hours, _utcnow_iso(), code)
         )
         conn.commit()
     finally:
         conn.close()
     return {'token': token, 'max_tracks': max_tracks, 'window_hours': window_hours,
+            'code': _collab_codigo_display(code),
             'join_url': _collab_join_url(token), 'join_urls': _collab_join_urls(token)}
 
 
@@ -4687,8 +4878,8 @@ def admin_collab_permiso(participant_id):
         if not sess:
             return jsonify({'status': 'error', 'message': 'No hay sesión activa.'}), 404
         row = conn.execute(
-            'SELECT * FROM collab_participants WHERE id=? AND session_id=? AND device_key<>?',
-            (participant_id, sess['id'], _COLLAB_INFINITO_KEY)
+            f'SELECT cp.* FROM collab_participants cp WHERE cp.id=? AND cp.session_id=? AND {_COLLAB_SQL_NO_ESPECIAL}',
+            (participant_id, sess['id'])
         ).fetchone()
         if not row:
             return jsonify({'status': 'error', 'message': 'Participante no encontrado.'}), 404
@@ -4735,12 +4926,24 @@ def api_admin_collab_estado():
         # Ticket C-01: can_pull como true/false (SQLite lo guarda 0/1 y la app
         # iOS lo decodifica como Bool: con un solo participante el decode
         # entero fallaba y el admin dejaba de ver a los invitados).
-        participants = [dict(r, can_pull=bool(r['can_pull']), joined_at=r['joined_at'] or '')
-                        for r in conn.execute(
-            'SELECT id, name, joined_at, can_pull FROM collab_participants '
-            'WHERE session_id=? AND device_key<>? ORDER BY joined_at',
-            (sess['id'], _COLLAB_INFINITO_KEY)
-        ).fetchall()]
+        # Ticket C-05: nombre/avatar desde el perfil para los usuarios con cuenta
+        # (is_user → logo de Orbyte junto al nombre en la app del anfitrión);
+        # los que salieron del Modo Colaborativo no se listan.
+        participants = []
+        for r in conn.execute(
+            f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp {_COLLAB_SQL_USER_JOIN} '
+            f'WHERE cp.session_id=? AND {_COLLAB_SQL_NO_ESPECIAL} AND COALESCE(cp.activo, 1)=1 '
+            'ORDER BY cp.joined_at', (sess['id'],)
+        ).fetchall():
+            nombre, av = _collab_part_view(r)
+            participants.append({'id': r['id'], 'name': nombre, 'joined_at': r['joined_at'] or '',
+                                 'can_pull': bool(r['can_pull']), 'is_user': r['user_id'] is not None,
+                                 'avatar': av})
+        if not sess.get('code'):
+            # Sesión creada antes del Ticket C-05: se le asigna código ahora.
+            sess['code'] = _collab_generar_codigo(conn)
+            conn.execute('UPDATE collab_sessions SET code=? WHERE id=?', (sess['code'], sess['id']))
+            conn.commit()
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
         ).fetchone()[0]
@@ -4756,14 +4959,16 @@ def api_admin_collab_estado():
         pull_requested_by_name = None
         if pull_requested and sess.get('pull_requested_by'):
             req = conn.execute(
-                'SELECT name FROM collab_participants WHERE id=?', (sess['pull_requested_by'],)
+                f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp {_COLLAB_SQL_USER_JOIN} '
+                'WHERE cp.id=?', (sess['pull_requested_by'],)
             ).fetchone()
-            pull_requested_by_name = req['name'] if req else None
+            pull_requested_by_name = _collab_part_view(req)[0] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
                         'total_count': total,
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
                         'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
                         'token': sess['token'],
+                        'code': _collab_codigo_display(sess.get('code')),
                         'join_url': _collab_join_url(sess['token']),
                         'join_urls': _collab_join_urls(sess['token'])})
     finally:
@@ -4816,14 +5021,13 @@ def api_admin_collab_pull():
         participant_ids = list({it['participant_id'] for it in ordered_items})
         p_placeholders = ','.join('?' * len(participant_ids))
         p_rows = conn.execute(
-            f'SELECT id, name, avatar_category, avatar_file FROM collab_participants '
-            f'WHERE id IN ({p_placeholders})', participant_ids
+            f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp {_COLLAB_SQL_USER_JOIN} '
+            f'WHERE cp.id IN ({p_placeholders})', participant_ids
         ).fetchall()
-        added_by_map = {
-            p['id']: {'name': p['name'],
-                      'avatar': _collab_avatar_display(p['avatar_category'], p['avatar_file'], p['name'])}
-            for p in p_rows
-        }
+        added_by_map = {}
+        for p in p_rows:
+            nombre, av = _collab_part_view(p)
+            added_by_map[p['id']] = {'name': nombre, 'avatar': av}
 
         result = []
         for it in ordered_items:
@@ -4872,20 +5076,23 @@ def api_v1_admin_collab_pistas():
             return jsonify({'active': False})
         items = _collab_items_sesion(conn, sess)
         parts = {}
-        for r in conn.execute('SELECT id, name, avatar_category, avatar_file, device_key FROM collab_participants '
-                              'WHERE session_id=? ORDER BY joined_at', (sess['id'],)):
-            parts[r['id']] = {'id': r['id'], 'name': r['name'],
-                              'avatar': _collab_avatar_display(r['avatar_category'], r['avatar_file'],
-                                                               r['name'], r['device_key']),
+        for r in conn.execute(f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp '
+                              f'{_COLLAB_SQL_USER_JOIN} WHERE cp.session_id=? ORDER BY cp.joined_at', (sess['id'],)):
+            nombre, av = _collab_part_view(r)
+            especial = r['device_key'] in _COLLAB_KEYS_ESPECIALES
+            parts[r['id']] = {'id': r['id'], 'name': nombre, 'avatar': av, 'badge': av.get('badge'),
                               'infinito': r['device_key'] == _COLLAB_INFINITO_KEY,
+                              'especial': especial,
+                              'activo': bool(r['activo'] if r['activo'] is not None else 1),
                               'total': 0, 'pending': 0}
         for t in items:
             p = parts.get(t['participant_id'])
             if p:
                 p['total'] += 1
                 p['pending'] += 0 if t['dispatched'] else 1
-        resumen = sorted((p for p in parts.values() if p['total'] or not p['infinito']),
-                         key=lambda p: (p['infinito'], -p['total'], p['name'].lower()))
+        # Especiales (Admin / Modo infinito) y los que salieron: solo si aportaron algo.
+        resumen = sorted((p for p in parts.values() if p['total'] or (not p['especial'] and p['activo'])),
+                         key=lambda p: (p['especial'], -p['total'], p['name'].lower()))
         pend = sum(1 for t in items if not t['dispatched'])
         return jsonify({
             'active': True,
@@ -4987,16 +5194,13 @@ def api_v1_collab_sonando_post():
 
 
 def _collab_anfitrion_display(conn, sess):
-    """Nombre y avatar del anfitrión, para las pistas que puso él mismo."""
-    row = conn.execute('SELECT nickname, avatar FROM users WHERE id=?', (sess['created_by'],)).fetchone()
-    nombre = ((row['nickname'] if row else None) or '').strip() or 'Anfitrión'
-    av = (row['avatar'] if row else None) or ''
-    if av and '/' in av:
-        cat, fname = av.split('/', 1)
-        avatar = _collab_avatar_display(cat, fname, nombre)
-    else:
-        avatar = {'type': 'initials', 'text': _collab_initials(nombre)}
-    return nombre, avatar
+    """Nombre y avatar del anfitrión (con la etiqueta Admin), para las pistas
+    que puso él mismo — mismo criterio que su participante especial."""
+    row = conn.execute('SELECT nickname AS u_nickname, avatar AS u_avatar, email AS u_email FROM users WHERE id=?',
+                       (sess['created_by'],)).fetchone()
+    fila = dict(row) if row else {}
+    fila.update({'device_key': _COLLAB_ANFITRION_KEY, 'user_id': sess['created_by']})
+    return _collab_part_view(fila)
 
 
 def _collab_pistas_detalle(conn, sess, ids):
@@ -5016,8 +5220,9 @@ def _collab_pistas_detalle(conn, sess, ids):
             LEFT JOIN artists ar ON ar.id = al.artist_id
             WHERE t.id IN ({ph})''', ids)}
     quien = {r['track_id']: dict(r) for r in conn.execute(
-        f'''SELECT cqi.track_id, cp.name, cp.avatar_category, cp.avatar_file, cp.device_key
+        f'''SELECT cqi.track_id, cp.*, {_COLLAB_SQL_USER_COLS}
             FROM collab_queue_items cqi JOIN collab_participants cp ON cp.id = cqi.participant_id
+            {_COLLAB_SQL_USER_JOIN}
             WHERE cqi.session_id=? AND cqi.track_id IN ({ph})''', [sess['id']] + list(ids))}
     host_nombre = host_avatar = None
     out = []
@@ -5028,8 +5233,8 @@ def _collab_pistas_detalle(conn, sess, ids):
         fmt, led = _fmt_format(d)
         q = quien.get(tid)
         if q:
-            by, by_av, by_host = q['name'], _collab_avatar_display(q['avatar_category'], q['avatar_file'],
-                                                                   q['name'], q['device_key']), False
+            by, by_av = _collab_part_view(q)
+            by_host = (q.get('device_key') == _COLLAB_ANFITRION_KEY)
         else:
             if host_nombre is None:
                 host_nombre, host_avatar = _collab_anfitrion_display(conn, sess)
@@ -5053,21 +5258,27 @@ def api_collab_sonando():
         sess, part = _collab_guest_ctx(conn)
         if not sess or not part:
             return jsonify({'active': False})
+        return jsonify(_collab_sonando_payload(conn, sess))
+    finally:
+        conn.close()
+
+
+def _collab_sonando_payload(conn, sess):
+    """Lo que suena en el anfitrión (web de invitados y Modo Colaborativo)."""
+    if True:
         st = _collab_sonando.get(sess['id'])
         ahora = time.time()
         if not st or not st['track_id'] or ahora - st['at'] > _COLLAB_SONANDO_VIGENCIA_S:
-            return jsonify({'active': True, 'track': None})
+            return {'active': True, 'track': None}
         detalle = _collab_pistas_detalle(conn, sess, [st['track_id']] + st['next_ids'])
         if not detalle or detalle[0]['id'] != st['track_id']:
-            return jsonify({'active': True, 'track': None})
+            return {'active': True, 'track': None}
         pos = st['position'] + ((ahora - st['at']) if st['playing'] else 0)
         dur = st['duration'] or (detalle[0]['duration'] or 0)
         if dur:
             pos = min(pos, dur)
-        return jsonify({'active': True, 'track': detalle[0], 'next': detalle[1:],
-                        'position': round(pos, 1), 'duration': dur, 'playing': st['playing']})
-    finally:
-        conn.close()
+        return {'active': True, 'track': detalle[0], 'next': detalle[1:],
+                'position': round(pos, 1), 'duration': dur, 'playing': st['playing']}
 
 
 @app.route('/colab/join/<token>', methods=['GET', 'POST'])
@@ -5170,17 +5381,20 @@ def _collab_items_sesion(conn, sess):
                   t.is_mqa, t.codec, t.sample_rate_real,
                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
                   ar.id AS artist_id, ar.name AS artist_name,
-                  cp.name AS added_by, cp.avatar_category, cp.avatar_file, cp.device_key
+                  cp.name, cp.avatar_category, cp.avatar_file, cp.device_key, cp.user_id,
+                  u.nickname AS u_nickname, u.avatar AS u_avatar, u.email AS u_email
            FROM collab_queue_items cqi
            JOIN tracks t ON t.id = cqi.track_id
            LEFT JOIN albums al ON al.id = t.album_id
            LEFT JOIN artists ar ON ar.id = al.artist_id
            JOIN collab_participants cp ON cp.id = cqi.participant_id
+           LEFT JOIN users u ON u.id = cp.user_id
            WHERE cqi.session_id=? ORDER BY cqi.added_at''', (sess['id'],)).fetchall()
     out = []
     for r in rows:
         d = dict(r)
         fmt, led = _fmt_format(d)
+        nombre, av = _collab_part_view(d)
         out.append({
             'id': d['track_id'], 'title': d['title'], 'duration': d['duration'],
             'duration_fmt': _fmt_seconds(d['duration']),
@@ -5190,9 +5404,9 @@ def _collab_items_sesion(conn, sess):
             'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
             'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
             'participant_id': d['participant_id'],
-            'added_by': d['added_by'],
-            'added_by_avatar': _collab_avatar_display(d['avatar_category'], d['avatar_file'], d['added_by'],
-                                                     d['device_key']),
+            'added_by': nombre,
+            'added_by_avatar': av,
+            'added_by_badge': av.get('badge'),
             'added_by_infinito': d['device_key'] == _COLLAB_INFINITO_KEY,
         })
     return out
@@ -5207,26 +5421,53 @@ def api_collab_yo():
         sess, part = _collab_guest_ctx(conn)
         if not sess or not part:
             return jsonify({'active': False})
-        usados = _collab_window_count(conn, sess, part['id'])
-        sesion = _collab_items_sesion(conn, sess)
-        mias = [t for t in sesion if t['participant_id'] == part['id']]
-        return jsonify({
-            'active': True,
-            'name': part['name'],
-            'avatar': _collab_avatar_display(part.get('avatar_category'), part.get('avatar_file'), part['name']),
-            'avatar_category': part.get('avatar_category'), 'avatar_file': part.get('avatar_file'),
-            'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
-            'used': usados, 'remaining': max(0, sess['max_tracks'] - usados),
-            'can_pull': bool(part.get('can_pull')),
-            # Ticket C-04: para el botón del delegado — cuántas pistas de la
-            # sesión todavía no llegaron al reproductor del anfitrión y si hay
-            # una recarga pedida que la app del anfitrión aún no atendió.
-            'pending_count': sum(1 for t in sesion if not t['dispatched']),
-            'pull_pending': bool(sess.get('pull_requested_at')),
-            'mine': mias, 'session_tracks': sesion,
-        })
+        return jsonify(_collab_yo_payload(conn, sess, part))
     finally:
         conn.close()
+
+
+def _collab_yo_payload(conn, sess, part):
+    """Estado del participante (invitado web o usuario con la app): nombre,
+    avatar, cupo (Ticket C-05: cupo fijo con bloqueo), delegado, sus pistas y
+    las de la sesión."""
+    fila = conn.execute(f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp '
+                        f'{_COLLAB_SQL_USER_JOIN} WHERE cp.id=?', (part['id'],)).fetchone()
+    nombre, avatar = _collab_part_view(fila)
+    cupo = _collab_cupo(conn, sess, fila)
+    sesion = _collab_items_sesion(conn, sess)
+    mias = [t for t in sesion if t['participant_id'] == part['id']]
+    host_nombre = _collab_anfitrion_display(conn, sess)[0]
+    return {
+        'active': True,
+        'joined': True,
+        'is_user': fila['user_id'] is not None,
+        'host_name': host_nombre,
+        'name': nombre,
+        'avatar': avatar,
+        'avatar_category': fila['avatar_category'], 'avatar_file': fila['avatar_file'],
+        'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
+        'used': cupo['used'], 'remaining': cupo['remaining'],
+        'blocked_until': cupo['blocked_until'], 'blocked_seconds': cupo['blocked_seconds'],
+        'can_pull': bool(fila['can_pull']),
+        # Ticket C-04: para el botón del delegado — cuántas pistas de la
+        # sesión todavía no llegaron al reproductor del anfitrión y si hay
+        # una recarga pedida que la app del anfitrión aún no atendió.
+        'pending_count': sum(1 for t in sesion if not t['dispatched']),
+        'pull_pending': bool(sess.get('pull_requested_at')),
+        'mine': mias, 'session_tracks': sesion,
+    }
+
+
+def _collab_solicitar_pull(conn, sess, part):
+    """El delegado pide que el anfitrión cargue las pistas nuevas. Devuelve
+    (dict, http_status)."""
+    row = conn.execute('SELECT can_pull FROM collab_participants WHERE id=?', (part['id'],)).fetchone()
+    if not row or not row['can_pull']:
+        return {'status': 'error', 'message': 'No tienes permiso para recargar la cola.'}, 403
+    conn.execute('UPDATE collab_sessions SET pull_requested_at=?, pull_requested_by=? WHERE id=?',
+                 (_utcnow_iso(), part['id'], sess['id']))
+    conn.commit()
+    return {'status': 'ok'}, 200
 
 
 @app.route('/api/collab/perfil', methods=['POST'])
@@ -5324,6 +5565,230 @@ def api_collab_solicitar_pull():
     finally:
         conn.close()
 
+
+
+# ── Ticket C-05 (pedido por Niko): Modo Colaborativo para usuarios con la app ──
+# Un usuario registrado se une a la playlist colaborativa desde la app (QR o
+# código): queda como participante atado a su CUENTA (no al dispositivo), con
+# nombre y avatar de su perfil y el mismo cupo que los invitados. Mismas
+# reglas que /api/collab/* (duplicados, aviso de álbum, cupo); el anfitrión no
+# puede unirse a su propia sesión.
+
+def _collab_user_ctx(conn, user):
+    """(sesión activa, participante activo) del usuario con cuenta, o (sess, None)."""
+    sess = _collab_active_session(conn)
+    if not sess:
+        return None, None
+    row = conn.execute('SELECT * FROM collab_participants WHERE session_id=? AND device_key=? '
+                       'AND COALESCE(activo, 1)=1', (sess['id'], _collab_user_key(user['id']))).fetchone()
+    return sess, (dict(row) if row else None)
+
+
+@app.route('/api/v1/collab/activa')
+@api_login_required
+def api_v1_collab_activa():
+    """Para el aviso de Home: ¿hay una sesión activa? ¿soy el anfitrión? ¿ya estoy dentro?"""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if not sess:
+            return jsonify({'active': False})
+        return jsonify({'active': True, 'host_name': _collab_anfitrion_display(conn, sess)[0],
+                        'is_host': sess['created_by'] == g.api_user['id'], 'joined': part is not None})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/unirse', methods=['POST'])
+@api_login_required
+def api_v1_collab_unirse():
+    """Body: {code} (K7F-Q2M, con o sin guion) o {token} (el del QR, o el link
+    completo del QR). Devuelve el mismo estado que /api/v1/collab/yo."""
+    data = request.get_json(silent=True) or {}
+    user = g.api_user
+    if not _collab_intento_codigo_permitido(f"user:{user['id']}"):
+        return jsonify({'status': 'error', 'error': 'demasiados_intentos',
+                        'message': 'Demasiados intentos. Espera un minuto y vuelve a probar.'}), 429
+    conn = get_db_connection()
+    try:
+        sess = None
+        token = (data.get('token') or '').strip()
+        if token:
+            m = re.search(r'/colab/join/([^/?#\s]+)', token)
+            sess = _collab_get_session_by_token(conn, m.group(1) if m else token)
+        elif data.get('code'):
+            sess = _collab_sesion_por_codigo(conn, data.get('code'))
+        if not sess:
+            return jsonify({'status': 'error', 'error': 'codigo_invalido',
+                            'message': 'Ese código o QR no corresponde a una playlist colaborativa activa.'}), 404
+        if sess['created_by'] == user['id']:
+            return jsonify({'status': 'error', 'error': 'es_anfitrion',
+                            'message': 'Eres el anfitrión de esta playlist colaborativa: no puedes unirte como participante.'}), 409
+        key = _collab_user_key(user['id'])
+        nombre = _collab_nombre_usuario(user.get('nickname'), user.get('email'))
+        row = conn.execute('SELECT id FROM collab_participants WHERE session_id=? AND device_key=?',
+                           (sess['id'], key)).fetchone()
+        if row:
+            conn.execute('UPDATE collab_participants SET activo=1, name=?, last_seen=? WHERE id=?',
+                         (nombre, _utcnow_iso(), row['id']))
+            pid = row['id']
+        else:
+            pid = conn.execute(
+                'INSERT INTO collab_participants (session_id, device_key, name, joined_at, last_seen, user_id, activo) '
+                'VALUES (?, ?, ?, ?, ?, ?, 1)',
+                (sess['id'], key, nombre, _utcnow_iso(), _utcnow_iso(), user['id'])).lastrowid
+        conn.commit()
+        part = dict(conn.execute('SELECT * FROM collab_participants WHERE id=?', (pid,)).fetchone())
+        return jsonify(dict(_collab_yo_payload(conn, sess, part), status='ok'))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/yo')
+@api_login_required
+def api_v1_collab_yo():
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if not sess:
+            return jsonify({'active': False, 'joined': False})
+        if not part:
+            return jsonify({'active': True, 'joined': False})
+        conn.execute('UPDATE collab_participants SET last_seen=? WHERE id=?', (_utcnow_iso(), part['id']))
+        conn.commit()
+        return jsonify(_collab_yo_payload(conn, sess, part))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/agregar', methods=['POST'])
+@api_login_required
+def api_v1_collab_agregar():
+    """Body: {track_id, confirm_album?}. Mismas respuestas que /api/collab/add."""
+    data = request.get_json(silent=True) or {}
+    track_id = data.get('track_id')
+    if not track_id:
+        return jsonify({'status': 'error', 'message': 'Falta track_id'}), 400
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if not sess or not part:
+            return jsonify({'status': 'expired', 'message': 'No estás en una playlist colaborativa activa.'})
+        return jsonify(_collab_try_add(conn, sess['id'], part['id'], track_id,
+                                       confirm_album=bool(data.get('confirm_album'))))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/sonando-ahora')
+@api_login_required
+def api_v1_collab_sonando_ahora():
+    """Reproductor de solo lectura del Modo Colaborativo (mismo contenido que
+    /api/collab/sonando de los invitados)."""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if not sess or not part:
+            return jsonify({'active': False})
+        return jsonify(_collab_sonando_payload(conn, sess))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/solicitar-pull', methods=['POST'])
+@api_login_required
+def api_v1_collab_solicitar_pull():
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if not sess or not part:
+            return jsonify({'status': 'error', 'message': 'La sesión colaborativa ya terminó.'}), 410
+        body, code = _collab_solicitar_pull(conn, sess, part)
+        return jsonify(body), code
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/salir', methods=['POST'])
+@api_login_required
+def api_v1_collab_salir():
+    """Sale del Modo Colaborativo: sus pistas quedan en la sesión; deja de
+    figurar como participante y pierde el permiso de delegado. Puede volver a
+    unirse mientras la sesión siga activa (conserva su cupo)."""
+    conn = get_db_connection()
+    try:
+        sess, part = _collab_user_ctx(conn, g.api_user)
+        if sess and part:
+            conn.execute('UPDATE collab_participants SET activo=0, can_pull=0 WHERE id=?', (part['id'],))
+            conn.commit()
+        return jsonify({'status': 'ok'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/collab/anfitrion', methods=['POST'])
+@api_login_required
+def api_v1_collab_anfitrion():
+    """Ticket C-05: pistas que el anfitrión agrega a su cola durante la sesión
+    ("Agregar a la cola" / "Reproducir a continuación" / "Agregar a la cola"
+    del aviso de reemplazo). Body: {track_ids}. Quedan con su avatar y la
+    etiqueta Admin, ya entregadas y sin cupo. Sin sesión (o si no es el
+    anfitrión) se ignora: las apps avisan siempre."""
+    data = request.get_json(silent=True) or {}
+    ids = []
+    for x in (data.get('track_ids') or [])[:200]:
+        try:
+            ids.append(int(x))
+        except (TypeError, ValueError):
+            pass
+    conn = get_db_connection()
+    try:
+        sess = _collab_sesion_del_anfitrion(conn)
+        if not sess:
+            return jsonify({'status': 'ignored', 'added': 0})
+        if not ids:
+            return jsonify({'status': 'ok', 'added': 0})
+        pid = _collab_participante_especial(conn, sess['id'], _COLLAB_ANFITRION_KEY, 'Anfitrión',
+                                            user_id=sess['created_by'])
+        ya = {r['track_id'] for r in conn.execute(
+            'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+        validos = {r['id'] for r in conn.execute(
+            f"SELECT id FROM tracks WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        agregadas = 0
+        for tid in ids:
+            if tid in ya or tid not in validos:
+                continue
+            ya.add(tid)
+            conn.execute('INSERT INTO collab_queue_items '
+                         '(session_id, participant_id, track_id, added_at, dispatched) VALUES (?, ?, ?, ?, 1)',
+                         (sess['id'], pid, tid, _utcnow_iso()))
+            agregadas += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'added': agregadas})
+    finally:
+        conn.close()
+
+
+@app.route('/colab', methods=['GET', 'POST'])
+def collab_codigo():
+    """Ticket C-05: entrar a la playlist colaborativa escribiendo el código
+    (para quien no puede escanear el QR). Lleva al mismo ingreso que el QR."""
+    error = None
+    code = ''
+    if request.method == 'POST':
+        code = (request.form.get('code') or '').strip()
+        if not _collab_intento_codigo_permitido(f"ip:{request.remote_addr}"):
+            error = 'Demasiados intentos. Espera un minuto y vuelve a probar.'
+        else:
+            conn = get_db_connection()
+            try:
+                sess = _collab_sesion_por_codigo(conn, code)
+            finally:
+                conn.close()
+            if sess:
+                return redirect(url_for('collab_join', token=sess['token']))
+            error = 'Ese código no corresponde a una playlist colaborativa activa.'
+    return render_template('collab_codigo.html', error=error, code=code)
 
 def _fmt_seconds(seconds):
     if not seconds or seconds < 0:
