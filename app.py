@@ -1526,6 +1526,9 @@ def api_v1_login():
             'id': user['id'],
             'email': user['email'],
             'is_admin': bool(user['is_admin']),
+            # Depuración C-05: el nickname desde el login, para que las apps
+            # no muestren el correo hasta la próxima consulta de /auth/me.
+            'nickname': user.get('nickname'),
         }
     })
 
