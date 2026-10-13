@@ -5247,7 +5247,9 @@ def api_v1_admin_collab_siguiente():
         n = 1
     conn = get_db_connection()
     try:
-        sess = _collab_active_session(conn)
+        # Solo la app del anfitrión que creó la sesión (otro admin con la app
+        # abierta no debe "llevarse" las pistas a su propia cola).
+        sess = _collab_sesion_del_anfitrion(conn)
         if not sess:
             return jsonify([])
         _collab_infinito_tick_seguro(conn, sess)
