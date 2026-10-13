@@ -15,7 +15,8 @@
     try { r = await ORB.api("/api/collab/yo"); } catch (e) { return; }
     if (!r || !r.active) { sessionEnded(); return; }
     G.me = r; G.meAt = Date.now();
-    G.inSession = new Map((r.session_tracks || []).map((t) => [t.id, t]));
+    // Ticket C-06: solo lo que todavía no sonó bloquea volver a agregarla.
+    G.inSession = new Map((r.session_tracks || []).filter((t) => !t.played).map((t) => [t.id, t]));
     paintHeader(); paintQuota(); refreshAddButtons();
     if (!document.getElementById("tab-mine").classList.contains("hidden")) renderMine();
   }
@@ -94,7 +95,7 @@
   async function addTrack(t, confirmAlbum) {
     if (G.busy.has(t.id)) return;
     const ya = G.inSession.get(t.id);
-    if (ya) { ORB.toast(`«${t.title}» ya está en la playlist (la agregó ${ya.added_by}).`); return; }
+    if (ya) { ORB.toast(`«${t.title}» ya está en la cola (la agregó ${ya.added_by}).`); return; }
     G.busy.add(t.id); refreshAddButtons();
     let r;
     try { r = await ORB.api("/api/collab/add", { method: "POST", body: { track_id: t.id, confirm_album: !!confirmAlbum } }); }
@@ -161,6 +162,7 @@
 
   // ---------- Mis pistas ----------
   function stateChip(t) {
+    if (t.played) return el("span", "state-chip done", "Ya sonó");   // Ticket C-06
     return el("span", "state-chip " + (t.dispatched ? "ok" : "wait"), t.dispatched ? "En la cola" : "En espera");
   }
   // Ticket C-05: el anfitrión aparece con la etiqueta Admin.
