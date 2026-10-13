@@ -183,6 +183,7 @@ header.app-header {
 .state-chip { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 999px; flex-shrink: 0; }
 .state-chip.wait { color: var(--accent-bright); background: rgba(200,146,10,0.14); }
 .state-chip.ok { color: #30D158; background: rgba(48,209,88,0.12); }
+.state-chip.done { color: var(--text-secondary, #888); background: rgba(136,136,136,0.14); }
 
 /* ---------- Menú contextual (hoja inferior en celular) ---------- */
 .action-sheet-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 90; display: flex; align-items: flex-end; justify-content: center; }
