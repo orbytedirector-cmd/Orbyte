@@ -5490,6 +5490,33 @@ def _collab_pistas_detalle(conn, sess, ids):
     return out
 
 
+@app.route('/api/v1/admin/collab/agregada-por')
+@api_admin_required
+def api_v1_admin_collab_agregada_por():
+    """Ticket C-06b (pedido por Niko): quién agregó la pista que suena, para
+    mostrarlo (avatar + nickname) en el reproductor en primer plano del
+    anfitrión — pensado para espejarlo en la TV en un evento. Query:
+    ?track_id=N. Si la pista no está en la playlist colaborativa, la puso el
+    anfitrión (su avatar + Admin)."""
+    try:
+        track_id = int(request.args.get('track_id', ''))
+    except (TypeError, ValueError):
+        return jsonify({'active': False})
+    conn = get_db_connection()
+    try:
+        sess = _collab_sesion_del_anfitrion(conn)
+        if not sess:
+            return jsonify({'active': False})
+        detalle = _collab_pistas_detalle(conn, sess, [track_id])
+        if not detalle:
+            return jsonify({'active': True, 'track_id': track_id, 'added_by': None})
+        d = detalle[0]
+        return jsonify({'active': True, 'track_id': track_id, 'added_by': d['added_by'],
+                        'added_by_avatar': d['added_by_avatar'], 'added_by_host': d['added_by_host']})
+    finally:
+        conn.close()
+
+
 @app.route('/api/collab/sonando')
 def api_collab_sonando():
     """Para la web de invitados: lo que suena en el reproductor del anfitrión."""
