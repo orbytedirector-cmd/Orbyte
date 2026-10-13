@@ -907,6 +907,25 @@ def get_db_connection():
             conn.commit()
         except Exception:
             pass  # Columna ya existe
+    # Lazy migration: Ticket C-06 (distribución de la reproducción).
+    # auto_carga = la app del anfitrión pide sola la siguiente pista;
+    # distribucion = 'turnos' | 'llegada' | 'menos'; inf_* = control de las
+    # tandas del modo infinito (cuándo propuso por última vez y cuántas
+    # pistas de usuarios había entonces). En las pistas: dispatched_at
+    # (cuándo se entregó al reproductor), played_at (cuándo empezó a sonar)
+    # y rescate (tanda de rescate del modo infinito: no cuenta en su cupo).
+    for _sql in ("ALTER TABLE collab_sessions ADD COLUMN auto_carga INTEGER DEFAULT 1",
+                 "ALTER TABLE collab_sessions ADD COLUMN distribucion TEXT DEFAULT 'turnos'",
+                 "ALTER TABLE collab_sessions ADD COLUMN inf_ultima_at TEXT",
+                 "ALTER TABLE collab_sessions ADD COLUMN inf_usuarios_n INTEGER",
+                 "ALTER TABLE collab_queue_items ADD COLUMN dispatched_at TEXT",
+                 "ALTER TABLE collab_queue_items ADD COLUMN played_at TEXT",
+                 "ALTER TABLE collab_queue_items ADD COLUMN rescate INTEGER DEFAULT 0"):
+        try:
+            conn.execute(_sql)
+            conn.commit()
+        except Exception:
+            pass  # Columna ya existe
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -4526,7 +4545,9 @@ def _collab_cupo(conn, sess, part):
     no tienen cupo. Si el bloqueo ya venció, lo libera (y lo guarda)."""
     part = dict(part)
     maximo = int(sess['max_tracks'])
-    if (part.get('device_key') or '') in _COLLAB_KEYS_ESPECIALES:
+    # Ticket C-06: el Modo infinito es un participante más, con el mismo cupo;
+    # solo el anfitrión (Admin) no tiene cupo.
+    if (part.get('device_key') or '') == _COLLAB_ANFITRION_KEY:
         return {'max_tracks': maximo, 'used': 0, 'remaining': maximo, 'unlimited': True,
                 'blocked_until': None, 'blocked_seconds': 0}
     ahora = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -4539,11 +4560,11 @@ def _collab_cupo(conn, sess, part):
                      (desde, part['id']))
         conn.commit()
     if desde:
-        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=? AND added_at>=?',
-                              (part['id'], desde)).fetchone()[0]
+        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=? AND added_at>=? '
+                              'AND COALESCE(rescate, 0)=0', (part['id'], desde)).fetchone()[0]
     else:
-        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=?',
-                              (part['id'],)).fetchone()[0]
+        usadas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=? '
+                              'AND COALESCE(rescate, 0)=0', (part['id'],)).fetchone()[0]
     if hasta_dt is None and usadas >= maximo:
         # Llegó al tope sin bloqueo registrado (datos de antes del cambio o se
         # bajó el máximo): el bloqueo empieza ahora.
@@ -4639,32 +4660,228 @@ def _collab_window_count(conn, session_row, participant_id):
         (participant_id, window_start)
     ).fetchone()[0]
 
-def _collab_fair_order(conn, session_id):
-    """Intercala round-robin las pistas TODAVÍA NO entregadas al reproductor
-    del host, agrupadas por participante (cada quien conserva el orden en que
-    fue agregando las suyas). Con 10/3/5 pistas por dispositivo el resultado
-    es D1,D2,D3, D1,D2,D3, D1,D2,D3, D1,D3, D1,D3, D1,D1,D1,D1,D1,D1 — todos
-    escuchan algo propio en las primeras 3 pistas en vez de que el que agregó
-    menos espere a que se acaben las 10 del primero."""
-    rows = conn.execute(
-        'SELECT id, participant_id, track_id FROM collab_queue_items '
-        'WHERE session_id=? AND dispatched=0 ORDER BY added_at ASC', (session_id,)
-    ).fetchall()
-    by_participant, order = {}, []
+# ── Ticket C-06: distribución de la reproducción y Modo infinito ──────────
+# El servidor decide el orden de lo que todavía no sonó. Tres modos (los
+# elige el anfitrión): 'turnos' (por defecto: suena quien lleva más tiempo
+# sin escuchar algo suyo), 'llegada' (orden en que se agregaron) y 'menos'
+# (primero quien lleva menos pistas en la sesión). El Modo infinito es un
+# participante más (mismo cupo y prioridad) que propone tandas de 5 cuando
+# los demás ya agregaron (ver _collab_infinito_tick).
+_COLLAB_DISTRIBUCIONES = ('turnos', 'llegada', 'menos')
+_COLLAB_INF_TANDA = 5            # pistas por tanda
+_COLLAB_INF_MIN_USUARIOS = 5     # pistas de usuarios antes de su primera tanda
+_COLLAB_INF_NUEVAS = 5           # pistas nuevas de usuarios entre tandas…
+_COLLAB_INF_MINUTOS = 15         # …o este tiempo (con al menos 1 nueva)
+_COLLAB_RESCATE_UMBRAL = 2       # "casi no quedan": pistas por sonar (incluida la que sigue)
+_collab_rescate_fallido = {}     # session_id -> último rescate sin recomendaciones (no reintentar al toque)
+
+
+def _collab_auto_carga(sess):
+    v = dict(sess).get('auto_carga')
+    return True if v is None else bool(v)
+
+
+def _collab_iso(v):
+    """Normaliza fechas guardadas con espacio o con T (para comparar como texto)."""
+    return str(v or '').replace(' ', 'T')
+
+
+def _collab_orden(conn, sess):
+    """Pistas en espera (dispatched=0) en el orden en que deben sonar, según
+    la distribución elegida por el anfitrión."""
+    rows = [dict(r) for r in conn.execute(
+        'SELECT id, participant_id, track_id, added_at FROM collab_queue_items '
+        'WHERE session_id=? AND dispatched=0 ORDER BY added_at ASC, id ASC', (sess['id'],))]
+    if not rows:
+        return []
+    modo = (dict(sess).get('distribucion') or 'turnos')
+    if modo == 'llegada':
+        return rows
+    if modo == 'menos':
+        totales = {r['participant_id']: r['n'] for r in conn.execute(
+            'SELECT participant_id, COUNT(*) AS n FROM collab_queue_items WHERE session_id=? '
+            'GROUP BY participant_id', (sess['id'],))}
+        return sorted(rows, key=lambda r: (totales.get(r['participant_id'], 0), _collab_iso(r['added_at']), r['id']))
+    # Turnos justos: suena el que lleva más tiempo sin que le entregaran algo
+    # (quien nunca sonó cuenta desde su primera pista en espera); empate →
+    # quien agregó antes. Al elegirlo pasa al final de la ronda.
+    filas = {}
     for r in rows:
-        pid = r['participant_id']
-        if pid not in by_participant:
-            by_participant[pid] = []
-            order.append(pid)
-        by_participant[pid].append(dict(r))
-    result, pending = [], True
-    while pending:
-        pending = False
-        for pid in order:
-            if by_participant[pid]:
-                result.append(by_participant[pid].pop(0))
-                pending = True
+        filas.setdefault(r['participant_id'], []).append(r)
+    ultimo = {r['participant_id']: _collab_iso(r['ult']) for r in conn.execute(
+        'SELECT participant_id, MAX(dispatched_at) AS ult FROM collab_queue_items '
+        'WHERE session_id=? AND dispatched=1 AND dispatched_at IS NOT NULL GROUP BY participant_id', (sess['id'],))}
+    clave = {pid: ultimo.get(pid) or _collab_iso(items[0]['added_at']) for pid, items in filas.items()}
+    out, turno = [], 0
+    while True:
+        candidatos = [pid for pid, items in filas.items() if items]
+        if not candidatos:
+            break
+        pid = min(candidatos, key=lambda x: (clave[x], _collab_iso(filas[x][0]['added_at']), filas[x][0]['id']))
+        out.append(filas[pid].pop(0))
+        turno += 1
+        clave[pid] = f'9999-{turno:08d}'   # siempre después de cualquier fecha real
+    return out
+
+
+def _collab_entregar(conn, sess, items):
+    """Marca como entregadas (con su momento, en orden) las pistas `items` y
+    devuelve su JSON para la app del anfitrión, con quién agregó cada una."""
+    if not items:
+        return []
+    ids = [it['track_id'] for it in items]
+    rows = conn.execute(
+        f'''SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
+                   al.artist_id, ar.name as artist_name
+            FROM tracks t
+            LEFT JOIN albums al ON t.album_id=al.id
+            LEFT JOIN artists ar ON al.artist_id=ar.id
+            WHERE t.id IN ({','.join('?' * len(ids))})''', ids
+    ).fetchall()
+    by_id = {r['id']: r for r in rows}
+    participant_ids = list({it['participant_id'] for it in items})
+    added_by_map = {}
+    for p in conn.execute(
+            f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp {_COLLAB_SQL_USER_JOIN} '
+            f'WHERE cp.id IN ({",".join("?" * len(participant_ids))})', participant_ids):
+        nombre, av = _collab_part_view(p)
+        added_by_map[p['id']] = {'name': nombre, 'avatar': av}
+    result = []
+    base = datetime.now(timezone.utc).replace(tzinfo=None)
+    for i, it in enumerate(items):
+        conn.execute('UPDATE collab_queue_items SET dispatched=1, dispatched_at=? WHERE id=?',
+                     ((base + timedelta(microseconds=i)).isoformat(), it['id']))
+        if it['track_id'] not in by_id:
+            continue
+        d = track_to_json(by_id[it['track_id']])
+        d['collab_added_by'] = added_by_map.get(it['participant_id'])
+        # Ticket C-02: stream_url / container_ext que exige la app iOS.
+        d['stream_url'] = f'/api/v1/stream/{d["id"]}'
+        d['container_ext'] = _container_ext(d)
+        result.append(d)
+    conn.commit()
     return result
+
+
+def _collab_marcar_sonando(conn, sess, track_id):
+    """La app del anfitrión informa que empezó a sonar `track_id`: esa pista
+    queda Reproducida, y lo que se le entregó antes y nunca sonó (lo saltó)
+    también, para que no quede "en la cola" para siempre."""
+    if not track_id:
+        return False
+    it = conn.execute(
+        'SELECT id, dispatched_at FROM collab_queue_items WHERE session_id=? AND track_id=? '
+        'AND dispatched=1 AND played_at IS NULL ORDER BY dispatched_at ASC, id ASC LIMIT 1',
+        (sess['id'], track_id)).fetchone()
+    if not it:
+        return False
+    ahora = _utcnow_iso()
+    conn.execute('UPDATE collab_queue_items SET played_at=? WHERE id=?', (ahora, it['id']))
+    if it['dispatched_at']:
+        conn.execute('UPDATE collab_queue_items SET played_at=? WHERE session_id=? AND dispatched=1 '
+                     'AND played_at IS NULL AND dispatched_at IS NOT NULL AND dispatched_at < ?',
+                     (ahora, sess['id'], it['dispatched_at']))
+    conn.commit()
+    return True
+
+
+def _collab_infinito_tanda(conn, sess, inf_id, n, rescate):
+    """Agrega hasta `n` pistas del Modo infinito (en espera, como las de
+    cualquiera). Cada una se inspira en un participante distinto — lo último
+    que agregó — rotando entre ellos, para no favorecer a nadie. Nunca
+    propone algo que ya esté en la sesión (en espera, en la cola o que ya
+    sonó)."""
+    por_part = {}
+    for r in conn.execute(
+            'SELECT participant_id, track_id FROM collab_queue_items WHERE session_id=? AND participant_id!=? '
+            'ORDER BY added_at DESC, id DESC', (sess['id'], inf_id)):
+        semillas = por_part.setdefault(r['participant_id'], [])
+        if len(semillas) < 3:
+            semillas.append(r['track_id'])
+    partes = list(por_part.keys())
+    if not partes:
+        return 0
+    excluir = {r['track_id'] for r in conn.execute(
+        'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+    hechas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=?', (inf_id,)).fetchone()[0]
+    todas = [t for semillas in por_part.values() for t in semillas][:10]
+    elegidas = []
+    for i in range(n):
+        pid = partes[(hechas + i) % len(partes)]
+        recs = _radio_next_tracks(conn, sess['created_by'], por_part[pid], list(excluir), 1)
+        if not recs:
+            recs = _radio_next_tracks(conn, sess['created_by'], todas, list(excluir), 1)
+        if not recs:
+            continue
+        tid = recs[0]['id']
+        excluir.add(tid)
+        elegidas.append(tid)
+    base = datetime.now(timezone.utc).replace(tzinfo=None)
+    for i, tid in enumerate(elegidas):
+        conn.execute('INSERT INTO collab_queue_items (session_id, participant_id, track_id, added_at, dispatched, rescate) '
+                     'VALUES (?, ?, ?, ?, 0, ?)',
+                     (sess['id'], inf_id, tid, (base + timedelta(microseconds=i)).isoformat(), 1 if rescate else 0))
+    conn.commit()
+    return len(elegidas)
+
+
+def _collab_infinito_tick(conn, sess):
+    """¿Le toca al Modo infinito? Devuelve cuántas pistas agregó.
+    - Rescate: si ya sonó algo y quedan 2 o menos por sonar, agrega 5 aunque
+      no tenga cupo (no cuentan en su cupo) — la música nunca se corta.
+    - Tanda normal: con al menos 5 pistas de usuarios en la sesión y cupo
+      disponible, propone 5; las siguientes cuando haya 5 nuevas de usuarios
+      o pasen 15 minutos (con al menos 1 nueva)."""
+    sess = conn.execute('SELECT * FROM collab_sessions WHERE id=? AND is_active=1', (sess['id'],)).fetchone()
+    if not sess:
+        return 0
+    sess = dict(sess)
+    inf_id = _collab_participante_infinito(conn, sess['id'])
+    usuarios_n = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND participant_id!=?',
+                              (sess['id'], inf_id)).fetchone()[0]
+    if not usuarios_n:
+        return 0
+    por_sonar = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND played_at IS NULL',
+                             (sess['id'],)).fetchone()[0]
+    alguna_sono = conn.execute('SELECT 1 FROM collab_queue_items WHERE session_id=? AND played_at IS NOT NULL LIMIT 1',
+                               (sess['id'],)).fetchone() is not None
+    if alguna_sono and por_sonar <= _COLLAB_RESCATE_UMBRAL:
+        if time.time() - _collab_rescate_fallido.get(sess['id'], 0) < 60:
+            return 0
+        n = _collab_infinito_tanda(conn, sess, inf_id, _COLLAB_INF_TANDA, rescate=True)
+        if not n:
+            _collab_rescate_fallido[sess['id']] = time.time()
+        return n
+    if usuarios_n < _COLLAB_INF_MIN_USUARIOS:
+        return 0
+    part = conn.execute('SELECT * FROM collab_participants WHERE id=?', (inf_id,)).fetchone()
+    cupo = _collab_cupo(conn, sess, part)
+    if cupo['remaining'] <= 0:
+        return 0
+    if sess.get('inf_ultima_at'):
+        nuevas = usuarios_n - int(sess.get('inf_usuarios_n') or 0)
+        ultima = _collab_parse_utc(sess['inf_ultima_at'])
+        pasaron = (datetime.now(timezone.utc).replace(tzinfo=None) - ultima).total_seconds() if ultima else 0
+        if not (nuevas >= _COLLAB_INF_NUEVAS or (nuevas >= 1 and pasaron >= _COLLAB_INF_MINUTOS * 60)):
+            return 0
+    agregadas = _collab_infinito_tanda(conn, sess, inf_id, min(_COLLAB_INF_TANDA, cupo['remaining']), rescate=False)
+    conn.execute('UPDATE collab_sessions SET inf_ultima_at=?, inf_usuarios_n=? WHERE id=?',
+                 (_utcnow_iso(), usuarios_n, sess['id']))
+    conn.commit()
+    if agregadas:
+        # Si con esta tanda llegó al tope, empieza su bloqueo (como cualquiera).
+        _collab_cupo(conn, sess, conn.execute('SELECT * FROM collab_participants WHERE id=?', (inf_id,)).fetchone())
+    return agregadas
+
+
+def _collab_infinito_tick_seguro(conn, sess):
+    """Igual que _collab_infinito_tick, pero un error ahí nunca rompe lo que
+    se estaba haciendo (agregar una pista, entregar la siguiente…)."""
+    try:
+        return _collab_infinito_tick(conn, sess)
+    except Exception:
+        app.logger.exception('collab: modo infinito')
+        return 0
 
 def _collab_set_delegate(conn, session_id, participant_id, enable):
     """Asigna o quita el permiso de 'delegado' (puede pedir la actualización
@@ -4717,13 +4934,15 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
         f'''SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_queue_items cqi
            JOIN collab_participants cp ON cp.id = cqi.participant_id
            {_COLLAB_SQL_USER_JOIN}
-           WHERE cqi.session_id=? AND cqi.track_id=? LIMIT 1''',
+           WHERE cqi.session_id=? AND cqi.track_id=? AND cqi.played_at IS NULL LIMIT 1''',
         (session_id, track_id)
     ).fetchone()
     if dup:
+        # Ticket C-06: solo se bloquea lo que está en la cola y todavía no
+        # sonó; volver a pedir algo que ya sonó se permite.
         dup_nombre = _collab_part_view(dup)[0]
         return {'status': 'duplicate', 'added_by': dup_nombre,
-                'message': f"«{track['title']}» ya está en la playlist colaborativa (la agregó {dup_nombre})."}
+                'message': f"«{track['title']}» ya está en la cola (la agregó {dup_nombre})."}
 
     if track['album_id'] and not confirm_album:
         album_count = conn.execute(
@@ -4749,6 +4968,7 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
                            + timedelta(hours=float(sess['window_hours']))).isoformat()
         conn.execute('UPDATE collab_participants SET bloqueado_hasta=? WHERE id=?', (bloqueado_hasta, participant_id))
     conn.commit()
+    _collab_infinito_tick_seguro(conn, sess)
     return {'status': 'ok', 'remaining': max(0, restantes) if not cupo['unlimited'] else sess['max_tracks'],
             'used': count + 1, 'blocked_until': bloqueado_hasta,
             'blocked_seconds': int(float(sess['window_hours']) * 3600) if bloqueado_hasta else 0}
@@ -4947,8 +5167,12 @@ def api_admin_collab_estado():
             sess['code'] = _collab_generar_codigo(conn)
             conn.execute('UPDATE collab_sessions SET code=? WHERE id=?', (sess['code'], sess['id']))
             conn.commit()
+        _collab_infinito_tick_seguro(conn, sess)   # Ticket C-06: tandas por tiempo
         pending = conn.execute(
             'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND dispatched=0', (sess['id'],)
+        ).fetchone()[0]
+        played = conn.execute(
+            'SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND played_at IS NOT NULL', (sess['id'],)
         ).fetchone()[0]
         # Ticket C-04: total agregado en la sesión (para el acceso a "Lo agregado")
         total = conn.execute(
@@ -4967,7 +5191,10 @@ def api_admin_collab_estado():
             ).fetchone()
             pull_requested_by_name = _collab_part_view(req)[0] if req else None
         return jsonify({'active': True, 'participants': participants, 'pending_count': pending,
-                        'total_count': total,
+                        'total_count': total, 'played_count': played,
+                        # Ticket C-06: ajustes del anfitrión
+                        'auto_carga': _collab_auto_carga(sess),
+                        'distribucion': sess.get('distribucion') or 'turnos',
                         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
                         'pull_requested': pull_requested, 'pull_requested_by_name': pull_requested_by_name,
                         'token': sess['token'],
@@ -4982,18 +5209,17 @@ def api_admin_collab_estado():
 @app.route('/api/v1/admin/collab/cola-pendiente')
 @api_admin_required
 def api_admin_collab_pull():
-    """Devuelve — y marca como entregadas — las pistas todavía no
-    despachadas, ya intercaladas en orden justo (_collab_fair_order). El
-    admin las agrega a SU cola local con appendToQueue() (ver collab_host.js)
-    exactamente como agregaría cualquier otra pista, y desde ahí las maneja
-    con total libertad — reordenar/quitar ya lo permite el playlist-panel
-    existente, no hace falta tocarlo."""
+    """"Recargar cola" (manual): devuelve — y marca como entregadas — todas
+    las pistas en espera, en el orden de la distribución elegida (Ticket
+    C-06, ver _collab_orden). La app del anfitrión las suma al final de su
+    cola local."""
     conn = get_db_connection()
     try:
         sess = _collab_active_session(conn)
         if not sess:
             return jsonify([])
-        ordered_items = _collab_fair_order(conn, sess['id'])
+        _collab_infinito_tick_seguro(conn, sess)
+        ordered_items = _collab_orden(conn, sess)
         # Se limpia el pedido remoto (si había uno) apenas se atiende el
         # pull, haya o no pistas nuevas — así el delegado no queda con el
         # pedido "trabado" si ya no había nada pendiente para cargar.
@@ -5001,57 +5227,58 @@ def api_admin_collab_pull():
             'UPDATE collab_sessions SET pull_requested_at=NULL, pull_requested_by=NULL WHERE id=?',
             (sess['id'],)
         )
-        if not ordered_items:
-            conn.commit()
-            return jsonify([])
-        ids = [it['track_id'] for it in ordered_items]
-        placeholders = ','.join('?' * len(ids))
-        rows = conn.execute(
-            f'''SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
-                       al.artist_id, ar.name as artist_name
-                FROM tracks t
-                LEFT JOIN albums al ON t.album_id=al.id
-                LEFT JOIN artists ar ON al.artist_id=ar.id
-                WHERE t.id IN ({placeholders})''', ids
-        ).fetchall()
-        by_id = {r['id']: r for r in rows}
-
-        # Quién agregó cada pista (ver ticket "avatar en el player del
-        # admin") — se resuelve UNA query por participante involucrado, no
-        # por pista, y se arma acá porque track_to_json() no sabe nada de
-        # playlist colaborativa (sigue usándose para browse/álbum/etc. tal
-        # cual, sin este campo extra).
-        participant_ids = list({it['participant_id'] for it in ordered_items})
-        p_placeholders = ','.join('?' * len(participant_ids))
-        p_rows = conn.execute(
-            f'SELECT cp.*, {_COLLAB_SQL_USER_COLS} FROM collab_participants cp {_COLLAB_SQL_USER_JOIN} '
-            f'WHERE cp.id IN ({p_placeholders})', participant_ids
-        ).fetchall()
-        added_by_map = {}
-        for p in p_rows:
-            nombre, av = _collab_part_view(p)
-            added_by_map[p['id']] = {'name': nombre, 'avatar': av}
-
-        result = []
-        for it in ordered_items:
-            if it['track_id'] not in by_id:
-                continue
-            d = track_to_json(by_id[it['track_id']])
-            d['collab_added_by'] = added_by_map.get(it['participant_id'])
-            # Ticket C-02 (reportado por Niko): track_to_json es el formato de
-            # la WEB (audio_url) y no trae stream_url, que la app iOS exige
-            # (OrbyteTrack.streamURL no opcional): el decode de toda la cola
-            # fallaba y "Recargar cola" nunca agregaba nada. Mismos campos que
-            # el resto de /api/v1 (ver favoritos / busqueda).
-            d['stream_url']    = f'/api/v1/stream/{d["id"]}'
-            d['container_ext'] = _container_ext(d)
-            result.append(d)
-
-        item_ids = [it['id'] for it in ordered_items]
-        placeholders2 = ','.join('?' * len(item_ids))
-        conn.execute(f'UPDATE collab_queue_items SET dispatched=1 WHERE id IN ({placeholders2})', item_ids)
         conn.commit()
-        return jsonify(result)
+        return jsonify(_collab_entregar(conn, sess, ordered_items))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/collab/siguiente', methods=['POST'])
+@api_admin_required
+def api_v1_admin_collab_siguiente():
+    """Ticket C-06 — Recarga automática: la app del anfitrión pide la(s)
+    siguiente(s) pista(s) cada vez que empieza una (mantiene solo la que
+    suena + la siguiente). El orden se decide en este momento, así lo que
+    se agregó recién entra al reparto. Body opcional: {n: 1..5}."""
+    data = request.get_json(silent=True) or {}
+    try:
+        n = max(1, min(int(data.get('n', 1)), 5))
+    except (TypeError, ValueError):
+        n = 1
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify([])
+        _collab_infinito_tick_seguro(conn, sess)
+        return jsonify(_collab_entregar(conn, sess, _collab_orden(conn, sess)[:n]))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/collab/ajustes', methods=['POST'])
+@api_admin_required
+def api_v1_admin_collab_ajustes():
+    """Ticket C-06: el anfitrión cambia la Recarga automática y/o la
+    distribución. Body: {auto_carga?: bool, distribucion?: 'turnos'|'llegada'|'menos'}."""
+    data = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            return jsonify({'status': 'error', 'message': 'No hay una playlist colaborativa activa.'}), 404
+        if 'auto_carga' in data:
+            conn.execute('UPDATE collab_sessions SET auto_carga=? WHERE id=?',
+                         (1 if data.get('auto_carga') else 0, sess['id']))
+        if 'distribucion' in data:
+            d = str(data.get('distribucion') or '')
+            if d not in _COLLAB_DISTRIBUCIONES:
+                return jsonify({'status': 'error', 'message': 'Distribución no válida.'}), 400
+            conn.execute('UPDATE collab_sessions SET distribucion=? WHERE id=?', (d, sess['id']))
+        conn.commit()
+        fila = dict(conn.execute('SELECT auto_carga, distribucion FROM collab_sessions WHERE id=?', (sess['id'],)).fetchone())
+        return jsonify({'status': 'ok', 'auto_carga': bool(fila['auto_carga'] if fila['auto_carga'] is not None else 1),
+                        'distribucion': fila['distribucion'] or 'turnos'})
     finally:
         conn.close()
 
@@ -5100,6 +5327,7 @@ def api_v1_admin_collab_pistas():
         return jsonify({
             'active': True,
             'total': len(items), 'pending': pend, 'dispatched': len(items) - pend,
+            'played': sum(1 for t in items if t['played']),
             'participants': resumen,
             'tracks': list(reversed(items)),   # lo más nuevo primero
         })
@@ -5140,8 +5368,9 @@ def api_v1_collab_infinito():
                 continue
             ya.add(tid)
             conn.execute('INSERT INTO collab_queue_items '
-                         '(session_id, participant_id, track_id, added_at, dispatched) VALUES (?, ?, ?, ?, 1)',
-                         (sess['id'], pid, tid, _utcnow_iso()))
+                         '(session_id, participant_id, track_id, added_at, dispatched, dispatched_at) '
+                         'VALUES (?, ?, ?, ?, 1, ?)',
+                         (sess['id'], pid, tid, _utcnow_iso(), _utcnow_iso()))
             agregadas += 1
         conn.commit()
         return jsonify({'status': 'ok', 'added': agregadas})
@@ -5185,6 +5414,11 @@ def api_v1_collab_sonando_post():
     conn = get_db_connection()
     try:
         sess = _collab_sesion_del_anfitrion(conn)
+        if sess and track_id:
+            # Ticket C-06: lo que empieza a sonar queda Reproducida; si quedan
+            # pocas por sonar, el Modo infinito agrega su tanda de rescate.
+            if _collab_marcar_sonando(conn, sess, track_id):
+                _collab_infinito_tick_seguro(conn, sess)
     finally:
         conn.close()
     if not sess:
@@ -5226,7 +5460,8 @@ def _collab_pistas_detalle(conn, sess, ids):
         f'''SELECT cqi.track_id, cp.*, {_COLLAB_SQL_USER_COLS}
             FROM collab_queue_items cqi JOIN collab_participants cp ON cp.id = cqi.participant_id
             {_COLLAB_SQL_USER_JOIN}
-            WHERE cqi.session_id=? AND cqi.track_id IN ({ph})''', [sess['id']] + list(ids))}
+            WHERE cqi.session_id=? AND cqi.track_id IN ({ph})
+            ORDER BY cqi.added_at, cqi.id''', [sess['id']] + list(ids))}
     host_nombre = host_avatar = None
     out = []
     for tid in ids:
@@ -5273,7 +5508,15 @@ def _collab_sonando_payload(conn, sess):
         ahora = time.time()
         if not st or not st['track_id'] or ahora - st['at'] > _COLLAB_SONANDO_VIGENCIA_S:
             return {'active': True, 'track': None}
-        detalle = _collab_pistas_detalle(conn, sess, [st['track_id']] + st['next_ids'])
+        # Ticket C-06: con la cola corta del anfitrión, "a continuación" se
+        # completa con el orden previsto de lo que está en espera.
+        siguientes = list(st['next_ids'])
+        for it in _collab_orden(conn, sess):
+            if len(siguientes) >= 5:
+                break
+            if it['track_id'] not in siguientes and it['track_id'] != st['track_id']:
+                siguientes.append(it['track_id'])
+        detalle = _collab_pistas_detalle(conn, sess, [st['track_id']] + siguientes)
         if not detalle or detalle[0]['id'] != st['track_id']:
             return {'active': True, 'track': None}
         pos = st['position'] + ((ahora - st['at']) if st['playing'] else 0)
@@ -5379,7 +5622,7 @@ def _collab_items_sesion(conn, sess):
     llegaron al reproductor del anfitrión. Lo usan la web de invitados
     (/api/collab/yo) y la vista del anfitrión (/api/v1/admin/collab/pistas)."""
     rows = conn.execute(
-        '''SELECT cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id,
+        '''SELECT cqi.id AS item_id, cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id, cqi.played_at,
                   t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
                   t.is_mqa, t.codec, t.sample_rate_real,
                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
@@ -5392,7 +5635,7 @@ def _collab_items_sesion(conn, sess):
            LEFT JOIN artists ar ON ar.id = al.artist_id
            JOIN collab_participants cp ON cp.id = cqi.participant_id
            LEFT JOIN users u ON u.id = cp.user_id
-           WHERE cqi.session_id=? ORDER BY cqi.added_at''', (sess['id'],)).fetchall()
+           WHERE cqi.session_id=? ORDER BY cqi.added_at, cqi.id''', (sess['id'],)).fetchall()
     out = []
     for r in rows:
         d = dict(r)
@@ -5406,6 +5649,9 @@ def _collab_items_sesion(conn, sess):
             'artist_id': d['artist_id'], 'artist_name': d['artist_name'],
             'cover_url': cover_url_filter(clean_db_path(d['cover_path'])),
             'added_at': d['added_at'], 'dispatched': bool(d['dispatched']),
+            # Ticket C-06: ya sonó (o se saltó) — y el id de la fila, porque la
+            # misma pista puede volver a pedirse después de sonar.
+            'played': d['played_at'] is not None, 'item_id': d['item_id'],
             'participant_id': d['participant_id'],
             'added_by': nombre,
             'added_by_avatar': av,
@@ -5451,7 +5697,10 @@ def _collab_yo_payload(conn, sess, part):
         'max_tracks': sess['max_tracks'], 'window_hours': sess['window_hours'],
         'used': cupo['used'], 'remaining': cupo['remaining'],
         'blocked_until': cupo['blocked_until'], 'blocked_seconds': cupo['blocked_seconds'],
-        'can_pull': bool(fila['can_pull']),
+        # Ticket C-06: con Recarga automática el botón del delegado no hace
+        # falta (todo entra solo): se informa como sin permiso.
+        'can_pull': bool(fila['can_pull']) and not _collab_auto_carga(sess),
+        'auto_carga': _collab_auto_carga(sess),
         # Ticket C-04: para el botón del delegado — cuántas pistas de la
         # sesión todavía no llegaron al reproductor del anfitrión y si hay
         # una recarga pedida que la app del anfitrión aún no atendió.
@@ -5467,6 +5716,8 @@ def _collab_solicitar_pull(conn, sess, part):
     row = conn.execute('SELECT can_pull FROM collab_participants WHERE id=?', (part['id'],)).fetchone()
     if not row or not row['can_pull']:
         return {'status': 'error', 'message': 'No tienes permiso para recargar la cola.'}, 403
+    if _collab_auto_carga(sess):
+        return {'status': 'error', 'message': 'La cola se recarga sola (Recarga automática activada).'}, 409
     conn.execute('UPDATE collab_sessions SET pull_requested_at=?, pull_requested_by=? WHERE id=?',
                  (_utcnow_iso(), part['id'], sess['id']))
     conn.commit()
@@ -5559,6 +5810,8 @@ def api_collab_solicitar_pull():
         ).fetchone()
         if not row or not row['can_pull']:
             return jsonify({'status': 'error', 'message': 'No tenés permiso para actualizar la cola.'}), 403
+        if _collab_auto_carga(sess):   # Ticket C-06
+            return jsonify({'status': 'error', 'message': 'La cola se recarga sola (Recarga automática activada).'}), 409
         conn.execute(
             'UPDATE collab_sessions SET pull_requested_at=?, pull_requested_by=? WHERE id=?',
             (_utcnow_iso(), session['collab_participant_id'], sess['id'])
@@ -5753,8 +6006,9 @@ def api_v1_collab_anfitrion():
             return jsonify({'status': 'ok', 'added': 0})
         pid = _collab_participante_especial(conn, sess['id'], _COLLAB_ANFITRION_KEY, 'Anfitrión',
                                             user_id=sess['created_by'])
+        # Ticket C-06: solo se evita duplicar lo que todavía no sonó.
         ya = {r['track_id'] for r in conn.execute(
-            'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+            'SELECT track_id FROM collab_queue_items WHERE session_id=? AND played_at IS NULL', (sess['id'],))}
         validos = {r['id'] for r in conn.execute(
             f"SELECT id FROM tracks WHERE id IN ({','.join('?' * len(ids))})", ids)}
         agregadas = 0
@@ -5763,8 +6017,9 @@ def api_v1_collab_anfitrion():
                 continue
             ya.add(tid)
             conn.execute('INSERT INTO collab_queue_items '
-                         '(session_id, participant_id, track_id, added_at, dispatched) VALUES (?, ?, ?, ?, 1)',
-                         (sess['id'], pid, tid, _utcnow_iso()))
+                         '(session_id, participant_id, track_id, added_at, dispatched, dispatched_at) '
+                         'VALUES (?, ?, ?, ?, 1, ?)',
+                         (sess['id'], pid, tid, _utcnow_iso(), _utcnow_iso()))
             agregadas += 1
         conn.commit()
         return jsonify({'status': 'ok', 'added': agregadas})
