@@ -156,6 +156,9 @@ PROVIDER_STATUS = {
 }
 
 
+_MAX_ARTISTAS = 15   # Ticket AI-34: artistas nombrados que se respetan en un mix
+
+
 def _empty_entities():
     return {
         'artists': [], 'albums': [], 'tracks': [], 'genres': [], 'moods': [], 'momentos': [],
@@ -245,7 +248,11 @@ def _normalize_entities(raw_entities, vocab, max_cantidad=_MAX_CANTIDAD):
     hacia atrás), pero interpret_query/handle_request lo resuelven por
     usuario desde settings_json antes de llegar acá."""
     out = _empty_entities()
-    out['artists'] = [a for a in (raw_entities.get('artists') or []) if a][:5]
+    # Ticket AI-34 (bug real, request 207 de Niko: nombró 11 artistas y el
+    # mix usó 5). El tope era [:5] y cortaba en silencio la lista que el LLM
+    # SÍ había devuelto completa (las sugerencias de los 11 llegaron). 15
+    # cubre un mix grande sin abrir la puerta a listas arbitrarias.
+    out['artists'] = [a for a in (raw_entities.get('artists') or []) if a][:_MAX_ARTISTAS]
     out['albums'] = [a for a in (raw_entities.get('albums') or []) if a][:5]
     out['tracks'] = [a for a in (raw_entities.get('tracks') or []) if a][:5]
     out['place'] = (raw_entities.get('place') or None)
