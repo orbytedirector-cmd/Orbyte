@@ -696,6 +696,7 @@ def _resolve_artist_ids_grouped(conn, artist_names, build_similar_artists_fn, si
     name_to_id = {r['name'].strip().lower(): r['id'] for r in rows}
 
     grouped = {}
+    matched = []   # (norm, matched_id) en el orden en que se nombraron
     for raw_name in artist_names:
         norm = str(raw_name).strip().lower()
         if not norm:
@@ -710,16 +711,29 @@ def _resolve_artist_ids_grouped(conn, artist_names, build_similar_artists_fn, si
 
         bucket = grouped.setdefault(norm, set())
         bucket.add(matched_id)
+        matched.append((norm, matched_id))
 
-        if not expand_similar:
-            continue
+    if not expand_similar:
+        return grouped
+    # Ticket AI-33 (bug real, request 213 de Niko: "Mix con lo mejor de
+    # Depeche Mode, Tears for Fears, INXS y similares" salió con "Everybody
+    # Wants To Rule The World" 3 veces). Antes cada artista nombrado se
+    # expandía a sus similares SIN mirar a los demás: Tears for Fears es
+    # "similar" de Depeche Mode y de INXS, así que su catálogo terminaba en
+    # los TRES grupos y cada grupo aportaba las mismas pistas. Ahora un
+    # artista nombrado nunca entra como similar en el grupo de otro, y un
+    # mismo similar queda en un solo grupo (el del primero que lo trae).
+    asignados = {mid for _, mid in matched}
+    for norm, matched_id in matched:
         similar_row = conn.execute(
             'SELECT similar_artists_json FROM artists WHERE id=?', (matched_id,)
         ).fetchone()
         if similar_row and similar_row['similar_artists_json']:
             for similar in build_similar_artists_fn(conn, similar_row['similar_artists_json'], limit=similar_limit):
-                if similar.get('id'):
-                    bucket.add(similar['id'])
+                sid = similar.get('id')
+                if sid and sid not in asignados:
+                    grouped[norm].add(sid)
+                    asignados.add(sid)
     return grouped
 
 
@@ -1678,6 +1692,12 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
         else:
             fetched[nm] = filter_pool
 
+    # Ticket AI-33: una misma canción (mismo artista + título normalizado)
+    # en un solo grupo y una sola vez — red de seguridad por si dos grupos
+    # igual traen la misma pista. Si es de un artista nombrado, se la queda
+    # el grupo de ese artista; si no, el primer grupo que la trajo.
+    _dedupe_mix_groups(conn, fetched, order, normalize_title_fn)
+
     selected = {nm: fetched[nm][:quotas.get(nm, 0)] for nm in order}
     total_deficit = sum(max(0, quotas.get(nm, 0) - len(fetched[nm])) for nm in order)
     if total_deficit > 0:
@@ -1701,6 +1721,41 @@ def _query_tracks_balanced_by_artist(conn, args_dict, track_to_json_fn, build_ad
 
     merged = _merge_selected_by_track_popularity(selected, order, priority_ids=all_priority_ids)
     return merged, all_priority_ids
+
+
+def _mix_track_key(t, normalize_title_fn):
+    """Ticket AI-33 — clave de "misma canción" dentro de un mix: artista +
+    título normalizado (versiones estudio/vivo/remaster cuentan igual; una
+    versión de OTRO artista es otra canción)."""
+    titulo = t.get('title') or ''
+    titulo = normalize_title_fn(titulo) if normalize_title_fn else titulo.strip().lower()
+    return ((t.get('artist_name') or '').strip().lower(), titulo or str(t.get('id')))
+
+
+def _dedupe_mix_groups(conn, fetched, order, normalize_title_fn):
+    """Ticket AI-33 (in place sobre `fetched`): cada canción queda en un solo
+    grupo y una sola vez. Dueño = el grupo del artista nombrado al que
+    pertenece la pista; si no es de ningún nombrado (similar), el primer
+    grupo (en `order`) que la trajo. Se respeta el orden de cada lista (las
+    sugerencias siguen primero)."""
+    own_ids = {nm: (_resolve_artist_ids(conn, [nm], None, expand_similar=False) or set()) for nm in order}
+    owner = {}
+    for nm in order:
+        for t in fetched[nm]:
+            if t.get('artist_id') in own_ids[nm]:
+                owner.setdefault(_mix_track_key(t, normalize_title_fn), nm)
+    for nm in order:
+        for t in fetched[nm]:
+            owner.setdefault(_mix_track_key(t, normalize_title_fn), nm)
+    for nm in order:
+        vistos, limpio = set(), []
+        for t in fetched[nm]:
+            k = _mix_track_key(t, normalize_title_fn)
+            if owner.get(k) != nm or k in vistos:
+                continue
+            vistos.add(k)
+            limpio.append(t)
+        fetched[nm] = limpio
 
 
 # Ticket AI-30 — qué fracción del cupo de un artista (su cuota en un
