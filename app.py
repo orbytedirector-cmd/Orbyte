@@ -7018,7 +7018,12 @@ _RADIO_DEDUPE_SUFFIX_RE = re.compile(
     r'''\s*[\(\[]\s*(?:\d{4}\s*)?
         (?:re-?master(?:ed)?
           |deluxe(?:\s+edition)?
-          |live(?:\s+at\s+[^)\]]*)?
+          |live(?:\s+(?:at|from|in|on)\s+[^)\]]*)?
+          # Ticket AI-34 (log real de Niko: Tears for Fears solo tiene "Mad
+          # World (Live From Franklin, TN)" y la sugerencia "Mad World" no
+          # resolvía): también "Live From/In/On …" y el español "En Vivo" /
+          # "En Directo".
+          |en\s+(?:vivo|directo)(?:\s+[^)\]]*)?
           |acoustic
           |radio\s+edit
           |bonus\s+track
