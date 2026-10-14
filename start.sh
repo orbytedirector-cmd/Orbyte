@@ -29,7 +29,8 @@ source venv/bin/activate
 # importaba de forma opcional desde antes (try/except), pero nunca estaba en
 # esta lista — sin este cambio, ai_playlist.py se degrada siempre al
 # fallback de popularidad porque requests queda en None.
-pip install -q flask flask-cors qrcode[pil] mutagen requests
+# websocket-client: Ticket C-07 (Modo TV) — control de la tele LG webOS por la red local.
+pip install -q flask flask-cors qrcode[pil] mutagen requests websocket-client
 
 # Start the application
 echo "Starting HiRes Browser..."

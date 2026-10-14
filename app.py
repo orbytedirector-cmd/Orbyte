@@ -34,6 +34,8 @@ from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 from genre_similarity import genre_similarity as _genre_similarity_fn
+import ipaddress
+import lg_webos  # Ticket C-07 — control de la tele LG webOS (Modo TV)
 import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapper), módulo aislado
 import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), módulo aislado
 import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
@@ -926,6 +928,24 @@ def get_db_connection():
             conn.commit()
         except Exception:
             pass  # Columna ya existe
+    # Ticket C-07 (Modo TV): teles LG webOS donde Orbyte muestra lo que suena.
+    # client_key = autorización que da la tele al aceptar «Permitir» (una vez);
+    # clave = parte secreta del link de solo lectura de la página /tv/<clave>;
+    # prev_app = app que tenía la tele antes, para volver a ella al quitar.
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS tv_pantallas (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip          TEXT UNIQUE NOT NULL,
+            nombre      TEXT,
+            mac         TEXT,
+            client_key  TEXT,
+            clave       TEXT NOT NULL,
+            prev_app    TEXT,
+            activa      INTEGER NOT NULL DEFAULT 0,
+            admin_id    INTEGER,
+            usada_at    TEXT
+        )
+    ''')
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -1239,7 +1259,10 @@ def _require_login():
     # 'cover': mismo criterio que 'cast_cover' (ya exento arriba) — una
     # carátula de álbum no es información sensible, y el cliente nativo no
     # maneja cookies de sesión persistentes entre lanzamientos de la app.
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file') or request.path.startswith('/static/'):
+    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
+              'tv_pantalla', 'tv_estado', 'tv_qr') or request.path.startswith('/static/'):
+        # tv_*: Ticket C-07 — página de solo lectura para la tele; se valida
+        # con su propia clave y solo desde la red de la casa (_tv_fila_por_clave).
         return
     # /api/v1/*: API del cliente nativo (Orbyte-iOS). Usa token Bearer propio
     # en vez de la cookie de sesión — se protege endpoint por endpoint con
@@ -5047,6 +5070,7 @@ def _collab_stop_active_session():
         conn.commit()
     finally:
         conn.close()
+    _tv_quitar_si_activa()   # Ticket C-07: al finalizar, la tele vuelve a lo que tenía
 
 
 @app.route('/admin/colaborativa/crear', methods=['POST'])
@@ -5424,6 +5448,14 @@ def api_v1_collab_sonando_post():
     finally:
         conn.close()
     if not sess:
+        # Ticket C-07: sin playlist colaborativa, un admin con el Modo TV
+        # activo igual informa lo que suena (para la pantalla de la tele).
+        if g.api_user.get('is_admin') and _tv_hay_activa():
+            _tv_sonando[g.api_user['id']] = {
+                'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
+                'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time(),
+            }
+            return jsonify({'status': 'ok', 'tv': True})
         return jsonify({'status': 'ignored'})
     _collab_sonando[sess['id']] = {
         'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
@@ -11333,6 +11365,331 @@ def api_debug_dsd():
     finally:
         conn.close()
 
+
+
+# ══ Ticket C-07 (pedido por Niko): Modo TV ═══════════════════════════════════
+# La tele LG del primer piso muestra lo que suena (y en una playlist
+# colaborativa: quién lo agregó, lo que viene, avisos y estadísticas) sin
+# espejar el teléfono. La música sigue saliendo por el Yamaha desde la app.
+# El servidor enciende la tele por red, abre su navegador en /tv/<clave> y,
+# al terminar, la devuelve a lo que tenía. Especificación:
+# claude/especificacion-c07-modo-tv.md (proyecto).
+
+_tv_lock = threading.Lock()
+_tv_progreso = {'estado': 'inactivo', 'mensaje': '', 'at': 0.0}
+_tv_sonando = {}   # admin_id -> lo que suena en su app SIN playlist colaborativa
+_TV_EN_CURSO = ('conectando', 'encendiendo', 'emparejando', 'quitando')
+
+
+def _tv_set_progreso(estado, mensaje):
+    _tv_progreso.update({'estado': estado, 'mensaje': mensaje, 'at': time.time()})
+
+
+def _tv_hay_activa(conn=None):
+    propia = conn is None
+    if propia:
+        conn = get_db_connection()
+    try:
+        return conn.execute('SELECT 1 FROM tv_pantallas WHERE activa=1 LIMIT 1').fetchone() is not None
+    finally:
+        if propia:
+            conn.close()
+
+
+def _tv_candidatas(conn):
+    """Teles LG conocidas: las ya usadas + las LG que encontró "Reproducir en…"."""
+    out, vistas = [], set()
+    for r in conn.execute('SELECT ip, nombre, client_key, activa FROM tv_pantallas ORDER BY usada_at DESC'):
+        vistas.add(r['ip'])
+        out.append({'ip': r['ip'], 'nombre': r['nombre'] or r['ip'], 'emparejada': bool(r['client_key']),
+                    'activa': bool(r['activa'])})
+    for r in conn.execute("SELECT name, ip, manufacturer, model_name FROM cast_targets "
+                          "WHERE ip IS NOT NULL AND (manufacturer LIKE '%LG%' OR name LIKE '%LG%' OR model_name LIKE '%webOS%') "
+                          "ORDER BY name"):
+        if r['ip'] and r['ip'] not in vistas:
+            vistas.add(r['ip'])
+            out.append({'ip': r['ip'], 'nombre': r['name'] or r['ip'], 'emparejada': False, 'activa': False})
+    return out
+
+
+def _tv_fila(conn, ip, nombre=None):
+    row = conn.execute('SELECT * FROM tv_pantallas WHERE ip=?', (ip,)).fetchone()
+    if row:
+        return dict(row)
+    conn.execute('INSERT INTO tv_pantallas (ip, nombre, clave) VALUES (?, ?, ?)',
+                 (ip, nombre or ip, secrets.token_urlsafe(18)))
+    conn.commit()
+    return dict(conn.execute('SELECT * FROM tv_pantallas WHERE ip=?', (ip,)).fetchone())
+
+
+def _tv_url(clave):
+    return _COLLAB_LAN_URL + f'/tv/{clave}'
+
+
+def _tv_mostrar_worker(ip, nombre, admin_id):
+    """En un hilo: enciende (si hace falta), empareja, abre /tv/<clave>."""
+    with _tv_lock:
+        conn = get_db_connection()
+        try:
+            fila = _tv_fila(conn, ip, nombre)
+            if not lg_webos.disponible():
+                raise lg_webos.WebOsError('Falta instalar websocket-client en el servidor '
+                                          '(venv/bin/pip install websocket-client) y reiniciar Orbyte.')
+            _tv_set_progreso('conectando', 'Conectando con la tele…')
+            if not lg_webos.puerto_abierto(ip):
+                mac = fila.get('mac') or lg_webos.mac_desde_arp(ip)
+                if not mac:
+                    raise lg_webos.WebOsError('La tele está apagada y todavía no sé cómo encenderla por red: '
+                                              'enciéndela con el control esta primera vez (después la enciendo yo).')
+                _tv_set_progreso('encendiendo', 'Encendiendo la tele…')
+                lg_webos.wake_on_lan(mac, ip)
+                limite = time.time() + 35
+                while time.time() < limite and not lg_webos.puerto_abierto(ip):
+                    time.sleep(1)
+                if not lg_webos.puerto_abierto(ip):
+                    raise lg_webos.WebOsError('La tele no se encendió por red. Revisa que tenga activado '
+                                              '«Encender con móvil / por red» o enciéndela con el control.')
+                time.sleep(4)   # webOS tarda un poco en aceptar órdenes después de despertar
+
+            def _aviso():
+                _tv_set_progreso('emparejando', 'Acepta «Permitir» en la tele con el control (solo esta vez).')
+
+            with lg_webos.WebOsTv(ip, fila.get('client_key'), on_prompt=_aviso) as tv:
+                cambios = {'client_key': tv.client_key}
+                mac = tv.mac() or lg_webos.mac_desde_arp(ip)
+                if mac:
+                    cambios['mac'] = mac
+                previa = tv.app_en_primer_plano()
+                if previa and previa != lg_webos.BROWSER_APP:
+                    cambios['prev_app'] = previa
+                _tv_set_progreso('conectando', 'Abriendo Orbyte en la tele…')
+                tv.abrir_url(_tv_url(fila['clave']))
+            conn.execute('UPDATE tv_pantallas SET activa=0')
+            conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, usada_at=?, client_key=?, mac=COALESCE(?, mac), '
+                         'prev_app=COALESCE(?, prev_app) WHERE id=?',
+                         (admin_id, _utcnow_iso(), cambios['client_key'], cambios.get('mac'),
+                          cambios.get('prev_app'), fila['id']))
+            conn.commit()
+            _tv_set_progreso('lista', 'Listo: Orbyte está en la tele.')
+        except lg_webos.WebOsError as e:
+            _tv_set_progreso('error', str(e))
+        except Exception as e:  # noqa: BLE001
+            app.logger.exception('Modo TV: no se pudo mostrar en la tele')
+            _tv_set_progreso('error', f'No se pudo abrir en la tele: {e}')
+        finally:
+            conn.close()
+
+
+def _tv_quitar_worker():
+    """En un hilo: la tele vuelve a la app que tenía (o se cierra el navegador)."""
+    with _tv_lock:
+        conn = get_db_connection()
+        try:
+            filas = [dict(r) for r in conn.execute('SELECT * FROM tv_pantallas WHERE activa=1')]
+            conn.execute('UPDATE tv_pantallas SET activa=0')
+            conn.commit()
+            _tv_sonando.clear()
+            for f in filas:
+                if not lg_webos.disponible() or not f.get('client_key') or not lg_webos.puerto_abierto(f['ip']):
+                    continue
+                _tv_set_progreso('quitando', 'Quitando Orbyte de la tele…')
+                try:
+                    with lg_webos.WebOsTv(f['ip'], f['client_key'], timeout_emparejar=8) as tv:
+                        if f.get('prev_app'):
+                            tv.abrir_app(f['prev_app'])
+                        else:
+                            tv.cerrar_app(lg_webos.BROWSER_APP)
+                except lg_webos.WebOsError as e:
+                    app.logger.warning('Modo TV: no se pudo devolver la tele a su app (%s)', e)
+            _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
+        except Exception:  # noqa: BLE001
+            app.logger.exception('Modo TV: error al quitar')
+            _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
+        finally:
+            conn.close()
+
+
+def _tv_quitar_si_activa():
+    try:
+        if _tv_hay_activa():
+            threading.Thread(target=_tv_quitar_worker, daemon=True).start()
+    except Exception:  # noqa: BLE001 - nunca romper el cierre de la sesión
+        app.logger.exception('Modo TV: no se pudo programar el quitar')
+
+
+@app.route('/api/v1/admin/tv')
+@api_admin_required
+def api_v1_admin_tv():
+    """Estado del Modo TV para la app del admin (botón y avisos de progreso)."""
+    conn = get_db_connection()
+    try:
+        cands = _tv_candidatas(conn)
+        activa = next((c for c in cands if c['activa']), None)
+        return jsonify({'disponible': lg_webos.disponible(), 'pantallas': cands,
+                        'activa': activa is not None, 'ip': activa['ip'] if activa else None,
+                        'progreso': dict(_tv_progreso)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/tv/mostrar', methods=['POST'])
+@api_admin_required
+def api_v1_admin_tv_mostrar():
+    """"Mostrar en TV": enciende la tele (si hace falta), la empareja la primera
+    vez y abre el Modo TV. Corre en segundo plano; la app consulta
+    /api/v1/admin/tv para ir mostrando el progreso. Body opcional: {ip}."""
+    data = request.get_json(silent=True) or {}
+    if _tv_progreso['estado'] in _TV_EN_CURSO and time.time() - _tv_progreso['at'] < 90:
+        return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
+    conn = get_db_connection()
+    try:
+        cands = _tv_candidatas(conn)
+    finally:
+        conn.close()
+    elegida = None
+    if data.get('ip'):
+        elegida = next((c for c in cands if c['ip'] == data['ip']), {'ip': str(data['ip']), 'nombre': str(data['ip'])})
+    elif cands:
+        elegida = cands[0]   # la última usada, o la primera LG encontrada
+    if not elegida:
+        return jsonify({'status': 'error', 'message': 'No encontré una tele LG en la red. Con la tele encendida, '
+                        'usa «Buscar equipos» en «Reproducir en…» y vuelve a intentarlo.'}), 404
+    _tv_set_progreso('conectando', 'Conectando con la tele…')
+    threading.Thread(target=_tv_mostrar_worker, args=(elegida['ip'], elegida.get('nombre'), g.api_user['id']),
+                     daemon=True).start()
+    return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
+
+
+@app.route('/api/v1/admin/tv/quitar', methods=['POST'])
+@api_admin_required
+def api_v1_admin_tv_quitar():
+    threading.Thread(target=_tv_quitar_worker, daemon=True).start()
+    return jsonify({'status': 'ok'})
+
+
+def _tv_fila_por_clave(clave):
+    """Fila de la tele si la clave es válida y el pedido viene de la red de
+    la casa (LAN). None si no."""
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or '')
+        if not (ip.is_private or ip.is_loopback):
+            return None
+    except ValueError:
+        return None
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT * FROM tv_pantallas WHERE clave=?', (clave,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+@app.route('/tv/<clave>')
+def tv_pantalla(clave):
+    if not _tv_fila_por_clave(clave):
+        return 'Pantalla no encontrada', 404
+    return render_template('tv.html', clave=clave)
+
+
+@app.route('/tv/<clave>/qr.png')
+def tv_qr(clave):
+    if not _tv_fila_por_clave(clave) or not _QRCODE_AVAILABLE:
+        return '', 404
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+    finally:
+        conn.close()
+    if not sess:
+        return '', 404
+    img = qrcode.make(_collab_join_url(sess['token']), border=1)
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    resp = Response(buf.getvalue(), mimetype='image/png')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+def _tv_pos(st, dur):
+    pos = st['position'] + ((time.time() - st['at']) if st['playing'] else 0)
+    return round(min(pos, dur), 1) if dur else round(pos, 1)
+
+
+_TV_SQL_RANKING = (
+    "SELECT cp.*, " + _COLLAB_SQL_USER_COLS + ", COUNT(cqi.id) AS n "
+    "FROM collab_queue_items cqi JOIN collab_participants cp ON cp.id = cqi.participant_id "
+    + _COLLAB_SQL_USER_JOIN +
+    " WHERE cqi.session_id=? AND cp.device_key != ? "
+    "GROUP BY cp.id ORDER BY n DESC, MIN(cqi.id) ASC LIMIT 5"
+)
+_TV_SQL_EVENTOS = (
+    "SELECT cqi.id AS item_id, t.title AS t_title, ar.name AS t_artist, cp.*, " + _COLLAB_SQL_USER_COLS + " "
+    "FROM collab_queue_items cqi "
+    "JOIN tracks t ON t.id = cqi.track_id "
+    "LEFT JOIN albums al ON al.id = t.album_id "
+    "LEFT JOIN artists ar ON ar.id = al.artist_id "
+    "JOIN collab_participants cp ON cp.id = cqi.participant_id "
+    + _COLLAB_SQL_USER_JOIN +
+    " WHERE cqi.session_id=? AND cqi.id>? ORDER BY cqi.id LIMIT 8"
+)
+
+
+@app.route('/tv/<clave>/estado')
+def tv_estado(clave):
+    """Lo que muestra la tele (consulta cada ~2,5 s). ?desde=<item_id> = último
+    aviso ya mostrado (los avisos son las pistas agregadas después)."""
+    fila = _tv_fila_por_clave(clave)
+    if not fila:
+        return jsonify({'error': 'not_found'}), 404
+    try:
+        desde = int(request.args.get('desde', ''))
+    except ValueError:
+        desde = None
+    conn = get_db_connection()
+    try:
+        out = {'activa': bool(fila['activa']), 'modo': 'nada', 'sonando': None, 'siguientes': [], 'colab': None}
+        sess = _collab_active_session(conn)
+        if sess:
+            out['modo'] = 'colab'
+            p = _collab_sonando_payload(conn, sess)
+            if p.get('track'):
+                out['sonando'] = {'track': p['track'], 'position': p['position'], 'duration': p['duration'],
+                                  'playing': p['playing']}
+                out['siguientes'] = (p.get('next') or [])[:3]
+            sid = sess['id']
+            ranking = []
+            for r in conn.execute(_TV_SQL_RANKING, (sid, _COLLAB_INFINITO_KEY)):
+                nombre, av = _collab_part_view(r)
+                ranking.append({'name': nombre, 'avatar': av, 'total': r['n']})
+            total = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE session_id=?', (sid,)).fetchone()[0]
+            sonaron = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND played_at IS NOT NULL',
+                                   (sid,)).fetchone()[0]
+            ultimo = conn.execute('SELECT MAX(id) FROM collab_queue_items WHERE session_id=?', (sid,)).fetchone()[0] or 0
+            eventos = []
+            if desde is not None and desde < ultimo:
+                for r in conn.execute(_TV_SQL_EVENTOS, (sid, desde)):
+                    nombre, av = _collab_part_view(r)
+                    eventos.append({'item_id': r['item_id'], 'by': nombre, 'avatar': av,
+                                    'title': r['t_title'], 'artist': r['t_artist']})
+            out['colab'] = {'code': _collab_codigo_display(sess.get('code')), 'join_url': _collab_join_url(sess['token']),
+                            'total': total, 'sonaron': sonaron, 'ranking': ranking,
+                            'eventos': eventos, 'ultimo_item': ultimo}
+        elif fila.get('admin_id') and fila['activa']:
+            st = _tv_sonando.get(fila['admin_id'])
+            if st and st['track_id'] and time.time() - st['at'] <= _COLLAB_SONANDO_VIGENCIA_S:
+                falso = {'id': -1, 'created_by': fila['admin_id']}
+                detalle = _collab_pistas_detalle(conn, falso, [st['track_id']] + st['next_ids'][:3])
+                if detalle and detalle[0]['id'] == st['track_id']:
+                    out['modo'] = 'solo'
+                    dur = st['duration'] or (detalle[0]['duration'] or 0)
+                    out['sonando'] = {'track': detalle[0], 'position': _tv_pos(st, dur), 'duration': dur,
+                                      'playing': st['playing']}
+                    out['siguientes'] = detalle[1:4]
+        resp = jsonify(out)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp
+    finally:
+        conn.close()
 
 if __name__ == '__main__':
     # threaded=True: sin esto, el server de desarrollo de Flask atiende UN
