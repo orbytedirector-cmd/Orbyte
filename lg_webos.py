@@ -382,11 +382,18 @@ class WebOsTv:
         return None
 
     def abrir_url(self, url):
-        """Abre el navegador de la tele en `url`."""
+        """Abre el navegador de la tele en `url`. Se usa system.launcher/open
+        {target}, lo mismo que documenta Home Assistant para abrir una URL
+        (launch con `target` suelto abre el navegador en su página de inicio
+        sin cargar la URL — visto en la NANO75SPA). Respaldo: launch con
+        params.target."""
         try:
-            return self.pedir('system.launcher/launch', {'id': BROWSER_APP, 'target': url})
-        except WebOsError:
-            return self.pedir('system.launcher/open', {'target': url})
+            r = self.pedir('system.launcher/open', {'target': url})
+            self._log(f'abrir {url} -> {str(r)[:200]}')
+            return r
+        except WebOsError as e:
+            self._log(f'system.launcher/open falló ({e}); probando launch con params')
+            return self.pedir('system.launcher/launch', {'id': BROWSER_APP, 'params': {'target': url}})
 
     def abrir_app(self, app_id):
         return self.pedir('system.launcher/launch', {'id': app_id})
