@@ -2331,3 +2331,32 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
   background:rgba(255,34,68,0.08); color:var(--led-red); cursor:pointer; font-size:0.76rem;
 }
 .cast-stop-btn:hover { background:rgba(255,34,68,0.18); }
+
+
+/* ── Ticket C-10: campana de notificaciones y amigos ── */
+.header-campana { position: relative; }
+.campana-badge { position: absolute; top: -6px; right: -8px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px;
+  background: var(--accent-bright, #F5C518); color: #000; font-size: 0.62rem; font-weight: 800; line-height: 16px; text-align: center; }
+.social-wrap { max-width: 760px; margin: 0 auto; padding: 1rem; }
+.social-wrap h1 { color: var(--text-primary); font-size: 1.3rem; margin-bottom: 0.8rem; }
+.social-tabs { display: flex; border-bottom: 1px solid var(--border, #1c1c1c); margin-bottom: 1rem; }
+.social-tabs button { background: none; border: none; color: var(--text-secondary, #888); font: inherit; font-weight: 600;
+  padding: 0.6rem 1rem; cursor: pointer; border-bottom: 2px solid transparent; }
+.social-tabs button.activa { color: var(--accent-bright, #F5C518); border-bottom-color: var(--accent-bright, #F5C518); }
+.social-fila { display: flex; align-items: center; padding: 0.7rem 0.4rem; border-bottom: 1px solid var(--border, #1c1c1c); }
+.social-fila.no-leida { background: rgba(200,146,10,0.07); }
+.social-fila .avatar-circle { width: 40px; height: 40px; flex-shrink: 0; margin-right: 0.8rem; font-size: 0.85rem; }
+.social-fila .txt { flex: 1; min-width: 0; }
+.social-fila .n { color: var(--text-primary); font-weight: 600; }
+.social-fila .d { color: var(--text-secondary, #888); font-size: 0.8rem; margin-top: 0.15rem; }
+.social-fila .acciones { display: flex; margin-left: 0.6rem; }
+.social-fila .acciones > * { margin-left: 0.4rem; }
+.social-vacio { color: var(--text-secondary, #888); padding: 1.2rem 0.4rem; font-size: 0.9rem; }
+.social-busca { display: flex; margin-bottom: 0.8rem; }
+.social-busca input { flex: 1; margin-right: 0.5rem; }
+.social-qr { display: flex; align-items: center; padding: 1rem; border: 1px solid var(--border, #1c1c1c); border-radius: 12px; margin: 1rem 0; }
+.social-qr img { width: 130px; height: 130px; background: #fff; padding: 6px; border-radius: 8px; margin-right: 1rem; }
+.social-qr .codigo { font-family: Orbitron, monospace; color: var(--accent-bright, #F5C518); font-size: 1.4rem; letter-spacing: 0.12em; }
+.social-ajuste { display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0.2rem; border-bottom: 1px solid var(--border, #1c1c1c); }
+.social-ajuste .d { color: var(--text-secondary, #888); font-size: 0.78rem; }
+.social-ajuste input[type=checkbox] { accent-color: var(--accent-bright, #F5C518); width: 18px; height: 18px; }

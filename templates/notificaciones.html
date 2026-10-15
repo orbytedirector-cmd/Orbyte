@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<!-- Ticket C-10: centro de notificaciones (web). -->
+<div class="social-wrap">
+  <div style="display:flex;align-items:center;justify-content:space-between">
+    <h1>Notificaciones</h1>
+    <button type="button" class="track-btn ghost admin-btn-sm" id="leer-todas">Marcar todo como leído</button>
+  </div>
+  <div id="lista"><div class="social-vacio">Cargando…</div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function avatar(a, tipo) {
+    if (!a) return '<span class="avatar-circle"><span>' + (tipo === 'sistema' ? '★' : '•') + '</span></span>';
+    var av = a.avatar || {};
+    return '<span class="avatar-circle">' + (av.type === 'image' ? '<img src="' + esc(av.url) + '" alt="">'
+      : '<span>' + esc(av.text || '?') + '</span>') + '</span>';
+  }
+  function hace(iso) {
+    var t = Date.parse(iso + 'Z'); if (isNaN(t)) return '';
+    var s = Math.max(0, (Date.now() - t) / 1000);
+    if (s < 60) return 'recién'; if (s < 3600) return 'hace ' + Math.floor(s / 60) + ' min';
+    if (s < 86400) return 'hace ' + Math.floor(s / 3600) + ' h'; return 'hace ' + Math.floor(s / 86400) + ' d';
+  }
+  function post(url, body) {
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {})}).then(function (r) { return r.json(); });
+  }
+  function cargar() {
+    fetch('/api/v1/social/notificaciones', {credentials: 'same-origin'}).then(function (r) { return r.json(); }).then(function (d) {
+      var items = d.items || [];
+      if (!items.length) { document.getElementById('lista').innerHTML = '<div class="social-vacio">No tienes notificaciones.</div>'; return; }
+      document.getElementById('lista').innerHTML = items.map(function (n) {
+        var acciones = '';
+        if (n.tipo === 'amistad_solicitud') {
+          var est = (n.datos || {}).estado;
+          acciones = est === 'pendiente'
+            ? '<button class="track-btn primary admin-btn-sm" data-acc="si" data-u="' + n.datos.user_id + '">Aceptar</button>' +
+              '<button class="track-btn ghost admin-btn-sm" data-acc="no" data-u="' + n.datos.user_id + '">Rechazar</button>'
+            : '<span class="d">' + (est === 'aceptada' ? 'Aceptada' : 'Rechazada') + '</span>';
+        }
+        return '<div class="social-fila' + (n.leida ? '' : ' no-leida') + '" data-id="' + n.id + '" data-tipo="' + esc(n.tipo) + '">' +
+          avatar(n.actor, n.tipo) + '<div class="txt"><div class="n">' + esc(n.texto) + '</div><div class="d">' + hace(n.creada) + '</div></div>' +
+          '<div class="acciones">' + acciones + '<button class="track-btn ghost admin-btn-sm" data-borrar="' + n.id + '" title="Borrar">✕</button></div></div>';
+      }).join('');
+      var noLeidas = items.filter(function (n) { return !n.leida; }).map(function (n) { return n.id; });
+      if (noLeidas.length) setTimeout(function () { post('/api/v1/social/notificaciones/leer', {ids: noLeidas}).then(function () { if (window.orbyteCampana) window.orbyteCampana(); }); }, 1500);
+    });
+  }
+  document.getElementById('lista').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (b && b.getAttribute('data-acc')) {
+      post('/api/v1/social/responder', {user_id: +b.getAttribute('data-u'), aceptar: b.getAttribute('data-acc') === 'si'}).then(cargar);
+      return;
+    }
+    if (b && b.getAttribute('data-borrar')) { post('/api/v1/social/notificaciones/borrar', {id: +b.getAttribute('data-borrar')}).then(cargar); return; }
+    var f = e.target.closest('.social-fila');
+    if (f && f.getAttribute('data-tipo').indexOf('amistad') === 0) location.href = '/amigos';
+  });
+  document.getElementById('leer-todas').addEventListener('click', function () {
+    post('/api/v1/social/notificaciones/leer', {todas: true}).then(function () { cargar(); if (window.orbyteCampana) window.orbyteCampana(); });
+  });
+  cargar();
+})();
+</script>
+{% endblock %}
