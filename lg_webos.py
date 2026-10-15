@@ -213,6 +213,7 @@ class WebOsTv:
         self.ip = ip
         self.log = log
         self._avisado = False
+        self._sin_origin = True
         self.client_key = client_key or None
         self.on_prompt = on_prompt
         self.timeout = timeout
@@ -271,6 +272,7 @@ class WebOsTv:
                 self._log(f'{variante}: registrando ({"con" if self.client_key else "sin"} client-key)')
                 self._registrar()
                 self._log(f'registrado en {variante}')
+                self._sin_origin = sin_origin
                 return
             except _Cortada as e:
                 self._log(f'{variante} se cortó: {e}')
@@ -394,6 +396,26 @@ class WebOsTv:
         except WebOsError as e:
             self._log(f'system.launcher/open falló ({e}); probando launch con params')
             return self.pedir('system.launcher/launch', {'id': BROWSER_APP, 'params': {'target': url}})
+
+    def pulsar(self, boton='ENTER'):
+        """Pulsa un botón del control (por el socket de "puntero" de webOS,
+        el mismo que usa Home Assistant para los botones)."""
+        ruta = (self.pedir('com.webos.service.networkinput/getPointerInputSocket') or {}).get('socketPath')
+        if not ruta:
+            raise WebOsError('La tele no entregó el socket de botones.')
+        kw = {'timeout': self.timeout, 'suppress_origin': self._sin_origin}
+        if ruta.startswith('wss'):
+            kw['sslopt'] = {'context': _ssl_contexto()}
+        ws = websocket.create_connection(ruta, **kw)
+        try:
+            ws.send(f'type:button\nname:{boton}\n\n')
+            time.sleep(0.3)
+        finally:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._log(f'botón {boton} pulsado')
 
     def abrir_app(self, app_id):
         return self.pedir('system.launcher/launch', {'id': app_id})
