@@ -11435,7 +11435,7 @@ def _tv_buscar(conn):
     """Busca teles LG en la red y arma la lista para elegir (C-07c).
     Incluye las ya conocidas aunque estén apagadas (si se sabe su MAC,
     se pueden encender por red)."""
-    encontradas = lg_webos.descubrir(3.0) if lg_webos.disponible() else []
+    encontradas = lg_webos.descubrir(3.0, log=app.logger.info) if lg_webos.disponible() else []
     ahora = time.time()
     for t in encontradas:
         _tv_descubiertas[t['ip']] = dict(t, at=ahora)
@@ -11479,6 +11479,9 @@ def _tv_buscar(conn):
             'ultima': bool(ultima and ultima['ip'] == ip),
         })
     out.sort(key=lambda t: (not t['activa'], not t['ultima'], not t['encendida'], t['nombre'].lower()))
+    app.logger.info('Modo TV: lista para elegir — %s', '; '.join(
+        f"{t['ip']} «{t['nombre']}» {'encendida' if t['encendida'] else 'apagada'}"
+        f"{' emparejada' if t['emparejada'] else ''}" for t in out) or 'vacía')
     return out
 
 
@@ -11649,17 +11652,42 @@ def api_v1_admin_tv_mostrar():
     return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
 
 
-@app.route('/api/v1/admin/tv/buscar')
-@api_admin_required
-def api_v1_admin_tv_buscar():
-    """C-07c: busca las teles LG de la red (~3 s) para elegir dónde mostrar.
-    Cada una: {ip, nombre, nombre_tele, alias, modelo, encendida, emparejada,
-    puede_encender, activa, ultima}. Primero la activa y la última usada."""
+_tv_busqueda = {'buscando': False, 'at': 0.0, 'pantallas': None, 'error': None}
+
+
+def _tv_buscar_worker():
     conn = get_db_connection()
     try:
-        return jsonify({'status': 'ok', 'disponible': lg_webos.disponible(), 'pantallas': _tv_buscar(conn)})
+        _tv_busqueda['pantallas'] = _tv_buscar(conn)
+        _tv_busqueda['error'] = None
+    except Exception as e:  # noqa: BLE001
+        app.logger.exception('Modo TV: error al buscar teles')
+        _tv_busqueda['error'] = f'No se pudo buscar las teles: {e}'
     finally:
         conn.close()
+        _tv_busqueda['buscando'] = False
+        _tv_busqueda['at'] = time.time()
+
+
+def _tv_busqueda_json():
+    return jsonify({'status': 'ok', 'disponible': lg_webos.disponible(), 'buscando': _tv_busqueda['buscando'],
+                    'pantallas': _tv_busqueda['pantallas'] or [], 'error': _tv_busqueda['error']})
+
+
+@app.route('/api/v1/admin/tv/buscar', methods=['GET', 'POST'])
+@api_admin_required
+def api_v1_admin_tv_buscar():
+    """C-07c/d: teles LG de la red para elegir dónde mostrar.
+    POST arranca una búsqueda en segundo plano (~3-6 s) y responde al tiro;
+    GET devuelve el estado: {buscando, pantallas, error}. La app consulta
+    hasta que buscando=false (las apps cortan a los 5 s por LAN, por eso no
+    se espera la búsqueda dentro del request).
+    Cada tele: {ip, nombre, nombre_tele, alias, modelo, encendida, emparejada,
+    puede_encender, activa, ultima}. Primero la activa y la última usada."""
+    if request.method == 'POST' and not (_tv_busqueda['buscando'] and time.time() - _tv_busqueda['at'] < 60):
+        _tv_busqueda.update({'buscando': True, 'at': time.time(), 'error': None})
+        threading.Thread(target=_tv_buscar_worker, daemon=True).start()
+    return _tv_busqueda_json()
 
 
 @app.route('/api/v1/admin/tv/renombrar', methods=['POST'])
