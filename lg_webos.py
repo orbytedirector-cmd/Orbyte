@@ -51,6 +51,27 @@ class WebOsError(Exception):
     """Error con un mensaje listo para mostrarle al usuario."""
 
 
+class _Cortada(WebOsError):
+    """La tele cerró el websocket."""
+
+
+def _ssl_contexto():
+    """La tele usa un certificado autofirmado y, en modelos 2020-2021, TLS y
+    cifrados viejos que OpenSSL 3 rechaza por defecto."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        ctx.minimum_version = ssl.TLSVersion.TLSv1
+    except (ValueError, AttributeError):
+        pass
+    try:
+        ctx.set_ciphers('DEFAULT:@SECLEVEL=0')
+    except ssl.SSLError:
+        pass
+    return ctx
+
+
 def disponible():
     return _WS_OK
 
@@ -107,8 +128,10 @@ class WebOsTv:
         nueva_key = tv.client_key
     """
 
-    def __init__(self, ip, client_key=None, on_prompt=None, timeout=6, timeout_emparejar=60):
+    def __init__(self, ip, client_key=None, on_prompt=None, timeout=6, timeout_emparejar=60, log=None):
         self.ip = ip
+        self.log = log
+        self._avisado = False
         self.client_key = client_key or None
         self.on_prompt = on_prompt
         self.timeout = timeout
@@ -124,30 +147,51 @@ class WebOsTv:
     def __exit__(self, *_a):
         self.cerrar()
 
+    def _log(self, msg):
+        if self.log:
+            try:
+                self.log(f'Modo TV [{self.ip}]: {msg}')
+            except Exception:  # noqa: BLE001
+                pass
+
     def conectar(self):
+        """Conecta y se registra. Prueba primero wss:3001 (los firmwares LG
+        actualizados cierran el ws:3000 sin cifrar apenas se conecta) y, si la
+        conexión se corta antes de terminar el registro, prueba el otro puerto
+        con un socket nuevo."""
         if not _WS_OK:
             raise WebOsError('Falta instalar websocket-client en el servidor (pip install websocket-client).')
-        ultimo = None
-        for url, sslopt in ((f'ws://{self.ip}:{WS_PORT}', None),
-                            (f'wss://{self.ip}:{WSS_PORT}', {'cert_reqs': ssl.CERT_NONE, 'check_hostname': False})):
+        errores = []
+        for url, sslopt in ((f'wss://{self.ip}:{WSS_PORT}', {'context': _ssl_contexto()}),
+                            (f'ws://{self.ip}:{WS_PORT}', None)):
+            self.cerrar()
             try:
                 kw = {'timeout': self.timeout}
                 if sslopt:
                     kw['sslopt'] = sslopt   # la tele usa un certificado autofirmado
+                self._log(f'conectando a {url}')
                 self._ws = websocket.create_connection(url, **kw)
-                break
             except Exception as e:  # noqa: BLE001 - se prueba el otro puerto
-                ultimo = e
+                self._log(f'{url} no conecta: {e.__class__.__name__}: {e}')
+                errores.append(f'{url}: {e}')
                 self._ws = None
-        if self._ws is None:
-            raise WebOsError(f'No pude conectarme a la tele ({self.ip}): {ultimo}')
-        # webOS nuevos piden la info del sistema antes de registrarse.
-        try:
-            self._enviar({'id': 'get_sys_info', 'type': 'request', 'uri': 'ssap://system/getSystemInfo', 'payload': {}})
-            self._recibir(self.timeout)
-        except Exception:  # noqa: BLE001 - no es obligatorio en firmwares viejos
-            pass
-        self._registrar()
+                continue
+            self._log(f'conectado a {url}; registrando ({"con" if self.client_key else "sin"} client-key)')
+            try:
+                self._registrar()
+                self._log(f'registrado en {url}')
+                return
+            except _Cortada as e:
+                self._log(f'{url} se cortó durante el registro: {e}')
+                errores.append(f'{url}: {e}')
+                if self._avisado:
+                    # Ya salió «Permitir» en la tele: el corte vino de ahí (rechazo o cierre).
+                    raise WebOsError(f'{e}. Vuelve a intentarlo y acepta «Permitir».') from None
+                continue
+        self.cerrar()
+        raise WebOsError('No pude conectarme a la tele (' + self.ip + '). ' + ' | '.join(errores)
+                         + '. Revisa en la tele: Configuración › General › Dispositivos externos ›'
+                           ' «LG Connect Apps» / «Encender con móvil» activados.')
 
     def _registrar(self):
         payload = {'forcePairing': False, 'pairingType': 'PROMPT',
@@ -156,15 +200,16 @@ class WebOsTv:
             payload['client-key'] = self.client_key
         self._enviar({'type': 'register', 'id': 'register_0', 'payload': payload})
         limite = time.time() + self.timeout_emparejar
-        avisado = False
+        self._avisado = avisado = False
         while time.time() < limite:
             r = self._recibir(max(1.0, limite - time.time()))
             if r is None:
                 continue
+            self._log(f'registro: recibido {str(r)[:200]}')
             if r.get('type') == 'response' and (r.get('payload') or {}).get('pairingType') == 'PROMPT':
                 if not avisado and self.on_prompt:
                     self.on_prompt()
-                avisado = True
+                self._avisado = avisado = True
                 continue
             if r.get('type') == 'registered':
                 self.client_key = (r.get('payload') or {}).get('client-key') or self.client_key
@@ -184,7 +229,10 @@ class WebOsTv:
 
     # -- mensajes ----------------------------------------------------------
     def _enviar(self, msg):
-        self._ws.send(json.dumps(msg))
+        try:
+            self._ws.send(json.dumps(msg))
+        except Exception as e:  # noqa: BLE001
+            raise _Cortada(f'Se cortó la conexión con la tele ({e.__class__.__name__}: {e})') from None
 
     def _recibir(self, timeout):
         self._ws.settimeout(timeout)
@@ -194,7 +242,7 @@ class WebOsTv:
             if isinstance(e, (socket.timeout, TimeoutError)) or 'Timeout' in e.__class__.__name__ \
                     or 'timed out' in str(e).lower():
                 return None
-            raise WebOsError(f'Se cortó la conexión con la tele: {e}')
+            raise _Cortada(f'Se cortó la conexión con la tele ({e.__class__.__name__}: {e})')
         try:
             return json.loads(data)
         except (TypeError, ValueError):

@@ -11454,7 +11454,7 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
             def _aviso():
                 _tv_set_progreso('emparejando', 'Acepta «Permitir» en la tele con el control (solo esta vez).')
 
-            with lg_webos.WebOsTv(ip, fila.get('client_key'), on_prompt=_aviso) as tv:
+            with lg_webos.WebOsTv(ip, fila.get('client_key'), on_prompt=_aviso, log=app.logger.info) as tv:
                 cambios = {'client_key': tv.client_key}
                 mac = tv.mac() or lg_webos.mac_desde_arp(ip)
                 if mac:
@@ -11472,6 +11472,7 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
             conn.commit()
             _tv_set_progreso('lista', 'Listo: Orbyte está en la tele.')
         except lg_webos.WebOsError as e:
+            app.logger.warning('Modo TV: error al mostrar en %s: %s', ip, e)
             _tv_set_progreso('error', str(e))
         except Exception as e:  # noqa: BLE001
             app.logger.exception('Modo TV: no se pudo mostrar en la tele')
@@ -11494,7 +11495,7 @@ def _tv_quitar_worker():
                     continue
                 _tv_set_progreso('quitando', 'Quitando Orbyte de la tele…')
                 try:
-                    with lg_webos.WebOsTv(f['ip'], f['client_key'], timeout_emparejar=8) as tv:
+                    with lg_webos.WebOsTv(f['ip'], f['client_key'], timeout_emparejar=8, log=app.logger.info) as tv:
                         if f.get('prev_app'):
                             tv.abrir_app(f['prev_app'])
                         else:
