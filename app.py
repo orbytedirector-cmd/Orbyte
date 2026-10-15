@@ -6,6 +6,7 @@ import gzip
 import random
 import tempfile
 import hashlib
+import hmac
 import socket
 import struct
 import signal
@@ -949,7 +950,13 @@ def get_db_connection():
     # Ticket C-07c: elegir entre varias teles — nombre propio (alias) y el
     # identificador UPnP (udn) para reconocerla aunque cambie de IP.
     for _sql in ("ALTER TABLE tv_pantallas ADD COLUMN alias TEXT",
-                 "ALTER TABLE tv_pantallas ADD COLUMN udn TEXT"):
+                 "ALTER TABLE tv_pantallas ADD COLUMN udn TEXT",
+                 # Ticket C-08: tipo 'lg' | 'app' (Orbyte TV en Android TV),
+                 # modo de pantalla elegido la última vez ('normal' | 'oled').
+                 "ALTER TABLE tv_pantallas ADD COLUMN tipo TEXT DEFAULT 'lg'",
+                 "ALTER TABLE tv_pantallas ADD COLUMN modo TEXT DEFAULT 'normal'",
+                 "ALTER TABLE tv_pantallas ADD COLUMN app_secret TEXT",
+                 "ALTER TABLE tv_pantallas ADD COLUMN app_modelo TEXT"):
         try:
             conn.execute(_sql)
             conn.commit()
@@ -1269,7 +1276,8 @@ def _require_login():
     # carátula de álbum no es información sensible, y el cliente nativo no
     # maneja cookies de sesión persistentes entre lanzamientos de la app.
     if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
-              'tv_pantalla', 'tv_estado', 'tv_qr') or request.path.startswith('/static/'):
+              'tv_pantalla', 'tv_estado', 'tv_qr',
+              'api_v1_tvapp_hola', 'api_v1_tvapp_orden', 'api_v1_tvapp_respuesta') or request.path.startswith('/static/'):
         # tv_*: Ticket C-07 — página de solo lectura para la tele; se valida
         # con su propia clave y solo desde la red de la casa (_tv_fila_por_clave).
         return
@@ -11425,6 +11433,8 @@ _tv_descubiertas = {}   # ip -> {ip, nombre, modelo, udn, at} de la última bús
 
 
 def _tv_ip_valida(ip):
+    if str(ip).startswith('app:'):
+        return True   # Orbyte TV (C-08): su existencia se valida contra la lista
     try:
         return ipaddress.ip_address(str(ip)).is_private
     except ValueError:
@@ -11462,6 +11472,9 @@ def _tv_buscar(conn):
     ips = list(dict.fromkeys(list(por_ip) + list(conocidas)))
     encendida = {}
     def _probar(ip):
+        if ip.startswith(_TVAPP_PREFIJO):   # Orbyte TV: conectada si consultó hace poco
+            encendida[ip] = _tvapp_conectada(ip[len(_TVAPP_PREFIJO):])
+            return
         encendida[ip] = ip in {t['ip'] for t in encontradas} or lg_webos.puerto_abierto(ip, timeout=1.0)
     hilos = [threading.Thread(target=_probar, args=(ip,), daemon=True) for ip in ips]
     for h in hilos:
@@ -11471,7 +11484,8 @@ def _tv_buscar(conn):
     out = []
     for ip in ips:
         k, d = conocidas.get(ip) or {}, por_ip.get(ip) or {}
-        if not encendida.get(ip) and not k.get('mac'):
+        es_app = ip.startswith(_TVAPP_PREFIJO)
+        if not encendida.get(ip) and not k.get('mac') and not es_app:
             # Apagada y sin MAC = no se puede encender ni usar; suele ser una
             # IP vieja de la misma tele (p. ej. la que guardó «Reproducir en…»).
             continue
@@ -11481,12 +11495,14 @@ def _tv_buscar(conn):
             'nombre': k.get('alias') or nombre_tele,
             'nombre_tele': nombre_tele,
             'alias': k.get('alias'),
-            'modelo': d.get('modelo'),
+            'modelo': d.get('modelo') or k.get('app_modelo'),
             'encendida': bool(encendida.get(ip)),
             'emparejada': bool(k.get('client_key')),
             'puede_encender': bool(k.get('mac')),
             'activa': bool(k.get('activa')),
             'ultima': bool(ultima and ultima['ip'] == ip),
+            'tipo': 'app' if es_app else 'lg',
+            'modo': k.get('modo') or 'normal',
         })
     out.sort(key=lambda t: (not t['activa'], not t['ultima'], not t['encendida'], t['nombre'].lower()))
     app.logger.info('Modo TV: lista para elegir — %s', '; '.join(
@@ -11505,11 +11521,213 @@ def _tv_fila(conn, ip, nombre=None):
     return dict(conn.execute('SELECT * FROM tv_pantallas WHERE ip=?', (ip,)).fetchone())
 
 
-def _tv_url(clave):
-    return _COLLAB_LAN_URL + f'/tv/{clave}'
+def _tv_url(clave, modo='normal'):
+    return _COLLAB_LAN_URL + f'/tv/{clave}' + ('?modo=oled' if modo == 'oled' else '')
 
 
-def _tv_mostrar_worker(ip, nombre, admin_id):
+# ══ Ticket C-08 (pedido por Niko): Orbyte TV — app de solo visualización ══════
+# para Android TV (NVIDIA Shield, Xiaomi Mi Box S). La app (módulo `tv/` de
+# Orbyte-Android) se anuncia con /tvapp/hola y queda escuchando órdenes con
+# /tvapp/orden (espera larga). "Mostrar en TV" sobre una de estas cajas le
+# manda: permiso (la primera vez, «Permitir» con el control), mostrar
+# (ruta de /tv/<clave>, la app arma la URL con la dirección del servidor que
+# le funcione: casa o Tailscale) y quitar. En tv_pantallas: tipo='app',
+# ip='app:<id>' (identificador para las apps del móvil), client_key='permitido'
+# cuando se aceptó «Permitir», app_secret = hash del secreto de la app.
+
+_TVAPP_PREFIJO = 'app:'
+_TVAPP_VIGENCIA_S = 50          # sin consultas en este lapso = desconectada
+_tvapp = {}                     # app_id -> {'visto', 'ip', 'ordenes', 'cond', 'respuesta', 'mostrando', 'mostrando_at'}
+_tvapp_lock = threading.Lock()
+
+
+def _tvapp_estado(app_id):
+    with _tvapp_lock:
+        st = _tvapp.get(app_id)
+        if st is None:
+            st = {'visto': 0.0, 'ip': None, 'ordenes': [], 'cond': threading.Condition(),
+                  'respuesta': None, 'mostrando': False, 'mostrando_at': 0.0}
+            _tvapp[app_id] = st
+        return st
+
+
+def _tvapp_conectada(app_id):
+    st = _tvapp.get(app_id)
+    return bool(st and time.time() - st['visto'] <= _TVAPP_VIGENCIA_S)
+
+
+def _tvapp_enviar(app_id, orden):
+    st = _tvapp_estado(app_id)
+    with st['cond']:
+        # Una orden nueva reemplaza a las del mismo tipo que no se leyeron.
+        st['ordenes'] = [o for o in st['ordenes'] if o.get('tipo') != orden.get('tipo')] + [orden]
+        st['cond'].notify_all()
+
+
+def _tvapp_red_permitida():
+    """Casa (LAN), el propio servidor o Tailscale (100.64.0.0/10)."""
+    try:
+        ip = ipaddress.ip_address(request.remote_addr or '')
+    except ValueError:
+        return False
+    return ip.is_private or ip.is_loopback or ip in ipaddress.ip_network('100.64.0.0/10')
+
+
+def _tvapp_hash(secreto):
+    return hashlib.sha256(('orbyte-tv:' + str(secreto)).encode('utf-8')).hexdigest()
+
+
+def _tvapp_autenticar(conn, datos):
+    """(fila, error_response). La app se identifica con {id, secret}."""
+    if not _tvapp_red_permitida():
+        return None, (jsonify({'status': 'error', 'message': 'Solo desde la red de la casa o Tailscale.'}), 403)
+    app_id = str(datos.get('id') or '').strip()
+    secreto = str(datos.get('secret') or '')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{8,64}', app_id) or len(secreto) < 16:
+        return None, (jsonify({'status': 'error', 'message': 'Identificación inválida.'}), 400)
+    fila = conn.execute('SELECT * FROM tv_pantallas WHERE ip=?', (_TVAPP_PREFIJO + app_id,)).fetchone()
+    if fila and fila['app_secret'] and not hmac.compare_digest(fila['app_secret'], _tvapp_hash(secreto)):
+        return None, (jsonify({'status': 'error', 'message': 'Esta caja ya está registrada con otra clave. '
+                               'Bórrala desde la app del móvil o reinstala Orbyte TV.'}), 403)
+    return (dict(fila) if fila else None), None
+
+
+@app.route('/api/v1/tvapp/hola', methods=['POST'])
+def api_v1_tvapp_hola():
+    """La app Orbyte TV se anuncia (al abrir y cada vez que reconecta).
+    Body: {id, secret, nombre, modelo, version}."""
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        fila, err = _tvapp_autenticar(conn, datos)
+        if err:
+            return err
+        app_id = str(datos['id']).strip()
+        nombre = ' '.join(str(datos.get('nombre') or '').split())[:40] or 'Orbyte TV'
+        modelo = ' '.join(str(datos.get('modelo') or '').split())[:60] or None
+        if fila is None:
+            conn.execute('INSERT INTO tv_pantallas (ip, nombre, clave, tipo, app_secret, app_modelo) '
+                         'VALUES (?, ?, ?, ?, ?, ?)',
+                         (_TVAPP_PREFIJO + app_id, nombre, secrets.token_urlsafe(18), 'app',
+                          _tvapp_hash(datos['secret']), modelo))
+            app.logger.info('Orbyte TV: caja nueva «%s» (%s) desde %s', nombre, modelo, request.remote_addr)
+        else:
+            conn.execute('UPDATE tv_pantallas SET nombre=?, app_modelo=COALESCE(?, app_modelo), tipo=? WHERE id=?',
+                         (nombre, modelo, 'app', fila['id']))
+        conn.commit()
+        st = _tvapp_estado(app_id)
+        st['visto'], st['ip'] = time.time(), request.remote_addr
+        fila = conn.execute('SELECT client_key FROM tv_pantallas WHERE ip=?', (_TVAPP_PREFIJO + app_id,)).fetchone()
+        return jsonify({'status': 'ok', 'emparejada': bool(fila and fila['client_key'])})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/tvapp/orden', methods=['POST'])
+def api_v1_tvapp_orden():
+    """Espera larga: la app pregunta "¿hay algo para mí?" y el servidor
+    responde al tiro si hay una orden, o a los `espera` s (máx. 25) con
+    {orden: null}. Body: {id, secret, espera}."""
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        fila, err = _tvapp_autenticar(conn, datos)
+        if err:
+            return err
+        if fila is None:
+            return jsonify({'status': 'error', 'message': 'Primero /tvapp/hola.'}), 404
+    finally:
+        conn.close()
+    app_id = str(datos['id']).strip()
+    try:
+        espera = max(0.0, min(25.0, float(datos.get('espera', 20))))
+    except (TypeError, ValueError):
+        espera = 20.0
+    st = _tvapp_estado(app_id)
+    st['visto'], st['ip'] = time.time(), request.remote_addr
+    with st['cond']:
+        if not st['ordenes']:
+            st['cond'].wait(espera)
+        orden = st['ordenes'].pop(0) if st['ordenes'] else None
+    st['visto'] = time.time()
+    return jsonify({'status': 'ok', 'orden': orden})
+
+
+@app.route('/api/v1/tvapp/respuesta', methods=['POST'])
+def api_v1_tvapp_respuesta():
+    """La app responde una orden. Body: {id, secret, tipo: 'permiso', permitido}
+    o {id, secret, tipo: 'mostrando', valor: bool} (abrió / se cerró la pantalla)."""
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        fila, err = _tvapp_autenticar(conn, datos)
+        if err:
+            return err
+        if fila is None:
+            return jsonify({'status': 'error', 'message': 'Primero /tvapp/hola.'}), 404
+        app_id = str(datos['id']).strip()
+        st = _tvapp_estado(app_id)
+        st['visto'] = time.time()
+        tipo = datos.get('tipo')
+        if tipo == 'permiso':
+            ok = bool(datos.get('permitido'))
+            if ok:
+                conn.execute("UPDATE tv_pantallas SET client_key='permitido' WHERE id=?", (fila['id'],))
+                conn.commit()
+            with st['cond']:
+                st['respuesta'] = {'tipo': 'permiso', 'permitido': ok}
+                st['cond'].notify_all()
+        elif tipo == 'mostrando':
+            valor = bool(datos.get('valor'))
+            with st['cond']:
+                st['mostrando'], st['mostrando_at'] = valor, time.time()
+                st['cond'].notify_all()
+            if not valor and fila['activa']:
+                # Se cerró en la caja (botón Atrás): deja de contar como activa.
+                conn.execute('UPDATE tv_pantallas SET activa=0 WHERE id=?', (fila['id'],))
+                conn.commit()
+        return jsonify({'status': 'ok'})
+    finally:
+        conn.close()
+
+
+def _tvapp_esperar(st, condicion, segundos):
+    limite = time.time() + segundos
+    with st['cond']:
+        while not condicion():
+            resto = limite - time.time()
+            if resto <= 0:
+                return False
+            st['cond'].wait(resto)
+    return True
+
+
+def _tvapp_mostrar(conn, fila, modo):
+    """Parte de _tv_mostrar_worker para una caja con Orbyte TV."""
+    app_id = fila['ip'][len(_TVAPP_PREFIJO):]
+    nombre = fila.get('alias') or fila.get('nombre') or 'la caja'
+    if not _tvapp_conectada(app_id):
+        raise lg_webos.WebOsError(f'Orbyte TV no está conectada en «{nombre}». Enciende la caja y abre Orbyte TV '
+                                  '(o revisa en sus ajustes la dirección del servidor).')
+    st = _tvapp_estado(app_id)
+    if not fila.get('client_key'):
+        st['respuesta'] = None
+        _tvapp_enviar(app_id, {'tipo': 'permiso'})
+        _tv_set_progreso('emparejando', 'Acepta «Permitir» en la tele con el control (solo esta vez).')
+        if not _tvapp_esperar(st, lambda: st['respuesta'] is not None, 70):
+            raise lg_webos.WebOsError('No se aceptó «Permitir» en la tele a tiempo. Vuelve a intentarlo.')
+        if not st['respuesta'].get('permitido'):
+            raise lg_webos.WebOsError('En la tele se eligió no permitir. Vuelve a intentarlo y elige «Permitir».')
+    _tv_set_progreso('conectando', f'Abriendo Orbyte en «{nombre}»…')
+    desde = time.time()
+    ruta = f'/tv/{fila["clave"]}' + ('?modo=oled' if modo == 'oled' else '')
+    _tvapp_enviar(app_id, {'tipo': 'mostrar', 'ruta': ruta})
+    if not _tvapp_esperar(st, lambda: st['mostrando'] and st['mostrando_at'] >= desde, 25):
+        raise lg_webos.WebOsError(f'«{nombre}» recibió la orden pero Orbyte TV no se abrió. En el Shield, dale a '
+                                  'Orbyte TV el permiso «Mostrar sobre otras apps» (lo explica la propia app en sus ajustes).')
+
+
+def _tv_mostrar_worker(ip, nombre, admin_id, modo='normal'):
     """En un hilo: enciende (si hace falta), empareja, abre /tv/<clave>."""
     with _tv_lock:
         conn = get_db_connection()
@@ -11522,6 +11740,16 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
                 conn.commit()
                 for f in otras:
                     _tv_devolver(f)
+            conn.execute('UPDATE tv_pantallas SET modo=? WHERE id=?', (modo, fila['id']))
+            conn.commit()
+            if fila.get('tipo') == 'app' or ip.startswith(_TVAPP_PREFIJO):
+                _tvapp_mostrar(conn, fila, modo)
+                conn.execute('UPDATE tv_pantallas SET activa=0')
+                conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, usada_at=? WHERE id=?',
+                             (admin_id, _utcnow_iso(), fila['id']))
+                conn.commit()
+                _tv_set_progreso('lista', 'Listo: Orbyte está en la tele.')
+                return
             if not lg_webos.disponible():
                 raise lg_webos.WebOsError('Falta instalar websocket-client en el servidor '
                                           '(venv/bin/pip install websocket-client) y reiniciar Orbyte.')
@@ -11553,7 +11781,7 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
                 if previa and previa != lg_webos.BROWSER_APP:
                     cambios['prev_app'] = previa
                 _tv_set_progreso('conectando', 'Abriendo Orbyte en la tele…')
-                tv.abrir_url(_tv_url(fila['clave']))
+                tv.abrir_url(_tv_url(fila['clave'], modo))
                 # Pantalla completa: la página la pide con la primera tecla del
                 # control, así que se "pulsa OK" cuando ya cargó (C-07g).
                 time.sleep(6)
@@ -11580,6 +11808,9 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
 
 def _tv_devolver(f):
     """La tele `f` (fila de tv_pantallas) vuelve a la app que tenía."""
+    if f.get('tipo') == 'app' or str(f.get('ip', '')).startswith(_TVAPP_PREFIJO):
+        _tvapp_enviar(f['ip'][len(_TVAPP_PREFIJO):], {'tipo': 'quitar'})   # Orbyte TV se cierra sola
+        return
     if not lg_webos.disponible() or not f.get('client_key') or not lg_webos.puerto_abierto(f['ip']):
         return
     _tv_set_progreso('quitando', 'Quitando Orbyte de la tele…')
@@ -11663,8 +11894,9 @@ def api_v1_admin_tv_mostrar():
     if not elegida:
         return jsonify({'status': 'error', 'message': 'No encontré una tele LG en la red. Con la tele encendida, '
                         'usa «Buscar equipos» en «Reproducir en…» y vuelve a intentarlo.'}), 404
+    modo = 'oled' if str(data.get('modo') or '').lower() == 'oled' else 'normal'
     _tv_set_progreso('conectando', 'Conectando con la tele…')
-    threading.Thread(target=_tv_mostrar_worker, args=(elegida['ip'], elegida.get('nombre'), g.api_user['id']),
+    threading.Thread(target=_tv_mostrar_worker, args=(elegida['ip'], elegida.get('nombre'), g.api_user['id'], modo),
                      daemon=True).start()
     return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
 
@@ -11742,11 +11974,7 @@ def api_v1_admin_tv_quitar():
 def _tv_fila_por_clave(clave):
     """Fila de la tele si la clave es válida y el pedido viene de la red de
     la casa (LAN). None si no."""
-    try:
-        ip = ipaddress.ip_address(request.remote_addr or '')
-        if not (ip.is_private or ip.is_loopback):
-            return None
-    except ValueError:
+    if not _tvapp_red_permitida():   # casa o Tailscale (Orbyte TV puede usar Tailscale)
         return None
     conn = get_db_connection()
     try:
@@ -11760,6 +11988,8 @@ def _tv_fila_por_clave(clave):
 def tv_pantalla(clave):
     if not _tv_fila_por_clave(clave):
         return 'Pantalla no encontrada', 404
+    if request.args.get('modo') == 'oled':   # C-08: diseño optimizado para OLED
+        return render_template('tv_oled.html', clave=clave)
     return render_template('tv.html', clave=clave)
 
 
