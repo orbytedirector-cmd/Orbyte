@@ -127,6 +127,8 @@
   .espera img { width: 17vw; height: 17vw; background: #fff; border-radius: 1vw; padding: 0.8vw; margin-top: 2.5vw; }
   .espera .code { font-family: Orbitron, sans-serif; color: var(--gold2); font-size: 3.4vw; letter-spacing: .14em; margin-top: 1.5vw; }
   .oculto { display: none !important; }
+  .aviso-ok { position: fixed; right: 2.2vw; bottom: 2.6vw; padding: 0.6vw 1.6vw; border-radius: 2vw;
+    background: rgba(0,0,0,.6); border: 1px solid rgba(200,146,10,.45); color: var(--gold2); font-size: 1vw; font-weight: 600; }
   .conexion { position: fixed; right: 1.4vw; bottom: 1vw; font-size: 0.8vw; color: var(--text3); }
 </style>
 </head>
@@ -176,6 +178,7 @@
   </div>
 </div>
 <div class="avisos" id="avisos"></div>
+<div class="aviso-ok oculto" id="aviso-ok">Pulsa OK en el control para ver a pantalla completa</div>
 <div class="conexion" id="conexion"></div>
 
 <script>
@@ -210,10 +213,12 @@
   function fondo(el, url) { el.style.backgroundImage = url ? 'url("' + url + '")' : ""; if (el.id === "cover") el.textContent = url ? "" : "♪"; }
 
   // Reloj igual al del player /mini: placas de ancho fijo, 24 h + fecha.
+  // Sin segundos (pedido de Niko): en el navegador de la tele el temporizador
+  // a veces se atrasa y los segundos se veían "pegados".
   var placas = [];
   (function () {
     var h = $("reloj-hora");
-    "00:00:00".split("").forEach(function (c) {
+    "00:00".split("").forEach(function (c) {
       var s = document.createElement("span");
       s.className = c === ":" ? "sep" : "dig";
       s.textContent = c;
@@ -223,8 +228,8 @@
   })();
   function reloj() {
     var d = new Date(), z = function (n) { return ("0" + n).slice(-2); };
-    var cifras = z(d.getHours()) + z(d.getMinutes()) + z(d.getSeconds());
-    for (var i = 0; i < 6; i++) if (placas[i].textContent !== cifras[i]) placas[i].textContent = cifras[i];
+    var cifras = z(d.getHours()) + z(d.getMinutes());
+    for (var i = 0; i < 4; i++) if (placas[i].textContent !== cifras[i]) placas[i].textContent = cifras[i];
     var f = z(d.getDate()) + "-" + z(d.getMonth() + 1) + "-" + d.getFullYear();
     if ($("reloj-fecha").textContent !== f) $("reloj-fecha").textContent = f;
   }
@@ -357,8 +362,24 @@
     });
   }
   consultar(); setInterval(consultar, 2500);
-  // Recarga suave cada 6 h por si el navegador de la tele acumula memoria.
-  setTimeout(function () { location.reload(); }, 6 * 3600 * 1000);
+  // Pantalla completa (sin la barra del navegador): el navegador solo lo
+  // permite tras una pulsación, así que se pide con la primera tecla o clic
+  // del control. El servidor "pulsa OK" solo al abrir la página; si eso no
+  // alcanza, se ve el aviso para pulsar OK a mano.
+  function enPantallaCompleta() { return !!(document.fullscreenElement || document.webkitFullscreenElement); }
+  function pedirPantallaCompleta() {
+    if (enPantallaCompleta()) return;
+    var e = document.documentElement;
+    var f = e.requestFullscreen || e.webkitRequestFullscreen || e.webkitRequestFullScreen;
+    if (!f) return;
+    try { var r = f.call(e); if (r && r.catch) r.catch(function () {}); } catch (err) {}
+  }
+  function avisoPantalla() { $("aviso-ok").className = enPantallaCompleta() ? "aviso-ok oculto" : "aviso-ok"; }
+  document.addEventListener("keydown", pedirPantallaCompleta);
+  document.addEventListener("click", pedirPantallaCompleta);
+  document.addEventListener("fullscreenchange", avisoPantalla);
+  document.addEventListener("webkitfullscreenchange", avisoPantalla);
+  setTimeout(avisoPantalla, 4000);
   // Que la tele no apague la pantalla mientras se muestra (si lo soporta).
   try { if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(function () {}); } catch (err) {}
 })();

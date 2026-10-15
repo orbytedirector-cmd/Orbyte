@@ -11554,6 +11554,13 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
                     cambios['prev_app'] = previa
                 _tv_set_progreso('conectando', 'Abriendo Orbyte en la tele…')
                 tv.abrir_url(_tv_url(fila['clave']))
+                # Pantalla completa: la página la pide con la primera tecla del
+                # control, así que se "pulsa OK" cuando ya cargó (C-07g).
+                time.sleep(6)
+                try:
+                    tv.pulsar('ENTER')
+                except Exception as e:  # noqa: BLE001 - si falla, la página pide pulsar OK
+                    app.logger.info('Modo TV: no se pudo pulsar OK para pantalla completa (%s)', e)
             conn.execute('UPDATE tv_pantallas SET activa=0')
             conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, usada_at=?, client_key=?, mac=COALESCE(?, mac), '
                          'prev_app=COALESCE(?, prev_app) WHERE id=?',
