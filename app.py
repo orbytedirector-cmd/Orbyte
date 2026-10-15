@@ -946,6 +946,15 @@ def get_db_connection():
             usada_at    TEXT
         )
     ''')
+    # Ticket C-07c: elegir entre varias teles — nombre propio (alias) y el
+    # identificador UPnP (udn) para reconocerla aunque cambie de IP.
+    for _sql in ("ALTER TABLE tv_pantallas ADD COLUMN alias TEXT",
+                 "ALTER TABLE tv_pantallas ADD COLUMN udn TEXT"):
+        try:
+            conn.execute(_sql)
+            conn.commit()
+        except Exception:
+            pass  # Columna ya existe
     # Lazy migration: "Reproducir en…" — dispositivos UPnP/DLNA (receiver,
     # bocinas MusicCast, etc.) que el admin descubrió y curó a mano. No
     # volvemos a escanear la red en cada request: el escaneo SSDP es lento
@@ -11399,9 +11408,9 @@ def _tv_hay_activa(conn=None):
 def _tv_candidatas(conn):
     """Teles LG conocidas: las ya usadas + las LG que encontró "Reproducir en…"."""
     out, vistas = [], set()
-    for r in conn.execute('SELECT ip, nombre, client_key, activa FROM tv_pantallas ORDER BY usada_at DESC'):
+    for r in conn.execute('SELECT ip, nombre, alias, client_key, activa FROM tv_pantallas ORDER BY usada_at DESC'):
         vistas.add(r['ip'])
-        out.append({'ip': r['ip'], 'nombre': r['nombre'] or r['ip'], 'emparejada': bool(r['client_key']),
+        out.append({'ip': r['ip'], 'nombre': r['alias'] or r['nombre'] or r['ip'], 'emparejada': bool(r['client_key']),
                     'activa': bool(r['activa'])})
     for r in conn.execute("SELECT name, ip, manufacturer, model_name FROM cast_targets "
                           "WHERE ip IS NOT NULL AND (manufacturer LIKE '%LG%' OR name LIKE '%LG%' OR model_name LIKE '%webOS%') "
@@ -11409,6 +11418,67 @@ def _tv_candidatas(conn):
         if r['ip'] and r['ip'] not in vistas:
             vistas.add(r['ip'])
             out.append({'ip': r['ip'], 'nombre': r['name'] or r['ip'], 'emparejada': False, 'activa': False})
+    return out
+
+
+_tv_descubiertas = {}   # ip -> {ip, nombre, modelo, udn, at} de la última búsqueda
+
+
+def _tv_ip_valida(ip):
+    try:
+        return ipaddress.ip_address(str(ip)).is_private
+    except ValueError:
+        return False
+
+
+def _tv_buscar(conn):
+    """Busca teles LG en la red y arma la lista para elegir (C-07c).
+    Incluye las ya conocidas aunque estén apagadas (si se sabe su MAC,
+    se pueden encender por red)."""
+    encontradas = lg_webos.descubrir(3.0) if lg_webos.disponible() else []
+    ahora = time.time()
+    for t in encontradas:
+        _tv_descubiertas[t['ip']] = dict(t, at=ahora)
+        # Si es una tele conocida que cambió de IP (DHCP), se le actualiza.
+        if t.get('udn'):
+            vieja = conn.execute('SELECT id, ip FROM tv_pantallas WHERE udn=? AND ip<>?', (t['udn'], t['ip'])).fetchone()
+            if vieja and not conn.execute('SELECT 1 FROM tv_pantallas WHERE ip=?', (t['ip'],)).fetchone():
+                conn.execute('UPDATE tv_pantallas SET ip=? WHERE id=?', (t['ip'], vieja['id']))
+        conn.execute('UPDATE tv_pantallas SET nombre=?, udn=COALESCE(?, udn) WHERE ip=?',
+                     (t['nombre'], t.get('udn'), t['ip']))
+    conn.commit()
+    por_ip = {t['ip']: t for t in encontradas}
+    for c in _tv_candidatas(conn):   # LG vistas por «Reproducir en…»
+        if c['ip'] not in por_ip and not conn.execute('SELECT 1 FROM tv_pantallas WHERE ip=?', (c['ip'],)).fetchone():
+            por_ip[c['ip']] = {'ip': c['ip'], 'nombre': c['nombre'], 'modelo': None, 'udn': None}
+    conocidas = {r['ip']: dict(r) for r in conn.execute('SELECT * FROM tv_pantallas')}
+    ultima = conn.execute('SELECT ip FROM tv_pantallas WHERE usada_at IS NOT NULL ORDER BY usada_at DESC LIMIT 1').fetchone()
+    ips = list(dict.fromkeys(list(por_ip) + list(conocidas)))
+    encendida = {}
+    def _probar(ip):
+        encendida[ip] = ip in {t['ip'] for t in encontradas} or lg_webos.puerto_abierto(ip, timeout=1.0)
+    hilos = [threading.Thread(target=_probar, args=(ip,), daemon=True) for ip in ips]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(3)
+    out = []
+    for ip in ips:
+        k, d = conocidas.get(ip) or {}, por_ip.get(ip) or {}
+        nombre_tele = d.get('nombre') or k.get('nombre') or ip
+        out.append({
+            'ip': ip,
+            'nombre': k.get('alias') or nombre_tele,
+            'nombre_tele': nombre_tele,
+            'alias': k.get('alias'),
+            'modelo': d.get('modelo'),
+            'encendida': bool(encendida.get(ip)),
+            'emparejada': bool(k.get('client_key')),
+            'puede_encender': bool(k.get('mac')),
+            'activa': bool(k.get('activa')),
+            'ultima': bool(ultima and ultima['ip'] == ip),
+        })
+    out.sort(key=lambda t: (not t['activa'], not t['ultima'], not t['encendida'], t['nombre'].lower()))
     return out
 
 
@@ -11432,6 +11502,13 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
         conn = get_db_connection()
         try:
             fila = _tv_fila(conn, ip, nombre)
+            # Una tele a la vez (C-07c): si otra estaba mostrando Orbyte, vuelve a lo suyo.
+            otras = [dict(r) for r in conn.execute('SELECT * FROM tv_pantallas WHERE activa=1 AND ip<>?', (ip,))]
+            if otras:
+                conn.execute('UPDATE tv_pantallas SET activa=0 WHERE ip<>?', (ip,))
+                conn.commit()
+                for f in otras:
+                    _tv_devolver(f)
             if not lg_webos.disponible():
                 raise lg_webos.WebOsError('Falta instalar websocket-client en el servidor '
                                           '(venv/bin/pip install websocket-client) y reiniciar Orbyte.')
@@ -11481,6 +11558,21 @@ def _tv_mostrar_worker(ip, nombre, admin_id):
             conn.close()
 
 
+def _tv_devolver(f):
+    """La tele `f` (fila de tv_pantallas) vuelve a la app que tenía."""
+    if not lg_webos.disponible() or not f.get('client_key') or not lg_webos.puerto_abierto(f['ip']):
+        return
+    _tv_set_progreso('quitando', 'Quitando Orbyte de la tele…')
+    try:
+        with lg_webos.WebOsTv(f['ip'], f['client_key'], timeout_emparejar=8, log=app.logger.info) as tv:
+            if f.get('prev_app'):
+                tv.abrir_app(f['prev_app'])
+            else:
+                tv.cerrar_app(lg_webos.BROWSER_APP)
+    except lg_webos.WebOsError as e:
+        app.logger.warning('Modo TV: no se pudo devolver la tele a su app (%s)', e)
+
+
 def _tv_quitar_worker():
     """En un hilo: la tele vuelve a la app que tenía (o se cierra el navegador)."""
     with _tv_lock:
@@ -11491,17 +11583,7 @@ def _tv_quitar_worker():
             conn.commit()
             _tv_sonando.clear()
             for f in filas:
-                if not lg_webos.disponible() or not f.get('client_key') or not lg_webos.puerto_abierto(f['ip']):
-                    continue
-                _tv_set_progreso('quitando', 'Quitando Orbyte de la tele…')
-                try:
-                    with lg_webos.WebOsTv(f['ip'], f['client_key'], timeout_emparejar=8, log=app.logger.info) as tv:
-                        if f.get('prev_app'):
-                            tv.abrir_app(f['prev_app'])
-                        else:
-                            tv.cerrar_app(lg_webos.BROWSER_APP)
-                except lg_webos.WebOsError as e:
-                    app.logger.warning('Modo TV: no se pudo devolver la tele a su app (%s)', e)
+                _tv_devolver(f)
             _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
         except Exception:  # noqa: BLE001
             app.logger.exception('Modo TV: error al quitar')
@@ -11528,6 +11610,7 @@ def api_v1_admin_tv():
         activa = next((c for c in cands if c['activa']), None)
         return jsonify({'disponible': lg_webos.disponible(), 'pantallas': cands,
                         'activa': activa is not None, 'ip': activa['ip'] if activa else None,
+                        'nombre': activa['nombre'] if activa else None,
                         'progreso': dict(_tv_progreso)})
     finally:
         conn.close()
@@ -11549,7 +11632,12 @@ def api_v1_admin_tv_mostrar():
         conn.close()
     elegida = None
     if data.get('ip'):
-        elegida = next((c for c in cands if c['ip'] == data['ip']), {'ip': str(data['ip']), 'nombre': str(data['ip'])})
+        ip = str(data['ip']).strip()
+        elegida = next((c for c in cands if c['ip'] == ip), None)
+        if not elegida and ip in _tv_descubiertas:
+            elegida = {'ip': ip, 'nombre': _tv_descubiertas[ip]['nombre']}
+        if not elegida or not _tv_ip_valida(ip):
+            return jsonify({'status': 'error', 'message': 'Esa tele no está en la lista. Busca las teles de nuevo.'}), 404
     elif cands:
         elegida = cands[0]   # la última usada, o la primera LG encontrada
     if not elegida:
@@ -11559,6 +11647,44 @@ def api_v1_admin_tv_mostrar():
     threading.Thread(target=_tv_mostrar_worker, args=(elegida['ip'], elegida.get('nombre'), g.api_user['id']),
                      daemon=True).start()
     return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
+
+
+@app.route('/api/v1/admin/tv/buscar')
+@api_admin_required
+def api_v1_admin_tv_buscar():
+    """C-07c: busca las teles LG de la red (~3 s) para elegir dónde mostrar.
+    Cada una: {ip, nombre, nombre_tele, alias, modelo, encendida, emparejada,
+    puede_encender, activa, ultima}. Primero la activa y la última usada."""
+    conn = get_db_connection()
+    try:
+        return jsonify({'status': 'ok', 'disponible': lg_webos.disponible(), 'pantallas': _tv_buscar(conn)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/tv/renombrar', methods=['POST'])
+@api_admin_required
+def api_v1_admin_tv_renombrar():
+    """C-07c: nombre propio para una tele (ej. «Living», «Quincho»).
+    Body: {ip, alias}. alias vacío = volver al nombre que trae la tele."""
+    data = request.get_json(silent=True) or {}
+    ip = str(data.get('ip') or '').strip()
+    alias = ' '.join(str(data.get('alias') or '').split())[:40] or None
+    conn = get_db_connection()
+    try:
+        conocida = conn.execute('SELECT 1 FROM tv_pantallas WHERE ip=?', (ip,)).fetchone()
+        if not _tv_ip_valida(ip) or not (conocida or ip in _tv_descubiertas
+                                          or any(c['ip'] == ip for c in _tv_candidatas(conn))):
+            return jsonify({'status': 'error', 'message': 'Esa tele no está en la lista.'}), 404
+        nombre = (_tv_descubiertas.get(ip) or {}).get('nombre')
+        _tv_fila(conn, ip, nombre)
+        conn.execute('UPDATE tv_pantallas SET alias=? WHERE ip=?', (alias, ip))
+        conn.commit()
+        fila = conn.execute('SELECT nombre, alias FROM tv_pantallas WHERE ip=?', (ip,)).fetchone()
+        return jsonify({'status': 'ok', 'ip': ip, 'alias': fila['alias'],
+                        'nombre': fila['alias'] or fila['nombre'] or ip})
+    finally:
+        conn.close()
 
 
 @app.route('/api/v1/admin/tv/quitar', methods=['POST'])
