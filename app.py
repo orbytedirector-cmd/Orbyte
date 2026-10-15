@@ -11439,11 +11439,17 @@ def _tv_buscar(conn):
     ahora = time.time()
     for t in encontradas:
         _tv_descubiertas[t['ip']] = dict(t, at=ahora)
-        # Si es una tele conocida que cambió de IP (DHCP), se le actualiza.
+        # Si es una tele conocida que cambió de IP (DHCP), se le actualiza
+        # (se reconoce por su identificador UPnP o por su MAC).
+        mac = lg_webos.mac_desde_arp(t['ip'])
+        vieja = None
         if t.get('udn'):
             vieja = conn.execute('SELECT id, ip FROM tv_pantallas WHERE udn=? AND ip<>?', (t['udn'], t['ip'])).fetchone()
-            if vieja and not conn.execute('SELECT 1 FROM tv_pantallas WHERE ip=?', (t['ip'],)).fetchone():
-                conn.execute('UPDATE tv_pantallas SET ip=? WHERE id=?', (t['ip'], vieja['id']))
+        if not vieja and mac:
+            vieja = conn.execute('SELECT id, ip FROM tv_pantallas WHERE lower(mac)=lower(?) AND ip<>?', (mac, t['ip'])).fetchone()
+        if vieja and not conn.execute('SELECT 1 FROM tv_pantallas WHERE ip=?', (t['ip'],)).fetchone():
+            app.logger.info('Modo TV: la tele %s ahora está en %s', vieja['ip'], t['ip'])
+            conn.execute('UPDATE tv_pantallas SET ip=? WHERE id=?', (t['ip'], vieja['id']))
         conn.execute('UPDATE tv_pantallas SET nombre=?, udn=COALESCE(?, udn) WHERE ip=?',
                      (t['nombre'], t.get('udn'), t['ip']))
     conn.commit()
@@ -11465,6 +11471,10 @@ def _tv_buscar(conn):
     out = []
     for ip in ips:
         k, d = conocidas.get(ip) or {}, por_ip.get(ip) or {}
+        if not encendida.get(ip) and not k.get('mac'):
+            # Apagada y sin MAC = no se puede encender ni usar; suele ser una
+            # IP vieja de la misma tele (p. ej. la que guardó «Reproducir en…»).
+            continue
         nombre_tele = d.get('nombre') or k.get('nombre') or ip
         out.append({
             'ip': ip,

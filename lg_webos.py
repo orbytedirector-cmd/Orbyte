@@ -236,43 +236,62 @@ class WebOsTv:
                 pass
 
     def conectar(self):
-        """Conecta y se registra. Prueba primero wss:3001 (los firmwares LG
-        actualizados cierran el ws:3000 sin cifrar apenas se conecta) y, si la
-        conexión se corta antes de terminar el registro, prueba el otro puerto
-        con un socket nuevo."""
+        """Conecta y se registra con la misma secuencia que Home Assistant
+        (aiowebostv): "hello" -> info del sistema -> registro, en el mismo
+        socket (los webOS nuevos cortan la conexión si uno se registra sin
+        haber pedido antes la info del sistema). Prueba ws:3000 y wss:3001,
+        con y sin cabecera Origin; si la tele corta, prueba la siguiente
+        combinación con un socket nuevo. Cada paso queda en el log."""
         if not _WS_OK:
             raise WebOsError('Falta instalar websocket-client en el servidor (pip install websocket-client).')
-        errores = []
-        for url, sslopt in ((f'wss://{self.ip}:{WSS_PORT}', {'context': _ssl_contexto()}),
-                            (f'ws://{self.ip}:{WS_PORT}', None)):
+        ws_url, wss_url = f'ws://{self.ip}:{WS_PORT}', f'wss://{self.ip}:{WSS_PORT}'
+        intentos = ((ws_url, True), (wss_url, True), (ws_url, False), (wss_url, False))
+        errores, sin_puerto = [], set()
+        for url, sin_origin in intentos:
+            if url in sin_puerto:
+                continue
             self.cerrar()
+            variante = f'{url} ({"sin" if sin_origin else "con"} Origin)'
             try:
-                kw = {'timeout': self.timeout}
-                if sslopt:
-                    kw['sslopt'] = sslopt   # la tele usa un certificado autofirmado
-                self._log(f'conectando a {url}')
+                kw = {'timeout': self.timeout, 'suppress_origin': sin_origin}
+                if url.startswith('wss'):
+                    kw['sslopt'] = {'context': _ssl_contexto()}   # certificado autofirmado
+                self._log(f'conectando a {variante}')
                 self._ws = websocket.create_connection(url, **kw)
-            except Exception as e:  # noqa: BLE001 - se prueba el otro puerto
-                self._log(f'{url} no conecta: {e.__class__.__name__}: {e}')
+            except Exception as e:  # noqa: BLE001 - se prueba la siguiente combinación
+                self._log(f'{variante} no conecta: {e.__class__.__name__}: {e}')
                 errores.append(f'{url}: {e}')
                 self._ws = None
+                if isinstance(e, (ConnectionRefusedError, socket.timeout, TimeoutError, OSError)) \
+                        and not isinstance(e, ssl.SSLError):
+                    sin_puerto.add(url)
                 continue
-            self._log(f'conectado a {url}; registrando ({"con" if self.client_key else "sin"} client-key)')
             try:
+                self._saludar()
+                self._log(f'{variante}: registrando ({"con" if self.client_key else "sin"} client-key)')
                 self._registrar()
-                self._log(f'registrado en {url}')
+                self._log(f'registrado en {variante}')
                 return
             except _Cortada as e:
-                self._log(f'{url} se cortó durante el registro: {e}')
-                errores.append(f'{url}: {e}')
+                self._log(f'{variante} se cortó: {e}')
+                errores.append(f'{variante}: {e}')
                 if self._avisado:
                     # Ya salió «Permitir» en la tele: el corte vino de ahí (rechazo o cierre).
                     raise WebOsError(f'{e}. Vuelve a intentarlo y acepta «Permitir».') from None
                 continue
         self.cerrar()
-        raise WebOsError('No pude conectarme a la tele (' + self.ip + '). ' + ' | '.join(errores)
-                         + '. Revisa en la tele: Configuración › General › Dispositivos externos ›'
-                           ' «LG Connect Apps» / «Encender con móvil» activados.')
+        raise WebOsError(f'La tele ({self.ip}) cortó la conexión en todos los intentos. '
+                         'Revisa en la tele: Configuración › General › Dispositivos externos › '
+                         '«LG Connect Apps» (o «Conectar app móvil») activado. Detalle: ' + ' | '.join(errores[-2:]))
+
+    def _saludar(self):
+        """"hello" e info del sistema antes del registro (como aiowebostv)."""
+        self._enviar({'id': 'hello', 'type': 'hello', 'payload': {}})
+        r = self._recibir(self.timeout)
+        self._log(f'hello -> {str(r)[:300] if r is not None else "sin respuesta"}')
+        self._enviar({'id': 'get_sys_info', 'type': 'request', 'uri': 'ssap://system/getSystemInfo', 'payload': {}})
+        r = self._recibir(self.timeout)
+        self._log(f'info del sistema -> {str(r)[:300] if r is not None else "sin respuesta"}')
 
     def _registrar(self):
         payload = {'forcePairing': False, 'pairingType': 'PROMPT',
