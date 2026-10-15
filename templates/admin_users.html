@@ -108,4 +108,25 @@
     document.addEventListener('visibilitychange', _refreshAdminStatus);
   })();
 </script>
+
+<!-- Ticket C-10: aviso del sistema para todos los usuarios (centro de notificaciones). -->
+<div style="max-width:760px;margin:1.5rem auto;padding:0 1rem">
+  <h2 class="admin-section-title">Aviso para todos</h2>
+  <div style="display:flex">
+    <input type="text" id="anuncio-txt" class="auth-input" maxlength="300" placeholder="Ej: Esta noche reinicio el servidor a las 23:00" style="flex:1;margin-right:0.5rem">
+    <button type="button" class="track-btn primary" id="anuncio-btn">Enviar</button>
+  </div>
+  <div id="anuncio-res" class="auth-hint" style="margin-top:0.4rem"></div>
+</div>
+<script>
+document.getElementById('anuncio-btn').addEventListener('click', function () {
+  var t = document.getElementById('anuncio-txt').value.trim();
+  if (t.length < 3) return;
+  fetch('/api/v1/admin/social/anuncio', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({texto: t})}).then(function (r) { return r.json(); }).then(function (d) {
+      document.getElementById('anuncio-res').textContent = d.status === 'ok' ? 'Enviado a ' + d.enviados + ' usuarios.' : (d.message || 'No se pudo enviar.');
+      if (d.status === 'ok') document.getElementById('anuncio-txt').value = '';
+  });
+});
+</script>
 {% endblock %}

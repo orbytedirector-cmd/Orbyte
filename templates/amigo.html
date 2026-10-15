@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<!-- Ticket C-10: destino del QR de una cuenta — agregar como amigo. -->
+<div class="social-wrap" style="text-align:center">
+  <h1>Agregar amigo</h1>
+  <div id="caja" class="social-vacio">Buscando…</div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  var CODIGO = {{ codigo|tojson }};
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  var caja = document.getElementById('caja');
+  function pintar(u) {
+    var av = u.avatar || {};
+    var txt = {yo: 'Este es tu propio código.', amigo: 'Ya son amigos.', enviada: 'Solicitud enviada. Falta que la acepte.',
+               recibida: 'Te envió una solicitud: al agregarlo quedan como amigos.', ninguna: ''}[u.relacion] || '';
+    caja.innerHTML = '<span class="avatar-circle" style="width:72px;height:72px;display:inline-flex;font-size:1.3rem">' +
+      (av.type === 'image' ? '<img src="' + esc(av.url) + '" alt="">' : '<span>' + esc(av.text) + '</span>') + '</span>' +
+      '<div style="color:var(--text-primary);font-size:1.2rem;font-weight:700;margin-top:0.6rem">' + esc(u.nombre) + '</div>' +
+      '<div style="margin-top:0.4rem">' + txt + '</div>' +
+      ((u.relacion === 'ninguna' || u.relacion === 'recibida') ? '<button class="track-btn primary" id="agregar" style="margin-top:1rem">Agregar como amigo</button>' : '') +
+      '<div style="margin-top:1.2rem"><a href="/amigos" class="header-user-link">👥 Ver mis amigos</a></div>';
+    var b = document.getElementById('agregar');
+    if (b) b.addEventListener('click', function () {
+      fetch('/api/v1/social/solicitar', {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({codigo: CODIGO})}).then(function (r) { return r.json(); }).then(function (d) { u.relacion = d.relacion || u.relacion; pintar(u); });
+    });
+  }
+  fetch('/api/v1/social/codigo/' + encodeURIComponent(CODIGO), {credentials: 'same-origin'})
+    .then(function (r) { return r.json(); })
+    .then(function (d) { if (d.usuario) pintar(d.usuario); else caja.textContent = d.message || 'Código no válido.'; });
+})();
+</script>
+{% endblock %}

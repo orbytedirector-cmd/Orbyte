@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block content %}
+<!-- Ticket C-10: amigos (amistad mutua), solicitudes, buscar, mi QR y ajustes de privacidad/avisos. -->
+<div class="social-wrap">
+  <h1>Amigos</h1>
+  <div class="social-tabs">
+    <button type="button" data-tab="amigos" class="activa">Amigos</button>
+    <button type="button" data-tab="solicitudes">Solicitudes <span id="n-recibidas"></span></button>
+    <button type="button" data-tab="agregar">Agregar</button>
+    <button type="button" data-tab="ajustes">Privacidad y avisos</button>
+  </div>
+  <div data-panel="amigos"><div id="lista-amigos"></div></div>
+  <div data-panel="solicitudes" hidden>
+    <h3 style="color:var(--text-secondary);font-size:0.8rem;letter-spacing:.1em;margin:0.4rem 0">RECIBIDAS</h3>
+    <div id="lista-recibidas"></div>
+    <h3 style="color:var(--text-secondary);font-size:0.8rem;letter-spacing:.1em;margin:1.2rem 0 0.4rem">ENVIADAS</h3>
+    <div id="lista-enviadas"></div>
+  </div>
+  <div data-panel="agregar" hidden>
+    <div class="social-busca">
+      <input type="text" id="q" class="auth-input" placeholder="Nickname o correo exacto" autocomplete="off">
+      <button type="button" class="track-btn primary" id="buscar">Buscar</button>
+    </div>
+    <div id="resultados"></div>
+    <div class="social-qr">
+      <img id="mi-qr" alt="Mi QR">
+      <div>
+        <div style="color:var(--text-primary);font-weight:600">Tu código para que te agreguen</div>
+        <div class="codigo" id="mi-codigo"></div>
+        <div class="d" style="color:var(--text-secondary);font-size:0.8rem;margin-top:0.3rem">Que lo escaneen desde la app Orbyte (Amigos › Escanear QR).</div>
+      </div>
+    </div>
+  </div>
+  <div data-panel="ajustes" hidden><div id="ajustes"></div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+(function () {
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function avatar(u) { var av = u.avatar || {};
+    return '<span class="avatar-circle">' + (av.type === 'image' ? '<img src="' + esc(av.url) + '" alt="">' : '<span>' + esc(av.text || '?') + '</span>') + '</span>'; }
+  function post(url, body) {
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {})}).then(function (r) { return r.json(); });
+  }
+  function boton(txt, acc, id, primario) {
+    return '<button class="track-btn ' + (primario ? 'primary' : 'ghost') + ' admin-btn-sm" data-acc="' + acc + '" data-u="' + id + '">' + txt + '</button>';
+  }
+  function fila(u, sub, acciones) {
+    return '<div class="social-fila">' + avatar(u) + '<div class="txt"><div class="n">' + esc(u.nombre) + '</div>' +
+      (sub ? '<div class="d">' + sub + '</div>' : '') + '</div><div class="acciones">' + acciones + '</div></div>';
+  }
+  function cargar() {
+    fetch('/api/v1/social/amigos', {credentials: 'same-origin'}).then(function (r) { return r.json(); }).then(function (d) {
+      $('lista-amigos').innerHTML = d.amigos.length ? d.amigos.map(function (u) {
+        return fila(u, u.silenciado ? 'Silenciado: sus avisos no te llegan' : '',
+          boton(u.silenciado ? 'Quitar silencio' : 'Silenciar', u.silenciado ? 'des' : 'sil', u.id) + boton('Quitar', 'quitar', u.id));
+      }).join('') : '<div class="social-vacio">Todavía no tienes amigos. Agrégalos por nickname, correo o con tu QR.</div>';
+      $('lista-recibidas').innerHTML = d.recibidas.length ? d.recibidas.map(function (u) {
+        return fila(u, 'Quiere ser tu amigo', boton('Aceptar', 'si', u.id, true) + boton('Rechazar', 'no', u.id));
+      }).join('') : '<div class="social-vacio">Sin solicitudes.</div>';
+      $('lista-enviadas').innerHTML = d.enviadas.length ? d.enviadas.map(function (u) {
+        return fila(u, 'Esperando que acepte', boton('Cancelar', 'quitar', u.id));
+      }).join('') : '<div class="social-vacio">Sin solicitudes enviadas.</div>';
+      $('n-recibidas').textContent = d.recibidas.length ? '(' + d.recibidas.length + ')' : '';
+      $('mi-codigo').textContent = d.mi_codigo;
+      $('mi-qr').src = '/api/v1/social/mi-qr.png';
+    });
+  }
+  function accion(acc, id) {
+    var p;
+    if (acc === 'si' || acc === 'no') p = post('/api/v1/social/responder', {user_id: id, aceptar: acc === 'si'});
+    else if (acc === 'quitar') { if (!confirm('¿Seguro?')) return; p = post('/api/v1/social/quitar', {user_id: id}); }
+    else if (acc === 'sil' || acc === 'des') p = post('/api/v1/social/silenciar', {user_id: id, silenciar: acc === 'sil'});
+    else if (acc === 'agregar') p = post('/api/v1/social/solicitar', {user_id: id});
+    if (p) p.then(function () { cargar(); if (acc === 'agregar') buscar(); });
+  }
+  document.addEventListener('click', function (e) {
+    var b = e.target.closest('button[data-acc]');
+    if (b) accion(b.getAttribute('data-acc'), +b.getAttribute('data-u'));
+    var t = e.target.closest('.social-tabs button');
+    if (t) {
+      document.querySelectorAll('.social-tabs button').forEach(function (x) { x.classList.toggle('activa', x === t); });
+      document.querySelectorAll('[data-panel]').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== t.getAttribute('data-tab'); });
+      if (t.getAttribute('data-tab') === 'ajustes') cargarAjustes();
+    }
+  });
+  var REL = {amigo: 'Ya son amigos', enviada: 'Solicitud enviada', recibida: 'Te envió una solicitud', ninguna: ''};
+  function buscar() {
+    var q = $('q').value.trim();
+    if (q.length < 2) { $('resultados').innerHTML = ''; return; }
+    post('/api/v1/social/buscar', {q: q}).then(function (d) {
+      var r = d.resultados || [];
+      $('resultados').innerHTML = r.length ? r.map(function (u) {
+        var acc = u.relacion === 'ninguna' ? boton('Agregar', 'agregar', u.id, true)
+                : u.relacion === 'recibida' ? boton('Aceptar', 'si', u.id, true) : '';
+        return fila(u, REL[u.relacion], acc);
+      }).join('') : '<div class="social-vacio">No encontré a nadie con eso. (El correo tiene que ser exacto.)</div>';
+    });
+  }
+  $('buscar').addEventListener('click', buscar);
+  $('q').addEventListener('keydown', function (e) { if (e.key === 'Enter') buscar(); });
+
+  var PRIV = [
+    ['buscable', 'Que me encuentren por nickname o correo', 'Si lo apagas, solo podrán agregarte con tu QR.'],
+    ['mostrar_conectado', 'Mostrar a mis amigos si estoy conectado', ''],
+    ['mostrar_escuchando', 'Mostrar a mis amigos qué estoy escuchando', ''],
+  ];
+  function cargarAjustes() {
+    fetch('/api/v1/social/ajustes', {credentials: 'same-origin'}).then(function (r) { return r.json(); }).then(pintarAjustes);
+  }
+  function chk(id, on) { return '<input type="checkbox" data-aj="' + id + '"' + (on ? ' checked' : '') + '>'; }
+  function pintarAjustes(a) {
+    var h = '<h3 style="color:var(--text-secondary);font-size:0.8rem;letter-spacing:.1em;margin:0.4rem 0">PRIVACIDAD</h3>';
+    PRIV.forEach(function (p) {
+      h += '<label class="social-ajuste"><span><span style="color:var(--text-primary)">' + p[1] + '</span>' +
+        (p[2] ? '<br><span class="d">' + p[2] + '</span>' : '') + '</span>' + chk('p.' + p[0], a.privacidad[p[0]]) + '</label>';
+    });
+    h += '<label class="social-ajuste"><span style="color:var(--text-primary)">Mi actividad y estadísticas</span>' +
+      '<select data-aj="p.actividad" class="auth-input" style="width:auto"><option value="amigos"' + (a.privacidad.actividad === 'amigos' ? ' selected' : '') +
+      '>Visible para mis amigos</option><option value="nadie"' + (a.privacidad.actividad === 'nadie' ? ' selected' : '') + '>Nadie</option></select></label>';
+    h += '<h3 style="color:var(--text-secondary);font-size:0.8rem;letter-spacing:.1em;margin:1.4rem 0 0.4rem">AVISOS</h3>';
+    var orden = ['amistad_solicitud', 'amistad_aceptada', 'sistema'];
+    Object.keys(a.avisos).sort(function (x, y) { return (orden.indexOf(x) + 99 * (orden.indexOf(x) < 0)) - (orden.indexOf(y) + 99 * (orden.indexOf(y) < 0)); }).forEach(function (t) {
+      var v = a.avisos[t];
+      h += '<div class="social-ajuste"><span style="color:var(--text-primary)">' + esc(v.nombre) + '</span><span>' +
+        '<label class="d">Activado ' + chk('a.' + t + '.activo', v.activo) + '</label> &nbsp; ' +
+        '<label class="d">Fuera de la app ' + chk('a.' + t + '.fuera', v.fuera) + '</label></span></div>';
+    });
+    h += '<div class="d" style="color:var(--text-secondary);font-size:0.78rem;margin-top:0.6rem">«Fuera de la app»: notificación del sistema en Android y Desktop. En el iPhone los avisos se ven al abrir la app.</div>';
+    $('ajustes').innerHTML = h;
+  }
+  $('ajustes').addEventListener('change', function (e) {
+    var k = e.target.getAttribute('data-aj'); if (!k) return;
+    var v = e.target.type === 'checkbox' ? e.target.checked : e.target.value, body = {}, p = k.split('.');
+    if (p[0] === 'p') { body.privacidad = {}; body.privacidad[p[1]] = v; }
+    else { body.avisos = {}; body.avisos[p[1]] = {}; body.avisos[p[1]][p[2]] = v; }
+    post('/api/v1/social/ajustes', body).then(pintarAjustes);
+  });
+  cargar();
+})();
+</script>
+{% endblock %}

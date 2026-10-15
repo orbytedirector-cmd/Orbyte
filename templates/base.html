@@ -53,6 +53,8 @@
           <a href="/admin/usuarios" class="header-user-link" title="Panel de administración">⚙ Admin</a>
           <a href="/admin/colaborativa" class="header-user-link" title="Playlist colaborativa (QR para invitados)">🎉 Colaborativa</a>
           {% endif %}
+          <a href="/amigos" class="header-user-link" title="Amigos">👥 Amigos</a>
+          <a href="/notificaciones" class="header-user-link header-campana" title="Notificaciones" id="header-campana">🔔<span class="campana-badge" id="campana-badge" hidden></span></a>
           <a href="/account" class="header-user-link" title="Mi cuenta">👤 Cuenta</a>
           <a href="/account" title="Mi cuenta">
             <span class="avatar-circle avatar-circle-sm" id="header-avatar">
@@ -1591,6 +1593,27 @@
     }
   </script>
   <script src="{{ url_for('static', filename='tutorial.js') }}?v=20260720"></script>
+  {% if current_user %}
+  <script>
+  // Ticket C-10: contador de la campana (notificaciones no leídas), cada 60 s.
+  (function () {
+    var badge = document.getElementById('campana-badge');
+    if (!badge) return;
+    function contar() {
+      fetch('/api/v1/social/notificaciones/contador', {credentials: 'same-origin'})
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (d) {
+          if (!d) return;
+          var n = d.no_leidas || 0;
+          badge.textContent = n > 99 ? '99+' : String(n);
+          badge.hidden = n === 0;
+        }).catch(function () {});
+    }
+    window.orbyteCampana = contar;
+    contar(); setInterval(contar, 60000);
+  })();
+  </script>
+  {% endif %}
   {% block scripts %}{% endblock %}
 </body>
 </html>

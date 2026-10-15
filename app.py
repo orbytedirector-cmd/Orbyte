@@ -929,6 +929,47 @@ def get_db_connection():
             conn.commit()
         except Exception:
             pass  # Columna ya existe
+    # Ticket C-10 (pedido por Niko): Orbyte social, etapa 1 — amigos con
+    # amistad mutua, silenciados y centro de notificaciones. Las amistades se
+    # guardan una vez por par (usuario_a < usuario_b).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS amistades (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_a     INTEGER NOT NULL,
+            usuario_b     INTEGER NOT NULL,
+            solicitante   INTEGER NOT NULL,
+            estado        TEXT NOT NULL DEFAULT 'pendiente',
+            creada_at     TEXT NOT NULL,
+            aceptada_at   TEXT,
+            UNIQUE (usuario_a, usuario_b)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS amigos_silenciados (
+            usuario_id    INTEGER NOT NULL,
+            amigo_id      INTEGER NOT NULL,
+            PRIMARY KEY (usuario_id, amigo_id)
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS notificaciones (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario_id    INTEGER NOT NULL,
+            tipo          TEXT NOT NULL,
+            actor_id      INTEGER,
+            texto         TEXT NOT NULL,
+            datos_json    TEXT,
+            fuera         INTEGER NOT NULL DEFAULT 1,
+            leida_at      TEXT,
+            creada_at     TEXT NOT NULL
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_notificaciones_usuario ON notificaciones (usuario_id, id)')
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN amigo_codigo TEXT")   # QR de la cuenta (C-10)
+        conn.commit()
+    except Exception:
+        pass
     # Ticket C-07 (Modo TV): teles LG webOS donde Orbyte muestra lo que suena.
     # client_key = autorización que da la tele al aceptar «Permitir» (una vez);
     # clave = parte secreta del link de solo lectura de la página /tv/<clave>;
@@ -12092,6 +12133,529 @@ def tv_estado(clave):
         return resp
     finally:
         conn.close()
+
+
+# ══ Ticket C-10 (pedido por Niko): Orbyte social — etapa 1 ════════════════════
+# Amigos con amistad mutua (solicitud → aceptar), silenciar a un amigo, centro
+# de notificaciones (campana) y ajustes de privacidad/avisos por usuario.
+# Toda interacción es solo entre amigos. Especificación:
+# claude/especificacion-c10-social.md (proyecto).
+
+_SOCIAL_TIPOS = {
+    # tipo: (descripción para ajustes, activo por defecto, fuera de la app por defecto)
+    'amistad_solicitud': ('Solicitudes de amistad', True, True),
+    'amistad_aceptada':  ('Solicitud aceptada', True, True),
+    'sistema':           ('Avisos de Orbyte', True, True),
+}
+_SOCIAL_PRIVACIDAD_DEFECTO = {
+    'buscable': True,              # encontrarme por nickname o correo (el QR siempre funciona)
+    'mostrar_conectado': True,
+    'mostrar_escuchando': False,
+    'actividad': 'amigos',         # 'amigos' | 'nadie'
+}
+_NOTIF_VIGENCIA_DIAS = 90
+
+
+def _social_ajustes(conn, user_id):
+    row = conn.execute('SELECT settings_json FROM users WHERE id=?', (user_id,)).fetchone()
+    try:
+        guardado = (json.loads(row['settings_json']) if row and row['settings_json'] else {}).get('social') or {}
+    except (TypeError, ValueError):
+        guardado = {}
+    priv = dict(_SOCIAL_PRIVACIDAD_DEFECTO)
+    priv.update({k: v for k, v in (guardado.get('privacidad') or {}).items() if k in priv})
+    avisos = {}
+    for tipo, (nombre, activo, fuera) in _SOCIAL_TIPOS.items():
+        g_ = (guardado.get('avisos') or {}).get(tipo) or {}
+        avisos[tipo] = {'nombre': nombre, 'activo': bool(g_.get('activo', activo)), 'fuera': bool(g_.get('fuera', fuera))}
+    return {'privacidad': priv, 'avisos': avisos}
+
+
+def _social_usuario(conn, user_id):
+    row = conn.execute('SELECT id, email, nickname, avatar FROM users WHERE id=?', (user_id,)).fetchone()
+    if not row:
+        return None
+    nombre = _collab_nombre_usuario(row['nickname'], row['email'])
+    return {'id': row['id'], 'nombre': nombre, 'avatar': _collab_avatar_usuario(row['avatar'], nombre)}
+
+
+def _social_par(a, b):
+    a, b = int(a), int(b)
+    return (a, b) if a < b else (b, a)
+
+
+def _social_amistad(conn, a, b):
+    x, y = _social_par(a, b)
+    row = conn.execute('SELECT * FROM amistades WHERE usuario_a=? AND usuario_b=?', (x, y)).fetchone()
+    return dict(row) if row else None
+
+
+def _social_relacion(conn, yo, otro):
+    """'amigo' | 'enviada' (yo pedí) | 'recibida' (me pidió) | 'ninguna'."""
+    am = _social_amistad(conn, yo, otro)
+    if not am:
+        return 'ninguna'
+    if am['estado'] == 'aceptada':
+        return 'amigo'
+    return 'enviada' if am['solicitante'] == yo else 'recibida'
+
+
+def _social_codigo(conn, user_id):
+    row = conn.execute('SELECT amigo_codigo FROM users WHERE id=?', (user_id,)).fetchone()
+    if row and row['amigo_codigo']:
+        return row['amigo_codigo']
+    while True:
+        codigo = ''.join(secrets.choice(_COLLAB_CODE_ALFABETO) for _ in range(8))
+        if not conn.execute('SELECT 1 FROM users WHERE amigo_codigo=?', (codigo,)).fetchone():
+            break
+    conn.execute('UPDATE users SET amigo_codigo=? WHERE id=?', (codigo, user_id))
+    conn.commit()
+    return codigo
+
+
+def _social_link_codigo(codigo):
+    return _COLLAB_LAN_URL + f'/amigo/{codigo}'
+
+
+def _notificar(conn, usuario_id, tipo, texto, actor_id=None, datos=None):
+    """Crea una notificación respetando los ajustes del destinatario (tipo
+    desactivado → no se crea) y los silenciados (amigo silenciado → no se crea).
+    Devuelve el id o None."""
+    if actor_id is not None and conn.execute(
+            'SELECT 1 FROM amigos_silenciados WHERE usuario_id=? AND amigo_id=?', (usuario_id, actor_id)).fetchone():
+        return None
+    pref = _social_ajustes(conn, usuario_id)['avisos'].get(tipo) or {'activo': True, 'fuera': True}
+    if not pref['activo']:
+        return None
+    cur = conn.execute('INSERT INTO notificaciones (usuario_id, tipo, actor_id, texto, datos_json, fuera, creada_at) '
+                       'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                       (usuario_id, tipo, actor_id, texto[:300], json.dumps(datos or {}, ensure_ascii=False),
+                        1 if pref['fuera'] else 0, _utcnow_iso()))
+    return cur.lastrowid
+
+
+def _notif_json(conn, row, cache):
+    r = dict(row)
+    actor = None
+    if r['actor_id']:
+        if r['actor_id'] not in cache:
+            cache[r['actor_id']] = _social_usuario(conn, r['actor_id'])
+        actor = cache[r['actor_id']]
+    try:
+        datos = json.loads(r['datos_json'] or '{}')
+    except ValueError:
+        datos = {}
+    return {'id': r['id'], 'tipo': r['tipo'], 'texto': r['texto'], 'actor': actor, 'datos': datos,
+            'fuera': bool(r['fuera']), 'leida': bool(r['leida_at']), 'creada': r['creada_at']}
+
+
+def _social_limpiar(conn, user_id):
+    limite = (datetime.now(timezone.utc) - timedelta(days=_NOTIF_VIGENCIA_DIAS)).strftime('%Y-%m-%dT%H:%M:%S')
+    conn.execute('DELETE FROM notificaciones WHERE usuario_id=? AND creada_at < ?', (user_id, limite))
+
+
+def _social_marcar_solicitud(conn, receptor, solicitante, estado):
+    """La notificación de solicitud queda resuelta (las apps ocultan los botones)."""
+    for r in conn.execute("SELECT id, datos_json FROM notificaciones WHERE usuario_id=? AND tipo='amistad_solicitud' "
+                          "AND actor_id=?", (receptor, solicitante)).fetchall():
+        try:
+            d = json.loads(r['datos_json'] or '{}')
+        except ValueError:
+            d = {}
+        d['estado'] = estado
+        conn.execute('UPDATE notificaciones SET datos_json=?, leida_at=COALESCE(leida_at, ?) WHERE id=?',
+                     (json.dumps(d, ensure_ascii=False), _utcnow_iso(), r['id']))
+
+
+def _social_lista_amigos(conn, yo):
+    silenciados = {r['amigo_id'] for r in conn.execute(
+        'SELECT amigo_id FROM amigos_silenciados WHERE usuario_id=?', (yo,))}
+    amigos, recibidas, enviadas = [], [], []
+    for am in conn.execute('SELECT * FROM amistades WHERE usuario_a=? OR usuario_b=? ORDER BY COALESCE(aceptada_at, creada_at) DESC',
+                           (yo, yo)).fetchall():
+        otro = am['usuario_b'] if am['usuario_a'] == yo else am['usuario_a']
+        u = _social_usuario(conn, otro)
+        if not u:
+            continue
+        if am['estado'] == 'aceptada':
+            u.update({'silenciado': otro in silenciados, 'desde': am['aceptada_at']})
+            amigos.append(u)
+        elif am['solicitante'] == yo:
+            u['enviada_at'] = am['creada_at']
+            enviadas.append(u)
+        else:
+            u['recibida_at'] = am['creada_at']
+            recibidas.append(u)
+    amigos.sort(key=lambda x: x['nombre'].lower())
+    return amigos, recibidas, enviadas
+
+
+@app.route('/api/v1/social/amigos')
+@api_login_required
+def api_v1_social_amigos():
+    """Amigos, solicitudes recibidas y enviadas, y mi código/QR para que me agreguen."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        amigos, recibidas, enviadas = _social_lista_amigos(conn, yo)
+        codigo = _social_codigo(conn, yo)
+        return jsonify({'status': 'ok', 'amigos': amigos, 'recibidas': recibidas, 'enviadas': enviadas,
+                        'mi_codigo': codigo, 'mi_link': _social_link_codigo(codigo)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/buscar', methods=['POST'])
+@api_login_required
+def api_v1_social_buscar():
+    """Buscar usuarios para agregar. {q}: con '@' busca el correo EXACTO; si
+    no, nicknames que empiecen con q (mín. 2 letras). Respeta 'buscable'."""
+    yo = g.api_user['id']
+    q = ' '.join(str((request.get_json(silent=True) or {}).get('q') or '').split())[:80]
+    if len(q) < 2:
+        return jsonify({'status': 'ok', 'resultados': []})
+    conn = get_db_connection()
+    try:
+        if '@' in q:
+            filas = conn.execute('SELECT id FROM users WHERE lower(email)=lower(?) AND is_approved=1 AND id<>?',
+                                 (q, yo)).fetchall()
+        else:
+            like = q.lower().replace('\\', '').replace('%', '').replace('_', '') + '%'
+            filas = conn.execute("SELECT id FROM users WHERE lower(nickname) LIKE ? AND is_approved=1 AND id<>? "
+                                 "ORDER BY nickname LIMIT 10", (like, yo)).fetchall()
+        out = []
+        for r in filas:
+            if not _social_ajustes(conn, r['id'])['privacidad']['buscable']:
+                continue
+            u = _social_usuario(conn, r['id'])
+            u['relacion'] = _social_relacion(conn, yo, r['id'])
+            out.append(u)
+        return jsonify({'status': 'ok', 'resultados': out})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/codigo/<codigo>')
+@api_login_required
+def api_v1_social_codigo(codigo):
+    """Quién es el dueño de un código/QR de cuenta (para confirmar antes de agregar)."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT id FROM users WHERE amigo_codigo=? AND is_approved=1',
+                           (str(codigo).strip().upper(),)).fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Ese código no corresponde a ninguna cuenta.'}), 404
+        u = _social_usuario(conn, row['id'])
+        u['relacion'] = 'yo' if row['id'] == yo else _social_relacion(conn, yo, row['id'])
+        return jsonify({'status': 'ok', 'usuario': u})
+    finally:
+        conn.close()
+
+
+def _social_destino(conn, datos, yo):
+    """user_id destino a partir de {user_id} o {codigo}."""
+    if datos.get('codigo'):
+        row = conn.execute('SELECT id FROM users WHERE amigo_codigo=? AND is_approved=1',
+                           (str(datos['codigo']).strip().upper(),)).fetchone()
+        return row['id'] if row else None
+    try:
+        uid = int(datos.get('user_id'))
+    except (TypeError, ValueError):
+        return None
+    row = conn.execute('SELECT id FROM users WHERE id=? AND is_approved=1', (uid,)).fetchone()
+    return row['id'] if row else None
+
+
+@app.route('/api/v1/social/solicitar', methods=['POST'])
+@api_login_required
+def api_v1_social_solicitar():
+    """Enviar solicitud de amistad. {user_id} o {codigo}. Si el otro ya me
+    había pedido, se acepta directo."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        otro = _social_destino(conn, datos, yo)
+        if not otro or otro == yo:
+            return jsonify({'status': 'error', 'message': 'No encontré esa cuenta.'}), 404
+        am = _social_amistad(conn, yo, otro)
+        if am and am['estado'] == 'aceptada':
+            return jsonify({'status': 'ok', 'relacion': 'amigo'})
+        if am and am['solicitante'] != yo:   # me había pedido: aceptar
+            return _social_aceptar(conn, yo, otro)
+        if am:
+            return jsonify({'status': 'ok', 'relacion': 'enviada'})
+        x, y = _social_par(yo, otro)
+        conn.execute('INSERT INTO amistades (usuario_a, usuario_b, solicitante, creada_at) VALUES (?, ?, ?, ?)',
+                     (x, y, yo, _utcnow_iso()))
+        yo_u = _social_usuario(conn, yo)
+        _notificar(conn, otro, 'amistad_solicitud', f'{yo_u["nombre"]} quiere ser tu amigo en Orbyte.',
+                   actor_id=yo, datos={'user_id': yo, 'estado': 'pendiente'})
+        conn.commit()
+        return jsonify({'status': 'ok', 'relacion': 'enviada'})
+    finally:
+        conn.close()
+
+
+def _social_aceptar(conn, yo, otro):
+    x, y = _social_par(yo, otro)
+    conn.execute("UPDATE amistades SET estado='aceptada', aceptada_at=? WHERE usuario_a=? AND usuario_b=?",
+                 (_utcnow_iso(), x, y))
+    _social_marcar_solicitud(conn, yo, otro, 'aceptada')
+    yo_u = _social_usuario(conn, yo)
+    _notificar(conn, otro, 'amistad_aceptada', f'{yo_u["nombre"]} aceptó tu solicitud: ahora son amigos.',
+               actor_id=yo, datos={'user_id': yo})
+    conn.commit()
+    return jsonify({'status': 'ok', 'relacion': 'amigo'})
+
+
+@app.route('/api/v1/social/responder', methods=['POST'])
+@api_login_required
+def api_v1_social_responder():
+    """Responder una solicitud recibida. {user_id, aceptar: bool}."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        otro = _social_destino(conn, datos, yo)
+        am = _social_amistad(conn, yo, otro) if otro else None
+        if not am or am['estado'] != 'pendiente' or am['solicitante'] == yo:
+            return jsonify({'status': 'error', 'message': 'Esa solicitud ya no está pendiente.'}), 409
+        if datos.get('aceptar'):
+            return _social_aceptar(conn, yo, otro)
+        conn.execute('DELETE FROM amistades WHERE id=?', (am['id'],))
+        _social_marcar_solicitud(conn, yo, otro, 'rechazada')
+        conn.commit()
+        return jsonify({'status': 'ok', 'relacion': 'ninguna'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/quitar', methods=['POST'])
+@api_login_required
+def api_v1_social_quitar():
+    """Quitar amistad o cancelar una solicitud enviada. {user_id}."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        otro = _social_destino(conn, datos, yo)
+        am = _social_amistad(conn, yo, otro) if otro else None
+        if am:
+            conn.execute('DELETE FROM amistades WHERE id=?', (am['id'],))
+            conn.execute('DELETE FROM amigos_silenciados WHERE (usuario_id=? AND amigo_id=?) OR (usuario_id=? AND amigo_id=?)',
+                         (yo, otro, otro, yo))
+            if am['estado'] == 'pendiente' and am['solicitante'] == yo:
+                # Solicitud cancelada: se borra el aviso que le llegó al otro.
+                conn.execute("DELETE FROM notificaciones WHERE usuario_id=? AND tipo='amistad_solicitud' AND actor_id=?",
+                             (otro, yo))
+            conn.commit()
+        return jsonify({'status': 'ok', 'relacion': 'ninguna'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/silenciar', methods=['POST'])
+@api_login_required
+def api_v1_social_silenciar():
+    """{user_id, silenciar: bool}: sigue siendo amigo, pero sus avisos no llegan."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        otro = _social_destino(conn, datos, yo)
+        if not otro or _social_relacion(conn, yo, otro) != 'amigo':
+            return jsonify({'status': 'error', 'message': 'Solo puedes silenciar a un amigo.'}), 409
+        if datos.get('silenciar'):
+            conn.execute('INSERT OR IGNORE INTO amigos_silenciados (usuario_id, amigo_id) VALUES (?, ?)', (yo, otro))
+        else:
+            conn.execute('DELETE FROM amigos_silenciados WHERE usuario_id=? AND amigo_id=?', (yo, otro))
+        conn.commit()
+        return jsonify({'status': 'ok', 'silenciado': bool(datos.get('silenciar'))})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/notificaciones')
+@api_login_required
+def api_v1_social_notificaciones():
+    """Centro de notificaciones: las últimas (?limite=, máx. 100; ?antes_de=<id>
+    para paginar) + no leídas."""
+    yo = g.api_user['id']
+    limite = max(1, min(100, request.args.get('limite', 50, type=int)))
+    antes = request.args.get('antes_de', type=int)
+    conn = get_db_connection()
+    try:
+        _social_limpiar(conn, yo)
+        conn.commit()
+        sql = 'SELECT * FROM notificaciones WHERE usuario_id=?' + (' AND id<?' if antes else '') + ' ORDER BY id DESC LIMIT ?'
+        args = (yo, antes, limite) if antes else (yo, limite)
+        cache = {}
+        items = [_notif_json(conn, r, cache) for r in conn.execute(sql, args).fetchall()]
+        no_leidas = conn.execute('SELECT COUNT(*) FROM notificaciones WHERE usuario_id=? AND leida_at IS NULL',
+                                 (yo,)).fetchone()[0]
+        return jsonify({'status': 'ok', 'items': items, 'no_leidas': no_leidas})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/notificaciones/contador')
+@api_login_required
+def api_v1_social_contador():
+    """Para la campana (consulta liviana): no leídas, el id más nuevo y las
+    nuevas para avisar fuera de la app (?despues_de=<id>, solo fuera=1)."""
+    yo = g.api_user['id']
+    despues = request.args.get('despues_de', type=int)
+    conn = get_db_connection()
+    try:
+        no_leidas = conn.execute('SELECT COUNT(*) FROM notificaciones WHERE usuario_id=? AND leida_at IS NULL',
+                                 (yo,)).fetchone()[0]
+        ultima = conn.execute('SELECT MAX(id) FROM notificaciones WHERE usuario_id=?', (yo,)).fetchone()[0] or 0
+        nuevas = []
+        if despues is not None and despues < ultima:
+            cache = {}
+            nuevas = [_notif_json(conn, r, cache) for r in conn.execute(
+                'SELECT * FROM notificaciones WHERE usuario_id=? AND id>? AND fuera=1 AND leida_at IS NULL '
+                'ORDER BY id LIMIT 10', (yo, despues)).fetchall()]
+        return jsonify({'status': 'ok', 'no_leidas': no_leidas, 'ultima_id': ultima, 'nuevas': nuevas})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/notificaciones/leer', methods=['POST'])
+@api_login_required
+def api_v1_social_leer():
+    """{ids: [...]} o {todas: true}."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        if datos.get('todas'):
+            conn.execute('UPDATE notificaciones SET leida_at=? WHERE usuario_id=? AND leida_at IS NULL', (_utcnow_iso(), yo))
+        else:
+            ids = [int(x) for x in (datos.get('ids') or []) if str(x).isdigit()][:200]
+            if ids:
+                conn.execute(f'UPDATE notificaciones SET leida_at=COALESCE(leida_at, ?) WHERE usuario_id=? '
+                             f'AND id IN ({",".join("?" * len(ids))})', [_utcnow_iso(), yo] + ids)
+        conn.commit()
+        no_leidas = conn.execute('SELECT COUNT(*) FROM notificaciones WHERE usuario_id=? AND leida_at IS NULL',
+                                 (yo,)).fetchone()[0]
+        return jsonify({'status': 'ok', 'no_leidas': no_leidas})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/notificaciones/borrar', methods=['POST'])
+@api_login_required
+def api_v1_social_borrar():
+    """{id}."""
+    yo = g.api_user['id']
+    try:
+        nid = int((request.get_json(silent=True) or {}).get('id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Falta id.'}), 400
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM notificaciones WHERE id=? AND usuario_id=?', (nid, yo))
+        conn.commit()
+        return jsonify({'status': 'ok'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/ajustes', methods=['GET', 'POST'])
+@api_login_required
+def api_v1_social_ajustes():
+    """Privacidad y avisos. POST parcial: {privacidad: {...}, avisos: {tipo: {activo, fuera}}}."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        if request.method == 'POST':
+            datos = request.get_json(silent=True) or {}
+            actual = _social_ajustes(conn, yo)
+            priv = actual['privacidad']
+            for k, v in (datos.get('privacidad') or {}).items():
+                if k in ('buscable', 'mostrar_conectado', 'mostrar_escuchando'):
+                    priv[k] = bool(v)
+                elif k == 'actividad' and v in ('amigos', 'nadie'):
+                    priv[k] = v
+            avisos = {t: {'activo': a['activo'], 'fuera': a['fuera']} for t, a in actual['avisos'].items()}
+            for t, v in (datos.get('avisos') or {}).items():
+                if t in avisos and isinstance(v, dict):
+                    if 'activo' in v:
+                        avisos[t]['activo'] = bool(v['activo'])
+                    if 'fuera' in v:
+                        avisos[t]['fuera'] = bool(v['fuera'])
+            row = conn.execute('SELECT settings_json FROM users WHERE id=?', (yo,)).fetchone()
+            try:
+                todo = json.loads(row['settings_json']) if row and row['settings_json'] else {}
+            except ValueError:
+                todo = {}
+            todo['social'] = {'privacidad': priv, 'avisos': avisos}
+            conn.execute('UPDATE users SET settings_json=? WHERE id=?', (json.dumps(todo), yo))
+            conn.commit()
+        return jsonify(dict(_social_ajustes(conn, yo), status='ok'))
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/social/anuncio', methods=['POST'])
+@api_admin_required
+def api_v1_admin_social_anuncio():
+    """Aviso del sistema para todos los usuarios aprobados. {texto}."""
+    texto = ' '.join(str((request.get_json(silent=True) or {}).get('texto') or '').split())[:300]
+    if len(texto) < 3:
+        return jsonify({'status': 'error', 'message': 'Escribe el aviso.'}), 400
+    conn = get_db_connection()
+    try:
+        n = 0
+        for r in conn.execute('SELECT id FROM users WHERE is_approved=1').fetchall():
+            if _notificar(conn, r['id'], 'sistema', texto, datos={'origen': 'admin'}):
+                n += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'enviados': n})
+    finally:
+        conn.close()
+
+
+@app.route('/amigo/<codigo>')
+@login_required
+def amigo_por_codigo(codigo):
+    """Destino del QR de la cuenta: muestra a quién se va a agregar."""
+    return render_template('amigo.html', codigo=str(codigo).strip().upper())
+
+
+@app.route('/amigos')
+@login_required
+def pagina_amigos():
+    return render_template('amigos.html')
+
+
+@app.route('/notificaciones')
+@login_required
+def pagina_notificaciones():
+    return render_template('notificaciones.html')
+
+
+@app.route('/api/v1/social/mi-qr.png')
+@api_login_required
+def api_v1_social_mi_qr():
+    """QR con el link de mi cuenta (para que un amigo lo escanee)."""
+    if not _QRCODE_AVAILABLE:
+        return '', 404
+    conn = get_db_connection()
+    try:
+        codigo = _social_codigo(conn, g.api_user['id'])
+    finally:
+        conn.close()
+    img = qrcode.make(_social_link_codigo(codigo), border=1)
+    buf = BytesIO()
+    img.save(buf, format='PNG')
+    resp = Response(buf.getvalue(), mimetype='image/png')
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
 
 if __name__ == '__main__':
     # threaded=True: sin esto, el server de desarrollo de Flask atiende UN
