@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Orbyte · TV</title>
+<!--
+  Ticket C-08 (pedido por Niko): Modo TV "Optimizado OLED". Misma informacion
+  que tv.html (misma /estado), pensada para paneles OLED 4K:
+  - negro puro (pixeles apagados): sin fondo difuminado, sin tarjetas grises;
+  - nada fijo: toda la escena se desplaza unos pixeles cada minuto, portada e
+    informacion cambian de lado cada 8 min, logo y reloj van tenues y se mueven
+    con la escena; el QR solo aparece 15 s cada 3 min (y al empezar una
+    sesion), cada vez en otra esquina; el codigo para unirse va en texto;
+  - en pausa o sin nada sonando: protector (portada chica + reloj) que flota;
+  - portadas a resolucion completa (la del archivo), letras finas.
+  Compatibilidad: navegador de webOS (~Chromium 68) y WebView de Android TV:
+  nada de `gap` en flexbox, `aspect-ratio`, `inset`, `?.` ni `??`.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600&family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --oro: #b8890f; --oro2: #e2b31a; --oro-tenue: #6e5410;
+    --texto: #e4e4e4; --texto2: #8c8c8c; --texto3: #4a4a4a;
+    --led-yellow:#e2b31a; --led-white:#dcdcdc; --led-cyan:#22b8d8; --led-red:#d8344e;
+    --led-green:#1fbf72; --led-blue:#3d78e0; --led-magenta:#c04ad8;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; background: #000; color: var(--texto); overflow: hidden;
+    font-family: Inter, system-ui, sans-serif; cursor: none; -webkit-font-smoothing: antialiased; }
+  .oculto { display: none !important; }
+
+  /* Escena: todo lo que se ve. Se desplaza despacio (protege el panel). */
+  .escena { position: fixed; left: 4vw; top: 3.4vw; width: 92vw; height: 93.2vh;
+    -webkit-transition: -webkit-transform 40s ease-in-out, opacity 1.6s; transition: transform 40s ease-in-out, opacity 1.6s; }
+  .escena.fuera { opacity: 0; }
+
+  .cab { display: flex; align-items: center; justify-content: space-between; height: 5vw; }
+  .marca { height: 4.4vw; opacity: .38; }
+  .reloj { font-family: Orbitron, sans-serif; font-weight: 500; color: var(--oro-tenue); text-align: right; }
+  .reloj .h { font-size: 2.2vw; letter-spacing: .06em; }
+  .reloj .f { font-size: .8vw; letter-spacing: .3em; margin-top: .2vw; opacity: .8; }
+
+  .main { display: flex; align-items: center; height: 62%; margin-top: 1vw; }
+  .main.invertido { -webkit-flex-direction: row-reverse; flex-direction: row-reverse; }
+  .marco { width: 34vw; height: 34vw; max-height: 100%; flex-shrink: 0; overflow: hidden; border-radius: .6vw; }
+  .cover { width: 100%; height: 100%; background: #000 center/cover no-repeat; display: flex; align-items: center;
+    justify-content: center; font-size: 7vw; color: var(--texto3);
+    -webkit-animation: respira 90s ease-in-out infinite alternate; animation: respira 90s ease-in-out infinite alternate; }
+  @-webkit-keyframes respira { from { -webkit-transform: scale(1); } to { -webkit-transform: scale(1.045) translate(-1%, 1%); } }
+  @keyframes respira { from { transform: scale(1); } to { transform: scale(1.045) translate(-1%, 1%); } }
+  .info { flex: 1; min-width: 0; padding: 0 4vw; }
+  .etq { font-size: .85vw; letter-spacing: .34em; color: var(--oro-tenue); font-weight: 600; text-transform: uppercase; }
+  .titulo { font-size: 4vw; line-height: 1.12; font-weight: 300; margin-top: .9vw; color: var(--texto);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .artista { font-size: 2.1vw; color: var(--oro2); margin-top: 1vw; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .album { font-size: 1.25vw; color: var(--texto2); margin-top: .5vw; font-weight: 400;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .formato { display: inline-flex; align-items: center; margin-top: 1.2vw; font-size: .95vw; font-weight: 500; color: var(--texto2);
+    letter-spacing: .06em; }
+  .formato .led { width: .5vw; height: .5vw; border-radius: 50%; margin-right: .6vw; }
+  .progreso { margin-top: 2.2vw; max-width: 40vw; }
+  .barra { height: 2px; background: #1a1a1a; }
+  .barra span { display: block; height: 100%; width: 0; background: var(--oro); -webkit-transition: width .9s linear; transition: width .9s linear; }
+  .tiempos { display: flex; justify-content: space-between; margin-top: .6vw; font-size: .95vw; color: var(--texto3);
+    font-variant-numeric: tabular-nums; }
+  .tiempos .pausa { color: var(--oro); }
+  .por { display: flex; align-items: center; margin-top: 2vw; }
+  .por .av { width: 2.8vw; height: 2.8vw; font-size: 1vw; margin-right: .9vw; }
+  .por .k { font-size: .75vw; letter-spacing: .26em; color: var(--texto3); font-weight: 600; }
+  .por .v { font-size: 1.5vw; font-weight: 500; color: var(--oro2); margin-top: .1vw; }
+
+  .sig { width: 24vw; flex-shrink: 0; }
+  .sig h3 { font-size: .8vw; letter-spacing: .34em; color: var(--texto3); font-weight: 600; margin-bottom: 1.2vw; }
+  .item { display: flex; align-items: center; margin-bottom: 1.3vw; }
+  .item .c { width: 4.4vw; height: 4.4vw; border-radius: .4vw; background: #000 center/cover no-repeat; flex-shrink: 0;
+    margin-right: 1vw; opacity: .8; }
+  .item .t { min-width: 0; flex: 1; }
+  .item .n { font-size: 1.15vw; font-weight: 500; color: #c8c8c8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .a { font-size: .9vw; color: var(--texto2); margin-top: .15vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .b { display: flex; align-items: center; margin-top: .3vw; font-size: .85vw; color: var(--oro); }
+  .item .b .av { width: 1.3vw; height: 1.3vw; font-size: .5vw; margin-right: .45vw; }
+
+  .pie { display: flex; align-items: center; margin-top: 2.4vw; color: var(--texto3); font-size: .95vw; }
+  .pie .code { font-family: Orbitron, sans-serif; color: var(--oro); letter-spacing: .14em; margin-left: .7vw; font-size: 1.2vw; }
+  .pie .sep { margin: 0 1.6vw; color: #262626; }
+  .pie .num { color: var(--oro); font-family: Orbitron, sans-serif; margin-right: .4vw; }
+  .rk { display: inline-flex; align-items: center; margin-right: 1.4vw; white-space: nowrap; }
+  .rk .av { width: 1.6vw; height: 1.6vw; font-size: .55vw; margin-right: .45vw; }
+  .rk .ct { color: var(--oro); margin-left: .4vw; }
+
+  .av { border-radius: 50%; background: var(--oro); color: #000; font-weight: 700; display: inline-flex;
+    align-items: center; justify-content: center; overflow: hidden; flex-shrink: 0; }
+  .av img { width: 100%; height: 100%; object-fit: cover; }
+  .admin { display: inline-block; font-size: .62em; font-weight: 700; color: var(--oro); border: 1px solid var(--oro-tenue);
+    border-radius: .25em; padding: 0 .35em; margin-left: .45em; vertical-align: .15em; }
+
+  /* Avisos "X sumó Y": texto sobre negro, aparecen y se van. */
+  .avisos { position: fixed; left: 50%; bottom: 4vw; width: 34vw; margin-left: -17vw; text-align: center; }
+  .aviso { display: inline-flex; align-items: center; max-width: 100%; opacity: 0;
+    -webkit-transform: translateY(.8vw); transform: translateY(.8vw); -webkit-transition: opacity .6s, -webkit-transform .6s; transition: opacity .6s, transform .6s; }
+  .aviso.ver { opacity: 1; -webkit-transform: none; transform: none; }
+  .aviso .av { width: 2.4vw; height: 2.4vw; font-size: .8vw; margin-right: .9vw; }
+  .aviso .q { font-size: 1.1vw; color: var(--oro2); font-weight: 500; text-align: left; }
+  .aviso .w { font-size: 1.1vw; color: #cfcfcf; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
+  .aviso .w span { color: var(--texto2); }
+
+  /* QR: solo de a ratos, en una esquina distinta cada vez. */
+  .qr { position: fixed; width: 13vw; text-align: center; opacity: 0; -webkit-transition: opacity 1.2s; transition: opacity 1.2s; }
+  .qr.ver { opacity: 1; }
+  .qr img { width: 11vw; height: 11vw; background: #d8d8d8; padding: .5vw; border-radius: .5vw; }
+  .qr .t { font-size: .85vw; color: var(--texto2); margin-top: .6vw; }
+  .qr .code { font-family: Orbitron, sans-serif; color: var(--oro2); font-size: 1.4vw; letter-spacing: .12em; margin-top: .2vw; }
+
+  /* Protector: en pausa o sin nada sonando. Flota por la pantalla. */
+  .protector { position: fixed; left: 0; top: 0; width: 26vw; text-align: center; opacity: 0;
+    -webkit-transition: -webkit-transform 30s ease-in-out, opacity 2s; transition: transform 30s ease-in-out, opacity 2s; }
+  .protector.ver { opacity: .75; }
+  .protector .c { width: 12vw; height: 12vw; margin: 0 auto; border-radius: .5vw; background: #000 center/cover no-repeat; opacity: .7; }
+  .protector .h { font-family: Orbitron, sans-serif; color: var(--oro-tenue); font-size: 3.2vw; margin-top: 1.2vw; font-weight: 500; }
+  .protector .s { font-size: 1vw; color: var(--texto3); margin-top: .6vw; letter-spacing: .1em; }
+  .protector .s b { color: var(--oro); font-weight: 500; font-family: Orbitron, sans-serif; letter-spacing: .12em; }
+
+  .conexion { position: fixed; right: 1.4vw; bottom: 1vw; font-size: .8vw; color: var(--texto3); }
+</style>
+</head>
+<body>
+<div class="escena" id="escena">
+  <div class="cab">
+    <img class="marca" src="/static/logo-full.png" alt="Orbyte">
+    <div class="reloj"><div class="h" id="hora">--:--</div><div class="f" id="fecha"></div></div>
+  </div>
+  <div class="main" id="main">
+    <div class="marco"><div class="cover" id="cover">♪</div></div>
+    <div class="info">
+      <div class="etq">Sonando ahora</div>
+      <div class="titulo" id="titulo"></div>
+      <div class="artista" id="artista"></div>
+      <div class="album" id="album"></div>
+      <div class="formato oculto" id="formato"><span class="led" id="led"></span><span id="formato-txt"></span></div>
+      <div class="progreso">
+        <div class="barra"><span id="barra"></span></div>
+        <div class="tiempos"><span id="pos">0:00</span><span class="pausa" id="pausa"></span><span id="dur">0:00</span></div>
+      </div>
+      <div class="por oculto" id="por"></div>
+    </div>
+    <div class="sig oculto" id="sig"><h3>A CONTINUACIÓN</h3><div id="sig-lista"></div></div>
+  </div>
+  <div class="pie oculto" id="pie"></div>
+</div>
+
+<div class="protector" id="protector">
+  <div class="c" id="prot-cover"></div>
+  <div class="h" id="prot-hora">--:--</div>
+  <div class="s" id="prot-txt"></div>
+</div>
+
+<div class="qr" id="qr"><img id="qr-img" alt=""><div class="t">Súmate con tu canción</div><div class="code" id="qr-code"></div></div>
+<div class="avisos" id="avisos"></div>
+<div class="conexion" id="conexion"></div>
+
+<script>
+(function () {
+  "use strict";
+  var CLAVE = {{ clave|tojson }};
+  var BASE = "/tv/" + encodeURIComponent(CLAVE);
+  var $ = function (id) { return document.getElementById(id); };
+  var LED = { yellow: "var(--led-yellow)", white: "var(--led-white)", cyan: "var(--led-cyan)", red: "var(--led-red)",
+              green: "var(--led-green)", blue: "var(--led-blue)", magenta: "var(--led-magenta)" };
+  var estado = null, recibidoEn = 0, desde = null, trackId = null, codeActual = null;
+  var colaAvisos = [], mostrandoAviso = false, pausadoDesde = null;
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function fmt(seg) {
+    seg = Math.max(0, Math.floor(seg || 0));
+    return Math.floor(seg / 60) + ":" + ("0" + (seg % 60)).slice(-2);
+  }
+  function avatar(av, nombre, clase) {
+    av = av || {};
+    var cls = "av" + (clase ? " " + clase : "");
+    if (av.type === "image" && av.url) return '<span class="' + cls + '"><img src="' + esc(av.url) + '" alt=""></span>';
+    if (av.type === "infinito") return '<span class="' + cls + '">∞</span>';
+    var txt = av.text || String(nombre || "?").slice(0, 2).toUpperCase();
+    return '<span class="' + cls + '">' + esc(txt) + "</span>";
+  }
+  function adminTag(av) { return av && av.badge === "admin" ? '<span class="admin">Admin</span>' : ""; }
+  function imagen(el, url) { el.style.backgroundImage = url ? 'url("' + url + '")' : ""; }
+  function azar(a, b) { return a + Math.random() * (b - a); }
+  function setTransform(el, v) { el.style.webkitTransform = v; el.style.transform = v; }
+
+  // Reloj (sin segundos).
+  function reloj() {
+    var d = new Date(), z = function (n) { return ("0" + n).slice(-2); };
+    var h = z(d.getHours()) + ":" + z(d.getMinutes());
+    if ($("hora").textContent !== h) { $("hora").textContent = h; $("prot-hora").textContent = h; }
+    var f = z(d.getDate()) + "-" + z(d.getMonth() + 1) + "-" + d.getFullYear();
+    if ($("fecha").textContent !== f) $("fecha").textContent = f;
+  }
+  reloj(); setInterval(reloj, 1000);
+
+  // ---- Protección del panel ----
+  // 1) La escena se desplaza a una posición nueva (±1,4 vw) cada minuto, en 40 s.
+  function desplazar() { setTransform($("escena"), "translate(" + azar(-1.4, 1.4).toFixed(2) + "vw," + azar(-1.2, 1.2).toFixed(2) + "vw)"); }
+  desplazar(); setInterval(desplazar, 60000);
+  // 2) Cada 8 min la portada y la información cambian de lado (con fundido).
+  setInterval(function () {
+    var esc_ = $("escena");
+    esc_.classList.add("fuera");
+    setTimeout(function () { $("main").classList.toggle("invertido"); esc_.classList.remove("fuera"); }, 1700);
+  }, 8 * 60000);
+  // 3) Protector: flota a otro punto cada 25 s.
+  function flotar() {
+    setTransform($("protector"), "translate(" + azar(4, 70).toFixed(1) + "vw," + azar(6, 58).toFixed(1) + "vh)");
+  }
+  flotar(); setInterval(flotar, 25000);
+  // 4) QR: 15 s cada 3 min, cada vez en otra esquina (y al cambiar de sesión).
+  var ESQUINAS = [["3vw", null, "4vw", null], [null, "3vw", "4vw", null], ["3vw", null, null, "4vw"], [null, "3vw", null, "4vw"]];
+  var esquina = 0, qrTimer = null;
+  function mostrarQR() {
+    var e = estado;
+    if (!e || !e.colab || !codeActual) return;
+    var q = $("qr"), p = ESQUINAS[esquina++ % ESQUINAS.length];
+    q.style.left = p[0] || "auto"; q.style.right = p[1] || "auto"; q.style.top = p[2] || "auto"; q.style.bottom = p[3] || "auto";
+    q.classList.add("ver");
+    clearTimeout(qrTimer);
+    qrTimer = setTimeout(function () { q.classList.remove("ver"); }, 15000);
+  }
+  setInterval(mostrarQR, 3 * 60000);
+
+  function posicion() {
+    var s = estado && estado.sonando;
+    if (!s) return 0;
+    var p = s.position || 0;
+    if (s.playing) p += (Date.now() - recibidoEn) / 1000;
+    return s.duration ? Math.min(p, s.duration) : p;
+  }
+  function tickProgreso() {
+    var s = estado && estado.sonando;
+    if (!s) return;
+    var p = posicion();
+    $("barra").style.width = (s.duration ? Math.min(100, p / s.duration * 100) : 0) + "%";
+    $("pos").textContent = fmt(p);
+  }
+  setInterval(tickProgreso, 500);
+
+  function pintar() {
+    var e = estado, colab = e.colab, s = e.sonando;
+    if (colab && colab.code !== codeActual) {
+      codeActual = colab.code;
+      $("qr-img").src = BASE + "/qr.png?c=" + encodeURIComponent(colab.code || "");
+      $("qr-code").textContent = colab.code || "";
+      setTimeout(mostrarQR, 1500);   // sesión nueva: se muestra al tiro
+    }
+    if (!colab) { $("qr").classList.remove("ver"); }
+    // Pausa o nada sonando -> protector (tras 20 s en pausa, para no parpadear).
+    var pausa = s && !s.playing;
+    if (pausa) { if (pausadoDesde === null) pausadoDesde = Date.now(); } else pausadoDesde = null;
+    var protector = !s || (pausa && Date.now() - pausadoDesde > 20000);
+    $("escena").style.opacity = protector ? "0" : "";
+    $("protector").classList.toggle("ver", protector);
+    if (protector) {
+      imagen($("prot-cover"), s ? s.track.cover_url : "");
+      $("prot-cover").classList.toggle("oculto", !s);
+      $("prot-txt").innerHTML = !e.activa ? "Modo TV desactivado" :
+        (s ? "En pausa" : (colab ? 'Súmate con el código <b>' + esc(colab.code || "") + "</b>" : "Nada sonando"));
+    }
+    if (s) {
+      var t = s.track;
+      if (t.id !== trackId) {
+        trackId = t.id;
+        imagen($("cover"), t.cover_url); $("cover").textContent = t.cover_url ? "" : "♪";
+        $("titulo").textContent = t.title || "";
+        $("artista").textContent = t.artist_name || "";
+        $("album").textContent = (t.album_name || "") + (t.album_year ? " · " + t.album_year : "");
+        var c = LED[t.format_color] || "";
+        $("formato").classList.toggle("oculto", !t.format_display);
+        $("formato-txt").textContent = t.format_display || "";
+        $("led").style.background = c || "var(--texto2)";
+      }
+      var por = $("por"), porHtml = "";
+      if (e.modo === "colab" && t.added_by) {
+        porHtml = avatar(t.added_by_avatar, t.added_by) +
+          '<div><div class="k">AGREGADA POR</div><div class="v">' + esc(t.added_by) + adminTag(t.added_by_avatar) + "</div></div>";
+      }
+      por.classList.toggle("oculto", !porHtml);
+      if (por.getAttribute("data-h") !== porHtml) { por.setAttribute("data-h", porHtml); por.innerHTML = porHtml; }
+      $("dur").textContent = fmt(s.duration);
+      $("pausa").textContent = s.playing ? "" : "En pausa";
+      tickProgreso();
+      var lista = e.siguientes || [];
+      $("sig").classList.toggle("oculto", !lista.length);
+      var sigHtml = lista.map(function (n) {
+        return '<div class="item"><div class="c" style="background-image:url(\'' + esc(n.cover_url || "") + '\')"></div>' +
+          '<div class="t"><div class="n">' + esc(n.title) + '</div><div class="a">' + esc(n.artist_name || "") + "</div>" +
+          (e.modo === "colab" && n.added_by ? '<div class="b">' + avatar(n.added_by_avatar, n.added_by) + esc(n.added_by) + adminTag(n.added_by_avatar) + "</div>" : "") +
+          "</div></div>";
+      }).join("");
+      if ($("sig-lista").getAttribute("data-h") !== sigHtml) { $("sig-lista").setAttribute("data-h", sigHtml); $("sig-lista").innerHTML = sigHtml; }
+    }
+    // Pie (solo playlist colaborativa): código en texto + cifras + más activos.
+    var pieHtml = "";
+    if (colab) {
+      pieHtml = "Súmate con el código<span class=\"code\">" + esc(colab.code || "") + "</span>" +
+        '<span class="sep">|</span><span class="num">' + colab.total + "</span>agregadas" +
+        '<span class="sep">|</span><span class="num">' + colab.sonaron + "</span>ya sonaron" +
+        (colab.ranking.length ? '<span class="sep">|</span>' + colab.ranking.slice(0, 3).map(function (r) {
+          return '<span class="rk">' + avatar(r.avatar, r.name) + esc(r.name) + '<span class="ct">' + r.total + "</span></span>";
+        }).join("") : "");
+    }
+    $("pie").classList.toggle("oculto", !pieHtml);
+    if ($("pie").getAttribute("data-h") !== pieHtml) { $("pie").setAttribute("data-h", pieHtml); $("pie").innerHTML = pieHtml; }
+  }
+
+  // Avisos "X sumó Y": de a uno, 6 s cada uno.
+  function encolarAvisos(evs) {
+    evs.forEach(function (ev) { colaAvisos.push(ev); });
+    if (colaAvisos.length > 6) colaAvisos = colaAvisos.slice(-6);
+    siguienteAviso();
+  }
+  function siguienteAviso() {
+    if (mostrandoAviso || !colaAvisos.length) return;
+    mostrandoAviso = true;
+    var ev = colaAvisos.shift();
+    var d = document.createElement("div");
+    d.className = "aviso";
+    d.innerHTML = avatar(ev.avatar, ev.by) + '<div style="min-width:0"><div class="q">' + esc(ev.by) + adminTag(ev.avatar) +
+      ' sumó</div><div class="w">' + esc(ev.title) + (ev.artist ? " <span>· " + esc(ev.artist) + "</span>" : "") + "</div></div>";
+    $("avisos").appendChild(d);
+    setTimeout(function () { d.classList.add("ver"); }, 30);
+    setTimeout(function () {
+      d.classList.remove("ver");
+      setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); mostrandoAviso = false; siguienteAviso(); }, 700);
+    }, 6000);
+  }
+
+  var fallos = 0;
+  function consultar() {
+    var url = BASE + "/estado" + (desde != null ? "?desde=" + desde : "");
+    fetch(url, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    }).then(function (e) {
+      fallos = 0; $("conexion").textContent = "";
+      estado = e; recibidoEn = Date.now();
+      if (e.colab) {
+        if (desde != null && e.colab.eventos && e.colab.eventos.length) encolarAvisos(e.colab.eventos);
+        desde = Math.max(desde || 0, e.colab.ultimo_item || 0);
+      } else { desde = null; codeActual = null; }
+      pintar();
+    }).catch(function () {
+      fallos += 1;
+      if (fallos >= 3) $("conexion").textContent = "Reconectando con Orbyte…";
+    });
+  }
+  consultar(); setInterval(consultar, 2500);
+
+  // Pantalla completa con la primera tecla del control (navegador de la LG).
+  function pedirPantallaCompleta() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) return;
+    var el = document.documentElement;
+    var f = el.requestFullscreen || el.webkitRequestFullscreen || el.webkitRequestFullScreen;
+    if (!f) return;
+    try { var r = f.call(el); if (r && r.catch) r.catch(function () {}); } catch (err) {}
+  }
+  document.addEventListener("keydown", pedirPantallaCompleta);
+  document.addEventListener("click", pedirPantallaCompleta);
+  try { if (navigator.wakeLock) navigator.wakeLock.request("screen").catch(function () {}); } catch (err) {}
+})();
+</script>
+</body>
+</html>
