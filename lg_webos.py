@@ -20,7 +20,10 @@ Dependencia: `websocket-client` (pip install websocket-client). Si falta,
 import json
 import socket
 import ssl
+import threading
 import time
+import urllib.request
+import xml.etree.ElementTree as ET
 
 try:
     import websocket  # websocket-client
@@ -104,6 +107,70 @@ def wake_on_lan(mac, ip=None):
                     s.sendto(paquete, (d, port))
                 except OSError:
                     pass
+
+
+_SSDP = ('239.255.255.250', 1900)
+_ST_LG = 'urn:lge-com:service:webos-second-screen:1'
+
+
+def _info_descripcion(location, timeout=2.5):
+    """(nombre, modelo, udn) desde la descripción UPnP de la tele."""
+    try:
+        with urllib.request.urlopen(location, timeout=timeout) as r:
+            root = ET.fromstring(r.read())
+    except Exception:  # noqa: BLE001 - se usa lo que haya
+        return None, None, None
+    def txt(tag):
+        for el in root.iter():
+            if el.tag.rsplit('}', 1)[-1] == tag and el.text and el.text.strip():
+                return el.text.strip()
+        return None
+    return txt('friendlyName'), txt('modelName'), txt('UDN')
+
+
+def descubrir(timeout=3.0):
+    """Busca teles LG webOS encendidas en la red local (anuncio SSDP
+    "webos-second-screen", el mismo que usa Home Assistant).
+    Devuelve [{ip, nombre, modelo, udn}]."""
+    msg = '\r\n'.join(['M-SEARCH * HTTP/1.1', f'HOST: {_SSDP[0]}:{_SSDP[1]}', 'MAN: "ssdp:discover"',
+                        'MX: 2', f'ST: {_ST_LG}', '', '']).encode()
+    vistas = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        for _ in range(2):   # UDP se pierde: se manda dos veces
+            try:
+                sock.sendto(msg, _SSDP)
+            except OSError:
+                pass
+        limite = time.time() + timeout
+        while time.time() < limite:
+            sock.settimeout(max(0.1, limite - time.time()))
+            try:
+                data, addr = sock.recvfrom(65507)
+            except (socket.timeout, OSError):
+                break
+            cab = {}
+            for linea in data.decode('utf-8', 'ignore').split('\r\n')[1:]:
+                if ':' in linea:
+                    k, v = linea.split(':', 1)
+                    cab[k.strip().lower()] = v.strip()
+            if 'lge-com' not in cab.get('st', '').lower() and 'webos' not in cab.get('server', '').lower():
+                continue
+            vistas.setdefault(addr[0], cab.get('location'))
+    finally:
+        sock.close()
+    out = []
+    def _uno(ip, loc):
+        nombre, modelo, udn = _info_descripcion(loc) if loc else (None, None, None)
+        out.append({'ip': ip, 'nombre': nombre or f'Tele LG ({ip})', 'modelo': modelo, 'udn': udn})
+    hilos = [threading.Thread(target=_uno, args=(ip, loc), daemon=True) for ip, loc in vistas.items()]
+    for h in hilos:
+        h.start()
+    for h in hilos:
+        h.join(4)
+    return sorted(out, key=lambda t: t['ip'])
 
 
 def mac_desde_arp(ip):
