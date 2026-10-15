@@ -128,22 +128,30 @@ def _info_descripcion(location, timeout=2.5):
     return txt('friendlyName'), txt('modelName'), txt('UDN')
 
 
-def descubrir(timeout=3.0):
-    """Busca teles LG webOS encendidas en la red local (anuncio SSDP
-    "webos-second-screen", el mismo que usa Home Assistant).
-    Devuelve [{ip, nombre, modelo, udn}]."""
-    msg = '\r\n'.join(['M-SEARCH * HTTP/1.1', f'HOST: {_SSDP[0]}:{_SSDP[1]}', 'MAN: "ssdp:discover"',
-                        'MX: 2', f'ST: {_ST_LG}', '', '']).encode()
-    vistas = {}
+def descubrir(timeout=3.0, log=None):
+    """Busca teles LG webOS encendidas en la red local por SSDP. Pregunta por
+    el servicio propio de LG ("webos-second-screen", el que usa Home
+    Assistant), por DIAL y por todo (ssdp:all), y se queda con lo que se
+    identifica como webOS/LG. Devuelve [{ip, nombre, modelo, udn}]."""
+    def _log(m):
+        if log:
+            try:
+                log(m)
+            except Exception:  # noqa: BLE001
+                pass
+    def _msg(st):
+        return '\r\n'.join(['M-SEARCH * HTTP/1.1', f'HOST: {_SSDP[0]}:{_SSDP[1]}', 'MAN: "ssdp:discover"',
+                             'MX: 2', f'ST: {st}', '', '']).encode()
+    vistas, respondieron = {}, set()
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-        for _ in range(2):   # UDP se pierde: se manda dos veces
+        for st in (_ST_LG, _ST_LG, 'urn:dial-multiscreen-org:service:dial:1', 'ssdp:all'):
             try:
-                sock.sendto(msg, _SSDP)
-            except OSError:
-                pass
+                sock.sendto(_msg(st), _SSDP)
+            except OSError as e:
+                _log(f'Modo TV: búsqueda — no pude enviar SSDP ({e})')
         limite = time.time() + timeout
         while time.time() < limite:
             sock.settimeout(max(0.1, limite - time.time()))
@@ -151,16 +159,22 @@ def descubrir(timeout=3.0):
                 data, addr = sock.recvfrom(65507)
             except (socket.timeout, OSError):
                 break
+            respondieron.add(addr[0])
             cab = {}
             for linea in data.decode('utf-8', 'ignore').split('\r\n')[1:]:
                 if ':' in linea:
                     k, v = linea.split(':', 1)
                     cab[k.strip().lower()] = v.strip()
-            if 'lge-com' not in cab.get('st', '').lower() and 'webos' not in cab.get('server', '').lower():
+            firma = ' '.join((cab.get('st', ''), cab.get('server', ''), cab.get('usn', ''))).lower()
+            if 'lge-com' not in firma and 'webos' not in firma and ' lge ' not in f' {firma} ':
                 continue
-            vistas.setdefault(addr[0], cab.get('location'))
+            # Preferir la LOCATION del servicio propio de LG (trae el nombre de la tele).
+            if addr[0] not in vistas or 'lge-com' in cab.get('st', '').lower():
+                vistas[addr[0]] = cab.get('location')
     finally:
         sock.close()
+    _log(f'Modo TV: búsqueda SSDP — respondieron {len(respondieron)} equipos '
+         f'({", ".join(sorted(respondieron)) or "ninguno"}); LG webOS: {", ".join(sorted(vistas)) or "ninguna"}')
     out = []
     def _uno(ip, loc):
         nombre, modelo, udn = _info_descripcion(loc) if loc else (None, None, None)
