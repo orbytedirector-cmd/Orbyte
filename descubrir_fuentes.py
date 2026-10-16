@@ -153,10 +153,12 @@ _PALABRAS_MUSICA = ('music', 'cantant', 'cantaut', 'compositor', 'guitarr', 'ban
 
 def wikimedia_efemerides(mes, dia, tipo):
     """tipo 'births' | 'deaths' → [{nombre, anio, descripcion, imagen, enlace}] solo músicos."""
-    data = obtener_json('wikimedia', f'https://api.wikimedia.org/feed/v1/wikipedia/es/onthisday/{tipo}/'
-                        f'{int(mes):02d}/{int(dia):02d}')
+    ruta = f'onthisday/{tipo}/{int(mes):02d}/{int(dia):02d}'
+    data = obtener_json('wikimedia', f'https://api.wikimedia.org/feed/v1/wikipedia/es/{ruta}')
+    if not data:   # respaldo: la API REST de la propia Wikipedia
+        data = obtener_json('wikimedia', f'https://es.wikipedia.org/api/rest_v1/feed/{ruta}')
     if not data:
-        return []
+        return None
     out = []
     for e in data.get(tipo) or []:
         for p in (e.get('pages') or [])[:1]:
