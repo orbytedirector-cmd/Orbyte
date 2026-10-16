@@ -983,6 +983,38 @@ def get_db_connection():
         )
     ''')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_playlist_compartidas_usuario ON playlist_compartidas (usuario_id)')
+    # Ticket C-10 etapa 3: actividad entre amigos — likes, toques, respect,
+    # recomendaciones (y quién las escuchó), escuchas de playlists ajenas y
+    # comentarios en playlists. dia = fecha local del servidor (límites diarios).
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS social_likes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, de_id INTEGER NOT NULL, para_id INTEGER NOT NULL,
+            tipo TEXT NOT NULL, ref_id INTEGER NOT NULL, dia TEXT NOT NULL, creada_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_social_likes_para ON social_likes (para_id, tipo);
+        CREATE INDEX IF NOT EXISTS idx_social_likes_ref ON social_likes (tipo, ref_id);
+        CREATE TABLE IF NOT EXISTS social_toques (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, de_id INTEGER NOT NULL, para_id INTEGER NOT NULL,
+            track_id INTEGER NOT NULL, dia TEXT NOT NULL, creada_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_social_toques_para ON social_toques (para_id);
+        CREATE TABLE IF NOT EXISTS social_respects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, de_id INTEGER NOT NULL, para_id INTEGER NOT NULL,
+            dia TEXT NOT NULL, creada_at TEXT NOT NULL, UNIQUE (de_id, dia));
+        CREATE INDEX IF NOT EXISTS idx_social_respects_para ON social_respects (para_id);
+        CREATE TABLE IF NOT EXISTS social_recomendaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, de_id INTEGER NOT NULL, track_id INTEGER NOT NULL,
+            dia TEXT NOT NULL, creada_at TEXT NOT NULL, UNIQUE (de_id, track_id, dia));
+        CREATE TABLE IF NOT EXISTS social_recomendacion_escuchas (
+            recomendacion_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL, creada_at TEXT NOT NULL,
+            PRIMARY KEY (recomendacion_id, usuario_id));
+        CREATE TABLE IF NOT EXISTS playlist_escuchas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL,
+            creada_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_playlist_escuchas_pl ON playlist_escuchas (playlist_id);
+        CREATE TABLE IF NOT EXISTS playlist_comentarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, playlist_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL,
+            texto TEXT NOT NULL, creada_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_playlist_comentarios_pl ON playlist_comentarios (playlist_id, id);
+    ''')
     for _sql in ("ALTER TABLE playlist_tracks ADD COLUMN added_by INTEGER",
                  "ALTER TABLE playlists ADD COLUMN copia_de INTEGER"):
         try:
@@ -2896,6 +2928,13 @@ def api_v1_playlist_detail(playlist_id):
             'dueno': _social_usuario(conn, pl['user_id']),
             'miembros': miembros,
             'copia_de': pl['copia_de'],
+            # Etapa 3: ❤️ y comentarios (solo tienen sentido si es compartida).
+            'likes': conn.execute("SELECT COUNT(*) FROM social_likes WHERE tipo='playlist' AND ref_id=?",
+                                  (playlist_id,)).fetchone()[0],
+            'me_gusta': bool(conn.execute("SELECT 1 FROM social_likes WHERE tipo='playlist' AND ref_id=? AND de_id=?",
+                                          (playlist_id, g.api_user['id'])).fetchone()),
+            'comentarios_n': conn.execute('SELECT COUNT(*) FROM playlist_comentarios WHERE playlist_id=?',
+                                          (playlist_id,)).fetchone()[0],
         })
     finally:
         conn.close()
@@ -2932,6 +2971,8 @@ def api_v1_playlist_delete(playlist_id):
             return jsonify({'error': 'not_found'}), 404
         conn.execute('DELETE FROM playlist_tracks WHERE playlist_id=?', (playlist_id,))
         conn.execute('DELETE FROM playlist_compartidas WHERE playlist_id=?', (playlist_id,))
+        conn.execute('DELETE FROM playlist_comentarios WHERE playlist_id=?', (playlist_id,))
+        conn.execute("DELETE FROM social_likes WHERE tipo='playlist' AND ref_id=?", (playlist_id,))
         conn.execute('DELETE FROM playlists WHERE id=?', (playlist_id,))
         conn.commit()
         return jsonify({'deleted': True})
@@ -2957,6 +2998,10 @@ def api_v1_playlist_mark_played(playlist_id):
             return jsonify({'error': 'not_found'}), 404
         if rol != 'dueno':
             # C-10 etapa 2: el orden «Última reproducción» es del dueño.
+            # Etapa 3: cuenta como escucha de un amigo (dashboard del dueño).
+            conn.execute('INSERT INTO playlist_escuchas (playlist_id, usuario_id, creada_at) VALUES (?, ?, ?)',
+                         (playlist_id, g.api_user['id'], _utcnow_iso()))
+            conn.commit()
             return jsonify({'marked': True})
         conn.execute(
             "UPDATE playlists SET play_count = play_count + 1, "
@@ -12237,6 +12282,12 @@ _SOCIAL_TIPOS = {
     # Etapa 2 (playlists compartidas): los cambios, por defecto solo en la campana.
     'playlist_compartida': ('Playlists compartidas contigo', True, True),
     'playlist_cambios':    ('Cambios en playlists compartidas', True, False),
+    # Etapa 3 (actividad entre amigos).
+    'recomendacion':       ('Recomendaciones de amigos', True, True),
+    'toque':               ('Toques 🔥', True, True),
+    'like':                ('Likes ❤️', True, False),
+    'respect':             ('Respect', True, True),
+    'playlist_comentario': ('Comentarios en playlists', True, False),
 }
 _SOCIAL_PRIVACIDAD_DEFECTO = {
     'buscable': True,              # encontrarme por nickname o correo (el QR siempre funciona)
@@ -12369,7 +12420,8 @@ def _social_lista_amigos(conn, yo):
         if not u:
             continue
         if am['estado'] == 'aceptada':
-            u.update({'silenciado': otro in silenciados, 'desde': am['aceptada_at']})
+            u.update({'silenciado': otro in silenciados, 'desde': am['aceptada_at'],
+                      'estado': _social_estado(conn, otro)})   # etapa 3
             amigos.append(u)
         elif am['solicitante'] == yo:
             u['enviada_at'] = am['creada_at']
@@ -12966,6 +13018,392 @@ def api_v1_admin_collab_guardar_playlist():
                     compartida += 1
         conn.commit()
         return jsonify({'status': 'ok', 'id': pid, 'name': nombre, 'track_count': pos, 'compartida_n': compartida})
+    finally:
+        conn.close()
+
+# ══ Ticket C-10 etapa 3: actividad entre amigos ══════════════════════════════
+# Conectado / escuchando ahora (según la privacidad de cada uno), ❤️ like a
+# playlists compartidas y a lo que suena un amigo, 🔥 toque, respect (dar 1 al
+# día en total), recomendar a todos los amigos (sin repetir pista en el día,
+# máx. 5 al día), dashboard del perfil y comentarios en playlists.
+
+_RECOMENDACIONES_POR_DIA = 5
+_ESCUCHANDO_VIGENCIA_S = 15 * 60       # sin noticias del cliente, deja de mostrarse
+_social_escuchando = {}                # user_id -> {track_id, playing, at, duracion}
+
+
+def _social_hoy():
+    return datetime.now().strftime('%Y-%m-%d')   # fecha local del servidor
+
+
+def _social_pista(conn, track_id):
+    """Pista con el mismo formato que el detalle de playlist (las apps la
+    reproducen o la agregan a la cola sin pedir nada más)."""
+    d = conn.execute(
+        'SELECT t.*, al.name as album_name, al.year as album_year, al.cover_path, al.artist_id, '
+        'ar.name as artist_name FROM tracks t LEFT JOIN albums al ON al.id = t.album_id '
+        'LEFT JOIN artists ar ON al.artist_id = ar.id WHERE t.id=?', (track_id,)).fetchone()
+    if not d:
+        return None
+    d = dict(d)
+    fmt, led = _fmt_format(d)
+    return {
+        'id': d['id'], 'title': d.get('title'), 'track_number': d.get('track_number'),
+        'disc_number': d.get('disc_number'), 'duration': d.get('duration'),
+        'duration_fmt': _fmt_seconds(d.get('duration')), 'format_display': fmt, 'format_color': led,
+        'artist_id': d.get('artist_id'), 'artist_name': d.get('artist_name'), 'album_id': d.get('album_id'),
+        'album_name': d.get('album_name'), 'album_year': d.get('album_year'),
+        'cover_url': cover_url_filter(clean_db_path(d.get('cover_path'))),
+        'stream_url': f'/api/v1/stream/{d["id"]}', 'is_dsd': d.get('is_dsd'), 'dsd_rate': d.get('dsd_rate'),
+        'sample_rate_real': d.get('sample_rate_real'), 'bit_depth': d.get('bit_depth'),
+        'container_ext': _container_ext(d),
+    }
+
+
+def _social_estado(conn, user_id):
+    """Lo que un amigo puede ver de user_id según su privacidad:
+    {conectado: bool|None, escuchando: pista|None} (None = no lo comparte)."""
+    priv = _social_ajustes(conn, user_id)['privacidad']
+    out = {'conectado': None, 'escuchando': None}
+    if priv.get('mostrar_conectado'):
+        row = conn.execute('SELECT last_seen FROM users WHERE id=?', (user_id,)).fetchone()
+        cutoff = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(minutes=ONLINE_WINDOW_MINUTES)).isoformat()
+        out['conectado'] = bool(row and row['last_seen'] and row['last_seen'] >= cutoff)
+    if priv.get('mostrar_escuchando'):
+        e = _social_escuchando.get(user_id)
+        if e and e.get('playing') and e.get('track_id'):
+            vigencia = max(_ESCUCHANDO_VIGENCIA_S, (e.get('duracion') or 0) + 120)
+            if time.time() - e['at'] < vigencia:
+                out['escuchando'] = _social_pista(conn, e['track_id'])
+    return out
+
+
+def _social_es_amigo(conn, yo, otro):
+    return otro is not None and _social_relacion(conn, yo, otro) == 'amigo'
+
+
+def _social_amigos_ids(conn, yo):
+    return [r[0] for r in conn.execute(
+        "SELECT CASE WHEN usuario_a=? THEN usuario_b ELSE usuario_a END FROM amistades "
+        "WHERE (usuario_a=? OR usuario_b=?) AND estado='aceptada'", (yo, yo, yo)).fetchall()]
+
+
+def _social_titulo(pista):
+    if not pista:
+        return 'una pista'
+    return f'«{pista["title"]}»' + (f' de {pista["artist_name"]}' if pista.get('artist_name') else '')
+
+
+def _social_contadores(conn, uid):
+    return {
+        'respect': conn.execute('SELECT COUNT(*) FROM social_respects WHERE para_id=?', (uid,)).fetchone()[0],
+        'likes': conn.execute('SELECT COUNT(*) FROM social_likes WHERE para_id=?', (uid,)).fetchone()[0],
+        'toques': conn.execute('SELECT COUNT(*) FROM social_toques WHERE para_id=?', (uid,)).fetchone()[0],
+        'recomendaciones': conn.execute('SELECT COUNT(*) FROM social_recomendaciones WHERE de_id=?', (uid,)).fetchone()[0],
+    }
+
+
+@app.route('/api/v1/social/escuchando', methods=['POST'])
+@api_login_required
+def api_v1_social_escuchando():
+    """Las apps avisan qué suena (al cambiar de pista o pausar). {track_id|null,
+    playing}. Solo se guarda en memoria; solo lo ven los amigos y solo si el
+    usuario activó «Mostrar qué estoy escuchando»."""
+    datos = request.get_json(silent=True) or {}
+    yo = g.api_user['id']
+    try:
+        tid = int(datos['track_id']) if datos.get('track_id') is not None else None
+    except (TypeError, ValueError):
+        tid = None
+    duracion = 0
+    if tid:
+        conn = get_db_connection()
+        try:
+            row = conn.execute('SELECT duration FROM tracks WHERE id=?', (tid,)).fetchone()
+            duracion = float(row['duration'] or 0) if row else 0
+        finally:
+            conn.close()
+    _social_escuchando[yo] = {'track_id': tid, 'playing': bool(datos.get('playing')) and bool(tid),
+                              'at': time.time(), 'duracion': duracion}
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/v1/social/amigo/<int:uid>')
+@api_login_required
+def api_v1_social_amigo(uid):
+    """Perfil de un amigo: estado, contadores (si comparte su actividad),
+    playlists que me compartió y qué puedo hacer (respect de hoy, ❤️/🔥 a lo
+    que suena)."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        if not _social_es_amigo(conn, yo, uid):
+            return jsonify({'status': 'error', 'message': 'Solo puedes ver el perfil de un amigo.'}), 404
+        estado = _social_estado(conn, uid)
+        hoy = _social_hoy()
+        out = {'status': 'ok', 'usuario': _social_usuario(conn, uid), 'estado': estado,
+               'silenciado': bool(conn.execute('SELECT 1 FROM amigos_silenciados WHERE usuario_id=? AND amigo_id=?',
+                                               (yo, uid)).fetchone())}
+        if _social_ajustes(conn, uid)['privacidad'].get('actividad') == 'amigos':
+            out['contadores'] = _social_contadores(conn, uid)
+        dado = conn.execute('SELECT para_id FROM social_respects WHERE de_id=? AND dia=?', (yo, hoy)).fetchone()
+        out['respect'] = {'dado_hoy': bool(dado), 'dado_hoy_a_el': bool(dado and dado['para_id'] == uid)}
+        pista = estado.get('escuchando')
+        if pista:
+            out['reacciones'] = {
+                'like': bool(conn.execute("SELECT 1 FROM social_likes WHERE de_id=? AND para_id=? AND tipo='pista' "
+                                          "AND ref_id=? AND dia=?", (yo, uid, pista['id'], hoy)).fetchone()),
+                'toque': bool(conn.execute('SELECT 1 FROM social_toques WHERE de_id=? AND para_id=? AND track_id=? AND dia=?',
+                                           (yo, uid, pista['id'], hoy)).fetchone()),
+            }
+        out['playlists'] = [dict(r) for r in conn.execute(
+            'SELECT p.id, p.name, pc.permiso AS rol, (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id=p.id) '
+            'AS track_count FROM playlists p JOIN playlist_compartidas pc ON pc.playlist_id=p.id AND pc.usuario_id=? '
+            'WHERE p.user_id=? ORDER BY p.name COLLATE NOCASE', (yo, uid)).fetchall()]
+        return jsonify(out)
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/reaccion', methods=['POST'])
+@api_login_required
+def api_v1_social_reaccion():
+    """❤️ o 🔥 a lo que está escuchando un amigo. {user_id, track_id, tipo:
+    'like'|'toque'}. Una de cada tipo por amigo, pista y día."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    tipo = datos.get('tipo')
+    try:
+        uid, tid = int(datos.get('user_id')), int(datos.get('track_id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Faltan datos.'}), 400
+    if tipo not in ('like', 'toque'):
+        return jsonify({'status': 'error', 'message': 'Reacción desconocida.'}), 400
+    conn = get_db_connection()
+    try:
+        if not _social_es_amigo(conn, yo, uid):
+            return jsonify({'status': 'error', 'message': 'Solo entre amigos.'}), 404
+        pista = _social_pista(conn, tid)
+        if not pista:
+            return jsonify({'status': 'error', 'message': 'Esa pista no existe.'}), 404
+        hoy, ahora = _social_hoy(), _utcnow_iso()
+        quien = _social_usuario(conn, yo)['nombre']
+        if tipo == 'like':
+            if not conn.execute("SELECT 1 FROM social_likes WHERE de_id=? AND para_id=? AND tipo='pista' AND ref_id=? AND dia=?",
+                                (yo, uid, tid, hoy)).fetchone():
+                conn.execute("INSERT INTO social_likes (de_id, para_id, tipo, ref_id, dia, creada_at) VALUES (?, ?, 'pista', ?, ?, ?)",
+                             (yo, uid, tid, hoy, ahora))
+                _notificar(conn, uid, 'like', f'A {quien} le gustó {_social_titulo(pista)}, que estás escuchando.',
+                           actor_id=yo, datos={'track_id': tid, 'pista': pista})
+        else:
+            if not conn.execute('SELECT 1 FROM social_toques WHERE de_id=? AND para_id=? AND track_id=? AND dia=?',
+                                (yo, uid, tid, hoy)).fetchone():
+                conn.execute('INSERT INTO social_toques (de_id, para_id, track_id, dia, creada_at) VALUES (?, ?, ?, ?, ?)',
+                             (yo, uid, tid, hoy, ahora))
+                _notificar(conn, uid, 'toque', f'🔥 {quien}: ¡buen tema! {_social_titulo(pista)}.',
+                           actor_id=yo, datos={'track_id': tid, 'pista': pista})
+        conn.commit()
+        return jsonify({'status': 'ok', 'tipo': tipo})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/respect', methods=['POST'])
+@api_login_required
+def api_v1_social_respect():
+    """Respect al gusto musical de un amigo. {user_id}. Cada uno da 1 al día."""
+    yo = g.api_user['id']
+    try:
+        uid = int((request.get_json(silent=True) or {}).get('user_id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Falta el amigo.'}), 400
+    conn = get_db_connection()
+    try:
+        if not _social_es_amigo(conn, yo, uid):
+            return jsonify({'status': 'error', 'message': 'Solo puedes darle respect a un amigo.'}), 404
+        hoy = _social_hoy()
+        dado = conn.execute('SELECT para_id FROM social_respects WHERE de_id=? AND dia=?', (yo, hoy)).fetchone()
+        if dado:
+            a = _social_usuario(conn, dado['para_id'])
+            return jsonify({'status': 'error', 'message': f'Hoy ya le diste tu respect a {a["nombre"] if a else "un amigo"}. Mañana tienes otro.'}), 409
+        conn.execute('INSERT INTO social_respects (de_id, para_id, dia, creada_at) VALUES (?, ?, ?, ?)',
+                     (yo, uid, hoy, _utcnow_iso()))
+        quien = _social_usuario(conn, yo)['nombre']
+        _notificar(conn, uid, 'respect', f'{quien} te dio su respect por tu gusto musical. 🤘', actor_id=yo, datos={'user_id': yo})
+        conn.commit()
+        total = conn.execute('SELECT COUNT(*) FROM social_respects WHERE para_id=?', (uid,)).fetchone()[0]
+        return jsonify({'status': 'ok', 'total': total})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/recomendar', methods=['POST'])
+@api_login_required
+def api_v1_social_recomendar():
+    """Recomendar una pista a TODOS mis amigos. {track_id}. La misma pista una
+    vez al día y máximo 5 recomendaciones al día."""
+    yo = g.api_user['id']
+    try:
+        tid = int((request.get_json(silent=True) or {}).get('track_id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Falta la pista.'}), 400
+    conn = get_db_connection()
+    try:
+        pista = _social_pista(conn, tid)
+        if not pista:
+            return jsonify({'status': 'error', 'message': 'Esa pista no existe.'}), 404
+        amigos = _social_amigos_ids(conn, yo)
+        if not amigos:
+            return jsonify({'status': 'error', 'message': 'Todavía no tienes amigos a quienes recomendarles.'}), 409
+        hoy = _social_hoy()
+        if conn.execute('SELECT 1 FROM social_recomendaciones WHERE de_id=? AND track_id=? AND dia=?', (yo, tid, hoy)).fetchone():
+            return jsonify({'status': 'error', 'message': 'Ya recomendaste esta pista hoy.'}), 409
+        n_hoy = conn.execute('SELECT COUNT(*) FROM social_recomendaciones WHERE de_id=? AND dia=?', (yo, hoy)).fetchone()[0]
+        if n_hoy >= _RECOMENDACIONES_POR_DIA:
+            return jsonify({'status': 'error', 'message': f'Llegaste al máximo de {_RECOMENDACIONES_POR_DIA} recomendaciones por hoy.'}), 409
+        rid = conn.execute('INSERT INTO social_recomendaciones (de_id, track_id, dia, creada_at) VALUES (?, ?, ?, ?)',
+                           (yo, tid, hoy, _utcnow_iso())).lastrowid
+        quien = _social_usuario(conn, yo)['nombre']
+        enviados = 0
+        for uid in amigos:
+            if _notificar(conn, uid, 'recomendacion', f'{quien} te recomienda {_social_titulo(pista)}.',
+                          actor_id=yo, datos={'recomendacion_id': rid, 'track_id': tid, 'pista': pista}):
+                enviados += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'enviados': enviados, 'amigos': len(amigos),
+                        'restantes': _RECOMENDACIONES_POR_DIA - n_hoy - 1, 'titulo': pista['title']})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/recomendacion/<int:rid>/escuchada', methods=['POST'])
+@api_login_required
+def api_v1_social_recomendacion_escuchada(rid):
+    """La app avisa que se tocó «▶ Escuchar» o «Agregar a la cola» (dashboard
+    de quien recomendó: recomendaciones más escuchadas)."""
+    conn = get_db_connection()
+    try:
+        if conn.execute('SELECT 1 FROM social_recomendaciones WHERE id=?', (rid,)).fetchone():
+            conn.execute('INSERT OR IGNORE INTO social_recomendacion_escuchas (recomendacion_id, usuario_id, creada_at) '
+                         'VALUES (?, ?, ?)', (rid, g.api_user['id'], _utcnow_iso()))
+            conn.commit()
+        return jsonify({'status': 'ok'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/social/dashboard')
+@api_login_required
+def api_v1_social_dashboard():
+    """Dashboard de mi perfil: lo que generé entre mis amigos."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        c = _social_contadores(conn, yo)
+        c['likes_playlists'] = conn.execute("SELECT COUNT(*) FROM social_likes WHERE para_id=? AND tipo='playlist'", (yo,)).fetchone()[0]
+        c['copias'] = conn.execute('SELECT COUNT(*) FROM playlists p JOIN playlists o ON o.id=p.copia_de '
+                                   'WHERE o.user_id=? AND p.user_id<>?', (yo, yo)).fetchone()[0]
+        c['escuchas_playlists'] = conn.execute('SELECT COUNT(*) FROM playlist_escuchas e JOIN playlists p ON p.id=e.playlist_id '
+                                               'WHERE p.user_id=?', (yo,)).fetchone()[0]
+        c['recomendaciones_escuchadas'] = conn.execute(
+            'SELECT COUNT(*) FROM social_recomendacion_escuchas e JOIN social_recomendaciones r ON r.id=e.recomendacion_id '
+            'WHERE r.de_id=?', (yo,)).fetchone()[0]
+        top = []
+        for r in conn.execute('SELECT r.track_id, COUNT(e.usuario_id) AS n FROM social_recomendaciones r '
+                              'JOIN social_recomendacion_escuchas e ON e.recomendacion_id=r.id WHERE r.de_id=? '
+                              'GROUP BY r.track_id ORDER BY n DESC, MAX(e.creada_at) DESC LIMIT 5', (yo,)).fetchall():
+            p = _social_pista(conn, r['track_id'])
+            if p:
+                p['escuchas'] = r['n']
+                top.append(p)
+        playlists = [dict(r) for r in conn.execute(
+            "SELECT p.id, p.name, (SELECT COUNT(*) FROM playlist_escuchas e WHERE e.playlist_id=p.id) AS escuchas, "
+            "(SELECT COUNT(*) FROM social_likes l WHERE l.tipo='playlist' AND l.ref_id=p.id) AS likes, "
+            "(SELECT COUNT(*) FROM playlists x WHERE x.copia_de=p.id AND x.user_id<>p.user_id) AS copias "
+            "FROM playlists p WHERE p.user_id=? AND EXISTS (SELECT 1 FROM playlist_compartidas pc WHERE pc.playlist_id=p.id) "
+            "ORDER BY escuchas DESC, likes DESC LIMIT 5", (yo,)).fetchall()]
+        hoy = _social_hoy()
+        dado = conn.execute('SELECT para_id FROM social_respects WHERE de_id=? AND dia=?', (yo, hoy)).fetchone()
+        n_hoy = conn.execute('SELECT COUNT(*) FROM social_recomendaciones WHERE de_id=? AND dia=?', (yo, hoy)).fetchone()[0]
+        return jsonify({'status': 'ok', 'contadores': c, 'top_recomendaciones': top, 'playlists': playlists,
+                        'hoy': {'recomendaciones_restantes': max(0, _RECOMENDACIONES_POR_DIA - n_hoy),
+                                'respect_disponible': not dado}})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/playlists/<int:playlist_id>/like', methods=['POST'])
+@api_login_required
+def api_v1_playlist_like(playlist_id):
+    """❤️ a una playlist compartida (alterna). El dueño no se da like a sí mismo."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        pl, rol = _playlist_acceso(conn, playlist_id, yo)
+        if not pl:
+            return jsonify({'status': 'error', 'message': 'No encontré esa playlist.'}), 404
+        if rol == 'dueno':
+            return jsonify({'status': 'error', 'message': 'Es tu playlist.'}), 409
+        previo = conn.execute("SELECT id FROM social_likes WHERE tipo='playlist' AND ref_id=? AND de_id=?",
+                              (playlist_id, yo)).fetchone()
+        if previo:
+            conn.execute('DELETE FROM social_likes WHERE id=?', (previo['id'],))
+        else:
+            conn.execute("INSERT INTO social_likes (de_id, para_id, tipo, ref_id, dia, creada_at) VALUES (?, ?, 'playlist', ?, ?, ?)",
+                         (yo, pl['user_id'], playlist_id, _social_hoy(), _utcnow_iso()))
+            quien = _social_usuario(conn, yo)['nombre']
+            _notificar(conn, pl['user_id'], 'like', f'A {quien} le gustó tu playlist «{pl["name"]}».',
+                       actor_id=yo, datos={'playlist_id': playlist_id})
+        conn.commit()
+        total = conn.execute("SELECT COUNT(*) FROM social_likes WHERE tipo='playlist' AND ref_id=?", (playlist_id,)).fetchone()[0]
+        return jsonify({'status': 'ok', 'me_gusta': not previo, 'likes': total})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/playlists/<int:playlist_id>/comentarios', methods=['GET', 'POST'])
+@api_login_required
+def api_v1_playlist_comentarios(playlist_id):
+    """Comentarios de una playlist compartida. POST {texto} agrega; POST
+    {borrar: id} borra (el autor o el dueño)."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        pl, rol = _playlist_acceso(conn, playlist_id, yo)
+        if not pl:
+            return jsonify({'status': 'error', 'message': 'No encontré esa playlist.'}), 404
+        if request.method == 'POST':
+            datos = request.get_json(silent=True) or {}
+            if datos.get('borrar'):
+                try:
+                    cid = int(datos['borrar'])
+                except (TypeError, ValueError):
+                    cid = 0
+                conn.execute('DELETE FROM playlist_comentarios WHERE id=? AND playlist_id=? AND (usuario_id=? OR ?)',
+                             (cid, playlist_id, yo, 1 if rol == 'dueno' else 0))
+            else:
+                texto = ' '.join(str(datos.get('texto') or '').split())[:500]
+                if not texto:
+                    return jsonify({'status': 'error', 'message': 'Escribe un comentario.'}), 400
+                conn.execute('INSERT INTO playlist_comentarios (playlist_id, usuario_id, texto, creada_at) VALUES (?, ?, ?, ?)',
+                             (playlist_id, yo, texto, _utcnow_iso()))
+                quien = _social_usuario(conn, yo)['nombre']
+                destinos = {pl['user_id']} | {r[0] for r in conn.execute(
+                    'SELECT usuario_id FROM playlist_compartidas WHERE playlist_id=?', (playlist_id,))}
+                destinos.discard(yo)
+                corto = texto if len(texto) <= 80 else texto[:77] + '…'
+                for uid in destinos:
+                    _notificar(conn, uid, 'playlist_comentario', f'{quien} comentó en «{pl["name"]}»: {corto}',
+                               actor_id=yo, datos={'playlist_id': playlist_id})
+            conn.commit()
+        cache = {}
+        items = []
+        for r in conn.execute('SELECT * FROM playlist_comentarios WHERE playlist_id=? ORDER BY id', (playlist_id,)).fetchall():
+            if r['usuario_id'] not in cache:
+                cache[r['usuario_id']] = _social_usuario(conn, r['usuario_id'])
+            items.append({'id': r['id'], 'texto': r['texto'], 'creada': r['creada_at'], 'autor': cache[r['usuario_id']],
+                          'puedo_borrar': r['usuario_id'] == yo or rol == 'dueno'})
+        return jsonify({'status': 'ok', 'items': items})
     finally:
         conn.close()
 
