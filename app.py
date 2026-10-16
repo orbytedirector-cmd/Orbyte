@@ -1015,6 +1015,7 @@ def get_db_connection():
             texto TEXT NOT NULL, creada_at TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS idx_playlist_comentarios_pl ON playlist_comentarios (playlist_id, id);
     ''')
+    _dsc_migrar(conn)   # Ticket C-11 (Descubrir)
     for _sql in ("ALTER TABLE playlist_tracks ADD COLUMN added_by INTEGER",
                  "ALTER TABLE playlists ADD COLUMN copia_de INTEGER"):
         try:
@@ -12288,6 +12289,9 @@ _SOCIAL_TIPOS = {
     'like':                ('Likes ❤️', True, False),
     'respect':             ('Respect', True, True),
     'playlist_comentario': ('Comentarios en playlists', True, False),
+    # Ticket C-11 (Descubrir).
+    'descubrir':           ('Descubrir: novedades de tus favoritos', True, True),
+    'pedido_subido':       ('Material que pediste ya está en Orbyte', True, True),
 }
 _SOCIAL_PRIVACIDAD_DEFECTO = {
     'buscable': True,              # encontrarme por nickname o correo (el QR siempre funciona)
@@ -13403,6 +13407,834 @@ def api_v1_playlist_comentarios(playlist_id):
                 cache[r['usuario_id']] = _social_usuario(conn, r['usuario_id'])
             items.append({'id': r['id'], 'texto': r['texto'], 'creada': r['creada_at'], 'autor': cache[r['usuario_id']],
                           'puedo_borrar': r['usuario_id'] == yo or rol == 'dueno'})
+        return jsonify({'status': 'ok', 'items': items})
+    finally:
+        conn.close()
+
+# ══ Ticket C-11 (pedido por Niko): Descubrir ═══════════════════════════════════
+# El servidor recolecta a diario de fuentes gratuitas (descubrir_fuentes.py) y
+# guarda BORRADORES de publicación. Ciclo semanal: el lote cierra el sábado en
+# la noche, el admin lo revisa el domingo en su Editor de Descubrir y lo
+# aprobado se publica el lunes 00:01 (avisos a los usuarios a las 09:00). Modo
+# por publicación: general (todos), favoritos (solo a quienes tienen ese
+# artista en favoritos: aviso + «Para ti») o ambos. Todo vence y se borra solo
+# (almacenamiento liviano: sin imágenes guardadas, solo enlaces). Especificación:
+# claude/especificacion-c11-descubrir.md (proyecto).
+
+import descubrir_fuentes as _dsc_fuentes
+
+DESCUBRIR_CIUDADES = ['Santiago', 'Valparaíso', 'Viña del Mar', 'Concepción', 'La Serena/Coquimbo']
+_DSC_TM_CIUDADES = {'Santiago': ['Santiago'], 'Valparaíso': ['Valparaíso', 'Valparaiso'],
+                    'Viña del Mar': ['Viña del Mar', 'Vina del Mar'], 'Concepción': ['Concepción', 'Concepcion'],
+                    'La Serena/Coquimbo': ['La Serena', 'Coquimbo']}
+_DSC_MESES = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre',
+              'octubre', 'noviembre', 'diciembre']
+_DSC_ARTISTAS_POR_DIA = int(os.environ.get('DESCUBRIR_ARTISTAS_POR_DIA', '400') or 400)
+_DSC_DISCOS_MB_POR_DIA = int(os.environ.get('DESCUBRIR_DISCOS_MB_POR_DIA', '300') or 300)
+_DSC_MAX_LANZAMIENTOS_LOTE = 60
+_DSC_VISTO_DIAS = 90
+
+_dsc_estado = {'corriendo': False, 'paso': '', 'inicio': None, 'fin': None, 'creados': 0}
+_dsc_lock = threading.Lock()
+_dsc_hilo = None
+
+
+def _dsc_migrar(conn):
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS descubrir_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, clave TEXT UNIQUE NOT NULL, tipo TEXT NOT NULL,
+            semana TEXT NOT NULL, estado TEXT NOT NULL DEFAULT 'borrador', modo TEXT,
+            titulo TEXT NOT NULL, texto TEXT, imagen TEXT, enlace TEXT, fecha TEXT,
+            artista_id INTEGER, album_id INTEGER, en_orbyte INTEGER NOT NULL DEFAULT 0,
+            afectados INTEGER NOT NULL DEFAULT 0, relevancia REAL NOT NULL DEFAULT 0, datos_json TEXT,
+            publicar_desde TEXT, avisar_desde TEXT, vence TEXT, avisado INTEGER NOT NULL DEFAULT 0,
+            creada_at TEXT NOT NULL, publicada_at TEXT);
+        CREATE INDEX IF NOT EXISTS idx_descubrir_items_estado ON descubrir_items (estado, semana);
+        CREATE TABLE IF NOT EXISTS descubrir_vistos (clave TEXT PRIMARY KEY, hasta TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS descubrir_artistas_ext (
+            artista_id INTEGER PRIMARY KEY, deezer_id INTEGER, revisado_at TEXT);
+        CREATE TABLE IF NOT EXISTS descubrir_albums_ext (album_id INTEGER PRIMARY KEY, fecha TEXT, revisado_at TEXT);
+        CREATE TABLE IF NOT EXISTS descubrir_meta (k TEXT PRIMARY KEY, v TEXT);
+        CREATE TABLE IF NOT EXISTS material_pedidos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, clave TEXT UNIQUE NOT NULL, tipo TEXT, artista TEXT,
+            titulo TEXT, imagen TEXT, enlace TEXT, estado TEXT NOT NULL DEFAULT 'pendiente',
+            creada_at TEXT NOT NULL, resuelto_at TEXT);
+        CREATE TABLE IF NOT EXISTS material_pedido_usuarios (
+            pedido_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL, creada_at TEXT NOT NULL,
+            PRIMARY KEY (pedido_id, usuario_id));
+    ''')
+
+
+# ---------------------------------------------------------------- tiempo y lotes
+
+def _dsc_ahora():
+    return datetime.now()   # hora local del servidor (Chile)
+
+
+def _dsc_iso(dt):
+    return dt.strftime('%Y-%m-%dT%H:%M:%S')
+
+
+def _dsc_lote_que_junta(d):
+    """Lunes de publicación del lote que está juntando el día d: lo del lunes
+    al sábado va al lote del lunes siguiente; lo del domingo, al del otro."""
+    return d + timedelta(days=(5 - d.weekday()) % 7 + 2)
+
+
+def _dsc_lote_en_revision(d):
+    """Próximo lunes (el lote que el admin revisa/aprueba)."""
+    return d + timedelta(days=(7 - d.weekday()) or 7)
+
+
+def _dsc_fecha_txt(iso, con_anio=True):
+    try:
+        f = datetime.strptime(iso[:10], '%Y-%m-%d')
+    except (TypeError, ValueError):
+        return iso or ''
+    return f'{f.day} de {_DSC_MESES[f.month - 1]}' + (f' de {f.year}' if con_anio else '')
+
+
+def _dsc_meta(conn, k, v=None):
+    if v is None:
+        row = conn.execute('SELECT v FROM descubrir_meta WHERE k=?', (k,)).fetchone()
+        return row['v'] if row else None
+    conn.execute('INSERT INTO descubrir_meta (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v', (k, str(v)))
+
+
+# ---------------------------------------------------------------- biblioteca y favoritos
+
+def _dsc_fav_artistas(conn):
+    """artista_id -> set(user_id) (favoritos de artista, de sus discos o pistas)."""
+    out = {}
+    for r in conn.execute('''
+        SELECT user_id, item_id AS aid FROM user_item_favorites WHERE item_type='artist'
+        UNION SELECT f.user_id, al.artist_id FROM user_item_favorites f JOIN albums al ON al.id=f.item_id
+              WHERE f.item_type='album'
+        UNION SELECT f.user_id, al.artist_id FROM user_item_favorites f JOIN tracks t ON t.id=f.item_id
+              JOIN albums al ON al.id=t.album_id WHERE f.item_type='track' ''').fetchall():
+        if r['aid'] is not None:
+            out.setdefault(r['aid'], set()).add(r['user_id'])
+    return out
+
+
+def _dsc_popularidad(conn, artista_id):
+    try:
+        row = conn.execute('SELECT lastfm_listeners FROM artists WHERE id=?', (artista_id,)).fetchone()
+        return float(row['lastfm_listeners'] or 0) if row else 0.0
+    except Exception:
+        return 0.0
+
+
+def _dsc_discos_biblioteca(conn, artista_id):
+    """{titulo normalizado: album_id} de un artista de la biblioteca."""
+    return {_dsc_fuentes.normalizar(r['name']): r['id']
+            for r in conn.execute('SELECT id, name FROM albums WHERE artist_id=?', (artista_id,)).fetchall()}
+
+
+def _dsc_crear(conn, item):
+    """Inserta un borrador si su clave no existe ni se vio hace poco. True si se creó."""
+    if conn.execute('SELECT 1 FROM descubrir_vistos WHERE clave=?', (item['clave'],)).fetchone():
+        return False
+    datos = item.pop('datos', None)
+    cols = ['clave', 'tipo', 'semana', 'titulo', 'texto', 'imagen', 'enlace', 'fecha', 'artista_id', 'album_id',
+            'en_orbyte', 'afectados', 'relevancia']
+    vals = [item.get(c) for c in cols]
+    try:
+        conn.execute(f'INSERT INTO descubrir_items ({",".join(cols)}, datos_json, creada_at) '
+                     f'VALUES ({",".join("?" * len(cols))}, ?, ?)',
+                     vals + [json.dumps(datos or {}, ensure_ascii=False), _dsc_iso(_dsc_ahora())])
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def _dsc_paso(texto):
+    _dsc_estado['paso'] = texto
+    app.logger.info(f'[descubrir] {texto}')
+
+
+# ---------------------------------------------------------------- recolección
+
+def _dsc_recolectar_lanzamientos(conn, hoy, lote, favs):
+    pendientes = conn.execute("SELECT COUNT(*) FROM descubrir_items WHERE tipo='lanzamiento' AND semana=?",
+                              (lote,)).fetchone()[0]
+    if pendientes >= _DSC_MAX_LANZAMIENTOS_LOTE:
+        return 0
+    limite_rev = _dsc_iso(_dsc_ahora() - timedelta(hours=20))
+    fav_ids = list(favs.keys())
+    ids = []
+    if fav_ids:
+        marcas = ','.join('?' * len(fav_ids))
+        ids += [r['id'] for r in conn.execute(
+            f'SELECT a.id FROM artists a LEFT JOIN descubrir_artistas_ext e ON e.artista_id=a.id '
+            f'WHERE a.id IN ({marcas}) AND (e.revisado_at IS NULL OR e.revisado_at < ?)', fav_ids + [limite_rev])]
+    ids += [r['id'] for r in conn.execute(
+        'SELECT a.id FROM artists a LEFT JOIN descubrir_artistas_ext e ON e.artista_id=a.id '
+        'WHERE (e.revisado_at IS NULL OR e.revisado_at < ?) ORDER BY e.revisado_at IS NOT NULL, e.revisado_at '
+        'LIMIT ?', (limite_rev, _DSC_ARTISTAS_POR_DIA))]
+    vistos, orden = set(), []
+    for i in ids:
+        if i not in vistos:
+            vistos.add(i)
+            orden.append(i)
+    desde, hasta = (hoy - timedelta(days=30)).isoformat(), (hoy + timedelta(days=14)).isoformat()
+    creados = 0
+    for n, aid in enumerate(orden[:_DSC_ARTISTAS_POR_DIA + len(fav_ids)]):
+        ar = conn.execute('SELECT id, name FROM artists WHERE id=?', (aid,)).fetchone()
+        if not ar or not ar['name']:
+            continue
+        if n % 25 == 0:
+            _dsc_paso(f'Lanzamientos: {n} de {len(orden)} artistas revisados')
+        ext = conn.execute('SELECT deezer_id, revisado_at FROM descubrir_artistas_ext WHERE artista_id=?', (aid,)).fetchone()
+        dz = ext['deezer_id'] if ext else None
+        if dz is None or (dz == 0 and (ext['revisado_at'] or '') < _dsc_iso(_dsc_ahora() - timedelta(days=30))):
+            dz = _dsc_fuentes.deezer_buscar_artista(ar['name'])
+            if dz is None:
+                continue   # Deezer no respondió: se reintenta otro día
+        conn.execute('INSERT INTO descubrir_artistas_ext (artista_id, deezer_id, revisado_at) VALUES (?, ?, ?) '
+                     'ON CONFLICT(artista_id) DO UPDATE SET deezer_id=excluded.deezer_id, revisado_at=excluded.revisado_at',
+                     (aid, dz, _dsc_iso(_dsc_ahora())))
+        conn.commit()
+        if not dz:
+            continue
+        propios = None
+        for d in _dsc_fuentes.deezer_discos(dz):
+            if not (desde <= d['fecha'] <= hasta) or d['tipo'] not in ('album', 'ep'):
+                continue
+            if propios is None:
+                propios = _dsc_discos_biblioteca(conn, aid)
+            album_id = propios.get(_dsc_fuentes.normalizar(d['titulo']))
+            if album_id and re.search(r'remaster|deluxe|edition|edición|anniversary|aniversario|expanded|live',
+                                      d['titulo'], re.I):
+                continue   # reedición de algo que ya está en la biblioteca: no es novedad
+            tipo_txt = 'EP' if d['tipo'] == 'ep' else 'disco'
+            futuro = d['fecha'] > hoy.isoformat()
+            afect = len(favs.get(aid, ()))
+            rel = 50 + afect * 20 + math.log10(_dsc_popularidad(conn, aid) + 1) * 4 + (5 if album_id else 0)
+            if _dsc_crear(conn, {
+                'clave': f'lanz:dz:{d["id"]}', 'tipo': 'lanzamiento', 'semana': lote,
+                'titulo': f'Nuevo {tipo_txt} de {ar["name"]}',
+                'texto': f'{ar["name"]} {"lanzará" if futuro else "lanzó"} «{d["titulo"]}» el {_dsc_fecha_txt(d["fecha"])}.'
+                         + (' Ya está en Orbyte.' if album_id else ''),
+                'imagen': d['portada'], 'enlace': d['enlace'], 'fecha': d['fecha'], 'artista_id': aid,
+                'album_id': album_id, 'en_orbyte': 1 if album_id else 0, 'afectados': afect, 'relevancia': rel,
+                'datos': {'artista': ar['name'], 'disco': d['titulo'], 'formato': d['tipo'], 'pedido_clave': f'lanz:dz:{d["id"]}'},
+            }):
+                creados += 1
+        conn.commit()
+        if creados + pendientes >= _DSC_MAX_LANZAMIENTOS_LOTE:
+            break
+    return creados
+
+
+def _dsc_recolectar_efemerides(conn, lote, favs):
+    lunes = datetime.strptime(lote, '%Y-%m-%d').date()
+    dias = [lunes + timedelta(days=i) for i in range(7)]
+    creados = 0
+    # 1) Fecha exacta de los discos de la biblioteca (MusicBrainz, de a poco y una sola vez por disco).
+    fav_ids = list(favs.keys()) or [-1]
+    marcas = ','.join('?' * len(fav_ids))
+    try:
+        orden_pop = 'COALESCE(CAST(ar.lastfm_listeners AS REAL), 0) DESC'
+        conn.execute(f'SELECT {orden_pop} FROM artists ar LIMIT 1')
+    except Exception:
+        orden_pop = 'ar.id'
+    filas = conn.execute(
+        f'SELECT al.id, al.name, ar.name AS artista FROM albums al JOIN artists ar ON ar.id=al.artist_id '
+        f'LEFT JOIN descubrir_albums_ext e ON e.album_id=al.id WHERE e.album_id IS NULL '
+        f'ORDER BY (al.artist_id IN ({marcas})) DESC, {orden_pop} LIMIT ?', fav_ids + [_DSC_DISCOS_MB_POR_DIA]).fetchall()
+    for n, r in enumerate(filas):
+        if n % 25 == 0:
+            _dsc_paso(f'Un día como hoy: fechas de discos {n} de {len(filas)}')
+        fecha = _dsc_fuentes.musicbrainz_fecha_disco(r['artista'], r['name'])
+        if fecha is None:
+            continue
+        conn.execute('INSERT OR REPLACE INTO descubrir_albums_ext (album_id, fecha, revisado_at) VALUES (?, ?, ?)',
+                     (r['id'], fecha or '-', _dsc_iso(_dsc_ahora())))
+        if n % 20 == 0:
+            conn.commit()
+    conn.commit()
+    # 2) Aniversarios redondos (cada 5 años) de discos de la biblioteca en la semana del lote.
+    for dia in dias:
+        sufijo = dia.strftime('-%m-%d')
+        for r in conn.execute(
+                'SELECT al.id, al.name, al.cover_path, al.artist_id, ar.name AS artista, e.fecha FROM descubrir_albums_ext e '
+                'JOIN albums al ON al.id=e.album_id JOIN artists ar ON ar.id=al.artist_id WHERE e.fecha LIKE ?',
+                ('%' + sufijo,)).fetchall():
+            anios = dia.year - int(r['fecha'][:4])
+            if anios < 5 or anios % 5:
+                continue
+            afect = len(favs.get(r['artist_id'], ()))
+            rel = 40 + afect * 20 + math.log10(_dsc_popularidad(conn, r['artist_id']) + 1) * 4 + \
+                (15 if anios % 25 == 0 else 8 if anios % 10 == 0 else 0)
+            if _dsc_crear(conn, {
+                'clave': f'efe:disco:{r["id"]}:{dia.year}', 'tipo': 'efemeride', 'semana': lote,
+                'titulo': f'Hace {anios} años: «{r["name"]}»',
+                'texto': f'Un {_dsc_fecha_txt(dia.isoformat(), False)} de {r["fecha"][:4]}, hace {anios} años, '
+                         f'{r["artista"]} publicaba «{r["name"]}».',
+                'imagen': cover_url_filter(clean_db_path(r['cover_path'])), 'enlace': '', 'fecha': dia.isoformat(),
+                'artista_id': r['artist_id'], 'album_id': r['id'], 'en_orbyte': 1, 'afectados': afect, 'relevancia': rel,
+                'datos': {'artista': r['artista'], 'disco': r['name'], 'anios': anios},
+            }):
+                creados += 1
+    conn.commit()
+    # 3) Nacimientos y muertes de músicos de la biblioteca (Wikimedia).
+    por_nombre = {_dsc_fuentes.normalizar(r['name']): r['id'] for r in conn.execute('SELECT id, name FROM artists')}
+    for dia in dias:
+        _dsc_paso(f'Un día como hoy: {_dsc_fecha_txt(dia.isoformat(), False)}')
+        for tipo in ('births', 'deaths'):
+            if _dsc_meta(conn, f'wiki:{tipo}:{dia.isoformat()}'):
+                continue
+            lista = _dsc_fuentes.wikimedia_efemerides(dia.month, dia.day, tipo)
+            if lista is None:
+                continue
+            for p in lista:
+                aid = por_nombre.get(_dsc_fuentes.normalizar(p['nombre']))
+                if not aid or not p.get('anio'):
+                    continue
+                anios = dia.year - int(p['anio'])
+                verbo = 'nacía' if tipo == 'births' else 'fallecía'
+                afect = len(favs.get(aid, ()))
+                rel = 35 + afect * 20 + math.log10(_dsc_popularidad(conn, aid) + 1) * 4 + (10 if anios % 10 == 0 else 0)
+                if _dsc_crear(conn, {
+                    'clave': f'efe:wiki:{tipo}:{aid}:{dia.year}', 'tipo': 'efemeride', 'semana': lote,
+                    'titulo': f'Hace {anios} años {verbo} {p["nombre"]}',
+                    'texto': f'Un {_dsc_fecha_txt(dia.isoformat(), False)} de {p["anio"]} {verbo} {p["nombre"]}'
+                             + (f', {p["descripcion"]}.' if p.get('descripcion') else '.'),
+                    'imagen': p.get('imagen') or '', 'enlace': p.get('enlace') or '', 'fecha': dia.isoformat(),
+                    'artista_id': aid, 'album_id': None, 'en_orbyte': 1, 'afectados': afect, 'relevancia': rel,
+                    'datos': {'artista': p['nombre'], 'anios': anios, 'motivo': tipo},
+                }):
+                    creados += 1
+            _dsc_meta(conn, f'wiki:{tipo}:{dia.isoformat()}', '1')
+            conn.commit()
+    return creados
+
+
+def _dsc_recolectar_eventos(conn, hoy, lote, favs):
+    clave = _dsc_fuentes.claves()['ticketmaster']
+    if not clave:
+        return 0
+    por_nombre = {_dsc_fuentes.normalizar(r['name']): r['id'] for r in conn.execute('SELECT id, name FROM artists')}
+    limite = (hoy + timedelta(days=120)).isoformat()
+    creados = 0
+    for ciudad, nombres in _DSC_TM_CIUDADES.items():
+        _dsc_paso(f'Eventos: {ciudad}')
+        vistos = set()
+        for nombre_tm in nombres:
+            for ev in _dsc_fuentes.ticketmaster_eventos(nombre_tm, clave):
+                if ev['id'] in vistos or not ev['fecha'] or not (hoy.isoformat() <= ev['fecha'] <= limite):
+                    continue
+                vistos.add(ev['id'])
+                aid = next((por_nombre[n] for n in (_dsc_fuentes.normalizar(a) for a in ev['artistas'] + [ev['nombre']])
+                            if n in por_nombre), None)
+                if not aid:
+                    continue
+                artista = conn.execute('SELECT name FROM artists WHERE id=?', (aid,)).fetchone()['name']
+                afect = len(favs.get(aid, ()))
+                dias_falta = (datetime.strptime(ev['fecha'], '%Y-%m-%d').date() - hoy).days
+                rel = 45 + afect * 20 + math.log10(_dsc_popularidad(conn, aid) + 1) * 4 + max(0, 20 - dias_falta / 3)
+                if _dsc_crear(conn, {
+                    'clave': f'evt:tm:{ev["id"]}', 'tipo': 'evento', 'semana': lote,
+                    'titulo': f'{artista} en {ciudad}',
+                    'texto': f'{ev["nombre"]} · {_dsc_fecha_txt(ev["fecha"])}' + (f' · {ev["recinto"]}' if ev['recinto'] else ''),
+                    'imagen': ev['imagen'], 'enlace': ev['enlace'], 'fecha': ev['fecha'], 'artista_id': aid,
+                    'album_id': None, 'en_orbyte': 1, 'afectados': afect, 'relevancia': rel,
+                    'datos': {'artista': artista, 'ciudad': ciudad, 'recinto': ev['recinto'], 'evento': ev['nombre']},
+                }):
+                    creados += 1
+        conn.commit()
+    return creados
+
+
+def _dsc_recolectar_semanales(conn, lote, favs):
+    """Tops y «te podría gustar»: una vez por lote."""
+    creados = 0
+    if _dsc_meta(conn, f'semanales:{lote}'):
+        return 0
+    _dsc_paso('Tops de la semana')
+    mapa = {}
+    for r in conn.execute('SELECT al.id, al.name, ar.name AS artista FROM albums al JOIN artists ar ON ar.id=al.artist_id'):
+        mapa[_dsc_fuentes.normalizar(r['artista']) + '|' + _dsc_fuentes.normalizar(r['name'])] = r['id']
+    artistas = {_dsc_fuentes.normalizar(r['name']) for r in conn.execute('SELECT name FROM artists')}
+    top = _dsc_fuentes.deezer_top_discos(10)
+    if top:
+        lista = []
+        for t in top:
+            aid = mapa.get(_dsc_fuentes.normalizar(t['artista']) + '|' + _dsc_fuentes.normalizar(t['titulo']))
+            lista.append({'titulo': t['titulo'], 'artista': t['artista'], 'portada': t['portada'], 'album_id': aid,
+                          'en_orbyte': bool(aid)})
+        n = sum(1 for x in lista if x['en_orbyte'])
+        if _dsc_crear(conn, {
+            'clave': f'top:dz:{lote}', 'tipo': 'top', 'semana': lote, 'titulo': 'Top 10 de discos en el mundo',
+            'texto': f'Los discos más escuchados esta semana. En Orbyte tienes {n} de los {len(lista)}.',
+            'imagen': lista[0]['portada'], 'enlace': 'https://www.deezer.com/charts', 'fecha': lote,
+            'artista_id': None, 'album_id': None, 'en_orbyte': 1 if n else 0, 'afectados': 0, 'relevancia': 30,
+            'datos': {'lista': lista, 'fuente': 'Deezer'},
+        }):
+            creados += 1
+    top_cl = _dsc_fuentes.lastfm_top_chile(_dsc_fuentes.claves()['lastfm'], 10)
+    if top_cl:
+        lista = [{'titulo': t['titulo'], 'artista': t['artista'], 'portada': '', 'album_id': None,
+                  'en_orbyte': _dsc_fuentes.normalizar(t['artista']) in artistas} for t in top_cl]
+        n = sum(1 for x in lista if x['en_orbyte'])
+        if _dsc_crear(conn, {
+            'clave': f'top:lfm:cl:{lote}', 'tipo': 'top', 'semana': lote, 'titulo': 'Top 10 de canciones en Chile',
+            'texto': f'Lo más escuchado en Chile esta semana (Last.fm). De {n} de estos artistas hay música en Orbyte.',
+            'imagen': '', 'enlace': 'https://www.last.fm/places/chile', 'fecha': lote, 'artista_id': None,
+            'album_id': None, 'en_orbyte': 1 if n else 0, 'afectados': 0, 'relevancia': 30,
+            'datos': {'lista': lista, 'fuente': 'Last.fm'},
+        }):
+            creados += 1
+    # Te podría gustar: artistas parecidos a los favoritos de los usuarios que no están en la biblioteca.
+    _dsc_paso('Te podría gustar')
+    for aid, usuarios in sorted(favs.items(), key=lambda kv: -len(kv[1]))[:8]:
+        ext = conn.execute('SELECT deezer_id FROM descubrir_artistas_ext WHERE artista_id=?', (aid,)).fetchone()
+        ar = conn.execute('SELECT name FROM artists WHERE id=?', (aid,)).fetchone()
+        if not ar:
+            continue
+        dz = ext['deezer_id'] if ext else _dsc_fuentes.deezer_buscar_artista(ar['name'])
+        if not dz:
+            continue
+        for rel_ar in _dsc_fuentes.deezer_relacionados(dz, 10):
+            if _dsc_fuentes.normalizar(rel_ar['nombre']) in artistas:
+                continue
+            if conn.execute('SELECT 1 FROM descubrir_vistos WHERE clave=?', (f'art:dz:{rel_ar["id"]}',)).fetchone():
+                continue
+            fans = int(rel_ar.get('fans') or 0)
+            if _dsc_crear(conn, {
+                'clave': f'sim:dz:{rel_ar["id"]}:{lote}', 'tipo': 'similar', 'semana': lote,
+                'titulo': f'Si te gusta {ar["name"]}, prueba {rel_ar["nombre"]}',
+                'texto': f'{rel_ar["nombre"]} no está en Orbyte' + (f' y tiene {fans:,} seguidores en Deezer.'.replace(',', '.') if fans else '.'),
+                'imagen': rel_ar['imagen'], 'enlace': rel_ar['enlace'], 'fecha': lote, 'artista_id': aid,
+                'album_id': None, 'en_orbyte': 0, 'afectados': len(usuarios),
+                'relevancia': 25 + len(usuarios) * 15 + math.log10(fans + 1) * 2,
+                'datos': {'artista': rel_ar['nombre'], 'parecido_a': ar['name'], 'pedido_clave': f'art:dz:{rel_ar["id"]}'},
+            }):
+                creados += 1
+                conn.execute('INSERT OR REPLACE INTO descubrir_vistos (clave, hasta) VALUES (?, ?)',
+                             (f'art:dz:{rel_ar["id"]}', (_dsc_ahora() + timedelta(days=60)).date().isoformat()))
+            break
+    _dsc_meta(conn, f'semanales:{lote}', '1')
+    conn.commit()
+    return creados
+
+
+def _dsc_recolectar():
+    """Corrida completa (en un hilo aparte). Cada fuente por separado: si una
+    falla, las demás siguen."""
+    with _dsc_lock:
+        if _dsc_estado['corriendo']:
+            return
+        _dsc_estado.update({'corriendo': True, 'inicio': _dsc_iso(_dsc_ahora()), 'fin': None, 'creados': 0})
+    conn = get_db_connection()
+    try:
+        hoy = _dsc_ahora().date()
+        lote = _dsc_lote_que_junta(hoy).isoformat()
+        favs = _dsc_fav_artistas(conn)
+        for nombre, fn in (('lanzamientos', lambda: _dsc_recolectar_lanzamientos(conn, hoy, lote, favs)),
+                           ('efemérides', lambda: _dsc_recolectar_efemerides(conn, lote, favs)),
+                           ('eventos', lambda: _dsc_recolectar_eventos(conn, hoy, lote, favs)),
+                           ('semanales', lambda: _dsc_recolectar_semanales(conn, lote, favs))):
+            try:
+                _dsc_estado['creados'] += fn() or 0
+            except Exception as e:  # noqa: BLE001
+                app.logger.exception(f'[descubrir] falló {nombre}: {e}')
+                _dsc_fuentes.ultimo_error[nombre] = f'{type(e).__name__}: {e}'[:200]
+        _dsc_meta(conn, 'ultima_recoleccion', hoy.isoformat())
+        conn.commit()
+    finally:
+        conn.close()
+        _dsc_estado.update({'corriendo': False, 'fin': _dsc_iso(_dsc_ahora()), 'paso': ''})
+
+
+def _dsc_recolectar_en_hilo():
+    if _dsc_estado['corriendo']:
+        return False
+    threading.Thread(target=_dsc_recolectar, name='descubrir-recolector', daemon=True).start()
+    return True
+
+
+# ---------------------------------------------------------------- publicación, avisos y limpieza
+
+def _dsc_usuario_ciudad(conn, uid):
+    row = conn.execute('SELECT settings_json FROM users WHERE id=?', (uid,)).fetchone()
+    try:
+        c = ((json.loads(row['settings_json']) if row and row['settings_json'] else {}).get('descubrir') or {}).get('ciudad')
+    except ValueError:
+        c = None
+    return c if c in DESCUBRIR_CIUDADES else 'Santiago'
+
+
+def _dsc_texto_aviso(it):
+    d = json.loads(it['datos_json'] or '{}')
+    if it['tipo'] == 'lanzamiento':
+        return f'🎵 {it["texto"]}' + ('' if it['en_orbyte'] else ' ¿Te gustaría tenerlo en Orbyte?')
+    if it['tipo'] == 'efemeride':
+        return f'📅 Un día como hoy: {it["texto"]}'
+    if it['tipo'] == 'evento':
+        return f'🎤 {it["titulo"]}: {it["texto"]}'
+    if it['tipo'] == 'similar':
+        return f'✨ {it["titulo"]}. ¿Te gustaría tenerlo en Orbyte?'
+    return it['titulo']
+
+
+def _dsc_tick():
+    """Cada minuto: publica lo aprobado que ya toca, manda los avisos de
+    «Solo favoritos», borra lo vencido y lanza la recolección diaria."""
+    ahora = _dsc_ahora()
+    ah = _dsc_iso(ahora)
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE descubrir_items SET estado='publicado', publicada_at=? WHERE estado='aprobado' "
+                     "AND publicar_desde <= ?", (ah, ah))
+        pend = conn.execute("SELECT * FROM descubrir_items WHERE estado='publicado' AND avisado=0 AND avisar_desde <= ? "
+                            "AND modo IN ('favoritos', 'ambos')", (ah,)).fetchall()
+        if pend:
+            favs = _dsc_fav_artistas(conn)
+            for it in pend:
+                d = json.loads(it['datos_json'] or '{}')
+                for uid in favs.get(it['artista_id'], ()):
+                    if it['tipo'] == 'evento' and _dsc_usuario_ciudad(conn, uid) != d.get('ciudad'):
+                        continue
+                    _notificar(conn, uid, 'descubrir', _dsc_texto_aviso(it),
+                               datos={'descubrir_id': it['id'], 'puede_pedir': _dsc_puede_pedir(it)})
+                conn.execute('UPDATE descubrir_items SET avisado=1 WHERE id=?', (it['id'],))
+        conn.commit()
+        if _dsc_meta(conn, 'ultima_limpieza') != ahora.strftime('%Y-%m-%dT%H'):
+            _dsc_limpiar(conn, ahora)
+            _dsc_meta(conn, 'ultima_limpieza', ahora.strftime('%Y-%m-%dT%H'))
+            conn.commit()
+        # Domingo 09:00: aviso al admin con lo que hay para revisar.
+        lote = _dsc_lote_en_revision(ahora.date()).isoformat()
+        if ahora.weekday() == 6 and ahora.hour >= 9 and _dsc_meta(conn, 'aviso_editor') != lote:
+            n = conn.execute("SELECT COUNT(*) FROM descubrir_items WHERE estado='borrador' AND semana<=?", (lote,)).fetchone()[0]
+            if n:
+                for a in conn.execute('SELECT id FROM users WHERE is_admin=1').fetchall():
+                    _notificar(conn, a['id'], 'sistema',
+                               f'Editor de Descubrir: tienes {n} publicaciones por revisar. Lo aprobado sale el lunes a las 00:01.',
+                               datos={'origen': 'descubrir'})
+            _dsc_meta(conn, 'aviso_editor', lote)
+            conn.commit()
+        recolectar = ahora.hour * 60 + ahora.minute >= 3 * 60 + 30 and \
+            _dsc_meta(conn, 'ultima_recoleccion') != ahora.date().isoformat()
+    finally:
+        conn.close()
+    if recolectar:
+        _dsc_recolectar_en_hilo()
+
+
+def _dsc_marcar_visto(conn, clave, dias=_DSC_VISTO_DIAS):
+    conn.execute('INSERT OR REPLACE INTO descubrir_vistos (clave, hasta) VALUES (?, ?)',
+                 (clave, (_dsc_ahora() + timedelta(days=dias)).date().isoformat()))
+
+
+def _dsc_limpiar(conn, ahora):
+    """Mantiene todo liviano: lo vencido, los borradores de lotes ya cerrados
+    sin aprobar y los pedidos resueltos hace tiempo se borran (las claves
+    quedan un tiempo en descubrir_vistos para no volver a proponerlos)."""
+    ah = _dsc_iso(ahora)
+    hoy = ahora.date().isoformat()
+    viejos = conn.execute("SELECT id, clave FROM descubrir_items WHERE (estado='publicado' AND vence < ?) "
+                          "OR (estado='borrador' AND semana <= ?)", (ah, hoy)).fetchall()
+    for r in viejos:
+        _dsc_marcar_visto(conn, r['clave'])
+    conn.executemany('DELETE FROM descubrir_items WHERE id=?', [(r['id'],) for r in viejos])
+    conn.execute('DELETE FROM descubrir_vistos WHERE hasta < ?', (hoy,))
+    limite = (ahora - timedelta(days=60)).isoformat()
+    viejos_p = [r['id'] for r in conn.execute("SELECT id FROM material_pedidos WHERE estado<>'pendiente' AND resuelto_at < ?",
+                                              (limite,))]
+    for pid in viejos_p:
+        conn.execute('DELETE FROM material_pedido_usuarios WHERE pedido_id=?', (pid,))
+        conn.execute('DELETE FROM material_pedidos WHERE id=?', (pid,))
+    conn.execute('DELETE FROM descubrir_meta WHERE k LIKE ? AND k < ?', ('wiki:%', f'wiki:births:{hoy}'))
+    conn.execute("DELETE FROM descubrir_meta WHERE k LIKE 'wiki:deaths:%' AND k < ?", (f'wiki:deaths:{hoy}',))
+    conn.execute("DELETE FROM descubrir_meta WHERE k LIKE 'semanales:%' AND k < ?", (f'semanales:{hoy}',))
+
+
+def _dsc_vigilar():
+    while True:
+        try:
+            _dsc_tick()
+        except Exception as e:  # noqa: BLE001 - el vigilante nunca se cae
+            app.logger.exception(f'[descubrir] tick: {e}')
+        time.sleep(60)
+
+
+@app.before_request
+def _dsc_asegurar_hilo():
+    """El vigilante arranca con el primer pedido (solo en el proceso que
+    atiende, no en el del recargador de Flask)."""
+    global _dsc_hilo
+    if _dsc_hilo is not None or app.config.get('TESTING'):
+        return
+    with _dsc_lock:
+        if _dsc_hilo is None:
+            _dsc_hilo = threading.Thread(target=_dsc_vigilar, name='descubrir', daemon=True)
+            _dsc_hilo.start()
+
+
+# ---------------------------------------------------------------- vistas
+
+def _dsc_puede_pedir(it):
+    return it['tipo'] in ('lanzamiento', 'similar') and not it['en_orbyte']
+
+
+def _dsc_item_json(conn, it, yo=None, admin=False):
+    d = json.loads(it['datos_json'] or '{}')
+    out = {'id': it['id'], 'tipo': it['tipo'], 'titulo': it['titulo'], 'texto': it['texto'] or '',
+           'imagen': it['imagen'] or '', 'enlace': it['enlace'] or '', 'fecha': it['fecha'],
+           'en_orbyte': bool(it['en_orbyte']), 'album_id': it['album_id'], 'artista_id': it['artista_id'],
+           'artista': d.get('artista'), 'ciudad': d.get('ciudad'), 'recinto': d.get('recinto'),
+           'lista': d.get('lista') or [], 'fuente': d.get('fuente'), 'puede_pedir': _dsc_puede_pedir(it)}
+    if yo is not None and out['puede_pedir'] and d.get('pedido_clave'):
+        out['pedido'] = bool(conn.execute(
+            'SELECT 1 FROM material_pedidos p JOIN material_pedido_usuarios u ON u.pedido_id=p.id '
+            'WHERE p.clave=? AND u.usuario_id=?', (d['pedido_clave'], yo)).fetchone())
+    if admin:
+        out.update({'estado': it['estado'], 'modo': it['modo'], 'afectados': it['afectados'],
+                    'relevancia': round(it['relevancia'] or 0, 1), 'semana': it['semana'],
+                    'publicar_desde': it['publicar_desde'], 'avisar_desde': it['avisar_desde'], 'vence': it['vence']})
+    return out
+
+
+@app.route('/api/v1/descubrir')
+@api_login_required
+def api_v1_descubrir():
+    """Pantalla Descubrir: Un día como hoy, Para ti, General y Eventos."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        favs = _dsc_fav_artistas(conn)
+        mios = {aid for aid, us in favs.items() if yo in us}
+        hoy = _dsc_ahora().date().isoformat()
+        efe, para_ti, general, eventos = [], [], [], []
+        for it in conn.execute("SELECT * FROM descubrir_items WHERE estado='publicado' "
+                               "ORDER BY relevancia DESC, id DESC").fetchall():
+            es_mio = it['artista_id'] in mios and it['modo'] in ('favoritos', 'ambos')
+            es_general = it['modo'] in ('general', 'ambos')
+            if not (es_mio or es_general):
+                continue
+            j = _dsc_item_json(conn, it, yo)
+            j['para_ti'] = es_mio
+            if it['tipo'] == 'efemeride':
+                if it['fecha'] == hoy:
+                    efe.append(j)
+            elif it['tipo'] == 'evento':
+                eventos.append(j)
+            elif es_mio:
+                para_ti.append(j)
+            elif es_general:
+                general.append(j)
+        eventos.sort(key=lambda e: e['fecha'] or '')
+        return jsonify({'status': 'ok', 'hoy': hoy, 'hoy_txt': _dsc_fecha_txt(hoy, False),
+                        'efemerides': efe, 'para_ti': para_ti, 'general': general, 'eventos': eventos,
+                        'ciudad': _dsc_usuario_ciudad(conn, yo), 'ciudades': DESCUBRIR_CIUDADES})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/descubrir/ajustes', methods=['POST'])
+@api_login_required
+def api_v1_descubrir_ajustes():
+    """{ciudad}."""
+    yo = g.api_user['id']
+    ciudad = (request.get_json(silent=True) or {}).get('ciudad')
+    if ciudad not in DESCUBRIR_CIUDADES:
+        return jsonify({'status': 'error', 'message': 'Ciudad desconocida.'}), 400
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT settings_json FROM users WHERE id=?', (yo,)).fetchone()
+        try:
+            todo = json.loads(row['settings_json']) if row and row['settings_json'] else {}
+        except ValueError:
+            todo = {}
+        todo.setdefault('descubrir', {})['ciudad'] = ciudad
+        conn.execute('UPDATE users SET settings_json=? WHERE id=?', (json.dumps(todo), yo))
+        conn.commit()
+        return jsonify({'status': 'ok', 'ciudad': ciudad})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/descubrir/pedir', methods=['POST'])
+@api_login_required
+def api_v1_descubrir_pedir():
+    """«¿Te gustaría que estuviera en Orbyte?» {id, quiero: bool}."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        it = conn.execute('SELECT * FROM descubrir_items WHERE id=?', (datos.get('id'),)).fetchone()
+        if not it or not _dsc_puede_pedir(it):
+            return jsonify({'status': 'error', 'message': 'Esa publicación ya no está disponible.'}), 404
+        d = json.loads(it['datos_json'] or '{}')
+        clave = d.get('pedido_clave') or it['clave']
+        p = conn.execute('SELECT id FROM material_pedidos WHERE clave=?', (clave,)).fetchone()
+        if datos.get('quiero', True):
+            if not p:
+                pid = conn.execute('INSERT INTO material_pedidos (clave, tipo, artista, titulo, imagen, enlace, creada_at) '
+                                   'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                                   (clave, 'disco' if it['tipo'] == 'lanzamiento' else 'artista', d.get('artista'),
+                                    d.get('disco') or d.get('artista'), it['imagen'], it['enlace'], _utcnow_iso())).lastrowid
+            else:
+                pid = p['id']
+                conn.execute("UPDATE material_pedidos SET estado='pendiente', resuelto_at=NULL WHERE id=? AND estado='descartado'",
+                             (pid,))
+            conn.execute('INSERT OR IGNORE INTO material_pedido_usuarios (pedido_id, usuario_id, creada_at) VALUES (?, ?, ?)',
+                         (pid, yo, _utcnow_iso()))
+            pedido = True
+        else:
+            if p:
+                conn.execute('DELETE FROM material_pedido_usuarios WHERE pedido_id=? AND usuario_id=?', (p['id'], yo))
+            pedido = False
+        conn.commit()
+        return jsonify({'status': 'ok', 'pedido': pedido})
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------- editor (admin)
+
+@app.route('/api/v1/admin/descubrir/borradores')
+@api_admin_required
+def api_v1_admin_descubrir_borradores():
+    """Lote en revisión (próximo lunes) + aprobados pendientes de salir +
+    estado del recolector."""
+    conn = get_db_connection()
+    try:
+        ahora = _dsc_ahora()
+        lote = _dsc_lote_en_revision(ahora.date())
+        cierre = lote - timedelta(days=2)
+        items = [_dsc_item_json(conn, it, admin=True) for it in conn.execute(
+            "SELECT * FROM descubrir_items WHERE estado IN ('borrador', 'aprobado') AND semana<=? "
+            "ORDER BY estado='aprobado', relevancia DESC, id DESC", (lote.isoformat(),)).fetchall()]
+        juntando = conn.execute("SELECT COUNT(*) FROM descubrir_items WHERE estado='borrador' AND semana>?",
+                                (lote.isoformat(),)).fetchone()[0]
+        claves = _dsc_fuentes.claves()
+        return jsonify({
+            'status': 'ok', 'lote': lote.isoformat(), 'lote_txt': _dsc_fecha_txt(lote.isoformat(), False),
+            'cierre_txt': f'sábado {_dsc_fecha_txt(cierre.isoformat(), False)} a las 23:59',
+            'cerrado': ahora.weekday() == 6, 'items': items, 'siguiente_lote': juntando,
+            'recolector': {'corriendo': _dsc_estado['corriendo'], 'paso': _dsc_estado['paso'],
+                           'ultima': _dsc_meta(conn, 'ultima_recoleccion'), 'creados': _dsc_estado['creados'],
+                           'errores': dict(_dsc_fuentes.ultimo_error),
+                           'fuentes': {'Deezer': True, 'MusicBrainz': True, 'Wikimedia': True,
+                                       'Ticketmaster': bool(claves['ticketmaster']), 'Last.fm': bool(claves['lastfm'])}},
+        })
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/descubrir/decidir', methods=['POST'])
+@api_admin_required
+def api_v1_admin_descubrir_decidir():
+    """{id, modo: 'general'|'favoritos'|'ambos'|null (descartar)|'borrador' (deshacer),
+    titulo?, texto?, ya?: bool (publicar ahora)}."""
+    datos = request.get_json(silent=True) or {}
+    modo = datos.get('modo')
+    conn = get_db_connection()
+    try:
+        it = conn.execute('SELECT * FROM descubrir_items WHERE id=?', (datos.get('id'),)).fetchone()
+        if not it:
+            return jsonify({'status': 'error', 'message': 'Esa publicación ya no existe.'}), 404
+        titulo = ' '.join(str(datos.get('titulo') or it['titulo']).split())[:160]
+        texto = str(datos.get('texto') if datos.get('texto') is not None else (it['texto'] or '')).strip()[:600]
+        if modo is None:
+            _dsc_marcar_visto(conn, it['clave'])
+            conn.execute('DELETE FROM descubrir_items WHERE id=?', (it['id'],))
+            conn.commit()
+            return jsonify({'status': 'ok', 'descartado': True})
+        if modo == 'borrador':
+            conn.execute("UPDATE descubrir_items SET estado='borrador', modo=NULL, publicar_desde=NULL, avisar_desde=NULL, "
+                         "vence=NULL, titulo=?, texto=? WHERE id=? AND estado IN ('aprobado', 'publicado')",
+                         (titulo, texto, it['id']))
+            conn.commit()
+            return jsonify({'status': 'ok', 'item': _dsc_item_json(conn, conn.execute(
+                'SELECT * FROM descubrir_items WHERE id=?', (it['id'],)).fetchone(), admin=True)})
+        if modo not in ('general', 'favoritos', 'ambos'):
+            return jsonify({'status': 'error', 'message': 'Modo desconocido.'}), 400
+        ahora = _dsc_ahora()
+        if datos.get('ya'):
+            desde = avisar = ahora
+        else:
+            lunes = datetime.strptime(it['semana'], '%Y-%m-%d')
+            desde = max(lunes.replace(hour=0, minute=1), ahora) if lunes.date() > ahora.date() else ahora
+            if it['tipo'] == 'efemeride':
+                desde = max(datetime.strptime(it['fecha'], '%Y-%m-%d').replace(hour=0, minute=1), ahora)
+            avisar = desde.replace(hour=9, minute=0) if desde.hour < 9 else desde
+        if it['tipo'] == 'efemeride':
+            vence = datetime.strptime(it['fecha'], '%Y-%m-%d').replace(hour=23, minute=59, second=59)
+        elif it['tipo'] == 'evento':
+            vence = datetime.strptime(it['fecha'], '%Y-%m-%d') + timedelta(days=1)
+        elif it['tipo'] == 'lanzamiento':
+            vence = desde + timedelta(days=30)
+        else:
+            vence = desde + timedelta(days=7)
+        conn.execute("UPDATE descubrir_items SET estado='aprobado', modo=?, titulo=?, texto=?, publicar_desde=?, "
+                     "avisar_desde=?, vence=?, avisado=0 WHERE id=?",
+                     (modo, titulo, texto, _dsc_iso(desde), _dsc_iso(avisar), _dsc_iso(vence), it['id']))
+        conn.commit()
+        if datos.get('ya'):
+            _dsc_tick_seguro()
+        it = conn.execute('SELECT * FROM descubrir_items WHERE id=?', (it['id'],)).fetchone()
+        return jsonify({'status': 'ok', 'item': _dsc_item_json(conn, it, admin=True)})
+    finally:
+        conn.close()
+
+
+def _dsc_tick_seguro():
+    try:
+        _dsc_tick()
+    except Exception as e:  # noqa: BLE001
+        app.logger.exception(f'[descubrir] tick: {e}')
+
+
+@app.route('/api/v1/admin/descubrir/publicadas')
+@api_admin_required
+def api_v1_admin_descubrir_publicadas():
+    conn = get_db_connection()
+    try:
+        items = [_dsc_item_json(conn, it, admin=True) for it in conn.execute(
+            "SELECT * FROM descubrir_items WHERE estado='publicado' ORDER BY publicada_at DESC").fetchall()]
+        return jsonify({'status': 'ok', 'items': items})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/descubrir/recolectar', methods=['POST'])
+@api_admin_required
+def api_v1_admin_descubrir_recolectar():
+    """Lanza la recolección ahora (en segundo plano)."""
+    iniciado = _dsc_recolectar_en_hilo()
+    return jsonify({'status': 'ok', 'iniciado': iniciado, 'corriendo': True})
+
+
+@app.route('/api/v1/admin/descubrir/pedidos', methods=['GET', 'POST'])
+@api_admin_required
+def api_v1_admin_descubrir_pedidos():
+    """Ranking de lo más solicitado. POST {id, estado: 'subido'|'descartado'|'pendiente'}:
+    al marcar «subido» se avisa a quienes lo pidieron."""
+    conn = get_db_connection()
+    try:
+        if request.method == 'POST':
+            datos = request.get_json(silent=True) or {}
+            estado = datos.get('estado')
+            p = conn.execute('SELECT * FROM material_pedidos WHERE id=?', (datos.get('id'),)).fetchone()
+            if not p or estado not in ('subido', 'descartado', 'pendiente'):
+                return jsonify({'status': 'error', 'message': 'Pedido o estado desconocido.'}), 400
+            conn.execute('UPDATE material_pedidos SET estado=?, resuelto_at=? WHERE id=?',
+                         (estado, None if estado == 'pendiente' else _utcnow_iso(), p['id']))
+            if estado == 'subido' and p['estado'] != 'subido':
+                nombre = f'«{p["titulo"]}»' + (f' de {p["artista"]}' if p['tipo'] == 'disco' and p['artista'] else '')
+                for u in conn.execute('SELECT usuario_id FROM material_pedido_usuarios WHERE pedido_id=?', (p['id'],)).fetchall():
+                    _notificar(conn, u['usuario_id'], 'pedido_subido', f'🎉 Ya está en Orbyte: {nombre}. Gracias por pedirlo.',
+                               datos={'pedido_id': p['id']})
+            conn.commit()
+        items = [dict(r) for r in conn.execute(
+            'SELECT p.id, p.tipo, p.artista, p.titulo, p.imagen, p.enlace, p.estado, p.creada_at, '
+            '(SELECT COUNT(*) FROM material_pedido_usuarios u WHERE u.pedido_id=p.id) AS pedidos '
+            "FROM material_pedidos p ORDER BY p.estado<>'pendiente', pedidos DESC, p.creada_at DESC LIMIT 200").fetchall()]
         return jsonify({'status': 'ok', 'items': items})
     finally:
         conn.close()
