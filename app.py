@@ -970,6 +970,26 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass
+    # Ticket C-10 etapa 2: playlists compartidas con amigos. permiso 'ver' |
+    # 'editar' por persona; playlist_tracks.added_by = quién agregó la pista
+    # (para mostrar su avatar en una playlist compartida).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS playlist_compartidas (
+            playlist_id   INTEGER NOT NULL,
+            usuario_id    INTEGER NOT NULL,
+            permiso       TEXT NOT NULL DEFAULT 'ver',
+            compartida_at TEXT NOT NULL,
+            PRIMARY KEY (playlist_id, usuario_id)
+        )
+    ''')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_playlist_compartidas_usuario ON playlist_compartidas (usuario_id)')
+    for _sql in ("ALTER TABLE playlist_tracks ADD COLUMN added_by INTEGER",
+                 "ALTER TABLE playlists ADD COLUMN copia_de INTEGER"):
+        try:
+            conn.execute(_sql)
+            conn.commit()
+        except Exception:
+            pass  # Columna ya existe
     # Ticket C-07 (Modo TV): teles LG webOS donde Orbyte muestra lo que suena.
     # client_key = autorización que da la tele al aceptar «Permitir» (una vez);
     # clave = parte secreta del link de solo lectura de la página /tv/<clave>;
@@ -2707,26 +2727,62 @@ def _playlist_owned_or_404(conn, playlist_id, user_id):
         'SELECT * FROM playlists WHERE id=? AND user_id=?', (playlist_id, user_id)
     ).fetchone()
 
+def _playlist_acceso(conn, playlist_id, user_id):
+    """Ticket C-10 etapa 2: (fila, rol) — rol 'dueno' | 'editar' | 'ver' —
+    o (None, None) si no es suya ni se la compartieron (los callers responden
+    404, mismo criterio que _playlist_owned_or_404)."""
+    pl = conn.execute('SELECT * FROM playlists WHERE id=?', (playlist_id,)).fetchone()
+    if not pl:
+        return None, None
+    if pl['user_id'] == user_id:
+        return pl, 'dueno'
+    c = conn.execute('SELECT permiso FROM playlist_compartidas WHERE playlist_id=? AND usuario_id=?',
+                     (playlist_id, user_id)).fetchone()
+    if c:
+        return pl, ('editar' if c['permiso'] == 'editar' else 'ver')
+    return None, None
+
+
 @app.route('/api/v1/playlists', methods=['GET'])
 @api_login_required
 def api_v1_playlists_list():
     # Ticket 20, Ítem 3: alphabetical | last_played | most_played.
     # Ausente/no reconocido -> _playlist_order conserva updated_at DESC
     # (comportamiento previo a este ticket).
+    # Ticket C-10 etapa 2: ?compartidas=1 suma las que me compartieron
+    # (rol 'ver'/'editar' + dueño). Sin el parámetro, solo las propias (las
+    # apps viejas no ven playlists ajenas que no sabrían manejar).
     sort = request.args.get('sort', '')
+    yo = g.api_user['id']
+    con_compartidas = request.args.get('compartidas') in ('1', 'true')
     conn = get_db_connection()
     try:
+        donde = 'p.user_id = ? OR pc.usuario_id IS NOT NULL' if con_compartidas else 'p.user_id = ?'
         rows = conn.execute(f'''
             SELECT p.id, p.name, p.created_at, p.updated_at,
-                   p.last_played_at, p.play_count,
-                   COUNT(pt.id) as track_count
+                   p.last_played_at, p.play_count, p.user_id AS dueno_id, pc.permiso AS mi_permiso,
+                   (SELECT COUNT(*) FROM playlist_tracks pt WHERE pt.playlist_id = p.id) as track_count,
+                   (SELECT COUNT(*) FROM playlist_compartidas x WHERE x.playlist_id = p.id) as compartida_n
             FROM playlists p
-            LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
-            WHERE p.user_id = ?
-            GROUP BY p.id
+            LEFT JOIN playlist_compartidas pc ON pc.playlist_id = p.id AND pc.usuario_id = ?
+            WHERE {donde}
             ORDER BY {_playlist_order(sort)}
-        ''', (g.api_user['id'],)).fetchall()
-        return jsonify({'playlists': [dict(r) for r in rows]})
+        ''', (yo, yo)).fetchall()
+        cache = {}
+        out = []
+        for r in rows:
+            d = dict(r)
+            dueno_id = d.pop('dueno_id')
+            permiso = d.pop('mi_permiso')
+            if dueno_id == yo:
+                d['rol'], d['dueno'] = 'dueno', None
+            else:
+                d['rol'] = 'editar' if permiso == 'editar' else 'ver'
+                if dueno_id not in cache:
+                    cache[dueno_id] = _social_usuario(conn, dueno_id)
+                d['dueno'] = cache[dueno_id]
+            out.append(d)
+        return jsonify({'playlists': out})
     finally:
         conn.close()
 
@@ -2743,8 +2799,14 @@ def api_v1_playlists_create():
             'INSERT INTO playlists (user_id, name) VALUES (?, ?)',
             (g.api_user['id'], name)
         )
+        # Ticket C-10 etapa 2: «crear en conjunto» — {amigos: [ids]} entran
+        # con permiso de editar desde el comienzo.
+        n = 0
+        for uid in (data.get('amigos') or [])[:50]:
+            if _playlist_compartir_con(conn, cur.lastrowid, name, g.api_user['id'], uid, 'editar'):
+                n += 1
         conn.commit()
-        return jsonify({'id': cur.lastrowid, 'name': name, 'track_count': 0}), 201
+        return jsonify({'id': cur.lastrowid, 'name': name, 'track_count': 0, 'compartida_n': n}), 201
     finally:
         conn.close()
 
@@ -2771,11 +2833,13 @@ def api_v1_playlist_detail(playlist_id):
     """
     conn = get_db_connection()
     try:
-        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        pl, rol = _playlist_acceso(conn, playlist_id, g.api_user['id'])
         if not pl:
             return jsonify({'error': 'not_found'}), 404
+        miembros = _playlist_miembros(conn, playlist_id)
+        cache = {}
         rows = conn.execute('''
-            SELECT t.*, pt.position, al.name as album_name, al.year as album_year,
+            SELECT t.*, pt.position, pt.added_by AS pt_added_by, al.name as album_name, al.year as album_year,
                    al.cover_path, al.artist_id, ar.name as artist_name,
                    COALESCE(tm.genre_primary, t.genre) as genre_primary,
                    tm.mood, tm.tema_lirico
@@ -2817,10 +2881,21 @@ def api_v1_playlist_detail(playlist_id):
                 'container_ext':  _container_ext(d),
                 'position':       d.get('position'),
             })
+            # Ticket C-10 etapa 2: quién la agregó (solo si la playlist es
+            # compartida; sin dato = el dueño).
+            if miembros:
+                quien = d.get('pt_added_by') or pl['user_id']
+                if quien not in cache:
+                    cache[quien] = _social_usuario(conn, quien)
+                tracks[-1]['agregada_por'] = cache[quien]
         return jsonify({
             'id': pl['id'], 'name': pl['name'],
             'created_at': pl['created_at'], 'updated_at': pl['updated_at'],
             'tracks': tracks,
+            'rol': rol,
+            'dueno': _social_usuario(conn, pl['user_id']),
+            'miembros': miembros,
+            'copia_de': pl['copia_de'],
         })
     finally:
         conn.close()
@@ -2856,6 +2931,7 @@ def api_v1_playlist_delete(playlist_id):
         if not pl:
             return jsonify({'error': 'not_found'}), 404
         conn.execute('DELETE FROM playlist_tracks WHERE playlist_id=?', (playlist_id,))
+        conn.execute('DELETE FROM playlist_compartidas WHERE playlist_id=?', (playlist_id,))
         conn.execute('DELETE FROM playlists WHERE id=?', (playlist_id,))
         conn.commit()
         return jsonify({'deleted': True})
@@ -2876,9 +2952,12 @@ def api_v1_playlist_mark_played(playlist_id):
     Última Reproducción apenas alguien edite una playlist vieja."""
     conn = get_db_connection()
     try:
-        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        pl, rol = _playlist_acceso(conn, playlist_id, g.api_user['id'])
         if not pl:
             return jsonify({'error': 'not_found'}), 404
+        if rol != 'dueno':
+            # C-10 etapa 2: el orden «Última reproducción» es del dueño.
+            return jsonify({'marked': True})
         conn.execute(
             "UPDATE playlists SET play_count = play_count + 1, "
             "last_played_at = datetime('now') WHERE id=?",
@@ -2899,20 +2978,25 @@ def api_v1_playlist_add_track(playlist_id):
         return jsonify({'error': 'missing_track_id'}), 400
     conn = get_db_connection()
     try:
-        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        yo = g.api_user['id']
+        pl, rol = _playlist_acceso(conn, playlist_id, yo)
         if not pl:
             return jsonify({'error': 'not_found'}), 404
+        if rol == 'ver':
+            return jsonify({'error': 'solo_lectura'}), 403
         if not conn.execute('SELECT id FROM tracks WHERE id=?', (track_id,)).fetchone():
             return jsonify({'error': 'track_not_found'}), 404
         next_pos = conn.execute(
             'SELECT COALESCE(MAX(position), -1) + 1 as p FROM playlist_tracks WHERE playlist_id=?',
             (playlist_id,)
         ).fetchone()['p']
-        conn.execute(
-            'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position) VALUES (?, ?, ?)',
-            (playlist_id, track_id, next_pos)
+        cur = conn.execute(
+            'INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_by) VALUES (?, ?, ?, ?)',
+            (playlist_id, track_id, next_pos, yo)
         )
         conn.execute("UPDATE playlists SET updated_at=datetime('now') WHERE id=?", (playlist_id,))
+        if cur.rowcount:
+            _playlist_avisar_cambio(conn, pl, yo)
         conn.commit()
         return jsonify({'added': True, 'track_id': track_id})
     finally:
@@ -2923,9 +3007,11 @@ def api_v1_playlist_add_track(playlist_id):
 def api_v1_playlist_remove_track(playlist_id, track_id):
     conn = get_db_connection()
     try:
-        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        pl, rol = _playlist_acceso(conn, playlist_id, g.api_user['id'])
         if not pl:
             return jsonify({'error': 'not_found'}), 404
+        if rol == 'ver':
+            return jsonify({'error': 'solo_lectura'}), 403
         conn.execute(
             'DELETE FROM playlist_tracks WHERE playlist_id=? AND track_id=?',
             (playlist_id, track_id)
@@ -2950,9 +3036,11 @@ def api_v1_playlist_reorder(playlist_id):
         return jsonify({'error': 'missing_track_ids'}), 400
     conn = get_db_connection()
     try:
-        pl = _playlist_owned_or_404(conn, playlist_id, g.api_user['id'])
+        pl, rol = _playlist_acceso(conn, playlist_id, g.api_user['id'])
         if not pl:
             return jsonify({'error': 'not_found'}), 404
+        if rol == 'ver':
+            return jsonify({'error': 'solo_lectura'}), 403
         existing_ids = {
             r['track_id'] for r in conn.execute(
                 'SELECT track_id FROM playlist_tracks WHERE playlist_id=?', (playlist_id,)
@@ -12146,6 +12234,9 @@ _SOCIAL_TIPOS = {
     'amistad_solicitud': ('Solicitudes de amistad', True, True),
     'amistad_aceptada':  ('Solicitud aceptada', True, True),
     'sistema':           ('Avisos de Orbyte', True, True),
+    # Etapa 2 (playlists compartidas): los cambios, por defecto solo en la campana.
+    'playlist_compartida': ('Playlists compartidas contigo', True, True),
+    'playlist_cambios':    ('Cambios en playlists compartidas', True, False),
 }
 _SOCIAL_PRIVACIDAD_DEFECTO = {
     'buscable': True,              # encontrarme por nickname o correo (el QR siempre funciona)
@@ -12446,6 +12537,10 @@ def api_v1_social_quitar():
             conn.execute('DELETE FROM amistades WHERE id=?', (am['id'],))
             conn.execute('DELETE FROM amigos_silenciados WHERE (usuario_id=? AND amigo_id=?) OR (usuario_id=? AND amigo_id=?)',
                          (yo, otro, otro, yo))
+            # C-10 etapa 2: se deja de compartir todo lo que había entre los dos.
+            conn.execute('DELETE FROM playlist_compartidas WHERE (usuario_id=? AND playlist_id IN '
+                         '(SELECT id FROM playlists WHERE user_id=?)) OR (usuario_id=? AND playlist_id IN '
+                         '(SELECT id FROM playlists WHERE user_id=?))', (otro, yo, yo, otro))
             if am['estado'] == 'pendiente' and am['solicitante'] == yo:
                 # Solicitud cancelada: se borra el aviso que le llegó al otro.
                 conn.execute("DELETE FROM notificaciones WHERE usuario_id=? AND tipo='amistad_solicitud' AND actor_id=?",
@@ -12656,6 +12751,223 @@ def api_v1_social_mi_qr():
     resp.headers['Cache-Control'] = 'no-store'
     return resp
 
+
+
+# ══ Ticket C-10 etapa 2: playlists compartidas ═══════════════════════════════
+# El dueño comparte con amigos («ver» o «editar» por persona); quien edita
+# agrega, quita y reordena (no renombra, borra ni comparte); cualquiera con
+# acceso guarda una copia propia; el invitado puede «dejar» la playlist.
+# Quitar la amistad corta lo compartido (ver api_v1_social_quitar).
+
+_PLAYLIST_CAMBIOS_VENTANA_H = 12   # avisos de cambios agrupados por amigo/playlist
+
+
+def _playlist_miembros(conn, playlist_id):
+    out = []
+    for r in conn.execute('SELECT usuario_id, permiso FROM playlist_compartidas WHERE playlist_id=? '
+                          'ORDER BY compartida_at', (playlist_id,)).fetchall():
+        u = _social_usuario(conn, r['usuario_id'])
+        if u:
+            u['permiso'] = r['permiso']
+            out.append(u)
+    return out
+
+
+def _playlist_compartir_con(conn, playlist_id, nombre, dueno, uid, permiso):
+    """Comparte (o cambia el permiso). Solo con amigos. Avisa si es nueva o si
+    pasa de ver a editar. Devuelve True si quedó compartida."""
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False
+    if uid == dueno or permiso not in ('ver', 'editar') or _social_relacion(conn, dueno, uid) != 'amigo':
+        return False
+    antes = conn.execute('SELECT permiso FROM playlist_compartidas WHERE playlist_id=? AND usuario_id=?',
+                         (playlist_id, uid)).fetchone()
+    if antes and antes['permiso'] == permiso:
+        return True
+    if antes:
+        conn.execute('UPDATE playlist_compartidas SET permiso=? WHERE playlist_id=? AND usuario_id=?',
+                     (permiso, playlist_id, uid))
+    else:
+        conn.execute('INSERT INTO playlist_compartidas (playlist_id, usuario_id, permiso, compartida_at) '
+                     'VALUES (?, ?, ?, ?)', (playlist_id, uid, permiso, _utcnow_iso()))
+    if not antes or permiso == 'editar':
+        quien = _social_usuario(conn, dueno)['nombre']
+        if permiso == 'editar':
+            texto = (f'{quien} te invitó a editar la playlist «{nombre}».' if antes else
+                     f'{quien} compartió contigo la playlist «{nombre}» (puedes editarla).')
+        else:
+            texto = f'{quien} compartió contigo la playlist «{nombre}».'
+        _notificar(conn, uid, 'playlist_compartida', texto, actor_id=dueno,
+                   datos={'playlist_id': playlist_id, 'permiso': permiso})
+    return True
+
+
+def _playlist_avisar_cambio(conn, pl, actor):
+    """Aviso agrupado a los demás con acceso: «Juan agregó 3 pistas a «X»»
+    (una notificación no leída por amigo y playlist en la ventana)."""
+    destinos = {pl['user_id']} | {r['usuario_id'] for r in conn.execute(
+        'SELECT usuario_id FROM playlist_compartidas WHERE playlist_id=?', (pl['id'],))}
+    destinos.discard(actor)
+    if not destinos:
+        return
+    quien = _social_usuario(conn, actor)['nombre']
+    desde = (datetime.now(timezone.utc) - timedelta(hours=_PLAYLIST_CAMBIOS_VENTANA_H)).strftime('%Y-%m-%dT%H:%M:%S')
+    for uid in destinos:
+        previa = None
+        for r in conn.execute("SELECT id, datos_json FROM notificaciones WHERE usuario_id=? AND tipo='playlist_cambios' "
+                              "AND actor_id=? AND leida_at IS NULL AND creada_at>? ORDER BY id DESC",
+                              (uid, actor, desde)).fetchall():
+            try:
+                d = json.loads(r['datos_json'] or '{}')
+            except ValueError:
+                d = {}
+            if d.get('playlist_id') == pl['id']:
+                previa = (r['id'], d)
+                break
+        if previa:
+            nid, d = previa
+            d['n'] = int(d.get('n') or 1) + 1
+            conn.execute('UPDATE notificaciones SET texto=?, datos_json=?, creada_at=? WHERE id=?',
+                         (f'{quien} agregó {d["n"]} pistas a «{pl["name"]}».'[:300],
+                          json.dumps(d, ensure_ascii=False), _utcnow_iso(), nid))
+        else:
+            _notificar(conn, uid, 'playlist_cambios', f'{quien} agregó una pista a «{pl["name"]}».',
+                       actor_id=actor, datos={'playlist_id': pl['id'], 'n': 1})
+
+
+@app.route('/api/v1/playlists/<int:playlist_id>/compartir', methods=['GET', 'POST'])
+@api_login_required
+def api_v1_playlist_compartir(playlist_id):
+    """Solo el dueño. GET: mis amigos con el permiso actual de cada uno
+    (null = no la ve). POST: {user_id, permiso: 'ver'|'editar'|null} o
+    {cambios: [{user_id, permiso}, ...]}."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        pl = _playlist_owned_or_404(conn, playlist_id, yo)
+        if not pl:
+            return jsonify({'status': 'error', 'message': 'Solo el dueño puede compartirla.'}), 404
+        if request.method == 'POST':
+            datos = request.get_json(silent=True) or {}
+            cambios = datos.get('cambios') if isinstance(datos.get('cambios'), list) else [datos]
+            for c in cambios[:50]:
+                if not isinstance(c, dict):
+                    continue
+                permiso = c.get('permiso')
+                if permiso in ('ver', 'editar'):
+                    _playlist_compartir_con(conn, playlist_id, pl['name'], yo, c.get('user_id'), permiso)
+                else:
+                    try:
+                        conn.execute('DELETE FROM playlist_compartidas WHERE playlist_id=? AND usuario_id=?',
+                                     (playlist_id, int(c.get('user_id'))))
+                    except (TypeError, ValueError):
+                        pass
+            conn.commit()
+        actuales = {r['usuario_id']: r['permiso'] for r in conn.execute(
+            'SELECT usuario_id, permiso FROM playlist_compartidas WHERE playlist_id=?', (playlist_id,))}
+        amigos, _, _ = _social_lista_amigos(conn, yo)
+        out = [{'id': a['id'], 'nombre': a['nombre'], 'avatar': a['avatar'], 'permiso': actuales.get(a['id'])}
+               for a in amigos]
+        return jsonify({'status': 'ok', 'amigos': out, 'compartida_n': len(actuales)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/playlists/<int:playlist_id>/dejar', methods=['POST'])
+@api_login_required
+def api_v1_playlist_dejar(playlist_id):
+    """El invitado se quita una playlist que le compartieron."""
+    conn = get_db_connection()
+    try:
+        conn.execute('DELETE FROM playlist_compartidas WHERE playlist_id=? AND usuario_id=?',
+                     (playlist_id, g.api_user['id']))
+        conn.commit()
+        return jsonify({'status': 'ok'})
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/playlists/<int:playlist_id>/copiar', methods=['POST'])
+@api_login_required
+def api_v1_playlist_copiar(playlist_id):
+    """Guardar una copia propia y editable. {name?}."""
+    yo = g.api_user['id']
+    conn = get_db_connection()
+    try:
+        pl, rol = _playlist_acceso(conn, playlist_id, yo)
+        if not pl:
+            return jsonify({'error': 'not_found'}), 404
+        name = ' '.join(str((request.get_json(silent=True) or {}).get('name') or '').split())[:120] \
+            or f'{pl["name"]} (copia)'
+        cur = conn.execute('INSERT INTO playlists (user_id, name, copia_de) VALUES (?, ?, ?)', (yo, name, playlist_id))
+        nuevo = cur.lastrowid
+        conn.execute('INSERT INTO playlist_tracks (playlist_id, track_id, position) '
+                     'SELECT ?, track_id, position FROM playlist_tracks WHERE playlist_id=? ORDER BY position',
+                     (nuevo, playlist_id))
+        n = conn.execute('SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id=?', (nuevo,)).fetchone()[0]
+        conn.commit()
+        return jsonify({'id': nuevo, 'name': name, 'track_count': n}), 201
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/admin/collab/guardar-playlist', methods=['POST'])
+@api_admin_required
+def api_v1_admin_collab_guardar_playlist():
+    """Guardar la sesión colaborativa (la activa, o la última cerrada hace
+    menos de 24 h) como playlist del anfitrión. {nombre?, solo_sonadas?,
+    compartir?}: compartir = con los participantes con cuenta que son amigos
+    del anfitrión (permiso «ver»). Cada pista queda «agregada por» quien la
+    pidió si tenía cuenta."""
+    yo = g.api_user['id']
+    datos = request.get_json(silent=True) or {}
+    conn = get_db_connection()
+    try:
+        sess = _collab_active_session(conn)
+        if not sess:
+            desde = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime('%Y-%m-%dT%H:%M:%S')
+            row = conn.execute('SELECT * FROM collab_sessions WHERE closed_at>? ORDER BY id DESC LIMIT 1',
+                               (desde,)).fetchone()
+            sess = dict(row) if row else None
+        if not sess:
+            return jsonify({'status': 'error', 'message': 'No hay una sesión colaborativa para guardar.'}), 404
+        filas = conn.execute(
+            'SELECT cqi.track_id, cqi.played_at, cp.user_id FROM collab_queue_items cqi '
+            'JOIN collab_participants cp ON cp.id = cqi.participant_id '
+            'WHERE cqi.session_id=? ORDER BY (cqi.played_at IS NULL), cqi.played_at, cqi.added_at, cqi.id',
+            (sess['id'],)).fetchall()
+        if datos.get('solo_sonadas'):
+            filas = [f for f in filas if f['played_at']]
+        if not filas:
+            return jsonify({'status': 'error', 'message': 'La sesión no tiene pistas para guardar.'}), 409
+        fecha = (sess.get('created_at') or '')[:19].replace('T', ' ')
+        try:   # created_at es UTC: la fecha en la hora local del servidor
+            fecha = datetime.strptime(fecha, '%Y-%m-%d %H:%M:%S').replace(tzinfo=timezone.utc).astimezone().strftime('%d-%m-%Y')
+        except ValueError:
+            fecha = fecha[:10]
+        nombre = ' '.join(str(datos.get('nombre') or '').split())[:120] or f'Colaborativa {fecha}'.strip()
+        cur = conn.execute('INSERT INTO playlists (user_id, name) VALUES (?, ?)', (yo, nombre))
+        pid = cur.lastrowid
+        pos, usuarios = 0, set()
+        for f in filas:
+            agrego = f['user_id'] if f['user_id'] else None
+            c = conn.execute('INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_by) '
+                             'VALUES (?, ?, ?, ?)', (pid, f['track_id'], pos, agrego))
+            if c.rowcount:
+                pos += 1
+            if agrego and agrego != yo:
+                usuarios.add(agrego)
+        compartida = 0
+        if datos.get('compartir'):
+            for uid in usuarios:
+                if _playlist_compartir_con(conn, pid, nombre, yo, uid, 'ver'):
+                    compartida += 1
+        conn.commit()
+        return jsonify({'status': 'ok', 'id': pid, 'name': nombre, 'track_count': pos, 'compartida_n': compartida})
+    finally:
+        conn.close()
 
 if __name__ == '__main__':
     # threaded=True: sin esto, el server de desarrollo de Flask atiende UN
