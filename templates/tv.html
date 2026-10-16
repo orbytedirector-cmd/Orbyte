@@ -34,15 +34,20 @@
 
   /* ---------- barra superior ---------- */
   .top { display: flex; align-items: center; height: 7.4vw; }
-  .marca { width: 22vw; display: flex; align-items: center; }
+  .marca { flex: 1; display: flex; align-items: center; }
   .marca img { height: 7.2vw; }
-  .reloj { flex: 1; display: flex; flex-direction: column; align-items: center; font-family: Orbitron, sans-serif; color: var(--gold); }
+  /* Reloj en espejo del logo (pedido de Niko): a la derecha, a la misma
+     distancia del borde que el logo del izquierdo. El PNG del logo trae
+     12 px transparentes de 153 de alto (0,565 vw a 7,2 vw), así que el
+     reloj se corre lo mismo hacia adentro. */
+  .reloj { display: flex; flex-direction: column; align-items: flex-end; margin-right: 0.565vw;
+    font-family: Orbitron, sans-serif; color: var(--gold); }
   .reloj-hora { display: flex; align-items: center; font-size: 1.9vw; font-weight: 600; }
   .dig { display: inline-block; width: 1.3em; margin: 0 0.05em; text-align: center; line-height: 1.6;
     background: #110e07; border: 1px solid #2a2109; border-radius: 0.18em; }
   .sep { display: inline-block; width: 0.5em; text-align: center; opacity: .4; }
   .reloj-fecha { margin-top: 0.45vw; font-size: 0.95vw; font-weight: 600; letter-spacing: .16em; opacity: .8; }
-  .union { width: 22vw; display: flex; align-items: center; justify-content: flex-end; }
+  .union { display: flex; align-items: center; justify-content: flex-end; margin-right: 2.6vw; }
   .union .txt { text-align: right; margin-right: 1vw; }
   .union .k { font-size: 0.95vw; color: var(--text2); font-weight: 600; letter-spacing: .08em; text-transform: uppercase; }
   .union .code { font-family: Orbitron, sans-serif; color: var(--gold2); font-size: 2vw; letter-spacing: .12em; margin-top: 0.2vw; }
@@ -138,11 +143,11 @@
 <div class="tv">
   <div class="top">
     <div class="marca"><img src="/static/logo-full.png" alt="Orbyte"></div>
-    <div class="reloj"><div class="reloj-hora" id="reloj-hora"></div><div class="reloj-fecha" id="reloj-fecha">--‑--‑----</div></div>
     <div class="union oculto" id="union">
       <div class="txt"><div class="k">Súmate con tu canción</div><div class="code" id="union-code"></div></div>
       <img id="union-qr" alt="">
     </div>
+    <div class="reloj"><div class="reloj-hora" id="reloj-hora"></div><div class="reloj-fecha" id="reloj-fecha">--‑--‑----</div></div>
   </div>
 
   <div class="main" id="main">
