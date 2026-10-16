@@ -38,7 +38,13 @@
 
   .cab { display: flex; align-items: center; justify-content: space-between; height: 5vw; }
   .marca { height: 4.4vw; opacity: .38; }
-  .reloj { font-family: Orbitron, sans-serif; font-weight: 500; color: var(--oro-tenue); text-align: right; }
+  /* Reloj en espejo del logo: misma distancia al borde (el PNG trae 12/153 de
+     margen transparente: 0,345 vw a 4,4 vw). Logo y reloj se cambian de lado
+     cada 11 min (distinto de los 8 min de portada/información, para que las
+     combinaciones varíen y nada quede siempre en el mismo píxel). */
+  .reloj { font-family: Orbitron, sans-serif; font-weight: 500; color: var(--oro-tenue); text-align: right; margin: 0 .345vw; }
+  .cab.invertido { -webkit-flex-direction: row-reverse; flex-direction: row-reverse; }
+  .cab.invertido .reloj { text-align: left; }
   .reloj .h { font-size: 2.2vw; letter-spacing: .06em; }
   .reloj .f { font-size: .8vw; letter-spacing: .3em; margin-top: .2vw; opacity: .8; }
 
@@ -128,7 +134,7 @@
 </head>
 <body>
 <div class="escena" id="escena">
-  <div class="cab">
+  <div class="cab" id="cab">
     <img class="marca" src="/static/logo-full.png" alt="Orbyte">
     <div class="reloj"><div class="h" id="hora">--:--</div><div class="f" id="fecha"></div></div>
   </div>
@@ -214,6 +220,12 @@
     esc_.classList.add("fuera");
     setTimeout(function () { $("main").classList.toggle("invertido"); esc_.classList.remove("fuera"); }, 1700);
   }, 8 * 60000);
+  // 2b) Cada 11 min el logo y el reloj se cambian de lado.
+  setInterval(function () {
+    var esc_ = $("escena");
+    esc_.classList.add("fuera");
+    setTimeout(function () { $("cab").classList.toggle("invertido"); esc_.classList.remove("fuera"); }, 1700);
+  }, 11 * 60000);
   // 3) Protector: flota a otro punto cada 25 s.
   function flotar() {
     setTransform($("protector"), "translate(" + azar(4, 70).toFixed(1) + "vw," + azar(6, 58).toFixed(1) + "vh)");
