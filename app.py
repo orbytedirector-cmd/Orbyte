@@ -13463,6 +13463,13 @@ def _dsc_migrar(conn):
             pedido_id INTEGER NOT NULL, usuario_id INTEGER NOT NULL, creada_at TEXT NOT NULL,
             PRIMARY KEY (pedido_id, usuario_id));
     ''')
+    # C-11c: huella de contenido para no duplicar (la misma novedad con otro id de la fuente).
+    cols = {r[1] for r in conn.execute('PRAGMA table_info(descubrir_items)').fetchall()}
+    if 'huella' not in cols:
+        conn.execute('ALTER TABLE descubrir_items ADD COLUMN huella TEXT')
+        for r in conn.execute('SELECT * FROM descubrir_items').fetchall():
+            conn.execute('UPDATE descubrir_items SET huella=? WHERE id=?', (_dsc_huella(dict(r)), r['id']))
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_descubrir_items_huella ON descubrir_items (huella)')
 
 
 # ---------------------------------------------------------------- tiempo y lotes
@@ -13531,12 +13538,35 @@ def _dsc_discos_biblioteca(conn, artista_id):
             for r in conn.execute('SELECT id, name FROM albums WHERE artist_id=?', (artista_id,)).fetchall()}
 
 
+def _dsc_huella(item):
+    """Identidad del CONTENIDO (no del id de la fuente): la misma novedad que
+    llega dos veces (Deezer publica el mismo disco con varios ids, Ticketmaster
+    repite un recital en dos ciudades o con dos fichas) tiene la misma huella."""
+    d = item.get('datos') if isinstance(item.get('datos'), dict) else json.loads(item.get('datos_json') or '{}')
+    n = _dsc_fuentes.normalizar
+    tipo = item.get('tipo')
+    if tipo == 'lanzamiento':
+        return f'lanz|{item.get("artista_id")}|{n(d.get("disco") or item.get("titulo"))}'
+    if tipo == 'evento':
+        return f'evt|{item.get("artista_id")}|{item.get("fecha")}|{n(d.get("recinto") or d.get("ciudad"))}'
+    if tipo == 'efemeride':
+        quien = item.get('album_id') or item.get('artista_id')
+        return f'efe|{"disco" if item.get("album_id") else d.get("motivo") or ""}|{quien}|{(item.get("fecha") or "")[:10]}'
+    if tipo == 'similar':
+        return f'sim|{n(d.get("artista"))}'
+    return item.get('clave')
+
+
 def _dsc_crear(conn, item):
-    """Inserta un borrador si su clave no existe ni se vio hace poco. True si se creó."""
-    if conn.execute('SELECT 1 FROM descubrir_vistos WHERE clave=?', (item['clave'],)).fetchone():
+    """Inserta un borrador si no existe ya (por clave ni por contenido) ni se
+    vio hace poco. True si se creó."""
+    item['huella'] = _dsc_huella(item)
+    if conn.execute('SELECT 1 FROM descubrir_vistos WHERE clave IN (?, ?)', (item['clave'], item['huella'])).fetchone():
+        return False
+    if conn.execute('SELECT 1 FROM descubrir_items WHERE huella=?', (item['huella'],)).fetchone():
         return False
     datos = item.pop('datos', None)
-    cols = ['clave', 'tipo', 'semana', 'titulo', 'texto', 'imagen', 'enlace', 'fecha', 'artista_id', 'album_id',
+    cols = ['clave', 'huella', 'tipo', 'semana', 'titulo', 'texto', 'imagen', 'enlace', 'fecha', 'artista_id', 'album_id',
             'en_orbyte', 'afectados', 'relevancia']
     vals = [item.get(c) for c in cols]
     try:
@@ -13912,7 +13942,8 @@ def _dsc_tick():
             if n:
                 for a in conn.execute('SELECT id FROM users WHERE is_admin=1').fetchall():
                     _notificar(conn, a['id'], 'sistema',
-                               f'Editor de Descubrir: tienes {n} publicaciones por revisar. Lo aprobado sale el lunes a las 00:01.',
+                               f'Editor de Descubrir: tienes {n} publicaciones por revisar. Lo aprobado sale el lunes a las 00:01 '
+                               f'(las efemérides 12 h antes de su día y los recitales cercanos, al aprobarlos).',
                                datos={'origen': 'descubrir'})
             _dsc_meta(conn, 'aviso_editor', lote)
             conn.commit()
@@ -13924,9 +13955,10 @@ def _dsc_tick():
         _dsc_recolectar_en_hilo()
 
 
-def _dsc_marcar_visto(conn, clave, dias=_DSC_VISTO_DIAS):
-    conn.execute('INSERT OR REPLACE INTO descubrir_vistos (clave, hasta) VALUES (?, ?)',
-                 (clave, (_dsc_ahora() + timedelta(days=dias)).date().isoformat()))
+def _dsc_marcar_visto(conn, clave, dias=_DSC_VISTO_DIAS, huella=None):
+    hasta = (_dsc_ahora() + timedelta(days=dias)).date().isoformat()
+    for k in {clave, huella} - {None, ''}:
+        conn.execute('INSERT OR REPLACE INTO descubrir_vistos (clave, hasta) VALUES (?, ?)', (k, hasta))
 
 
 def _dsc_limpiar(conn, ahora):
@@ -13935,10 +13967,15 @@ def _dsc_limpiar(conn, ahora):
     quedan un tiempo en descubrir_vistos para no volver a proponerlos)."""
     ah = _dsc_iso(ahora)
     hoy = ahora.date().isoformat()
-    viejos = conn.execute("SELECT id, clave FROM descubrir_items WHERE (estado='publicado' AND vence < ?) "
-                          "OR (estado='borrador' AND semana <= ?)", (ah, hoy)).fetchall()
+    # Vencido (publicado o aprobado que ya no alcanza a salir); borradores sin
+    # aprobar: efemérides y recitales cuando pasa su día (se pueden aprobar
+    # durante toda la semana), lo demás cuando sale su lote.
+    viejos = conn.execute(
+        "SELECT id, clave, huella FROM descubrir_items WHERE (estado IN ('publicado', 'aprobado') AND vence < ?) "
+        "OR (estado='borrador' AND tipo IN ('efemeride', 'evento') AND fecha < ?) "
+        "OR (estado='borrador' AND tipo NOT IN ('efemeride', 'evento') AND semana <= ?)", (ah, hoy, hoy)).fetchall()
     for r in viejos:
-        _dsc_marcar_visto(conn, r['clave'])
+        _dsc_marcar_visto(conn, r['clave'], huella=r['huella'])
     conn.executemany('DELETE FROM descubrir_items WHERE id=?', [(r['id'],) for r in viejos])
     conn.execute('DELETE FROM descubrir_vistos WHERE hasta < ?', (hoy,))
     limite = (ahora - timedelta(days=60)).isoformat()
@@ -13980,13 +14017,28 @@ def _dsc_puede_pedir(it):
     return it['tipo'] in ('lanzamiento', 'similar') and not it['en_orbyte']
 
 
+def _dsc_neg(iso):
+    """Clave para ordenar fechas ISO de la más nueva a la más vieja."""
+    return ''.join(chr(255 - ord(c)) for c in (iso or ''))
+
+
+def _dsc_cuando(fecha):
+    """«Hoy», «Mañana», «Ayer», «Hace 2 días»… para las efemérides."""
+    try:
+        dias = (datetime.strptime((fecha or '')[:10], '%Y-%m-%d').date() - _dsc_ahora().date()).days
+    except ValueError:
+        return None
+    return {0: 'Hoy', 1: 'Mañana', -1: 'Ayer'}.get(dias) or (f'En {dias} días' if dias > 0 else f'Hace {-dias} días')
+
+
 def _dsc_item_json(conn, it, yo=None, admin=False):
     d = json.loads(it['datos_json'] or '{}')
     out = {'id': it['id'], 'tipo': it['tipo'], 'titulo': it['titulo'], 'texto': it['texto'] or '',
            'imagen': it['imagen'] or '', 'enlace': it['enlace'] or '', 'fecha': it['fecha'],
            'en_orbyte': bool(it['en_orbyte']), 'album_id': it['album_id'], 'artista_id': it['artista_id'],
            'artista': d.get('artista'), 'ciudad': d.get('ciudad'), 'recinto': d.get('recinto'),
-           'lista': d.get('lista') or [], 'fuente': d.get('fuente'), 'puede_pedir': _dsc_puede_pedir(it)}
+           'lista': d.get('lista') or [], 'fuente': d.get('fuente'), 'puede_pedir': _dsc_puede_pedir(it),
+           'cuando': _dsc_cuando(it['fecha']) if it['tipo'] == 'efemeride' else None}
     if yo is not None and out['puede_pedir'] and d.get('pedido_clave'):
         out['pedido'] = bool(conn.execute(
             'SELECT 1 FROM material_pedidos p JOIN material_pedido_usuarios u ON u.pedido_id=p.id '
@@ -14018,8 +14070,7 @@ def api_v1_descubrir():
             j = _dsc_item_json(conn, it, yo)
             j['para_ti'] = es_mio
             if it['tipo'] == 'efemeride':
-                if it['fecha'] == hoy:
-                    efe.append(j)
+                efe.append(j)
             elif it['tipo'] == 'evento':
                 eventos.append(j)
             elif es_mio:
@@ -14027,6 +14078,10 @@ def api_v1_descubrir():
             elif es_general:
                 general.append(j)
         eventos.sort(key=lambda e: e['fecha'] or '')
+        # Un día como hoy: primero la de hoy, después la de mañana y al final
+        # las de días pasados (se quedan 72 h), de la más reciente a la más vieja.
+        efe.sort(key=lambda e: (0 if e['fecha'] == hoy else 1 if (e['fecha'] or '') > hoy else 2,
+                                '' if (e['fecha'] or '') > hoy else _dsc_neg(e['fecha'])))
         return jsonify({'status': 'ok', 'hoy': hoy, 'hoy_txt': _dsc_fecha_txt(hoy, False),
                         'efemerides': efe, 'para_ti': para_ti, 'general': general, 'eventos': eventos,
                         'ciudad': _dsc_usuario_ciudad(conn, yo), 'ciudades': DESCUBRIR_CIUDADES})
@@ -14111,11 +14166,13 @@ def api_v1_admin_descubrir_borradores():
             "ORDER BY estado='aprobado', relevancia DESC, id DESC", (lote.isoformat(),)).fetchall()]
         juntando = conn.execute("SELECT COUNT(*) FROM descubrir_items WHERE estado='borrador' AND semana>?",
                                 (lote.isoformat(),)).fetchone()[0]
+        en_espera = conn.execute("SELECT COUNT(*) FROM descubrir_items WHERE estado='aprobado' AND tipo<>'efemeride'"
+                                 ).fetchone()[0]
         claves = _dsc_fuentes.claves()
         return jsonify({
             'status': 'ok', 'lote': lote.isoformat(), 'lote_txt': _dsc_fecha_txt(lote.isoformat(), False),
             'cierre_txt': f'sábado {_dsc_fecha_txt(cierre.isoformat(), False)} a las 23:59',
-            'cerrado': ahora.weekday() == 6, 'items': items, 'siguiente_lote': juntando,
+            'cerrado': ahora.weekday() == 6, 'items': items, 'siguiente_lote': juntando, 'en_espera': en_espera,
             'recolector': {'corriendo': _dsc_estado['corriendo'], 'paso': _dsc_estado['paso'],
                            'ultima': _dsc_meta(conn, 'ultima_recoleccion'), 'creados': _dsc_estado['creados'],
                            'errores': dict(_dsc_fuentes.ultimo_error),
@@ -14141,7 +14198,7 @@ def api_v1_admin_descubrir_decidir():
         titulo = ' '.join(str(datos.get('titulo') or it['titulo']).split())[:160]
         texto = str(datos.get('texto') if datos.get('texto') is not None else (it['texto'] or '')).strip()[:600]
         if modo is None:
-            _dsc_marcar_visto(conn, it['clave'])
+            _dsc_marcar_visto(conn, it['clave'], huella=it['huella'])
             conn.execute('DELETE FROM descubrir_items WHERE id=?', (it['id'],))
             conn.commit()
             return jsonify({'status': 'ok', 'descartado': True})
@@ -14154,31 +14211,87 @@ def api_v1_admin_descubrir_decidir():
                 'SELECT * FROM descubrir_items WHERE id=?', (it['id'],)).fetchone(), admin=True)})
         if modo not in ('general', 'favoritos', 'ambos'):
             return jsonify({'status': 'error', 'message': 'Modo desconocido.'}), 400
-        ahora = _dsc_ahora()
-        if datos.get('ya'):
-            desde = avisar = ahora
+        if it['estado'] == 'publicado' and not datos.get('ya'):
+            # Ya está publicado: solo cambia modo/texto, sin volver a programarlo.
+            conn.execute('UPDATE descubrir_items SET modo=?, titulo=?, texto=? WHERE id=?', (modo, titulo, texto, it['id']))
         else:
-            lunes = datetime.strptime(it['semana'], '%Y-%m-%d')
-            desde = max(lunes.replace(hour=0, minute=1), ahora) if lunes.date() > ahora.date() else ahora
-            if it['tipo'] == 'efemeride':
-                desde = max(datetime.strptime(it['fecha'], '%Y-%m-%d').replace(hour=0, minute=1), ahora)
-            avisar = desde.replace(hour=9, minute=0) if desde.hour < 9 else desde
-        if it['tipo'] == 'efemeride':
-            vence = datetime.strptime(it['fecha'], '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-        elif it['tipo'] == 'evento':
-            vence = datetime.strptime(it['fecha'], '%Y-%m-%d') + timedelta(days=1)
-        elif it['tipo'] == 'lanzamiento':
-            vence = desde + timedelta(days=30)
-        else:
-            vence = desde + timedelta(days=7)
-        conn.execute("UPDATE descubrir_items SET estado='aprobado', modo=?, titulo=?, texto=?, publicar_desde=?, "
-                     "avisar_desde=?, vence=?, avisado=0 WHERE id=?",
-                     (modo, titulo, texto, _dsc_iso(desde), _dsc_iso(avisar), _dsc_iso(vence), it['id']))
+            desde, avisar, vence, sin_aviso = _dsc_programa(it, _dsc_ahora(), bool(datos.get('ya')))
+            # `avisado` NO se reinicia: si ya se avisó (y se despublicó y volvió a
+            # aprobar) no se manda el mismo aviso dos veces.
+            conn.execute("UPDATE descubrir_items SET estado='aprobado', modo=?, titulo=?, texto=?, publicar_desde=?, "
+                         "avisar_desde=?, vence=?, avisado=MAX(avisado, ?) WHERE id=?",
+                         (modo, titulo, texto, _dsc_iso(desde), _dsc_iso(avisar), _dsc_iso(vence), 1 if sin_aviso else 0,
+                          it['id']))
         conn.commit()
         if datos.get('ya'):
             _dsc_tick_seguro()
         it = conn.execute('SELECT * FROM descubrir_items WHERE id=?', (it['id'],)).fetchone()
         return jsonify({'status': 'ok', 'item': _dsc_item_json(conn, it, admin=True)})
+    finally:
+        conn.close()
+
+
+_DSC_EFE_ANTES = timedelta(hours=12)       # la efeméride aparece 12 h antes de su día…
+_DSC_EFE_DESPUES = timedelta(hours=72)     # …y se queda hasta 72 h después de terminado
+_DSC_EVENTO_YA_DIAS = 30                   # recital a 30 días o menos: sale al aprobarlo
+
+
+def _dsc_programa(it, ahora, ya=False):
+    """(publicar_desde, avisar_desde, vence, sin_aviso) de algo aprobado. Lo
+    aprobado se publica solo:
+    - efeméride: 12 h antes de su día (o ya, si es más tarde), aviso a las
+      09:00 del día mismo, vence 72 h después de terminado el día; si el día
+      ya pasó no se avisa («un día como hoy» ya no es hoy);
+    - recital: si faltan 30 días o menos sale al aprobarlo; si no, con el
+      lote del lunes. Vence al día siguiente del recital;
+    - lo demás, con el lote del lunes a las 00:01 (lanzamiento 30 días, resto 7).
+    `ya` (Publicar ahora) adelanta la salida a este instante."""
+    lunes = datetime.strptime(it['semana'], '%Y-%m-%d').replace(hour=0, minute=1)
+    fecha = None
+    try:
+        fecha = datetime.strptime((it['fecha'] or '')[:10], '%Y-%m-%d')
+    except ValueError:
+        pass
+    sin_aviso = False
+    if it['tipo'] == 'efemeride' and fecha:
+        desde = ahora if ya else max(fecha - _DSC_EFE_ANTES, ahora)
+        vence = fecha + timedelta(days=1) + _DSC_EFE_DESPUES
+        avisar = max(fecha.replace(hour=9), ahora)
+        sin_aviso = ahora >= fecha + timedelta(days=1)
+        return desde, avisar, vence, sin_aviso
+    if ya:
+        desde = ahora
+    elif it['tipo'] == 'evento' and fecha and (fecha.date() - ahora.date()).days <= _DSC_EVENTO_YA_DIAS:
+        desde = ahora
+    else:
+        desde = max(lunes, ahora)
+    avisar = desde.replace(hour=9, minute=0, second=0) if desde.hour < 9 else desde
+    if it['tipo'] == 'evento' and fecha:
+        vence = fecha + timedelta(days=1)
+    elif it['tipo'] == 'lanzamiento':
+        vence = desde + timedelta(days=30)
+    else:
+        vence = desde + timedelta(days=7)
+    return desde, avisar, vence, sin_aviso
+
+
+@app.route('/api/v1/admin/descubrir/publicar-ahora', methods=['POST'])
+@api_admin_required
+def api_v1_admin_descubrir_publicar_ahora():
+    """Publica YA todo lo aprobado que espera su lote (sin esperar al lunes).
+    Las efemérides siguen su horario (12 h antes de su día): adelantarlas
+    días mostraría «un día como hoy» que no es hoy."""
+    conn = get_db_connection()
+    try:
+        ahora = _dsc_ahora()
+        filas = conn.execute("SELECT * FROM descubrir_items WHERE estado='aprobado' AND tipo<>'efemeride'").fetchall()
+        for it in filas:
+            desde, avisar, vence, _ = _dsc_programa(it, ahora, ya=True)
+            conn.execute('UPDATE descubrir_items SET publicar_desde=?, avisar_desde=?, vence=? WHERE id=?',
+                         (_dsc_iso(desde), _dsc_iso(avisar), _dsc_iso(vence), it['id']))
+        conn.commit()
+        _dsc_tick_seguro()
+        return jsonify({'status': 'ok', 'publicadas': len(filas)})
     finally:
         conn.close()
 
