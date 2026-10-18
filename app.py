@@ -12064,6 +12064,29 @@ def _tv_quitar_worker():
             conn.close()
 
 
+def _tv_soltar_ya():
+    """Marca la tele como libre AL INSTANTE (la app que vuelve a abrirse ya
+    la ve en OFF) y la devuelve a su app en segundo plano."""
+    conn = get_db_connection()
+    try:
+        filas = [dict(r) for r in conn.execute('SELECT * FROM tv_pantallas WHERE activa=1')]
+        conn.execute('UPDATE tv_pantallas SET activa=0, dispositivo=NULL')
+        conn.commit()
+    finally:
+        conn.close()
+    _tv_sonando.clear()
+
+    def _devolver():
+        with _tv_lock:
+            for f in filas:
+                try:
+                    _tv_devolver(f)
+                except Exception:  # noqa: BLE001
+                    app.logger.exception('Modo TV: error al devolver la tele')
+            _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
+    threading.Thread(target=_devolver, daemon=True).start()
+
+
 def _tv_quitar_si_activa():
     try:
         if _tv_hay_activa():
@@ -12210,7 +12233,7 @@ def api_v1_dispositivo_liberar():
     finally:
         conn.close()
     if tv:
-        threading.Thread(target=_tv_quitar_worker, daemon=True).start()
+        _tv_soltar_ya()
     for t in targets:
         _cast_soltar_equipo(t)
     return jsonify({'status': 'ok', 'tv': tv, 'equipos': len(targets)})
