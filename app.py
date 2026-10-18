@@ -1016,6 +1016,7 @@ def get_db_connection():
         CREATE INDEX IF NOT EXISTS idx_playlist_comentarios_pl ON playlist_comentarios (playlist_id, id);
     ''')
     _dsc_migrar(conn)   # Ticket C-11 (Descubrir)
+    _integ.migrar(conn)  # Ticket 42b (clave de Alexa)
     for _sql in ("ALTER TABLE playlist_tracks ADD COLUMN added_by INTEGER",
                  "ALTER TABLE playlists ADD COLUMN copia_de INTEGER"):
         try:
@@ -1575,6 +1576,76 @@ def _api_presence_touch(user):
         app.logger.exception('B-01: no se pudo registrar la presencia')
 
 
+# ── Ticket 42b (pedido por Niko): clave propia para la skill de Alexa ─────────
+# La skill usaba una clave de sesión de 30 días y dejó de responder al vencer.
+# La clave de Alexa (`alx_…`, ver integraciones.py) no vence, se revoca con
+# ./clave_alexa.sh y solo abre lo que usa Alexa. Si Alexa llega con una clave
+# rechazada se avisa a los admins en la campana (como mucho cada 6 h).
+ALEXA_ENDPOINTS = {'api_v1_ai_playlist', 'api_v1_ai_playlist_expand', 'api_v1_ai_playlist_feedback', 'api_v1_me',
+                   'api_v1_alexa_stream', 'api_v1_alexa_track'}
+_alexa_aviso_at = [0.0]
+_alexa_uso_at = {}
+
+
+def _alexa_avisar_rechazo(motivo):
+    if time.time() - _alexa_aviso_at[0] < 6 * 3600:
+        return
+    _alexa_aviso_at[0] = time.time()
+    app.logger.warning(f'[alexa] clave rechazada: {motivo}')
+    try:
+        conn = get_db_connection()
+        try:
+            for a in conn.execute('SELECT id FROM users WHERE is_admin=1').fetchall():
+                _notificar(conn, a['id'], 'sistema',
+                           f'Alexa no pudo entrar a Orbyte ({motivo}). En el servidor: ./clave_alexa.sh estado',
+                           datos={'origen': 'alexa'})
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - el aviso nunca rompe el pedido
+        app.logger.exception('[alexa] no se pudo avisar el rechazo')
+
+
+def _alexa_usuario_por_clave(clave):
+    """(usuario, None) si la clave de Alexa es válida para este endpoint; si
+    no, (None, respuesta de error)."""
+    conn = get_db_connection()
+    try:
+        fila = _integ.buscar(conn, clave)
+        user = None
+        if fila:
+            row = conn.execute('SELECT * FROM users WHERE id=?', (fila['user_id'],)).fetchone()
+            user = dict(row) if row and row['is_approved'] else None
+            if user and time.time() - _alexa_uso_at.get(fila['id'], 0) > 60:
+                _alexa_uso_at[fila['id']] = time.time()
+                conn.execute('UPDATE integracion_claves SET ultimo_uso_at=? WHERE id=?',
+                             (_utcnow_iso()[:19], fila['id']))
+                conn.commit()
+    finally:
+        conn.close()
+    if not user:
+        _alexa_avisar_rechazo('la clave fue revocada o no existe')
+        return None, (jsonify({'error': 'invalid_token'}), 401)
+    if request.endpoint not in ALEXA_ENDPOINTS:
+        _alexa_avisar_rechazo(f'la skill pidió algo no permitido: {request.path}')
+        return None, (jsonify({'error': 'not_allowed_for_integration'}), 403)
+    user['via_integracion'] = 'alexa'
+    return user, None
+
+
+def _alexa_user_id_de_token(token):
+    """Para /api/v1/alexa/stream y /track (token por header o ?token=):
+    acepta la clave de Alexa o una clave de sesión normal. user_id o None."""
+    if _integ.es_clave_integracion(token):
+        user, error = _alexa_usuario_por_clave(token)
+        return user['id'] if user else None
+    try:
+        return _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        _alexa_avisar_rechazo('su clave venció; genera una que no vence con ./clave_alexa.sh generar')
+        return None
+
+
 def api_login_required(view):
     """Para /api/v1/*: acepta token Bearer (cliente nativo) O cookie de
     sesión activa (fetch() same-origin desde la propia web) — así la web
@@ -1585,7 +1656,12 @@ def api_login_required(view):
     def wrapped(*args, **kwargs):
         auth = request.headers.get('Authorization', '')
         user = None
-        if auth.startswith('Bearer '):
+        if auth.startswith('Bearer ') and _integ.es_clave_integracion(auth[len('Bearer '):]):
+            # Ticket 42b: clave propia de la skill de Alexa (no vence, alcance acotado).
+            user, error = _alexa_usuario_por_clave(auth[len('Bearer '):])
+            if error:
+                return error
+        elif auth.startswith('Bearer '):
             token = auth[len('Bearer '):]
             try:
                 user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
@@ -3881,10 +3957,9 @@ def api_v1_alexa_stream(track_id):
     if not token:
         app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: sin token (ni header ni query)")
         return jsonify({'error': 'not_authenticated'}), 401
-    try:
-        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
-    except (BadSignature, SignatureExpired) as e:
-        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: token inválido ({e.__class__.__name__})")
+    user_id = _alexa_user_id_de_token(token)   # Ticket 42b: clave de Alexa o de sesión
+    if user_id is None:
+        app.logger.warning(f"[api/v1/alexa/stream] track={track_id}: token inválido")
         return jsonify({'error': 'invalid_token'}), 401
 
     conn = get_db_connection()
@@ -3969,9 +4044,8 @@ def api_v1_alexa_track(track_id):
     token = auth_header[len('Bearer '):] if auth_header.startswith('Bearer ') else request.args.get('token')
     if not token:
         return jsonify({'error': 'not_authenticated'}), 401
-    try:
-        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
-    except (BadSignature, SignatureExpired):
+    user_id = _alexa_user_id_de_token(token)   # Ticket 42b: clave de Alexa o de sesión
+    if user_id is None:
         return jsonify({'error': 'invalid_token'}), 401
 
     conn = get_db_connection()
@@ -13559,6 +13633,7 @@ def api_v1_playlist_comentarios(playlist_id):
 # claude/especificacion-c11-descubrir.md (proyecto).
 
 import descubrir_fuentes as _dsc_fuentes
+import integraciones as _integ   # Ticket 42b
 
 DESCUBRIR_CIUDADES = ['Santiago', 'Valparaíso', 'Viña del Mar', 'Concepción', 'La Serena/Coquimbo']
 _DSC_TM_CIUDADES = {'Santiago': ['Santiago'], 'Valparaíso': ['Valparaíso', 'Valparaiso'],
