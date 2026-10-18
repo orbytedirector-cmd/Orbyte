@@ -4904,6 +4904,11 @@ _COLLAB_INF_NUEVAS = 5           # pistas nuevas de usuarios entre tandas…
 _COLLAB_INF_MINUTOS = 15         # …o este tiempo (con al menos 1 nueva)
 _COLLAB_RESCATE_UMBRAL = 2       # "casi no quedan": pistas por sonar (incluida la que sigue)
 _collab_rescate_fallido = {}     # session_id -> último rescate sin recomendaciones (no reintentar al toque)
+# C-06c (sesión real de Niko, 18-10): dos avisos casi simultáneos (agregar +
+# lo que suena, o dos dispositivos) corrían el modo infinito a la vez: tandas
+# de 10 en vez de 5 y la misma pista repetida. Un candado por sesión.
+_collab_infinito_locks = {}
+_collab_infinito_locks_guard = threading.Lock()
 
 
 def _collab_auto_carga(sess):
@@ -5015,6 +5020,15 @@ def _collab_marcar_sonando(conn, sess, track_id):
     return True
 
 
+def _collab_cancion_clave(r):
+    """Misma canción aunque sea otra versión: título sin «(Live…)», «[…]»,
+    « - Remaster…» + artista, normalizados."""
+    r = dict(r)
+    titulo = r.get('title') or r.get('t_title') or ''
+    artista = r.get('artist') or ''
+    return _dsc_fuentes.normalizar(titulo) + '|' + _dsc_fuentes.normalizar(artista)
+
+
 def _collab_infinito_tanda(conn, sess, inf_id, n, rescate):
     """Agrega hasta `n` pistas del Modo infinito (en espera, como las de
     cualquiera). Cada una se inspira en un participante distinto — lo último
@@ -5033,18 +5047,31 @@ def _collab_infinito_tanda(conn, sess, inf_id, n, rescate):
         return 0
     excluir = {r['track_id'] for r in conn.execute(
         'SELECT track_id FROM collab_queue_items WHERE session_id=?', (sess['id'],))}
+    # C-06c: tampoco la MISMA canción en otra versión («Radio Ga Ga» y «Radio
+    # Ga Ga (Live Aid)»): en la tele parecía que el modo infinito se adjudicaba
+    # la canción que había pedido un invitado.
+    canciones = {_collab_cancion_clave(r) for r in conn.execute(
+        'SELECT t.title, t.artist FROM collab_queue_items q JOIN tracks t ON t.id=q.track_id WHERE q.session_id=?',
+        (sess['id'],))}
     hechas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE participant_id=?', (inf_id,)).fetchone()[0]
     todas = [t for semillas in por_part.values() for t in semillas][:10]
     elegidas = []
     for i in range(n):
         pid = partes[(hechas + i) % len(partes)]
-        recs = _radio_next_tracks(conn, sess['created_by'], por_part[pid], list(excluir), 1)
-        if not recs:
-            recs = _radio_next_tracks(conn, sess['created_by'], todas, list(excluir), 1)
-        if not recs:
+        rec = None
+        for semillas in (por_part[pid], todas):
+            for r in _radio_next_tracks(conn, sess['created_by'], semillas, list(excluir), 6):
+                if _collab_cancion_clave(r) not in canciones:
+                    rec = r
+                    break
+                excluir.add(r['id'])
+            if rec:
+                break
+        if not rec:
             continue
-        tid = recs[0]['id']
+        tid = rec['id']
         excluir.add(tid)
+        canciones.add(_collab_cancion_clave(rec))
         elegidas.append(tid)
     base = datetime.now(timezone.utc).replace(tzinfo=None)
     for i, tid in enumerate(elegidas):
@@ -5106,9 +5133,14 @@ def _collab_infinito_tick(conn, sess):
 
 def _collab_infinito_tick_seguro(conn, sess):
     """Igual que _collab_infinito_tick, pero un error ahí nunca rompe lo que
-    se estaba haciendo (agregar una pista, entregar la siguiente…)."""
+    se estaba haciendo (agregar una pista, entregar la siguiente…). Una sola
+    corrida a la vez por sesión (C-06c)."""
+    with _collab_infinito_locks_guard:
+        lock = _collab_infinito_locks.setdefault(sess['id'], threading.Lock())
     try:
-        return _collab_infinito_tick(conn, sess)
+        conn.commit()   # que la consulta vea lo que otra corrida ya guardó
+        with lock:
+            return _collab_infinito_tick(conn, sess)
     except Exception:
         app.logger.exception('collab: modo infinito')
         return 0
