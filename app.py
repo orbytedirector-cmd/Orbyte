@@ -5084,8 +5084,9 @@ def _collab_infinito_tanda(conn, sess, inf_id, n, rescate):
 
 def _collab_infinito_tick(conn, sess):
     """¿Le toca al Modo infinito? Devuelve cuántas pistas agregó.
-    - Rescate: si ya sonó algo y quedan 2 o menos por sonar, agrega 5 aunque
-      no tenga cupo (no cuentan en su cupo) — la música nunca se corta.
+    - Rescate: si ya sonó algo y quedan 2 o menos por sonar, agrega 2 y 3
+      alternados (C-06d) aunque no tenga cupo (no cuentan en su cupo) — la
+      música nunca se corta.
     - Tanda normal: con al menos 5 pistas de usuarios en la sesión y cupo
       disponible, propone 5; las siguientes cuando haya 5 nuevas de usuarios
       o pasen 15 minutos (con al menos 1 nueva)."""
@@ -5105,7 +5106,11 @@ def _collab_infinito_tick(conn, sess):
     if alguna_sono and por_sonar <= _COLLAB_RESCATE_UMBRAL:
         if time.time() - _collab_rescate_fallido.get(sess['id'], 0) < 60:
             return 0
-        n = _collab_infinito_tanda(conn, sess, inf_id, _COLLAB_INF_TANDA, rescate=True)
+        # C-06d (pedido por Niko): el rescate suma poco, 2 y 3 alternados, para
+        # que el modo infinito no se acumule mientras los usuarios agregan.
+        hechas = conn.execute('SELECT COUNT(*) FROM collab_queue_items WHERE session_id=? AND participant_id=? '
+                              'AND rescate=1', (sess['id'], inf_id)).fetchone()[0]
+        n = _collab_infinito_tanda(conn, sess, inf_id, 2 if hechas % 5 == 0 else 3, rescate=True)
         if not n:
             _collab_rescate_fallido[sess['id']] = time.time()
         return n
