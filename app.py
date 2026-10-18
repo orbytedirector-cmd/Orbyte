@@ -1050,7 +1050,8 @@ def get_db_connection():
                  "ALTER TABLE tv_pantallas ADD COLUMN tipo TEXT DEFAULT 'lg'",
                  "ALTER TABLE tv_pantallas ADD COLUMN modo TEXT DEFAULT 'normal'",
                  "ALTER TABLE tv_pantallas ADD COLUMN app_secret TEXT",
-                 "ALTER TABLE tv_pantallas ADD COLUMN app_modelo TEXT"):
+                 "ALTER TABLE tv_pantallas ADD COLUMN app_modelo TEXT",
+                 "ALTER TABLE tv_pantallas ADD COLUMN dispositivo TEXT"):
         try:
             conn.execute(_sql)
             conn.commit()
@@ -1627,6 +1628,20 @@ def api_login_required(view):
         g.api_user = user
         return view(*args, **kwargs)
     return wrapped
+
+
+def _api_dispositivo():
+    """Identidad del DISPOSITIVO que hace el pedido (no de la cuenta): un
+    hash del token de la app (cada inicio de sesión en cada equipo tiene el
+    suyo y se guarda entre aperturas) o, en la web, un id por cookie. Lo usan
+    el Modo TV (la tele muestra solo el dispositivo que la mandó) y
+    «Reproducir en…» (al cerrar/abrir la app se sueltan sus equipos)."""
+    auth = request.headers.get('Authorization', '')
+    if auth.startswith('Bearer '):
+        return 'app:' + hashlib.sha256(auth[len('Bearer '):].encode()).hexdigest()[:16]
+    if not session.get('disp_id'):
+        session['disp_id'] = secrets.token_hex(8)
+    return 'web:' + session['disp_id']
 
 
 # Ticket C-03: endpoints /api/v1 de SOLO LECTURA que puede usar un invitado
@@ -5605,6 +5620,7 @@ def api_v1_collab_infinito():
 # agregó y lo que viene — sin ningún control.
 _collab_sonando = {}            # session_id -> {track_id, position, duration, playing, next_ids, at}
 _COLLAB_SONANDO_VIGENCIA_S = 45  # sin avisos por más que esto = no se sabe qué suena
+_collab_sonando_disp = {}       # C-07j: (session_id, dispositivo) -> lo mismo, por dispositivo
 
 
 @app.route('/api/v1/collab/sonando', methods=['POST'])
@@ -5639,20 +5655,22 @@ def api_v1_collab_sonando_post():
                 _collab_infinito_tick_seguro(conn, sess)
     finally:
         conn.close()
+    disp = _api_dispositivo()
     if not sess:
         # Ticket C-07: sin playlist colaborativa, un admin con el Modo TV
         # activo igual informa lo que suena (para la pantalla de la tele).
+        # C-07j: por dispositivo (la tele muestra solo el que la mandó).
         if g.api_user.get('is_admin') and _tv_hay_activa():
-            _tv_sonando[g.api_user['id']] = {
+            _tv_sonando[disp] = {
                 'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
                 'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time(),
             }
             return jsonify({'status': 'ok', 'tv': True})
         return jsonify({'status': 'ignored'})
-    _collab_sonando[sess['id']] = {
-        'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
-        'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time(),
-    }
+    st = {'track_id': track_id, 'position': _num(data.get('position')), 'duration': _num(data.get('duration')),
+          'playing': bool(data.get('playing')), 'next_ids': next_ids, 'at': time.time()}
+    _collab_sonando[sess['id']] = st
+    _collab_sonando_disp[(sess['id'], disp)] = st   # C-07j: para la tele
     return jsonify({'status': 'ok'})
 
 
@@ -5754,10 +5772,11 @@ def api_collab_sonando():
         conn.close()
 
 
-def _collab_sonando_payload(conn, sess):
-    """Lo que suena en el anfitrión (web de invitados y Modo Colaborativo)."""
+def _collab_sonando_payload(conn, sess, dispositivo=None):
+    """Lo que suena en el anfitrión (web de invitados y Modo Colaborativo).
+    `dispositivo` (Modo TV, C-07j): solo lo que informa ese dispositivo."""
     if True:
-        st = _collab_sonando.get(sess['id'])
+        st = _collab_sonando_disp.get((sess['id'], dispositivo)) if dispositivo else _collab_sonando.get(sess['id'])
         ahora = time.time()
         if not st or not st['track_id'] or ahora - st['at'] > _COLLAB_SONANDO_VIGENCIA_S:
             return {'active': True, 'track': None}
@@ -10246,6 +10265,7 @@ def api_v1_cast_play():
     # Ticket D-18: otro cliente (Desktop, iPhone) toma el equipo -> la cola
     # del servidor deja de avanzar para no pisarle lo que mando.
     _cast_cola_soltar(int(target_id), 'cast/play directo')
+    _cast_duenos[int(target_id)] = _api_dispositivo()   # C-07j
     payload, codigo = _cast_reproducir(int(target_id), int(track_id),
                                        request.host_url.rstrip('/'), g.api_user['id'])
     return jsonify(payload), codigo
@@ -10759,6 +10779,30 @@ def _cast_cola_estado(target_id):
         return _cast_cola_publica(_cast_colas.get(target_id))
 
 
+_cast_duenos = {}   # C-07j: target_id -> dispositivo que lo está usando
+
+
+def _cast_soltar_equipo(target):
+    """C-07j: la app que usaba este equipo se cerró (o se volvió a abrir):
+    se detiene y se descarta su cola; la app vuelve a su salida propia."""
+    tid = target['id']
+    _cast_duenos.pop(tid, None)
+    _cast_pausas.pop(tid, None)
+    _cast_cola_soltar(tid, 'la app se cerró')
+    with _cast_colas_lock:
+        _cast_colas.pop(tid, None)
+    try:
+        status, _ = _cast_soap_call(target['control_url'], 'Stop',
+                                    '<u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">'
+                                    '<InstanceID>0</InstanceID></u:Stop>')
+        app.logger.info(f"[cast v1] liberar -> {target['name']}: HTTP {status}")
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"[cast v1] liberar -> {target['name']}: {e}")
+    global _cast_active_target
+    if _cast_active_target and _cast_active_target.get('id') == tid:
+        _cast_active_target = None
+
+
 def _cast_cola_soltar(target_id, motivo):
     with _cast_colas_lock:
         cola = _cast_colas.get(target_id)
@@ -11028,6 +11072,8 @@ def api_v1_cast_queue():
         conn.close()
 
     tocar = data.get('play', True) is not False
+    if tocar:
+        _cast_duenos[target_id] = _api_dispositivo()   # C-07j
     if tocar:
         # Ticket D-22: diagnostico — que accion de la pantalla pidio reproducir
         app.logger.info(f"[cast cola] pedido de reproducción equipo {target_id} pos {index} "
@@ -11569,7 +11615,7 @@ def api_debug_dsd():
 
 _tv_lock = threading.Lock()
 _tv_progreso = {'estado': 'inactivo', 'mensaje': '', 'at': 0.0}
-_tv_sonando = {}   # admin_id -> lo que suena en su app SIN playlist colaborativa
+_tv_sonando = {}   # dispositivo -> lo que suena en su app SIN playlist colaborativa (C-07j)
 _TV_EN_CURSO = ('conectando', 'encendiendo', 'emparejando', 'quitando')
 
 
@@ -11902,7 +11948,7 @@ def _tvapp_mostrar(conn, fila, modo):
                                   'Orbyte TV el permiso «Mostrar sobre otras apps» (lo explica la propia app en sus ajustes).')
 
 
-def _tv_mostrar_worker(ip, nombre, admin_id, modo='normal'):
+def _tv_mostrar_worker(ip, nombre, admin_id, modo='normal', dispositivo=None):
     """En un hilo: enciende (si hace falta), empareja, abre /tv/<clave>."""
     with _tv_lock:
         conn = get_db_connection()
@@ -11920,8 +11966,8 @@ def _tv_mostrar_worker(ip, nombre, admin_id, modo='normal'):
             if fila.get('tipo') == 'app' or ip.startswith(_TVAPP_PREFIJO):
                 _tvapp_mostrar(conn, fila, modo)
                 conn.execute('UPDATE tv_pantallas SET activa=0')
-                conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, usada_at=? WHERE id=?',
-                             (admin_id, _utcnow_iso(), fila['id']))
+                conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, dispositivo=?, usada_at=? WHERE id=?',
+                             (admin_id, dispositivo, _utcnow_iso(), fila['id']))
                 conn.commit()
                 _tv_set_progreso('lista', 'Listo: Orbyte está en la tele.')
                 return
@@ -11965,9 +12011,9 @@ def _tv_mostrar_worker(ip, nombre, admin_id, modo='normal'):
                 except Exception as e:  # noqa: BLE001 - si falla, la página pide pulsar OK
                     app.logger.info('Modo TV: no se pudo pulsar OK para pantalla completa (%s)', e)
             conn.execute('UPDATE tv_pantallas SET activa=0')
-            conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, usada_at=?, client_key=?, mac=COALESCE(?, mac), '
-                         'prev_app=COALESCE(?, prev_app) WHERE id=?',
-                         (admin_id, _utcnow_iso(), cambios['client_key'], cambios.get('mac'),
+            conn.execute('UPDATE tv_pantallas SET activa=1, admin_id=?, dispositivo=?, usada_at=?, client_key=?, '
+                         'mac=COALESCE(?, mac), prev_app=COALESCE(?, prev_app) WHERE id=?',
+                         (admin_id, dispositivo, _utcnow_iso(), cambios['client_key'], cambios.get('mac'),
                           cambios.get('prev_app'), fila['id']))
             conn.commit()
             _tv_set_progreso('lista', 'Listo: Orbyte está en la tele.')
@@ -12005,7 +12051,7 @@ def _tv_quitar_worker():
         conn = get_db_connection()
         try:
             filas = [dict(r) for r in conn.execute('SELECT * FROM tv_pantallas WHERE activa=1')]
-            conn.execute('UPDATE tv_pantallas SET activa=0')
+            conn.execute('UPDATE tv_pantallas SET activa=0, dispositivo=NULL')
             conn.commit()
             _tv_sonando.clear()
             for f in filas:
@@ -12016,6 +12062,29 @@ def _tv_quitar_worker():
             _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
         finally:
             conn.close()
+
+
+def _tv_soltar_ya():
+    """Marca la tele como libre AL INSTANTE (la app que vuelve a abrirse ya
+    la ve en OFF) y la devuelve a su app en segundo plano."""
+    conn = get_db_connection()
+    try:
+        filas = [dict(r) for r in conn.execute('SELECT * FROM tv_pantallas WHERE activa=1')]
+        conn.execute('UPDATE tv_pantallas SET activa=0, dispositivo=NULL')
+        conn.commit()
+    finally:
+        conn.close()
+    _tv_sonando.clear()
+
+    def _devolver():
+        with _tv_lock:
+            for f in filas:
+                try:
+                    _tv_devolver(f)
+                except Exception:  # noqa: BLE001
+                    app.logger.exception('Modo TV: error al devolver la tele')
+            _tv_set_progreso('inactivo', 'Se quitó Orbyte de la tele.')
+    threading.Thread(target=_devolver, daemon=True).start()
 
 
 def _tv_quitar_si_activa():
@@ -12037,6 +12106,8 @@ def api_v1_admin_tv():
         return jsonify({'disponible': lg_webos.disponible(), 'pantallas': cands,
                         'activa': activa is not None, 'ip': activa['ip'] if activa else None,
                         'nombre': activa['nombre'] if activa else None,
+                        'es_mia': bool(activa) and conn.execute(
+                            'SELECT 1 FROM tv_pantallas WHERE activa=1 AND dispositivo=?', (_api_dispositivo(),)).fetchone() is not None,
                         'progreso': dict(_tv_progreso)})
     finally:
         conn.close()
@@ -12071,7 +12142,9 @@ def api_v1_admin_tv_mostrar():
                         'usa «Buscar equipos» en «Reproducir en…» y vuelve a intentarlo.'}), 404
     modo = 'oled' if str(data.get('modo') or '').lower() == 'oled' else 'normal'
     _tv_set_progreso('conectando', 'Conectando con la tele…')
-    threading.Thread(target=_tv_mostrar_worker, args=(elegida['ip'], elegida.get('nombre'), g.api_user['id'], modo),
+    # C-07j: la tele muestra solo lo que suena en ESTE dispositivo.
+    threading.Thread(target=_tv_mostrar_worker,
+                     args=(elegida['ip'], elegida.get('nombre'), g.api_user['id'], modo, _api_dispositivo()),
                      daemon=True).start()
     return jsonify({'status': 'ok', 'progreso': dict(_tv_progreso)})
 
@@ -12137,6 +12210,33 @@ def api_v1_admin_tv_renombrar():
                         'nombre': fila['alias'] or fila['nombre'] or ip})
     finally:
         conn.close()
+
+
+@app.route('/api/v1/dispositivo/liberar', methods=['POST'])
+@api_login_required
+def api_v1_dispositivo_liberar():
+    """C-07j (pedido por Niko): al cerrar la app y al volver a abrirla todo
+    parte en OFF. Suelta lo que ESTE dispositivo dejó tomado: la tele del
+    Modo TV (si la mandó él) y los equipos de «Reproducir en…» que estaba
+    usando (se detienen y se descarta su cola). No toca lo de otros
+    dispositivos de la misma cuenta."""
+    disp = _api_dispositivo()
+    tv = False
+    conn = get_db_connection()
+    try:
+        # (una tele encendida antes de esta versión no tiene dispositivo: se
+        # suelta si la mandó esta misma cuenta)
+        tv = conn.execute('SELECT 1 FROM tv_pantallas WHERE activa=1 AND (dispositivo=? OR '
+                          '(dispositivo IS NULL AND admin_id=?))', (disp, g.api_user['id'])).fetchone() is not None
+        targets = [dict(r) for r in conn.execute('SELECT * FROM cast_targets').fetchall()
+                   if _cast_duenos.get(r['id']) == disp]
+    finally:
+        conn.close()
+    if tv:
+        _tv_soltar_ya()
+    for t in targets:
+        _cast_soltar_equipo(t)
+    return jsonify({'status': 'ok', 'tv': tv, 'equipos': len(targets)})
 
 
 @app.route('/api/v1/admin/tv/quitar', methods=['POST'])
@@ -12228,7 +12328,7 @@ def tv_estado(clave):
         sess = _collab_active_session(conn)
         if sess:
             out['modo'] = 'colab'
-            p = _collab_sonando_payload(conn, sess)
+            p = _collab_sonando_payload(conn, sess, fila.get('dispositivo'))
             if p.get('track'):
                 out['sonando'] = {'track': p['track'], 'position': p['position'], 'duration': p['duration'],
                                   'playing': p['playing']}
@@ -12251,8 +12351,8 @@ def tv_estado(clave):
             out['colab'] = {'code': _collab_codigo_display(sess.get('code')), 'join_url': _collab_join_url(sess['token']),
                             'total': total, 'sonaron': sonaron, 'ranking': ranking,
                             'eventos': eventos, 'ultimo_item': ultimo}
-        elif fila.get('admin_id') and fila['activa']:
-            st = _tv_sonando.get(fila['admin_id'])
+        elif fila.get('dispositivo') and fila['activa']:
+            st = _tv_sonando.get(fila['dispositivo'])
             if st and st['track_id'] and time.time() - st['at'] <= _COLLAB_SONANDO_VIGENCIA_S:
                 falso = {'id': -1, 'created_by': fila['admin_id']}
                 detalle = _collab_pistas_detalle(conn, falso, [st['track_id']] + st['next_ids'][:3])
