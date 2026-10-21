@@ -12397,7 +12397,12 @@ def api_v1_app_ios():
     if not info:
         return jsonify({'disponible': False})
     from urllib.parse import quote
-    descarga = f"{request.host_url.rstrip('/')}/descargas/orbyte.ipa?t={info['enlace_token']}"
+    # Con ORBYTE_URL_PUBLICA (la dirección de Tailscale Funnel, en el .env) el
+    # IPA se baja por internet: fuera de casa no se puede tener Tailscale y la
+    # VPN de SideStore encendidas a la vez (iOS permite una sola VPN).
+    publica = os.environ.get('ORBYTE_URL_PUBLICA', '').strip().rstrip('/')
+    base = publica or request.host_url.rstrip('/')
+    descarga = f"{base}/descargas/orbyte.ipa?t={info['enlace_token']}"
     return jsonify({
         'disponible': True,
         'version': info.get('version') or '',
