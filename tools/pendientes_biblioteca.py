@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-"""Lista los álbumes de la biblioteca que falta procesar para Orbyte.
+"""Reporte de lo que falta en Orbyte: qué indexar y qué procesar.
 
-Recorre la carpeta de música (por defecto /mnt/musica), busca las carpetas
-que tienen audio y las compara con music.db. Solo lee: no modifica la BD
-ni los archivos.
+Recorre la carpeta de música (por defecto /mnt/musica), mira cada archivo de
+audio y lo compara con music.db. Solo lee: no modifica la BD ni los archivos.
 
-Muestra tres grupos, cada álbum como Artista / Álbum / Ruta:
-  1. Sin agregar a la BD     -> carpeta con audio que no está en `albums`.
-  2. Con canciones nuevas    -> el álbum está, pero hay archivos que no
-                                están en `tracks` (se agregaron después).
-  3. Sin metadata            -> está en la BD, pero nunca se le generó
-                                metadata (sin `album_meta` o ninguna canción
-                                con `track_meta`).
+Grupos del reporte (cada álbum como Artista — Álbum, con su ruta):
+  1. Álbumes sin indexar          carpeta con audio que no está en `albums`.
+  2. Canciones sin indexar        el álbum está, pero hay archivos que no
+                                  están en `tracks` (agregados después).
+  3. Falta procesar (metadata)    canciones en la BD sin `track_meta` cuyo
+                                  archivo sí pesa: falta correr el proceso.
+  4. Canciones de 0 bytes         archivo vacío en disco (indexado o no):
+                                  hay que volver a copiarlo, no procesarlo.
 
 Uso (desde la carpeta del servidor):
-  python3 tools/pendientes_biblioteca.py              # todo, más nuevos primero
-  python3 tools/pendientes_biblioteca.py --dias 7     # solo carpetas tocadas en 7 días
-  python3 tools/pendientes_biblioteca.py --rutas      # solo rutas, una por línea
+  python3 tools/pendientes_biblioteca.py              # reporte completo
+  python3 tools/pendientes_biblioteca.py --dias 7     # solo álbumes tocados en 7 días
+  python3 tools/pendientes_biblioteca.py --rutas      # carpetas a procesar (grupos 1-3), una por línea
   python3 tools/pendientes_biblioteca.py --csv pendientes.csv
 """
 import argparse
@@ -32,29 +32,47 @@ AUDIO = {".flac", ".dsf", ".dff", ".mp3", ".wav", ".aif", ".aiff", ".m4a",
 RAIZ = "/mnt/musica"
 DB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "music.db")
 
+G_ALB = "1. Álbumes sin indexar"
+G_CAN = "2. Canciones sin indexar"
+G_META = "3. Falta procesar (metadata)"
+G_CERO = "4. Canciones de 0 bytes"
+
 
 def nfc(s):
     # Algunas copias (Mac, SMB) guardan los acentos descompuestos: se comparan normalizados.
     return unicodedata.normalize("NFC", s)
 
 
-def carpetas_con_audio(raiz):
-    """{ruta: (mtime, {archivos de audio})} para cada carpeta con audio directo."""
+def leer_disco(raiz):
+    """{carpeta: {"mt": fecha más nueva, "archivos": {nombre: tamaño}}} de cada carpeta con audio."""
     out = {}
-    for d, subdirs, archivos in os.walk(raiz):
+    for d, subdirs, _ in os.walk(raiz):
         subdirs[:] = [s for s in subdirs if not s.startswith(".")]
-        audio = {f for f in archivos
-                 if not f.startswith(".") and os.path.splitext(f)[1].lower() in AUDIO}
-        if not audio:
-            continue
+        archivos, mt = {}, 0.0
         try:
-            # La fecha más nueva entre la carpeta y sus archivos de audio:
-            # sirve para ordenar "lo recién agregado" primero.
-            mt = max([os.path.getmtime(d)] + [os.path.getmtime(os.path.join(d, f)) for f in audio])
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.startswith(".") or os.path.splitext(e.name)[1].lower() not in AUDIO:
+                        continue
+                    try:
+                        st = e.stat()
+                    except OSError:
+                        continue
+                    if not e.is_file():
+                        continue
+                    archivos[e.name] = st.st_size
+                    mt = max(mt, st.st_mtime)
+            if archivos:
+                mt = max(mt, os.path.getmtime(d))
         except OSError:
-            mt = 0
-        out[d.rstrip("/")] = (mt, audio)
+            continue
+        if archivos:
+            out[d.rstrip("/")] = {"mt": mt, "archivos": archivos}
     return out
+
+
+def cuenta(n, uno, varios):
+    return f"{n} {uno if n == 1 else varios}"
 
 
 def artista_album(ruta, raiz):
@@ -68,11 +86,12 @@ def artista_album(ruta, raiz):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Álbumes pendientes de procesar para Orbyte")
+    ap = argparse.ArgumentParser(description="Qué falta indexar y procesar en Orbyte")
     ap.add_argument("--db", default=DB, help=f"ruta a music.db (por defecto {DB})")
     ap.add_argument("--raiz", default=RAIZ, help=f"carpeta de música (por defecto {RAIZ})")
-    ap.add_argument("--dias", type=float, help="solo carpetas modificadas en los últimos N días")
-    ap.add_argument("--rutas", action="store_true", help="imprimir solo las rutas (para pasarlas a otros scripts)")
+    ap.add_argument("--dias", type=float, help="solo álbumes modificados en los últimos N días")
+    ap.add_argument("--rutas", action="store_true",
+                    help="imprimir solo las carpetas a procesar (grupos 1 a 3), una por línea")
     ap.add_argument("--csv", help="guardar también en un CSV (Grupo, Artista, Álbum, Ruta)")
     a = ap.parse_args()
 
@@ -83,61 +102,71 @@ def main():
         sys.exit(f"No encuentro la BD: {a.db} (usa --db)")
 
     con = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
-    albums = {nfc(p.rstrip("/")): i for i, p in con.execute("SELECT id, path FROM albums WHERE path IS NOT NULL")}
-    tracks = {nfc(p) for (p,) in con.execute("SELECT file_path FROM tracks WHERE file_path IS NOT NULL")}
-    # Álbum nunca procesado: sin album_meta o ninguna canción con track_meta.
-    # (Una canción suelta sin track_meta en un álbum ya procesado suele ser un
-    # archivo dañado -duración 0- que el proceso salta, no algo pendiente.)
-    sin_meta = {i for (i,) in con.execute("""
-        SELECT a.id FROM albums a
-        WHERE NOT EXISTS (SELECT 1 FROM album_meta m WHERE m.album_id = a.id)
-           OR NOT EXISTS (SELECT 1 FROM tracks t JOIN track_meta tm ON tm.track_id = t.id
-                          WHERE t.album_id = a.id)""")}
+    albums = {nfc(p.rstrip("/")) for (p,) in con.execute("SELECT path FROM albums WHERE path IS NOT NULL")}
+    # Canciones indexadas: ruta -> ¿tiene track_meta?
+    tracks = {nfc(p): bool(m) for p, m in con.execute("""
+        SELECT t.file_path, tm.track_id IS NOT NULL
+        FROM tracks t LEFT JOIN track_meta tm ON tm.track_id = t.id
+        WHERE t.file_path IS NOT NULL""")}
     con.close()
 
-    disco = carpetas_con_audio(raiz)
+    disco = leer_disco(raiz)
     limite = time.time() - a.dias * 86400 if a.dias else None
 
-    grupos = {"Sin agregar a la BD": [], "Con canciones nuevas": [], "Sin metadata": []}
-    for ruta, (mt, audio) in disco.items():
-        if limite and mt < limite:
+    # grupo -> {carpeta: [archivos]}   (lista vacía = el álbum completo)
+    grupos = {G_ALB: {}, G_CAN: {}, G_META: {}, G_CERO: {}}
+    for ruta, info in disco.items():
+        if limite and info["mt"] < limite:
             continue
-        clave = nfc(ruta)
-        aid = albums.get(clave)
-        if aid is None:
-            grupos["Sin agregar a la BD"].append((mt, ruta))
-        elif any(nfc(os.path.join(ruta, f)) not in tracks for f in audio):
-            grupos["Con canciones nuevas"].append((mt, ruta))
-        elif aid in sin_meta:
-            grupos["Sin metadata"].append((mt, ruta))
+        indexado = nfc(ruta) in albums
+        for nombre, tam in sorted(info["archivos"].items()):
+            clave = nfc(os.path.join(ruta, nombre))
+            if tam == 0:
+                grupos[G_CERO].setdefault(ruta, []).append(nombre)
+            elif not indexado:
+                grupos[G_ALB].setdefault(ruta, [])
+            elif clave not in tracks:
+                grupos[G_CAN].setdefault(ruta, []).append(nombre)
+            elif not tracks[clave]:
+                grupos[G_META].setdefault(ruta, []).append(nombre)
+
+    def ordenados(carpetas):                       # más nuevos primero
+        return sorted(carpetas, key=lambda r: (-disco[r]["mt"], r))
+
+    if a.rutas:
+        vistas = set()
+        for g in (G_ALB, G_CAN, G_META):
+            for ruta in ordenados(grupos[g]):
+                if ruta not in vistas:
+                    vistas.add(ruta)
+                    print(ruta)
+        return
 
     filas = []
-    for grupo, items in grupos.items():
-        for mt, ruta in sorted(items, key=lambda x: (-x[0], x[1])):   # más nuevos primero
+    for g, carpetas in grupos.items():
+        n_can = sum(len(v) for v in carpetas.values())
+        detalle = cuenta(len(carpetas), "álbum", "álbumes") + (
+            ", " + cuenta(n_can, "canción", "canciones") if g != G_ALB else "")
+        print(f"\n== {g} ({detalle}) ==")
+        for ruta in ordenados(carpetas):
             art, alb = artista_album(ruta, raiz)
-            filas.append((grupo, art, alb, ruta))
+            print(f"{art} — {alb}\n    {ruta}")
+            if carpetas[ruta]:
+                for nombre in carpetas[ruta]:
+                    print(f"      · {nombre}")
+                    filas.append((g, art, alb, os.path.join(ruta, nombre)))
+            else:
+                filas.append((g, art, alb, ruta))
+
+    filtro = f" (últimos {a.dias:g} días)" if a.dias else ""
+    print(f"\nResumen{filtro}: " + " · ".join(f"{g.split('. ', 1)[1]}: {len(c)}" for g, c in grupos.items())
+          + f"   [carpetas con audio revisadas: {len(disco)}]")
 
     if a.csv:
         with open(a.csv, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["Grupo", "Artista", "Álbum", "Ruta"])
             w.writerows(filas)
-
-    if a.rutas:
-        for *_, ruta in filas:
-            print(ruta)
-        return
-
-    total = 0
-    for grupo, items in grupos.items():
-        print(f"\n== {grupo} ({len(items)}) ==")
-        for g, art, alb, ruta in filas:
-            if g == grupo:
-                print(f"{art} — {alb}\n    {ruta}")
-        total += len(items)
-    filtro = f" en los últimos {a.dias:g} días" if a.dias else ""
-    print(f"\nTotal pendientes{filtro}: {total}  (carpetas con audio revisadas: {len(disco)})")
-    if a.csv:
         print(f"CSV guardado en {a.csv}")
 
 
