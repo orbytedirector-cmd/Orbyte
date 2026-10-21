@@ -12427,6 +12427,59 @@ def descargas_orbyte_ipa():
                      as_attachment=True, conditional=True, download_name='Orbyte.ipa')
 
 
+# ── Actualización de Orbyte Desktop (Windows instalador / Linux AppImage) ────
+# tools/publicar_desktop.py deja en apk/ el paquete más nuevo de cada sistema
+# (desktop-<plataforma>.json + el archivo). La app lo baja con su sesión.
+_DESKTOP_PLATAFORMAS = ('windows', 'linux')
+
+
+def _desktop_info(plataforma):
+    if plataforma not in _DESKTOP_PLATAFORMAS:
+        return None
+    try:
+        with open(os.path.join(APK_DIR, f'desktop-{plataforma}.json'), encoding='utf-8') as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    archivo = os.path.join(APK_DIR, os.path.basename(info.get('archivo') or ''))
+    if not info.get('archivo') or not os.path.isfile(archivo):
+        return None
+    info['_ruta'] = archivo
+    return info
+
+
+@app.route('/api/v1/app/desktop', methods=['GET'])
+@api_login_required
+def api_v1_app_desktop():
+    plataforma = (request.args.get('plataforma') or '').strip().lower()
+    info = _desktop_info(plataforma)
+    if not info:
+        return jsonify({'disponible': False})
+    return jsonify({
+        'disponible': True,
+        'plataforma': plataforma,
+        'version': info.get('version') or '',
+        'numero': info.get('numero') or [],
+        'notas': info.get('notas') or '',
+        'tamano': int(info.get('tamano') or 0),
+        'sha256': info.get('sha256') or '',
+        'archivo': info.get('archivo'),
+        'publicado_at': info.get('publicado_at') or '',
+        'descarga': f'/api/v1/app/desktop/descargar?plataforma={plataforma}',
+    })
+
+
+@app.route('/api/v1/app/desktop/descargar', methods=['GET'])
+@api_login_required
+def api_v1_app_desktop_descargar():
+    plataforma = (request.args.get('plataforma') or '').strip().lower()
+    info = _desktop_info(plataforma)
+    if not info:
+        return jsonify({'error': 'sin_paquete'}), 404
+    return send_file(info['_ruta'], mimetype='application/octet-stream', as_attachment=True,
+                     conditional=True, download_name=info['archivo'])
+
+
 @app.route('/api/v1/dispositivo/liberar', methods=['POST'])
 @api_login_required
 def api_v1_dispositivo_liberar():
