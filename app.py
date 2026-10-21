@@ -1373,7 +1373,10 @@ def _require_login():
     # maneja cookies de sesión persistentes entre lanzamientos de la app.
     if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
               'tv_pantalla', 'tv_estado', 'tv_qr',
-              'api_v1_tvapp_hola', 'api_v1_tvapp_orden', 'api_v1_tvapp_respuesta') or request.path.startswith('/static/'):
+              'api_v1_tvapp_hola', 'api_v1_tvapp_orden', 'api_v1_tvapp_respuesta',
+              'descargas_orbyte_ipa') or request.path.startswith('/static/'):
+        # descargas_orbyte_ipa: la baja SideStore, sin sesión; se valida con
+        # el enlace_token de apk/ios.json (cambia en cada publicación).
         # tv_*: Ticket C-07 — página de solo lectura para la tele; se valida
         # con su propia clave y solo desde la red de la casa (_tv_fila_por_clave).
         return
@@ -12368,6 +12371,55 @@ def api_v1_app_android_apk():
                      mimetype='application/vnd.android.package-archive',
                      as_attachment=True, conditional=True,
                      download_name=f"orbyte-{info.get('version_name') or 'android'}.apk")
+
+
+# ── Actualización de la app iPhone (SideStore) ──────────────────────────────
+# tools/publicar_ipa.py deja en apk/ el IPA más nuevo (orbyte.ipa) y su ficha
+# (ios.json, con un enlace_token al azar que cambia en cada publicación).
+# La app pregunta al abrirse; si hay una versión mayor, abre SideStore con
+# sidestore://install?url=<este servidor>/descargas/orbyte.ipa?t=<token>.
+# SideStore descarga sin la sesión de Orbyte: por eso el enlace lleva token.
+def _ipa_ios_info():
+    try:
+        with open(os.path.join(APK_DIR, 'ios.json'), encoding='utf-8') as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not os.path.isfile(os.path.join(APK_DIR, 'orbyte.ipa')) or not info.get('enlace_token'):
+        return None
+    return info
+
+
+@app.route('/api/v1/app/ios', methods=['GET'])
+@api_login_required
+def api_v1_app_ios():
+    info = _ipa_ios_info()
+    if not info:
+        return jsonify({'disponible': False})
+    from urllib.parse import quote
+    descarga = f"{request.host_url.rstrip('/')}/descargas/orbyte.ipa?t={info['enlace_token']}"
+    return jsonify({
+        'disponible': True,
+        'version': info.get('version') or '',
+        'build': int(info.get('build') or 0),
+        'notas': info.get('notas') or '',
+        'tamano': int(info.get('tamano') or 0),
+        'publicado_at': info.get('publicado_at') or '',
+        'descarga_url': descarga,
+        'instalar_url': 'sidestore://install?url=' + quote(descarga, safe=''),
+    })
+
+
+@app.route('/descargas/orbyte.ipa', methods=['GET'])
+def descargas_orbyte_ipa():
+    info = _ipa_ios_info()
+    token = request.args.get('t', '')
+    if not info or not token or not hmac.compare_digest(token, str(info['enlace_token'])):
+        return jsonify({'error': 'enlace_invalido'}), 404
+    app.logger.info(f"[actualizador ios] descarga del IPA {info.get('version')} ({info.get('build')}) "
+                    f"desde {request.remote_addr}")
+    return send_file(os.path.join(APK_DIR, 'orbyte.ipa'), mimetype='application/octet-stream',
+                     as_attachment=True, conditional=True, download_name='Orbyte.ipa')
 
 
 @app.route('/api/v1/dispositivo/liberar', methods=['POST'])
