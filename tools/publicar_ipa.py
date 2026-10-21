@@ -65,12 +65,31 @@ def ips_del_servidor():
     return ips
 
 
+def url_publica():
+    """ORBYTE_URL_PUBLICA del entorno o del .env del servidor (Tailscale Funnel)."""
+    valor = os.environ.get('ORBYTE_URL_PUBLICA', '')
+    if not valor:
+        try:
+            with open(os.path.join(os.path.dirname(APK_DIR), '.env'), encoding='utf-8') as fh:
+                for linea in fh:
+                    k, _, v = linea.strip().partition('=')
+                    if k.strip() == 'ORBYTE_URL_PUBLICA':
+                        valor = v.strip().strip('"').strip("'")
+        except OSError:
+            pass
+    return valor.rstrip('/')
+
+
 def mostrar(ficha):
     print(f"Publicada: {ficha['version']} (build {ficha['build']}) el {ficha['publicado_at']} — "
           f"{ficha['tamano'] / 1e6:.1f} MB")
     if ficha.get('notas'):
         print(f"Notas: {ficha['notas']}")
-    print('\nEnlaces para instalar con SideStore (abrir en Safari del iPhone):')
+    print('\nEnlaces para instalar con SideStore (abrir en Safari del iPhone, con LocalDevVPN):')
+    publica = url_publica()
+    if publica:
+        url = f"{publica}/descargas/orbyte.ipa?t={ficha['enlace_token']}"
+        print(f"  Internet : sidestore://install?url={quote(url, safe='')}")
     for ip in ips_del_servidor():
         url = f"http://{ip}:{PUERTO}/descargas/orbyte.ipa?t={ficha['enlace_token']}"
         print(f"  {'Tailscale' if ip.startswith('100.') else 'Casa    '}: sidestore://install?url={quote(url, safe='')}")
