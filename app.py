@@ -12323,6 +12323,53 @@ def api_v1_admin_tv_renombrar():
         conn.close()
 
 
+# ── Actualización de la app Android desde el propio servidor ─────────────────
+# tools/publicar_apk.py deja en apk/ el APK más nuevo (orbyte.apk) y su ficha
+# (android.json). La app pregunta al abrirse; si hay una versión mayor que la
+# suya, la descarga (con su sesión, por LAN o Tailscale) y abre el instalador.
+APK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'apk')
+
+
+def _apk_android_info():
+    try:
+        with open(os.path.join(APK_DIR, 'android.json'), encoding='utf-8') as fh:
+            info = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not os.path.isfile(os.path.join(APK_DIR, 'orbyte.apk')):
+        return None
+    return info
+
+
+@app.route('/api/v1/app/android', methods=['GET'])
+@api_login_required
+def api_v1_app_android():
+    info = _apk_android_info()
+    if not info:
+        return jsonify({'disponible': False})
+    return jsonify({
+        'disponible': True,
+        'version_code': int(info.get('version_code') or 0),
+        'version_name': info.get('version_name') or '',
+        'notas': info.get('notas') or '',
+        'tamano': int(info.get('tamano') or 0),
+        'sha256': info.get('sha256') or '',
+        'publicado_at': info.get('publicado_at') or '',
+    })
+
+
+@app.route('/api/v1/app/android/apk', methods=['GET'])
+@api_login_required
+def api_v1_app_android_apk():
+    info = _apk_android_info()
+    if not info:
+        return jsonify({'error': 'sin_apk'}), 404
+    return send_file(os.path.join(APK_DIR, 'orbyte.apk'),
+                     mimetype='application/vnd.android.package-archive',
+                     as_attachment=True, conditional=True,
+                     download_name=f"orbyte-{info.get('version_name') or 'android'}.apk")
+
+
 @app.route('/api/v1/dispositivo/liberar', methods=['POST'])
 @api_login_required
 def api_v1_dispositivo_liberar():
