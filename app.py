@@ -264,7 +264,7 @@ def _configure_logging():
     # reproducirlo en vivo), va a terminar en el archivo igual.
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    # Ticket 23: con debug=True (ver app.run al final de este archivo),
+    # Ticket 23: con debug=True (hoy solo con ORBYTE_DEBUG=1, ver app.run),
     # Flask por default RE-LANZA cualquier excepción no manejada para
     # que el debugger interactivo de Werkzeug la muestre en el
     # navegador, en vez de pasarla por @app.errorhandler — confirmado
@@ -14622,4 +14622,17 @@ if __name__ == '__main__':
     # cada vez que el hilo único se lo lleva otro pedido (un heartbeat, el
     # polling del panel de cast, el propio audio local), la descarga hacia
     # el dispositivo remoto se corta un instante y retoma de a tirones.
-    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
+    #
+    # Lote 42cl (pedido por Niko): SIN modo depuración por defecto. Con
+    # debug=True el recargador de Werkzeug reiniciaba el servidor cada vez
+    # que cambiaba un .py (un git pull, una herramienta nueva…) y cortaba lo
+    # que estuvieran escuchando los usuarios (y mandaba Stop al equipo DLNA).
+    # Ahora el servidor solo se reinicia con `systemctl restart`. Los logs no
+    # dependen de esto (handler propio en _configure_logging). Para una
+    # sesión puntual de desarrollo: ORBYTE_DEBUG=1 en el .env.
+    depurar = os.environ.get('ORBYTE_DEBUG', '').strip().lower() in ('1', 'true', 'si', 'sí', 'yes')
+    # Las plantillas HTML se recargan solas aunque no haya modo depuración:
+    # un cambio en templates/ no necesita reiniciar.
+    app.config['TEMPLATES_AUTO_RELOAD'] = True
+    app.jinja_env.auto_reload = True
+    app.run(debug=depurar, use_reloader=depurar, host='0.0.0.0', port=5001, threaded=True)
