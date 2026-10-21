@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pendientes de Orbyte</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f6f6f4; --surface: #fcfcfb; --surface-2: #f0efec; --border: #e2e1dc;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #7a7974; --grid: #e7e6e1;
+  --accent: #2a78d6; --focus: #2a78d6;
+  --g-alb: #2a78d6; --g-can: #eb6834; --g-meta: #1baf7a; --g-cero: #eda100;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86; --grid: #2c2c29;
+    --accent: #3987e5; --focus: #3987e5;
+    --g-alb: #3987e5; --g-can: #d95926; --g-meta: #199e70; --g-cero: #c98500;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8e8d86; --grid: #2c2c29;
+  --accent: #3987e5; --focus: #3987e5;
+  --g-alb: #3987e5; --g-can: #d95926; --g-meta: #199e70; --g-cero: #c98500;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 16px; margin-bottom: 20px; }
+h1 { font-size: 24px; margin: 0; letter-spacing: -0.01em; }
+.meta { color: var(--text-2); font-size: 13px; }
+.meta code { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+button { font: inherit; color: inherit; }
+.tema { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 16px; cursor: pointer; transition: border-color .15s, opacity .15s; }
+.kpi:hover { border-color: var(--muted); }
+.kpi.off { opacity: .45; }
+.kpi .t { display: flex; align-items: center; gap: 8px; color: var(--text-2); font-size: 13px; font-weight: 600; }
+.dot { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.kpi .n { font-size: 30px; font-weight: 650; margin: 4px 0 0; font-variant-numeric: tabular-nums; }
+.kpi .s { color: var(--text-2); font-size: 13px; }
+.kpi .d { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+.charts { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; margin-bottom: 16px; }
+@media (max-width: 860px) { .charts { grid-template-columns: 1fr; } }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
+.card h2 { font-size: 15px; margin: 0; }
+.card .sub { color: var(--text-2); font-size: 12px; margin: 2px 0 10px; }
+.card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { background: none; border: 0; padding: 3px 10px; cursor: pointer; color: var(--text-2); }
+.seg button.on { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+svg { display: block; width: 100%; height: auto; overflow: visible; }
+svg text { fill: var(--text-2); font-size: 11px; font-family: inherit; }
+.vacio { color: var(--muted); padding: 24px 0; text-align: center; }
+
+.tip { position: fixed; pointer-events: none; z-index: 10; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.18); display: none; max-width: 280px; }
+.tip b { display: block; margin-bottom: 4px; }
+.tip .r { display: flex; align-items: center; gap: 6px; justify-content: space-between; }
+.tip .r span:first-child { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 10px; }
+.controls input { flex: 1 1 260px; min-width: 0; background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; }
+.controls input:focus, button:focus-visible, a:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 4px 10px; cursor: pointer; font-size: 12px; color: var(--text-2); }
+.chip.off { opacity: .45; }
+.cuantos { color: var(--text-2); font-size: 12px; margin-left: auto; }
+
+.tabla { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 880px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-size: 12px; color: var(--text-2); font-weight: 600; white-space: nowrap; position: sticky; top: 0; background: var(--surface); }
+th button { background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font-weight: 600; }
+th .flecha { color: var(--accent); }
+tr:last-child td { border-bottom: 0; }
+tbody tr:hover td { background: var(--surface-2); }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grupo { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; font-size: 12px; color: var(--text-2); }
+.art { font-weight: 600; }
+.fecha { white-space: nowrap; }
+.fecha small { display: block; color: var(--muted); }
+.canc summary { cursor: pointer; color: var(--accent); white-space: nowrap; }
+.canc ul { margin: 6px 0 0; padding-left: 18px; color: var(--text-2); font-size: 12px; }
+.ubic { display: flex; align-items: center; gap: 8px; }
+.ubic a { color: var(--accent); text-decoration: none; font-weight: 600; white-space: nowrap; }
+.ubic a:hover { text-decoration: underline; }
+.ruta { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); word-break: break-all; margin-top: 3px; }
+.copiar { background: none; border: 1px solid var(--border); border-radius: 6px; padding: 1px 7px; cursor: pointer; font-size: 11px; color: var(--text-2); }
+footer { color: var(--muted); font-size: 12px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Pendientes de Orbyte</h1>
+      <div class="meta" id="meta"></div>
+    </div>
+    <button class="tema" id="tema" type="button">Tema</button>
+  </header>
+
+  <section class="kpis" id="kpis" aria-label="Totales por grupo"></section>
+
+  <section class="charts">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>Cuándo ingresaron los pendientes</h2><div class="sub">Álbumes por fecha de ingreso al disco</div></div>
+        <div class="seg" id="escala"><button type="button" data-e="sem">Semanas</button><button type="button" data-e="mes">Meses</button></div>
+      </div>
+      <div class="legend" id="leyenda"></div>
+      <div id="graf-tiempo"></div>
+    </div>
+    <div class="card">
+      <h2>Artistas con más pendientes</h2><div class="sub">Álbumes pendientes por artista (10 primeros)</div>
+      <div id="graf-artistas"></div>
+    </div>
+  </section>
+
+  <div class="controls">
+    <input id="buscar" type="search" placeholder="Buscar artista, álbum, canción o ruta…" aria-label="Buscar">
+    <span id="chips"></span>
+    <span class="cuantos" id="cuantos"></span>
+  </div>
+  <div class="tabla">
+    <table>
+      <thead><tr id="cabecera"></tr></thead>
+      <tbody id="filas"></tbody>
+    </table>
+  </div>
+  <footer id="pie"></footer>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+
+<script>
+const D = /*__DATOS__*/null;
+const G = Object.fromEntries(D.grupos.map(g => [g.id, g]));
+const color = id => `var(--g-${id})`;
+const activos = new Set(D.grupos.map(g => g.id));
+let texto = "", orden = { col: "ingreso", dir: -1 };
+const ahora = Date.now() / 1000;
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmtFecha = t => new Date(t * 1000).toLocaleDateString("es-CL", { day: "2-digit", month: "short", year: "numeric" });
+const hace = t => {
+  const d = Math.floor((ahora - t) / 86400);
+  if (d < 1) return "hoy"; if (d < 2) return "ayer"; if (d < 31) return `hace ${d} días`;
+  const m = Math.floor(d / 30.4); return m < 12 ? `hace ${m} ${m === 1 ? "mes" : "meses"}` : `hace ${Math.floor(m / 12)} año(s)`;
+};
+const plural = (n, a, b) => `${n.toLocaleString("es-CL")} ${n === 1 ? a : b}`;
+
+// ---- tema ----
+const raizDoc = document.documentElement;
+document.getElementById("tema").addEventListener("click", () => {
+  const oscuro = raizDoc.dataset.theme ? raizDoc.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+  raizDoc.dataset.theme = oscuro ? "light" : "dark";
+});
+
+// ---- cabecera ----
+document.getElementById("meta").innerHTML =
+  `Generado ${esc(D.generado)} · <code>${esc(D.raiz)}</code> · ${plural(D.carpetas, "carpeta con audio revisada", "carpetas con audio revisadas")}` +
+  (D.dias ? ` · solo últimos ${esc(D.dias)} días` : "");
+document.getElementById("pie").innerHTML =
+  `<b>Ingreso</b>: cuándo llegaron los archivos al disco (para un álbum, su primer archivo; para canciones sueltas, la más reciente). ` +
+  `<b>Indexado</b>: cuándo entró el álbum a la BD. BD: <code>${esc(D.db)}</code>. ` +
+  `Los enlaces abren la carpeta si el reporte se mira en el mismo equipo; desde otro, genera el reporte con <code>--enlace-base</code> o usa «Copiar».`;
+
+// ---- tarjetas ----
+function kpis() {
+  document.getElementById("kpis").innerHTML = D.grupos.map(g => {
+    const fs = D.filas.filter(f => f.g === g.id);
+    const can = fs.reduce((s, f) => s + f.n, 0);
+    const sub = g.id === "alb" ? plural(can, "canción adentro", "canciones adentro") : plural(can, "canción", "canciones");
+    return `<button type="button" class="kpi ${activos.has(g.id) ? "" : "off"}" data-g="${g.id}" aria-pressed="${activos.has(g.id)}">
+      <div class="t"><span class="dot" style="background:${color(g.id)}"></span>${esc(g.nombre)}</div>
+      <div class="n">${fs.length.toLocaleString("es-CL")}</div><div class="s">${fs.length === 1 ? "álbum" : "álbumes"} · ${sub}</div>
+      <div class="d">${esc(g.desc)}</div></button>`;
+  }).join("");
+  document.querySelectorAll(".kpi").forEach(b => b.addEventListener("click", () => alternar(b.dataset.g)));
+  document.getElementById("chips").innerHTML = D.grupos.map(g =>
+    `<button type="button" class="chip ${activos.has(g.id) ? "" : "off"}" data-g="${g.id}" aria-pressed="${activos.has(g.id)}"><span class="dot" style="background:${color(g.id)}"></span>${esc(g.nombre)}</button>`).join(" ");
+  document.querySelectorAll(".chip").forEach(b => b.addEventListener("click", () => alternar(b.dataset.g)));
+  document.getElementById("leyenda").innerHTML = D.grupos.filter(g => activos.has(g.id)).map(g =>
+    `<span><span class="dot" style="background:${color(g.id)}"></span>${esc(g.nombre)}</span>`).join("");
+}
+function alternar(id) {
+  if (activos.has(id) && activos.size === 1) { D.grupos.forEach(g => activos.add(g.id)); }
+  else if (activos.has(id)) activos.delete(id); else activos.add(id);
+  todo();
+}
+
+// ---- filtrado y orden ----
+function visibles() {
+  const q = texto.trim().toLowerCase();
+  return D.filas.filter(f => activos.has(f.g) && (!q ||
+    (f.art + " " + f.alb + " " + f.ruta + " " + f.canciones.join(" ")).toLowerCase().includes(q)));
+}
+const COLS = [
+  { k: "g", t: "Grupo", v: f => D.grupos.findIndex(g => g.id === f.g) },
+  { k: "art", t: "Artista", v: f => f.art.toLowerCase() },
+  { k: "alb", t: "Álbum", v: f => f.alb.toLowerCase() },
+  { k: "n", t: "Canciones", v: f => f.n },
+  { k: "ingreso", t: "Ingreso", v: f => f.ingreso },
+  { k: "indexado", t: "Indexado", v: f => f.indexado || "" },
+  { k: "ruta", t: "Ubicación", v: f => f.ruta.toLowerCase() },
+];
+function cabecera() {
+  document.getElementById("cabecera").innerHTML = COLS.map(c => {
+    const on = orden.col === c.k;
+    return `<th aria-sort="${on ? (orden.dir > 0 ? "ascending" : "descending") : "none"}"><button type="button" data-k="${c.k}">${c.t} <span class="flecha">${on ? (orden.dir > 0 ? "▲" : "▼") : ""}</span></button></th>`;
+  }).join("");
+  document.querySelectorAll("th button").forEach(b => b.addEventListener("click", () => {
+    const k = b.dataset.k;
+    orden = orden.col === k ? { col: k, dir: -orden.dir } : { col: k, dir: (k === "ingreso" || k === "n" || k === "indexado") ? -1 : 1 };
+    tabla();
+  }));
+}
+function tabla() {
+  cabecera();
+  const col = COLS.find(c => c.k === orden.col);
+  const fs = visibles().sort((a, b) => {
+    const x = col.v(a), y = col.v(b);
+    return (x < y ? -1 : x > y ? 1 : 0) * orden.dir || b.ingreso - a.ingreso || a.ruta.localeCompare(b.ruta);
+  });
+  const can = fs.reduce((s, f) => s + f.n, 0);
+  document.getElementById("cuantos").textContent = `${plural(fs.length, "álbum", "álbumes")} · ${plural(can, "canción", "canciones")}`;
+  const tb = document.getElementById("filas");
+  if (!fs.length) { tb.innerHTML = `<tr><td colspan="7" class="vacio">Nada pendiente con estos filtros.</td></tr>`; return; }
+  tb.innerHTML = fs.map((f, i) => {
+    const canc = f.canciones.length
+      ? `<details class="canc"><summary>${f.n}</summary><ul>${f.canciones.map(c => `<li>${esc(c)}</li>`).join("")}</ul></details>`
+      : `${f.n} <small style="color:var(--muted)">(álbum completo)</small>`;
+    return `<tr>
+      <td><span class="grupo"><span class="dot" style="background:${color(f.g)}"></span>${esc(G[f.g].nombre)}</span></td>
+      <td class="art">${esc(f.art)}</td>
+      <td>${esc(f.alb)}</td>
+      <td class="num">${canc}</td>
+      <td class="fecha">${fmtFecha(f.ingreso)}<small>${hace(f.ingreso)}</small></td>
+      <td class="fecha">${f.indexado ? esc(f.indexado.slice(0, 10)) : '<span style="color:var(--muted)">—</span>'}</td>
+      <td><div class="ubic"><a href="${esc(f.href)}" target="_blank" rel="noopener">Abrir carpeta</a>
+        <button type="button" class="copiar" data-i="${i}">Copiar ruta</button></div><div class="ruta">${esc(f.ruta)}</div></td>
+    </tr>`;
+  }).join("");
+  tb.querySelectorAll(".copiar").forEach(b => b.addEventListener("click", () => copiar(fs[+b.dataset.i].ruta, b)));
+}
+async function copiar(txt, b) {
+  try { await navigator.clipboard.writeText(txt); }
+  catch { const t = document.createElement("textarea"); t.value = txt; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+  const o = b.textContent; b.textContent = "Copiada"; setTimeout(() => b.textContent = o, 1200);
+}
+document.getElementById("buscar").addEventListener("input", e => { texto = e.target.value; tabla(); graficos(); });
+
+// ---- tooltip ----
+const tip = document.getElementById("tip");
+function mostrarTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = ev.clientX + 14, y = ev.clientY + 14;
+  if (x + w > innerWidth - 8) x = ev.clientX - w - 14;
+  if (y + h > innerHeight - 8) y = ev.clientY - h - 14;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const ocultarTip = () => tip.style.display = "none";
+function filasTip(cuenta) {
+  return D.grupos.filter(g => cuenta[g.id]).map(g =>
+    `<div class="r"><span><span class="dot" style="background:${color(g.id)}"></span>${esc(g.nombre)}</span><b style="display:inline;margin:0">${cuenta[g.id]}</b></div>`).join("");
+}
+
+// ---- gráfico: ingresos en el tiempo (barras apiladas) ----
+let escala = null;
+function cubetas(fs, modo) {
+  const lunes = t => { const d = new Date(t * 1000); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return d; };
+  const mes = t => { const d = new Date(t * 1000); return new Date(d.getFullYear(), d.getMonth(), 1); };
+  const fin = modo === "sem" ? lunes(ahora) : mes(ahora);
+  const n = 12, out = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(fin);
+    if (modo === "sem") d.setDate(d.getDate() - 7 * i); else d.setMonth(d.getMonth() - i);
+    out.push({ ini: d, cuenta: {}, total: 0,
+      etiqueta: modo === "sem" ? d.toLocaleDateString("es-CL", { day: "numeric", month: "short" }) : d.toLocaleDateString("es-CL", { month: "short", year: "2-digit" }) });
+  }
+  const antes = { etiqueta: "Antes", cuenta: {}, total: 0 };
+  for (const f of fs) {
+    const t = new Date(f.ingreso * 1000);
+    let c = antes;
+    for (let i = out.length - 1; i >= 0; i--) if (t >= out[i].ini) { c = out[i]; break; }
+    c.cuenta[f.g] = (c.cuenta[f.g] || 0) + 1; c.total++;
+  }
+  return antes.total ? [antes, ...out] : out;
+}
+function grafTiempo(fs) {
+  const el = document.getElementById("graf-tiempo");
+  if (!fs.length) { el.innerHTML = `<div class="vacio">Sin datos</div>`; return; }
+  if (!escala) {   // por defecto: semanas si casi todo es de los últimos 3 meses
+    const recientes = fs.filter(f => ahora - f.ingreso < 84 * 86400).length;
+    escala = recientes / fs.length >= 0.8 ? "sem" : "mes";
+  }
+  document.querySelectorAll("#escala button").forEach(b => b.classList.toggle("on", b.dataset.e === escala));
+  const cs = cubetas(fs, escala);
+  const W = 640, H = 230, m = { t: 8, r: 8, b: 26, l: 34 };
+  const max = Math.max(1, ...cs.map(c => c.total));
+  const paso = Math.max(1, Math.ceil(max / 4 / Math.pow(10, Math.floor(Math.log10(max / 4 || 1)))) * Math.pow(10, Math.floor(Math.log10(max / 4 || 1))));
+  const tope = Math.ceil(max / paso) * paso;
+  const y = v => m.t + (H - m.t - m.b) * (1 - v / tope);
+  const bw = (W - m.l - m.r) / cs.length, ancho = Math.min(36, bw * 0.62);
+  let s = "";
+  for (let v = 0; v <= tope; v += paso) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${y(v)}" y2="${y(v)}" stroke="var(--grid)"/><text x="${m.l - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
+  cs.forEach((c, i) => {
+    const x = m.l + bw * i + (bw - ancho) / 2;
+    let base = 0;
+    const segs = D.grupos.filter(g => activos.has(g.id) && c.cuenta[g.id]);
+    segs.forEach((g, j) => {
+      const v = c.cuenta[g.id], y0 = y(base), y1 = y(base + v);
+      const alto = Math.max(0, y0 - y1 - (j < segs.length - 1 ? 2 : 0));   // 2px de separación entre segmentos
+      const r = j === segs.length - 1 ? Math.min(4, alto / 2) : 0;
+      s += r ? `<path d="M${x},${y0} V${y0 - alto + r} Q${x},${y0 - alto} ${x + r},${y0 - alto} H${x + ancho - r} Q${x + ancho},${y0 - alto} ${x + ancho},${y0 - alto + r} V${y0} Z" fill="${color(g.id)}"/>`
+             : `<rect x="${x}" y="${y0 - alto}" width="${ancho}" height="${alto}" fill="${color(g.id)}"/>`;
+      base += v;
+    });
+    if (c.total) s += `<text x="${x + ancho / 2}" y="${y(c.total) - 5}" text-anchor="middle" style="fill:var(--text)">${c.total}</text>`;
+    if (cs.length <= 8 || i % 2 === (cs.length - 1) % 2) s += `<text x="${x + ancho / 2}" y="${H - 8}" text-anchor="middle">${esc(c.etiqueta)}</text>`;
+    s += `<rect class="hit" data-i="${i}" x="${m.l + bw * i}" y="${m.t}" width="${bw}" height="${H - m.t - m.b}" fill="transparent"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Álbumes pendientes por fecha de ingreso">${s}</svg>`;
+  el.querySelectorAll(".hit").forEach(h => {
+    h.addEventListener("mousemove", ev => { const c = cs[+h.dataset.i];
+      mostrarTip(ev, `<b>${esc(c.etiqueta === "Antes" ? "Antes del período" : (escala === "sem" ? "Semana del " : "") + c.etiqueta)} · ${plural(c.total, "álbum", "álbumes")}</b>${filasTip(c.cuenta)}`); });
+    h.addEventListener("mouseleave", ocultarTip);
+  });
+}
+document.querySelectorAll("#escala button").forEach(b => b.addEventListener("click", () => { escala = b.dataset.e; graficos(); }));
+
+// ---- gráfico: artistas ----
+function grafArtistas(fs) {
+  const el = document.getElementById("graf-artistas");
+  const por = {};
+  for (const f of fs) { const a = por[f.art] ||= { art: f.art, total: 0, cuenta: {} }; a.total++; a.cuenta[f.g] = (a.cuenta[f.g] || 0) + 1; }
+  const top = Object.values(por).sort((a, b) => b.total - a.total || a.art.localeCompare(b.art)).slice(0, 10);
+  if (!top.length) { el.innerHTML = `<div class="vacio">Sin datos</div>`; return; }
+  const fila = 22, W = 420, eti = 140, H = top.length * fila;
+  const max = Math.max(...top.map(a => a.total));
+  let s = "";
+  top.forEach((a, i) => {
+    const yy = i * fila, w = Math.max(3, (W - eti - 34) * a.total / max);
+    const nom = a.art.length > 22 ? a.art.slice(0, 21) + "…" : a.art;
+    s += `<text x="${eti - 8}" y="${yy + 15}" text-anchor="end" style="fill:var(--text)">${esc(nom)}</text>`;
+    s += `<path d="M${eti},${yy + 4} H${eti + w - 4} Q${eti + w},${yy + 4} ${eti + w},${yy + 8} V${yy + 14} Q${eti + w},${yy + 18} ${eti + w - 4},${yy + 18} H${eti} Z" fill="var(--accent)"/>`;
+    s += `<text x="${eti + w + 6}" y="${yy + 15}">${a.total}</text>`;
+    s += `<rect class="hit" data-i="${i}" x="0" y="${yy}" width="${W}" height="${fila}" fill="transparent"/>`;
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Artistas con más álbumes pendientes">${s}</svg>`;
+  el.querySelectorAll(".hit").forEach(h => {
+    h.addEventListener("mousemove", ev => { const a = top[+h.dataset.i]; mostrarTip(ev, `<b>${esc(a.art)} · ${plural(a.total, "álbum", "álbumes")}</b>${filasTip(a.cuenta)}`); });
+    h.addEventListener("mouseleave", ocultarTip);
+    h.addEventListener("click", () => { const i = document.getElementById("buscar"); i.value = top[+h.dataset.i].art; texto = i.value; tabla(); graficos(); });
+  });
+}
+
+function graficos() { const fs = visibles(); grafTiempo(fs); grafArtistas(fs); }
+function todo() { kpis(); graficos(); tabla(); }
+todo();
+</script>
+</body>
+</html>
