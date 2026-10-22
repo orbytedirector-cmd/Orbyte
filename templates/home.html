@@ -57,7 +57,7 @@
       'green':   {'name': 'MQA',                'detail': 'Master Quality Authenticated',           'codecs': 'FLAC MQA'},
       'blue':    {'name': 'MQA Studio',         'detail': 'Studio-authenticated MQA',              'codecs': 'FLAC MQA Studio'},
       'magenta': {'name': 'Original Sample Rate','detail': 'MQB — preserves original sample rate',  'codecs': 'MQB'},
-      'silver':  {'name': 'Con Pérdida',        'detail': 'Comprimido con pérdida · el DAC muestra amarillo', 'codecs': 'MP3 · AAC'},
+      'silver':  {'name': 'Lossy',              'detail': 'Compresión con pérdida · el DAC muestra amarillo', 'codecs': 'MP3 · AAC'},
     } %}
     {% for color in led_order %}
       {% set cnt = led_counts.get(color, 0) %}
