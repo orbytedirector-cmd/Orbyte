@@ -656,7 +656,7 @@ LED_LABELS = {
     # es la verdad del hardware). Es el color del DISTINTIVO de calidad para
     # archivos con pérdida — se deriva de codec/compression_mode, nunca se
     # guarda en led_color. Ver _es_con_perdida()/_lossy_sql().
-    'silver':  'Con Pérdida (MP3 · AAC)',
+    'silver':  'Lossy (MP3 · AAC)',
 }
 LED_ORDER = ['yellow', 'white', 'cyan', 'red', 'green', 'blue', 'magenta', 'silver']
 
@@ -666,7 +666,7 @@ _LOSSY_EXTS  = ('.mp3', '.ogg', '.opus', '.wma')   # .m4a puede ser ALAC: solo p
 _LOSSY_CODEC_LABEL = {'vorbis': 'OGG', 'wmav1': 'WMA', 'wmav2': 'WMA'}
 _STD_KBPS = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
 LOSSY_COLOR = 'silver'
-LOSSY_QUALITY = 'Con Pérdida'
+LOSSY_QUALITY = 'LOSSY'
 
 
 def _lossy_sql(alias='t'):
@@ -6516,7 +6516,7 @@ def _fmt_bitrate(bps, con_perdida=False, kbps_nominal=None):
     if not bps:
         return "N/A"
     if con_perdida:
-        return f"{kbps_nominal or int(bps / 1000)} kbps · Con Pérdida"
+        return f"{kbps_nominal or int(bps / 1000)} kbps · Lossy"
     kbps = bps / 1000
     if kbps >= 1000:
         label = f"{kbps/1000:.2f} Mbps"
@@ -7549,7 +7549,7 @@ def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
 # track in the schema is tagged higher). Selecting a "DSD512" value would
 # either silently relabel DSD256 files or match nothing; instead of inventing
 # that convention, this is called out for a product decision — see chat reply.
-QUALITY_OPTIONS = ['CD', 'HI-RES', 'DSD64', 'DSD128', 'DSD256', 'MQA', 'MQA Studio', 'OSR', 'Con Pérdida']
+QUALITY_OPTIONS = ['CD', 'HI-RES', 'DSD64', 'DSD128', 'DSD256', 'MQA', 'MQA Studio', 'OSR', 'LOSSY']
 
 # Popularidad buckets mirror the 5-star scale already rendered in browse.html
 # (Math.floor(pop_score / 20)), so a filter labelled "★★★★★" matches exactly
@@ -11771,7 +11771,7 @@ def favorites_page():
         conn.close()
         tracks = [dict(r) for r in rows]
         for t in tracks:
-            # Con Pérdida: etiqueta "MP3 · 320 kbps" y distintivo plateado.
+            # Con Pérdida: etiqueta "MP3 · 320 kbps" y distintivo titanio.
             if _es_con_perdida(t):
                 t['format_display'], t['format_color'] = _fmt_format(t)
         # Build audio_url for each track
