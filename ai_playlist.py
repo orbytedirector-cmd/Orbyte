@@ -1797,7 +1797,7 @@ def _score_track_version(track, group, led_quality_rank_fn):
       más nuevo del grupo) — así "ser el original" pesa fuerte sin
       aplastar del todo a una versión bastante mejor grabada o más
       escuchada. 0 si no hay dato de año en el grupo."""
-    quality = led_quality_rank_fn(track.get('led_color'))
+    quality = led_quality_rank_fn(track.get('format_color') or track.get('led_color'))
     max_pc = max((_track_playcount(t) for t in group), default=0) or 1
     pop_norm = _track_playcount(track) / max_pc * 100.0
 
@@ -2590,7 +2590,7 @@ def _pick_best_album(conn, rows, track_to_json_fn, build_adv_filters_fn, dedupe_
         if not tracks:
             continue
         if led_quality_rank_fn:
-            quality = max((led_quality_rank_fn(t.get('led_color')) for t in tracks), default=0)
+            quality = max((led_quality_rank_fn(t.get('format_color') or t.get('led_color')) for t in tracks), default=0)
         else:
             quality = 0
         key = (quality, len(tracks), -r['id'])

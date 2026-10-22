@@ -1315,7 +1315,7 @@
       const badge = document.getElementById('np-badge');
       badge.textContent = t.format_display ||
         (t.is_dsd ? (t.dsd_rate||'DSD') : t.is_mqa ? 'MQA' : (t.codec||'FLAC').toUpperCase());
-      badge.className = 'player-fmt-badge fmt-' + c;
+      badge.className = 'player-fmt-badge fmt-' + (t.format_color || c).toLowerCase();
       const led = document.getElementById('np-led');
       led.innerHTML = _makeDiamondSVG(c, 'np');
       led.className = 'player-led led-d-' + c;

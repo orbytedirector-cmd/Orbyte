@@ -24,7 +24,7 @@
     --oro: #b8890f; --oro2: #e2b31a; --oro-tenue: #6e5410;
     --texto: #e4e4e4; --texto2: #8c8c8c; --texto3: #4a4a4a;
     --led-yellow:#e2b31a; --led-white:#dcdcdc; --led-cyan:#22b8d8; --led-red:#d8344e;
-    --led-green:#1fbf72; --led-blue:#3d78e0; --led-magenta:#c04ad8;
+    --led-green:#1fbf72; --led-blue:#3d78e0; --led-magenta:#c04ad8; --led-silver:#98a2ae;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; background: #000; color: var(--texto); overflow: hidden;
@@ -174,7 +174,8 @@
   var BASE = "/tv/" + encodeURIComponent(CLAVE);
   var $ = function (id) { return document.getElementById(id); };
   var LED = { yellow: "var(--led-yellow)", white: "var(--led-white)", cyan: "var(--led-cyan)", red: "var(--led-red)",
-              green: "var(--led-green)", blue: "var(--led-blue)", magenta: "var(--led-magenta)" };
+              green: "var(--led-green)", blue: "var(--led-blue)", magenta: "var(--led-magenta)",
+              silver: "var(--led-silver)" };
   var estado = null, recibidoEn = 0, desde = null, trackId = null, codeActual = null;
   var colaAvisos = [], mostrandoAviso = false, pausadoDesde = null;
 

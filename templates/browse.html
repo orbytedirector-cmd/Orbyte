@@ -359,6 +359,7 @@ const ADV_FIELD_MAP = { mood:'mood', momento:'momento', era:'era', tema:'tema',
 const LED_TO_CALIDAD = {
   yellow: ['CD'], white: ['HI-RES'], cyan: ['DSD64', 'DSD128'],
   red: ['DSD256'], green: ['MQA'], blue: ['MQA Studio'], magenta: ['OSR'],
+  silver: ['Con Pérdida'],
 };
 window.openAdvancedSearchWithPreset = function() {
   const advField = ADV_FIELD_MAP[FILTER_TYPE] || FILTER_TYPE;
@@ -538,7 +539,7 @@ if (IS_META) {
       if (countEl) countEl.textContent = `${data.total} pistas`;
 
       listEl.innerHTML = tracks.map((t, i) => {
-        const led       = t.led_color || 'white';
+        const led       = t.format_color || t.led_color || 'white';
         const moodRaw   = t.mood || '';
         const moodLabel = MOOD_LABELS_JS[moodRaw] || moodRaw;
         // Point 10: Distinguish Mood (🎭) vs Tema (📖) with icon+label prefix

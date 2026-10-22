@@ -651,8 +651,77 @@ LED_LABELS = {
     'green':   'MQA',
     'blue':    'MQA Studio',
     'magenta': 'Original Sample Rate (MQB)',
+    # 'silver' NO es un LED del DAC: el iFi recibe el MP3 ya decodificado a
+    # PCM 44.1/48 y enciende amarillo (tracks.led_color sigue 'yellow', que
+    # es la verdad del hardware). Es el color del DISTINTIVO de calidad para
+    # archivos con pérdida — se deriva de codec/compression_mode, nunca se
+    # guarda en led_color. Ver _es_con_perdida()/_lossy_sql().
+    'silver':  'Con Pérdida (MP3 · AAC)',
 }
-LED_ORDER = ['yellow', 'white', 'cyan', 'red', 'green', 'blue', 'magenta']
+LED_ORDER = ['yellow', 'white', 'cyan', 'red', 'green', 'blue', 'magenta', 'silver']
+
+# ── Calidad "Con Pérdida" ───────────────────────────────────────────────────
+LOSSY_CODECS = ('mp3', 'aac', 'vorbis', 'opus', 'wmav1', 'wmav2', 'mp2')
+_LOSSY_EXTS  = ('.mp3', '.ogg', '.opus', '.wma')   # .m4a puede ser ALAC: solo por codec
+_LOSSY_CODEC_LABEL = {'vorbis': 'OGG', 'wmav1': 'WMA', 'wmav2': 'WMA'}
+_STD_KBPS = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+LOSSY_COLOR = 'silver'
+LOSSY_QUALITY = 'Con Pérdida'
+
+
+def _lossy_sql(alias='t'):
+    """Fragmento SQL booleano: la pista es con pérdida. alias='' para
+    subconsultas sin alias (SELECT ... FROM tracks WHERE album_id=...)."""
+    p = f'{alias}.' if alias else ''
+    codecs = ','.join(f"'{c}'" for c in LOSSY_CODECS)
+    return (f"(COALESCE({p}compression_mode,'')='Lossy' "
+            f"OR LOWER(COALESCE({p}codec,'')) IN ({codecs}))")
+
+
+def _quality_color_sql(alias='t'):
+    """Color de distintivo en SQL: 'silver' si es con pérdida, si no el
+    led_color de la BD (mismo valor que devuelve _fmt_format)."""
+    p = f'{alias}.' if alias else ''
+    return f"(CASE WHEN {_lossy_sql(alias)} THEN 'silver' ELSE {p}led_color END)"
+
+
+def _es_con_perdida(track):
+    cm = (track.get('compression_mode') or '')
+    if cm == 'Lossy':
+        return True
+    codec = (track.get('codec') or '').lower()
+    if codec in LOSSY_CODECS:
+        return True
+    if not codec and not cm:
+        ext = os.path.splitext(track.get('file_path') or '')[1].lower()
+        return ext in _LOSSY_EXTS
+    return False
+
+
+def _kbps_nominal(track):
+    """kbps 'de etiqueta' (320, 256, 192...). tracks.bitrate viene del
+    contenedor (incluye la carátula embebida: un MP3 320 CBR figura como
+    321-343k), así que se ajusta al valor estándar más cercano; un VBR que
+    no calza queda con su promedio redondeado."""
+    bps = track.get('bitrate') or 0
+    if not bps:
+        return None
+    k = bps / 1000.0
+    if (track.get('codec') or '').lower() == 'mp3' and k > 320:
+        return 320
+    best = min(_STD_KBPS, key=lambda v: abs(v - k))
+    if abs(best - k) / best <= 0.06:
+        return best
+    return int(round(k))
+
+
+def _lossy_label(track):
+    codec = (track.get('codec') or '').lower()
+    if not codec:
+        codec = os.path.splitext(track.get('file_path') or '')[1].lower().lstrip('.')
+    name = _LOSSY_CODEC_LABEL.get(codec, (codec or 'MP3').upper())
+    kbps = _kbps_nominal(track)
+    return f'{name} · {kbps} kbps' if kbps else name
 
 # Mood display labels — maps raw DB value → friendly UI label
 MOOD_LABELS = {
@@ -2422,7 +2491,7 @@ def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_, p
     if filter_type == 'led':
         count_sql = '''SELECT COUNT(DISTINCT al.id)
                        FROM albums al JOIN tracks t ON t.album_id=al.id
-                       WHERE t.led_color=?'''
+                       WHERE ''' + _quality_color_sql('t') + '=?'
         data_sql = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
                               al.track_count, al.total_duration, al.artist_id,
                               ar.name as artist_name, ? as album_led,
@@ -2431,7 +2500,7 @@ def _api_v1_filtered_albums(conn, filter_type, filter_value, page, sort, dir_, p
                        JOIN artists ar ON al.artist_id=ar.id
                        JOIN tracks t ON t.album_id=al.id
                        LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
-                       WHERE t.led_color=?'''
+                       WHERE ''' + _quality_color_sql('t') + '=?'
         return _paginate(conn, count_sql, [filter_value], data_sql, [filter_value, filter_value], page, order, page_size=page_size)
     return [], 0, 1
 
@@ -2449,7 +2518,7 @@ def api_v1_home_facets():
         total_size     = conn.execute('SELECT COALESCE(SUM(file_size),0) FROM tracks').fetchone()[0]
 
         led_rows = conn.execute(
-            'SELECT led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY led_color ORDER BY c DESC'
+            f'SELECT {_quality_color_sql("")} AS led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY 1 ORDER BY c DESC'
         ).fetchall()
         mood_rows = conn.execute(
             'SELECT mood, COUNT(*) as c FROM track_meta WHERE mood IS NOT NULL GROUP BY mood ORDER BY c DESC LIMIT 14'
@@ -3249,13 +3318,13 @@ def api_v1_artist_detail(artist_id):
             d['cover_path'] = clean_db_path(d.get('cover_path'))
             d['cover_url']  = cover_url_filter(d['cover_path'])
             led_row = conn.execute(
-                '''SELECT led_color FROM tracks
+                '''SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END AS led_color FROM tracks
                    WHERE album_id=? AND led_color IS NOT NULL
-                   GROUP BY led_color
+                   GROUP BY 1
                    ORDER BY CASE led_color
                      WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                      WHEN 'red'     THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                     ELSE 6 END
+                     ELSE 6 END, MIN((COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')))
                    LIMIT 1''',
                 (a['id'],)
             ).fetchone()
@@ -4193,11 +4262,11 @@ def api_v1_search():
         albums = conn.execute(
             '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
                       al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
-                      (SELECT led_color FROM tracks WHERE album_id=al.id
+                      (SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id
                        ORDER BY CASE led_color
                          WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                          WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                         ELSE 6 END LIMIT 1) as album_led
+                         ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led
                FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
                WHERE al.name LIKE ? OR ar.name LIKE ? ORDER BY al.name LIMIT 20''',
             (like, like)
@@ -4205,7 +4274,7 @@ def api_v1_search():
         tracks = conn.execute(
             '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate,
                       t.bit_depth, t.is_mqa, t.file_path,
-                      t.codec, t.duration, t.sample_rate_real,
+                      t.codec, t.bitrate, t.compression_mode, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
                       ar.id as artist_id, ar.name as artist_name,
                       tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
@@ -5807,7 +5876,7 @@ def _collab_pistas_detalle(conn, sess, ids):
     ph = ','.join('?' * len(ids))
     rows = {r['id']: dict(r) for r in conn.execute(
         f'''SELECT t.id, t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
-                   t.is_mqa, t.codec, t.sample_rate_real, t.genre,
+                   t.is_mqa, t.codec, t.bitrate, t.compression_mode, t.sample_rate_real, t.genre,
                    al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
                    ar.id AS artist_id, ar.name AS artist_name
             FROM tracks t
@@ -6010,7 +6079,7 @@ def _collab_items_sesion(conn, sess):
     rows = conn.execute(
         '''SELECT cqi.id AS item_id, cqi.track_id, cqi.added_at, cqi.dispatched, cqi.participant_id, cqi.played_at,
                   t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
-                  t.is_mqa, t.codec, t.sample_rate_real,
+                  t.is_mqa, t.codec, t.bitrate, t.compression_mode, t.sample_rate_real,
                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
                   ar.id AS artist_id, ar.name AS artist_name,
                   cp.name, cp.avatar_category, cp.avatar_file, cp.device_key, cp.user_id,
@@ -6443,9 +6512,11 @@ def _fmt_seconds(seconds):
     s = seconds % 60
     return f"{h}:{m:02d}:{s:02d}" if h > 0 else f"{m}:{s:02d}"
 
-def _fmt_bitrate(bps):
+def _fmt_bitrate(bps, con_perdida=False, kbps_nominal=None):
     if not bps:
         return "N/A"
+    if con_perdida:
+        return f"{kbps_nominal or int(bps / 1000)} kbps · Con Pérdida"
     kbps = bps / 1000
     if kbps >= 1000:
         label = f"{kbps/1000:.2f} Mbps"
@@ -6488,6 +6559,9 @@ def _dsd_label(track):
 def _fmt_format(track):
     """Return (display_label, led_color) using DB led_color as sole truth."""
     led = (track.get('led_color') or 'yellow').lower()
+    if not track.get('is_dsd') and not track.get('is_mqa') and _es_con_perdida(track):
+        # Distintivo plateado; led_color en BD sigue 'yellow' (DAC).
+        return _lossy_label(track), LOSSY_COLOR
     if track.get('is_dsd'):
         label = _dsd_label(track)
     elif track.get('is_mqa'):
@@ -6522,10 +6596,18 @@ def track_to_json(t):
     d['format_display'] = fmt
     d['format_color']   = led
     # led_color stays as-is from DB
-    d['bitrate_fmt']     = _fmt_bitrate(d.get('bitrate'))
+    con_perdida = led == LOSSY_COLOR
+    d['con_perdida']     = con_perdida
+    d['kbps']            = _kbps_nominal(d) if con_perdida else None
+    d['bitrate_fmt']     = _fmt_bitrate(d.get('bitrate'), con_perdida, d['kbps'])
     sr = d.get('sample_rate_real')
     d['sample_rate_fmt'] = f"{sr/1000:.1f} kHz" if sr else "N/A"
-    d['bit_depth_fmt']   = f"{d.get('bit_depth') or 24} bit"
+    # MP3/AAC no tienen profundidad de bits (en la BD queda 0): antes se
+    # mostraba "24 bit" por el default.
+    if con_perdida and not d.get('bit_depth'):
+        d['bit_depth_fmt'] = '—'
+    else:
+        d['bit_depth_fmt'] = f"{d.get('bit_depth') or 24} bit"
     return d
 
 # ── Jinja2 filters ────────────────────────────────────────────────────────────
@@ -6635,7 +6717,7 @@ def home():
 
         # LED breakdown — direct from DB field, no computation
         led_rows = conn.execute(
-            'SELECT led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY led_color ORDER BY c DESC'
+            f'SELECT {_quality_color_sql("")} AS led_color, COUNT(*) as c FROM tracks WHERE led_color IS NOT NULL GROUP BY 1 ORDER BY c DESC'
         ).fetchall()
         led_counts = {r['led_color']: r['c'] for r in led_rows}
 
@@ -6656,11 +6738,11 @@ def home():
         for a in recent_albums_raw:
             d = {**dict(a), 'cover_path': clean_db_path(a['cover_path'])}
             led = conn.execute(
-                """SELECT led_color FROM tracks WHERE album_id=?
+                """SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END AS led_color FROM tracks WHERE album_id=?
                    ORDER BY CASE led_color
                      WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                      WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                     ELSE 6 END LIMIT 1""",
+                     ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1""",
                 (a['id'],)
             ).fetchone()
             d['album_led'] = led['led_color'] if led else 'yellow'
@@ -6811,13 +6893,13 @@ def artist(artist_id):
             d['cover_path'] = clean_db_path(d.get('cover_path'))
             # Dominant led_color: highest-quality color that appears most
             led_row = conn.execute(
-                '''SELECT led_color FROM tracks
+                '''SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END AS led_color FROM tracks
                    WHERE album_id=? AND led_color IS NOT NULL
-                   GROUP BY led_color
+                   GROUP BY 1
                    ORDER BY CASE led_color
                      WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                      WHEN 'red'     THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                     ELSE 6 END
+                     ELSE 6 END, MIN((COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')))
                    LIMIT 1''',
                 (a['id'],)
             ).fetchone()
@@ -7130,18 +7212,18 @@ def search():
         albums = conn.execute(
             '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
                       al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
-                      (SELECT led_color FROM tracks WHERE album_id=al.id
+                      (SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id
                        ORDER BY CASE led_color
                          WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                          WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                         ELSE 6 END LIMIT 1) as album_led
+                         ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led
                FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id
                WHERE al.name LIKE ? OR ar.name LIKE ? ORDER BY al.name LIMIT 20''',
             (like, like)
         ).fetchall()
         tracks = conn.execute(
             '''SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.is_mqa,
-                      t.codec, t.duration, t.sample_rate_real,
+                      t.codec, t.bitrate, t.compression_mode, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
                       tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
                FROM tracks t
@@ -7283,7 +7365,11 @@ def _playlist_order(sort_key):
 # Si el usuario quiere la otra versión, puede seguir encontrándola buscándola
 # manualmente (álbum, vista de álbumes, etc.) — este filtro solo afecta la
 # vista de pistas, tal como pide el ticket.
-_TRACK_QUALITY_RANK_SQL = """(CASE {alias}.led_color
+_TRACK_QUALITY_RANK_SQL = """(CASE
+        WHEN COALESCE({alias}.compression_mode,'')='Lossy'
+          OR LOWER(COALESCE({alias}.codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')
+          THEN -16.6666666667
+        ELSE CASE {alias}.led_color
         WHEN 'magenta' THEN 100.0
         WHEN 'blue'    THEN 83.3333333333
         WHEN 'green'   THEN 66.6666666667
@@ -7291,7 +7377,7 @@ _TRACK_QUALITY_RANK_SQL = """(CASE {alias}.led_color
         WHEN 'cyan'    THEN 33.3333333333
         WHEN 'white'   THEN 16.6666666667
         ELSE 0.0
-    END)"""
+    END END)"""
 
 # Ticket AI-30 — mismo mapeo que _TRACK_QUALITY_RANK_SQL de arriba, pero
 # como dict de Python en vez de fragmento SQL. ai_playlist.py necesita
@@ -7307,6 +7393,7 @@ _TRACK_QUALITY_RANK_SQL = """(CASE {alias}.led_color
 LED_QUALITY_RANK = {
     'magenta': 100.0, 'blue': 83.3333333333, 'green': 66.6666666667,
     'red': 50.0, 'cyan': 33.3333333333, 'white': 16.6666666667,
+    'silver': -16.6666666667,   # con pérdida: siempre gana la copia sin pérdida
 }
 
 
@@ -7462,7 +7549,7 @@ def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
 # track in the schema is tagged higher). Selecting a "DSD512" value would
 # either silently relabel DSD256 files or match nothing; instead of inventing
 # that convention, this is called out for a product decision — see chat reply.
-QUALITY_OPTIONS = ['CD', 'HI-RES', 'DSD64', 'DSD128', 'DSD256', 'MQA', 'MQA Studio', 'OSR']
+QUALITY_OPTIONS = ['CD', 'HI-RES', 'DSD64', 'DSD128', 'DSD256', 'MQA', 'MQA Studio', 'OSR', 'Con Pérdida']
 
 # Popularidad buckets mirror the 5-star scale already rendered in browse.html
 # (Math.floor(pop_score / 20)), so a filter labelled "★★★★★" matches exactly
@@ -7479,7 +7566,9 @@ BAIL_BUCKETS   = {'baja': (0, 33), 'media': (34, 66), 'alta': (67, 100)}
 def _quality_condition(value):
     """SQL boolean fragment (references alias t.) for a Calidad filter value."""
     v = (value or '').strip()
-    if v == 'CD':         return "t.led_color = 'yellow'"
+    if v == 'CD':         return f"t.led_color = 'yellow' AND NOT {_lossy_sql('t')}"
+    if v == LOSSY_QUALITY or v.upper() in ('CON PERDIDA', 'CON PÉRDIDA', 'LOSSY'):
+        return _lossy_sql('t')
     if v == 'HI-RES':     return "t.led_color = 'white'"
     if v == 'DSD64':      return ("t.is_dsd=1 AND (UPPER(COALESCE(t.dsd_rate,'')) LIKE 'DSD64%' "
                                    "OR (COALESCE(t.dsd_rate,'')='' AND t.sample_rate_real>=2822400 "
@@ -7831,11 +7920,11 @@ def _api_search_advanced_payload(args, page_size=None):
         data_sql = f'''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
                               al.track_count, al.total_duration, al.artist_id,
                               ar.name as artist_name,
-                              (SELECT led_color FROM tracks WHERE album_id=al.id
+                              (SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id
                                ORDER BY CASE led_color
                                    WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                                    WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                                   ELSE 6 END LIMIT 1) as album_led,
+                                   ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led,
                               COALESCE(apc.pop_score, 0) as pop_score
                        FROM albums al
                        JOIN tracks t ON t.album_id=al.id
@@ -7885,11 +7974,11 @@ def browse_format(fmt):
     try:
         base = '''SELECT al.id, al.name, al.cover_path, al.primary_format, al.year,
                          al.track_count, al.total_duration, al.artist_id, ar.name as artist_name,
-                         (SELECT led_color FROM tracks WHERE album_id=al.id
+                         (SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id
                           ORDER BY CASE led_color
                             WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                             WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5
-                            ELSE 6 END LIMIT 1) as album_led
+                            ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led
                   FROM albums al LEFT JOIN artists ar ON al.artist_id=ar.id'''
         if fmt == 'DSD':   where = ' WHERE al.primary_format="DSD"'
         elif fmt == 'MQA':  where = ' WHERE al.primary_format="MQA"'
@@ -7923,7 +8012,7 @@ def browse_led(color):
         opts = _advanced_search_options(conn)
         count_sql = '''SELECT COUNT(DISTINCT al.id)
                        FROM albums al JOIN tracks t ON t.album_id=al.id
-                       WHERE t.led_color=?'''
+                       WHERE ''' + _quality_color_sql('t') + '=?'
         data_sql  = '''SELECT DISTINCT al.id, al.name, al.cover_path, al.primary_format, al.year,
                               al.track_count, al.total_duration, al.artist_id,
                               ar.name as artist_name, ? as album_led,
@@ -7932,7 +8021,7 @@ def browse_led(color):
                        JOIN artists ar ON al.artist_id=ar.id
                        JOIN tracks t ON t.album_id=al.id
                        LEFT JOIN album_pop_cache apc ON apc.album_id=al.id
-                       WHERE t.led_color=?'''
+                       WHERE ''' + _quality_color_sql('t') + '=?'
         order = _album_order(sort, dir_)
         albums, total, total_pages = _paginate(
             conn, count_sql, [color], data_sql, [color, color], page, order)
@@ -7948,7 +8037,8 @@ def browse_led(color):
                 if row:
                     alb['primary_format'] = _dsd_label(dict(row))
         return render_template('browse.html', albums=albums,
-                               title=f"LED {color.capitalize()} — {LED_LABELS[color]}",
+                               title=(LOSSY_QUALITY if color == LOSSY_COLOR
+                                      else f"LED {color.capitalize()} — {LED_LABELS[color]}"),
                                filter_type='led', filter_value=color,
                                page=page, total_pages=total_pages, total=total,
                                sort=sort, sort_dir=dir_, **opts)
@@ -8012,11 +8102,11 @@ def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad
             "SELECT al.id, al.name, al.cover_path, al.primary_format, al.year, "
             "al.track_count, al.total_duration, al.artist_id, "
             "ar.name as artist_name, "
-            "(SELECT led_color FROM tracks WHERE album_id=al.id "
+            "(SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id "
             " ORDER BY CASE led_color "
             "   WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2 "
             "   WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5 "
-            "   ELSE 6 END LIMIT 1) as album_led, "
+            "   ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led, "
             "COALESCE(apc.pop_score, 0) as pop_score "
             "FROM albums al "
             "LEFT JOIN artists ar ON al.artist_id=ar.id "
@@ -8040,11 +8130,11 @@ def _meta_browse(conn, field, value, page, title, filter_type, sort='popularidad
             "SELECT al.id, al.name, al.cover_path, al.primary_format, al.year, "
             "al.track_count, al.total_duration, al.artist_id, "
             "ar.name as artist_name, "
-            "(SELECT led_color FROM tracks WHERE album_id=al.id "
+            "(SELECT CASE WHEN (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) THEN 'silver' ELSE led_color END FROM tracks WHERE album_id=al.id "
             " ORDER BY CASE led_color "
             "   WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2 "
             "   WHEN 'red' THEN 3 WHEN 'cyan' THEN 4 WHEN 'white' THEN 5 "
-            "   ELSE 6 END LIMIT 1) as album_led, "
+            "   ELSE 6 END, (COALESCE(compression_mode,'')='Lossy' OR LOWER(COALESCE(codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2')) LIMIT 1) as album_led, "
             "COALESCE(apc.pop_score, 0) as pop_score "
             "FROM albums al "
             "LEFT JOIN artists ar ON al.artist_id=ar.id "
@@ -8824,6 +8914,7 @@ def _radio_candidate_rows(conn, seed, exclude_track_ids, over_fetch):
                         WHEN 'magenta' THEN 0 WHEN 'blue' THEN 1 WHEN 'green' THEN 2
                         WHEN 'red'     THEN 3 WHEN 'cyan'  THEN 4 WHEN 'white' THEN 5
                         ELSE 6 END) / 6.0 * 15 )
+             - ( CASE WHEN COALESCE(t.compression_mode,'')='Lossy' OR LOWER(COALESCE(t.codec,'')) IN ('mp3','aac','vorbis','opus','wmav1','wmav2','mp2') THEN 3 ELSE 0 END )
                -- Ruido aleatorio (variedad, existente, sin cambios)
              + (ABS(RANDOM()) % 20)
                AS score
@@ -9194,7 +9285,7 @@ def _api_meta_tracks_payload(args, page_size=None):
             # Ticket 20, Ítem 1: led_color vive en 'tracks' (t), no en
             # 'track_meta' (tm) — mismo caso que genre arriba, no un
             # tm.led=? que rompería contra una tabla sin esa columna.
-            base_where  = 't.led_color=?'
+            base_where  = _quality_color_sql('t') + '=?'
             base_params = (value,)
         else:
             base_where  = f'tm.{field}=?'
@@ -9243,7 +9334,7 @@ def _api_meta_tracks_payload(args, page_size=None):
 
         rows = conn.execute(f'''
             SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate,
-                   t.sample_rate_real, t.bit_depth, t.is_mqa, t.codec,
+                   t.sample_rate_real, t.bit_depth, t.is_mqa, t.codec, t.bitrate, t.compression_mode,
                    t.duration, t.track_number, t.file_path,
                    a.id as album_id, a.name as album_name, a.cover_path, a.year as album_year,
                    ar.id as artist_id, ar.name as artist_name,
@@ -10812,7 +10903,7 @@ def api_v1_cast_status():
         if m:
             row = conn.execute(
                 'SELECT t.id, t.title, t.artist, t.led_color, t.is_dsd, t.dsd_rate, '
-                '       t.bit_depth, t.is_mqa, t.codec, t.duration, t.sample_rate_real, '
+                '       t.bit_depth, t.is_mqa, t.codec, t.bitrate, t.compression_mode, t.duration, t.sample_rate_real, '
                 '       a.id AS album_id, a.name AS album_name, a.cover_path '
                 'FROM tracks t LEFT JOIN albums a ON t.album_id = a.id '
                 'WHERE t.id=?', (int(m.group(1)),)).fetchone()
@@ -11663,7 +11754,8 @@ def favorites_page():
         conn = get_db_connection()
         rows = conn.execute('''
             SELECT t.id, t.title, t.artist, t.duration, t.led_color, t.file_path,
-                   t.codec, t.is_dsd, t.dsd_rate, t.is_mqa, t.sample_rate_real,
+                   t.codec, t.bitrate, t.compression_mode,
+                   t.is_dsd, t.dsd_rate, t.is_mqa, t.sample_rate_real,
                    al.id as album_id, al.name as album_name, al.cover_path,
                    al.artist_id,
                    CASE WHEN t.is_dsd=1 THEN COALESCE(t.dsd_rate,'DSD')
@@ -11678,6 +11770,10 @@ def favorites_page():
         ''', (user_id,)).fetchall()
         conn.close()
         tracks = [dict(r) for r in rows]
+        for t in tracks:
+            # Con Pérdida: etiqueta "MP3 · 320 kbps" y distintivo plateado.
+            if _es_con_perdida(t):
+                t['format_display'], t['format_color'] = _fmt_format(t)
         # Build audio_url for each track
         for t in tracks:
             t['audio_url'] = audio_url_filter(t['file_path'])

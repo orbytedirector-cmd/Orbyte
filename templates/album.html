@@ -192,7 +192,7 @@
       </span>
       <span class="track-duration">{{ track.duration|format_duration }}</span>
       <span class="track-quality">
-        <span class="tq-badge format-{{ track.led_color or 'white' }}">{{ track.format_display or track.codec|upper or 'FLAC' }}</span>
+        <span class="tq-badge format-{{ track.format_color or track.led_color or 'white' }}">{{ track.format_display or track.codec|upper or 'FLAC' }}</span>
       </span>
       <span class="track-led">{{ diamond_svg(track.led_color or 'white', 'sm')|safe }}</span>
       <span class="track-actions">
