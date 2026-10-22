@@ -13,8 +13,8 @@
   const ASSETS = "/static/web/assets/";
 
   // ---- Tablas (copiadas tal cual de Desktop app.js) ----
-  const LED_COLORS = { yellow: "#F5C518", white: "#F0F0F0", cyan: "#00D4FF", red: "#FF2244", green: "#00E676", blue: "#2979FF", magenta: "#E040FB" };
-  const LED_LABELS = { yellow: "PCM CD Quality", white: "PCM Hi-Res", cyan: "DSD 64/128", red: "DSD 256", green: "MQA", blue: "MQA Studio", magenta: "Original Sample Rate" };
+  const LED_COLORS = { yellow: "#F5C518", white: "#F0F0F0", cyan: "#00D4FF", red: "#FF2244", green: "#00E676", blue: "#2979FF", magenta: "#E040FB", silver: "#A9B4C2" };
+  const LED_LABELS = { yellow: "PCM CD Quality", white: "PCM Hi-Res", cyan: "DSD 64/128", red: "DSD 256", green: "MQA", blue: "MQA Studio", magenta: "Original Sample Rate", silver: "Con Pérdida" };
   const MOMENTO_LABELS = { morning: "Mañana", evening: "Tarde", night: "Noche", sleep: "Para dormir", party: "Fiesta", workout: "Ejercicio", focus: "Concentración", anytime: "Cualquier momento" };
   const ERA_LABELS = { early_rock_era: "Early Rock", british_invasion_era: "British Invasion", classic_rock_era: "Classic Rock", nwobhm_synth_era: "NWOBHM / Synth", grunge_alternative_era: "Grunge / Alternative", post_millennial_era: "Post-millennial", streaming_era: "Streaming Era", current_era: "Actualidad" };
   const IDIOMA_NAMES = {

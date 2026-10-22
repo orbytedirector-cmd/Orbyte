@@ -29,7 +29,7 @@
       <div class="fav-title" title="{{ t.title }}">{{ t.title }}</div>
       <div class="fav-artist">{{ t.artist or t.album_name or '' }}</div>
     </div>
-    <span class="track-format-badge format-{{ t.led_color or 'yellow' }}" style="font-size:0.65rem;flex-shrink:0">
+    <span class="track-format-badge format-{{ t.format_color or t.led_color or 'yellow' }}" style="font-size:0.65rem;flex-shrink:0">
       {{ t.format_display or t.led_color|upper }}
     </span>
     <button class="track-actions-btn" title="Reproducir" onclick="playFavTrack({{ loop.index0 }})">▶</button>

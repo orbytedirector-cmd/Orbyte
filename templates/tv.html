@@ -20,7 +20,7 @@
     --bg: #000; --card: rgba(13,13,13,0.78); --border: rgba(255,255,255,0.08);
     --gold: #C8920A; --gold2: #F5C518; --text: #efefef; --text2: #9a9a9a; --text3: #555;
     --led-yellow:#f5c518; --led-white:#f0f0f0; --led-cyan:#00d4ff; --led-red:#ff2244;
-    --led-green:#00e676; --led-blue:#2979ff; --led-magenta:#e040fb;
+    --led-green:#00e676; --led-blue:#2979ff; --led-magenta:#e040fb; --led-silver:#a9b4c2;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { width: 100%; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
@@ -193,7 +193,8 @@
   var BASE = "/tv/" + encodeURIComponent(CLAVE);
   var $ = function (id) { return document.getElementById(id); };
   var LED = { yellow: "var(--led-yellow)", white: "var(--led-white)", cyan: "var(--led-cyan)", red: "var(--led-red)",
-              green: "var(--led-green)", blue: "var(--led-blue)", magenta: "var(--led-magenta)" };
+              green: "var(--led-green)", blue: "var(--led-blue)", magenta: "var(--led-magenta)",
+              silver: "var(--led-silver)" };
   var estado = null, recibidoEn = 0, desde = null, trackId = null, codeActual = null;
   var colaAvisos = [], mostrandoAviso = false;
 

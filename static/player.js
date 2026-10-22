@@ -333,7 +333,9 @@ function updatePlayerBar(track) {
              track.is_mqa ? (c === 'blue' ? 'MQA Studio' : c === 'magenta' ? 'MQB' : 'MQA') :
              (track.codec || 'FLAC').toUpperCase());
         fmt.textContent = label;
-        fmt.className   = `player-fmt-badge fmt-${c}`;
+        // Distintivo: format_color ('silver' si es con pérdida). El rombo de
+        // arriba sigue con led_color = lo que muestra el DAC.
+        fmt.className   = `player-fmt-badge fmt-${(track.format_color || c).toLowerCase()}`;
     }
 
     document.getElementById('play-btn').textContent = '⏸';
