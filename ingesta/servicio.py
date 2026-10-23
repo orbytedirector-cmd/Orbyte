@@ -359,7 +359,13 @@ def caratula(aid):
     raiz = os.path.realpath(a['ruta'])
     disco = request.args.get('disco', type=int)
     archivo = None
-    if disco:
+    if request.args.get('r'):                   # cualquier imagen candidata del álbum
+        archivo = request.args.get('r')
+        if not any(c.get('archivo') == archivo for c in car.get('candidatos', [])):
+            abort(404)
+    elif request.args.get('incrustada') and car.get('incrustada_en'):
+        car = dict(car, tipo='incrustada', pista=car['incrustada_en'])
+    elif disco:
         d = next((x for x in car.get('por_disco', []) if x.get('disco') == disco), None)
         archivo = d and d.get('archivo')
     elif car.get('tipo') == 'archivo':
@@ -369,7 +375,7 @@ def caratula(aid):
         origen = os.path.realpath(os.path.join(raiz, archivo))
         if not origen.startswith(raiz + os.sep) or not os.path.isfile(origen):
             abort(404)
-    elif car.get('tipo') == 'incrustada' and not disco:
+    elif car.get('tipo') == 'incrustada' and not disco and not request.args.get('r'):
         pista = os.path.realpath(os.path.join(raiz, car['pista']))
         if not pista.startswith(raiz + os.sep) or not os.path.isfile(pista):
             abort(404)
