@@ -42,6 +42,15 @@
         <input type="number" id="trabajadores" name="trabajadores" min="1" max="8" value="{{ aj.trabajadores }}"></div>
     </div>
   </div>
+  <div class="bloque">
+    <div class="campo">
+      <label style="display:flex;gap:.6rem;align-items:center;cursor:pointer">
+        <input type="checkbox" name="musicbrainz" value="1" {{ 'checked' if aj.musicbrainz != '0' }} style="width:18px;height:18px;accent-color:var(--oro)">
+        Identificar la edición en MusicBrainz durante la revisión</label>
+      <div class="ayuda" style="margin-top:.35rem">Busca la edición exacta (ID en los tags, TOC del CD desde el .log o el .cue, número de catálogo y duración de cada pista) para usar <b>el año de la edición</b> en el nombre de la carpeta. Una consulta por segundo; las respuestas quedan guardadas.</div>
+      <div class="ayuda">AcoustID (huella del audio, solo cuando faltan tags): {% if acoustid %}<span class="ok">disponible</span>{% else %}<span class="med">no disponible</span> — falta <span class="mono">fpcalc</span> (paquete libchromaprint-tools) o <span class="mono">ACOUSTID_API_KEY</span> en el .env{% endif %}.</div>
+    </div>
+  </div>
   <div><button class="btn oro">Guardar</button></div>
 </form>
 

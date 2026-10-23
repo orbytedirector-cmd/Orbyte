@@ -213,6 +213,14 @@ td .nombre { font-family: var(--mono); font-size: .74rem; color: var(--texto-2);
 .giro { width: 18px; height: 18px; border: 2px solid var(--borde-oro); border-top-color: var(--oro-claro); border-radius: 50%; animation: giro .9s linear infinite; }
 @keyframes giro { to { transform: rotate(360deg); } }
 
+/* ── edición ── */
+.edicion-elegida { display: flex; gap: 1rem; align-items: flex-start; }
+.edicion-elegida img { width: 110px; height: 110px; object-fit: cover; border-radius: 8px; border: 1px solid var(--borde); flex: none; }
+.candidatas summary { cursor: pointer; color: var(--texto-2); font-size: .85rem; margin-top: .7rem; }
+.mini-caa { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; display: block; }
+.btn-link { background: none; border: 0; color: var(--oro-claro); cursor: pointer; text-decoration: underline; font-size: inherit; }
+td a:hover { color: var(--oro-claro); }
+
 /* ── ajustes ── */
 .form { max-width: 760px; display: flex; flex-direction: column; gap: 1.1rem; }
 .campo label { display: block; font-weight: 600; font-size: .9rem; margin-bottom: .25rem; }
