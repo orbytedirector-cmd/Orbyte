@@ -14,6 +14,7 @@ AJUSTES_DEFECTO = {
     'espera_min': '2',          # minutos sin cambios para dar por terminada una copia
     'intervalo_seg': '30',      # cada cuánto se mira la carpeta de entrada
     'trabajadores': '3',        # decodificaciones en paralelo durante la revisión
+    'musicbrainz': '1',         # identificar la edición exacta durante la revisión
 }
 
 ESTADOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error')
@@ -48,6 +49,10 @@ class Almacen:
                 );
                 CREATE INDEX IF NOT EXISTS ix_avisos_leido ON avisos(leido, ts);
             ''')
+            columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
+            for col, tipo in (('eleccion', 'TEXT'),):
+                if col not in columnas:
+                    c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
 
     def _con(self):
         c = sqlite3.connect(self.ruta, timeout=30)

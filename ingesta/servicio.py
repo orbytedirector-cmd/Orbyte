@@ -11,6 +11,7 @@ Variables: INGESTA_PORT (5005) · INGESTA_DATOS (<repo>/ingesta_datos) · ORBYTE
 import hashlib
 import ipaddress
 import json
+import re
 import logging
 import os
 import secrets
@@ -229,6 +230,7 @@ def ajustes():
     if request.method == 'POST':
         nuevo = {k: (request.form.get(k) or '').strip() for k in
                  ('carpeta_entrada', 'biblioteca', 'db_orbyte', 'espera_min', 'intervalo_seg', 'trabajadores')}
+        nuevo['musicbrainz'] = '1' if request.form.get('musicbrainz') else '0'
         entrada = os.path.abspath(nuevo['carpeta_entrada']) if nuevo['carpeta_entrada'] else ''
         bib = os.path.abspath(nuevo['biblioteca'] or '/mnt/musica')
         nuevo['carpeta_entrada'], nuevo['biblioteca'] = entrada, bib
@@ -267,7 +269,9 @@ def ajustes():
             flash('Ajustes guardados.')
             return redirect(url_for('ajustes'))
         aj.update(nuevo)
-    return render_template('ajustes.html', pagina='ajustes', aj=aj, errores=errores)
+    from .edicion import acoustid_disponible
+    return render_template('ajustes.html', pagina='ajustes', aj=aj, errores=errores,
+                           acoustid=acoustid_disponible())
 
 
 # ─────────────────────────── API ───────────────────────────
@@ -302,6 +306,20 @@ def api_revisar(aid):
     if a['estado'] != 'analizando':
         almacen.actualizar(aid, estado='en_cola', progreso=None)
         vigilante.ya()
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/edicion', methods=['POST'])
+def api_edicion(aid):
+    """Elegir (o quitar) la edición de MusicBrainz: solo se guarda la elección y se vuelve a revisar."""
+    a = almacen.album(aid)
+    if not a:
+        return jsonify(ok=False), 404
+    mbid = (request.get_json(silent=True) or {}).get('mbid')
+    if mbid and not re.fullmatch(r'[0-9a-f-]{36}', mbid):
+        return jsonify(ok=False, error='id inválido'), 400
+    almacen.actualizar(aid, eleccion=json.dumps({'mbid': mbid}) if mbid else None, estado='en_cola', progreso=None)
+    vigilante.ya()
     return jsonify(ok=True)
 
 
@@ -356,6 +374,8 @@ def caratula(aid):
         abort(404)
     r = a['reporte']
     car = r['caratula']
+    if car.get('tipo') == 'caa' and car.get('mb') and not request.args.get('r') and not request.args.get('disco'):
+        return redirect(f'https://coverartarchive.org/release/{car["mb"]}/front-250')
     raiz = os.path.realpath(a['ruta'])
     disco = request.args.get('disco', type=int)
     archivo = None

@@ -19,6 +19,8 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import edicion as edicion_mod
+
 try:
     import mutagen
 except ImportError:          # el servicio funciona igual, con menos tags
@@ -380,7 +382,7 @@ def analizar_pista(ruta, base):
     fmt = info.get('format', {})
     ext = Path(ruta).suffix.lower()
     p = {'archivo': os.path.relpath(ruta, base), 'ext': ext.lstrip('.'),
-         'tamano': os.path.getsize(ruta)}
+         'tamano': os.path.getsize(ruta), 'mtime': round(os.path.getmtime(ruta), 1)}
     if not stream:
         p.update({'legible': False, 'codec': None, 'codec_label': ext.lstrip('.').upper(),
                   'duracion': 0, 'tags': {}, 'clase': None})
@@ -458,6 +460,7 @@ def analizar_pista(ruta, base):
               'kbps': kbps_nominal(br, codec) if lossy else (round(br / 1000) if br else None),
               'mqa': es_mqa, 'mqa_tipo': mqa_tipo, 'mqa_sr_original': orig_sr,
               'clase': clase, 'portada_incrustada': portada, 'tags': tags,
+              'muestras': _muestras(stream, sr),
               'edicion': _edicion(crudo)})
     if codec == 'flac':
         ini, fin = id3_en_flac(ruta)
@@ -495,6 +498,16 @@ def _edicion(crudo):
         if d.get(c):
             d[c] = _anio(d[c]) or d[c]
     return {k: v for k, v in d.items() if v}
+
+
+def _muestras(stream, sr):
+    """Largo exacto en muestras (sirve para calcular el TOC de un rip de CD)."""
+    try:
+        if stream.get('time_base') == f'1/{sr}' and stream.get('duration_ts'):
+            return int(stream['duration_ts'])
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 # ─────────────────────────── carátulas ───────────────────────────
@@ -714,7 +727,80 @@ def _desde_carpeta(nombre):
     return (artista or '').strip() or None, s.strip() or None, anio
 
 
-def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
+VINILO_RE = re.compile(r'(?<![a-z])(lp|vinyl|vinilo|vinyl[- ]?rip|needledrop)(?![a-z])', re.I)
+CATALOGO_RE = re.compile(r'(?<![A-Z0-9])([A-Z]{2,6}[- ]?[A-Z]{0,2}\d{3,7}[A-Z]?)(?![A-Z0-9])')
+
+
+def _datos_para_edicion(ruta, pistas, legibles, info_cues, otros, artista, album, origen,
+                        edicion, n_discos, discos_n, anios_carpeta, anio_tags, anio_orig, cue0):
+    """Lo que identificar() necesita: duraciones en orden, TOC, catálogos, años y tipo de formato."""
+    duraciones, por_disco = [], {}
+    for d in discos_n:
+        lista = []
+        for p in sorted([p for p in pistas if p.get('disco') == d and p.get('legible')],
+                        key=lambda p: (p.get('numero') or 999, p['archivo'])):
+            if p.get('imagen_cue'):
+                cue = next((c for c in info_cues for r in c['referencias'] if r['archivo'] == p['archivo']), None)
+                if cue:
+                    ref = next(r for r in cue['referencias'] if r['archivo'] == p['archivo'])
+                    ini = [cp['inicio'] for cp in cue['pistas'] if cp['archivo_cue'] == ref['archivo_cue']]
+                    fin = ini[1:] + [p.get('duracion') or 0]
+                    lista += [round(b - a, 1) for a, b in zip(ini, fin)]
+                    por_disco.setdefault(d, []).append(('cue', p, ini))
+                    continue
+            lista.append(round(p.get('duracion') or 0, 1))
+            por_disco.setdefault(d, []).append(('pista', p, None))
+        duraciones.append(lista)
+
+    toc = None
+    if n_discos == 1:
+        for o in otros:
+            if o.lower().endswith('.log'):
+                try:
+                    with open(os.path.join(ruta, o), 'rb') as f:
+                        crudo = f.read(400000)
+                    texto = crudo.decode('utf-16') if crudo[:2] in (b'\xff\xfe', b'\xfe\xff') else crudo.decode('utf-8', 'replace')
+                    toc = edicion_mod.toc_desde_log_str(texto)
+                except Exception:
+                    toc = None
+                if toc:
+                    break
+        elementos = por_disco.get(discos_n[0], []) if discos_n else []
+        if not toc and len(elementos) == 1 and elementos[0][0] == 'cue':
+            p = elementos[0][1]
+            toc = edicion_mod.toc_desde_cue(elementos[0][2], p.get('muestras'), p.get('sr'))
+        if not toc and elementos and all(e[0] == 'pista' and e[1].get('sr') == 44100 and not e[1].get('lossy')
+                                         for e in elementos):
+            toc = edicion_mod.toc_desde_pistas([e[1].get('muestras') for e in elementos])
+
+    nombres = os.path.basename(ruta) + ' ' + os.path.basename(os.path.dirname(ruta))
+    catalogos = []
+    if edicion.get('catalogo'):
+        catalogos.append(edicion['catalogo'])
+    for c in CATALOGO_RE.findall(nombres):
+        if not re.fullmatch(r'(CD|LP|HR|DSD|MQA|FLAC|WEB|SACD)\d*', c.replace(' ', '').replace('-', '')) \
+                and not re.fullmatch(r'[A-Z]+[- ]?(19|20)\d\d', c):
+            catalogos.append(c)
+    barcodes = [re.sub(r'\D', '', edicion['barcode'])] if edicion.get('barcode') else []
+    barcodes = [b for b in barcodes if len(b) in (12, 13)]
+
+    anios = {a for a in [anio_tags, anio_orig, cue0.get('anio')] + list(anios_carpeta) if a}
+    if any(p.get('dsd') for p in legibles):
+        formato = 'sacd'
+    elif VINILO_RE.search(nombres):
+        formato = 'vinilo'
+    elif any(p.get('lossy') for p in legibles) or any((p.get('sr') or 0) > 48000 for p in legibles):
+        formato = 'digital'
+    else:
+        formato = 'cd'
+    return {'artista': artista, 'album': album, 'duraciones': duraciones, 'toc': toc,
+            'catalogos': list(dict.fromkeys(catalogos)), 'barcodes': barcodes, 'anios': anios,
+            'formato': formato, 'mbid': edicion.get('mbid'),
+            'tags_utiles': origen.get('artista') in ('tags', 'cue') and origen.get('album') in ('tags', 'cue'),
+            'rutas_audio': [os.path.join(ruta, p['archivo']) for p in legibles[:3]]}
+
+
+def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=None, eleccion=None, previo=None):
     """
     unidad: dict de detectar_albumes() (ruta, carpetas).
     ajustes: {'biblioteca': '/mnt/musica', 'db_orbyte': '.../music.db'}
@@ -812,7 +898,18 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
     # ── decodificación completa (en paralelo) ──
     hechas = [0]
 
+    anteriores = {}
+    for d in (previo or {}).get('discos') or []:
+        for t in d.get('pistas') or []:
+            if t.get('decodificado_s') is not None:
+                anteriores[(t['archivo'], t['tamano'], t.get('mtime'))] = t
+
     def _dec(p):
+        ant = anteriores.get((p['archivo'], p['tamano'], p.get('mtime')))
+        if ant:          # mismo archivo y mismo tamaño que en la revisión anterior: no se decodifica de nuevo
+            hechas[0] += 1
+            ok_ant = ant.get('decodifica') and not ant.get('error_por_id3')
+            return ok_ant, ant.get('errores') or [], ant.get('pico_db'), ant.get('decodificado_s')
         res = decodificar(os.path.join(ruta, p['archivo']))
         hechas[0] += 1
         if progreso:
@@ -1104,6 +1201,59 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         problema('correccion', 'caratula_por_disco',
                  'Cada disco trae su portada: se incrustará en sus pistas y se guardará como «Cover CD2.jpg»…')
 
+    # ── edición (si los tags la traen) ──
+    edicion = {}
+    for campo in _CLAVES_EDICION:
+        v = _mayoria([(p.get('edicion') or {}).get(campo) for p in legibles])
+        if v:
+            edicion[campo] = v
+
+    # ── edición exacta (MusicBrainz) ──
+    ed_mb = None
+    if cliente_mb is not None:
+        datos_ed = _datos_para_edicion(ruta, pistas, legibles, info_cues, otros, artista, album, origen,
+                                       edicion, n_discos, discos_n, anios_carpeta, anio_tags, anio_orig, cue0)
+        try:
+            ed_mb = edicion_mod.identificar(cliente_mb, datos_ed, eleccion=eleccion, progreso=progreso)
+        except Exception as e:
+            ed_mb = {'estado': 'error', 'error': f'{type(e).__name__}: {e}', 'candidatas': []}
+        ed_mb['datos'] = {'duraciones': datos_ed['duraciones'], 'toc': datos_ed.get('toc'),
+                          'formato': datos_ed.get('formato'), 'catalogos': datos_ed.get('catalogos')}
+        el = ed_mb.get('elegida')
+        if el and el.get('anio'):
+            anterior = anio
+            anio = el['anio']
+            problemas[:] = [x for x in problemas if x['codigo'] not in ('anio_conflicto', 'sin_anio', 'anio_inferido')]
+            txt = f'Edición identificada ({ed_mb["metodo"]}): {el["anio"]}'
+            txt += f' · {el["sello"]}' if el.get('sello') else ''
+            txt += f' {el["catalogo"]}' if el.get('catalogo') else ''
+            txt += f' · {el["pais"]}' if el.get('pais') else ''
+            if el.get('anio_original') and el['anio_original'] != el['anio']:
+                txt += f' — original {el["anio_original"]}'
+            if anterior and anterior != anio:
+                txt += f' (los tags decían {anterior})'
+            if ed_mb['estado'] == 'anio':
+                txt += '. Hay varias ediciones casi iguales del mismo año: se eligió la más parecida'
+            problema('aviso', 'edicion', txt)
+            if el.get('portada'):
+                car.setdefault('candidatos', []).append({'archivo': None, 'mb': el['id'], 'puntaje': 3,
+                                                         'origen': 'Cover Art Archive'})
+                if car['tipo'] == 'ninguna':
+                    car.update(tipo='caa', mb=el['id'])
+                    problemas[:] = [x for x in problemas if x['codigo'] != 'sin_caratula']
+                    problema('correccion', 'caratula_caa',
+                             'Sin carátula en la carpeta: se usará la portada de la edición (Cover Art Archive)')
+        elif ed_mb['estado'] == 'dudosa':
+            problemas[:] = [x for x in problemas if x['codigo'] != 'anio_conflicto']
+            problema('decision', 'elegir_edicion',
+                     f'No hay una edición clara en MusicBrainz: elige entre {len(ed_mb["candidatas"])} candidatas')
+        elif ed_mb['estado'] == 'sin_red':
+            problema('aviso', 'mb_sin_red', 'No se pudo consultar MusicBrainz (sin conexión): se usó el año de los tags')
+        elif ed_mb['estado'] == 'error':
+            problema('aviso', 'mb_error', f'Falló la consulta a MusicBrainz: {ed_mb.get("error")}')
+        else:
+            problema('aviso', 'mb_sin_resultado', 'MusicBrainz no encontró esta edición: se usó el año de los tags')
+
     # ── destino propuesto ──
     bib = None
     db = ajustes.get('db_orbyte')
@@ -1149,13 +1299,6 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         for cp in c['pistas']:
             cp['nombre_destino'] = nombre_pista(disco_c, cp['num'], cp['titulo'], 'flac')
 
-    # ── edición (si los tags la traen) ──
-    edicion = {}
-    for campo in _CLAVES_EDICION:
-        v = _mayoria([(p.get('edicion') or {}).get(campo) for p in legibles])
-        if v:
-            edicion[campo] = v
-
     # ── duplicados ──
     duplicados = buscar_duplicados(bib, artista, album)
     if duplicados:
@@ -1200,6 +1343,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         'duracion': round(sum(p.get('duracion') or 0 for p in legibles), 1),
         'tamano': sum(p['tamano'] for p in pistas),
         'discos': discos, 'cues': info_cues, 'caratula': car, 'otros_archivos': otros, 'edicion': edicion,
+        'edicion_mb': ed_mb,
         'destino': destino, 'duplicados': duplicados,
         'problemas': problemas, 'conteo_problemas': dict(niveles), 'estado': estado,
     }

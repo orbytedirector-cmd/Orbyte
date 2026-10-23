@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 
-from . import analisis
+from . import analisis, edicion
 
 log = logging.getLogger('ingesta')
 
@@ -34,6 +34,7 @@ class Vigilante(threading.Thread):
         self.estado = {'ultimo_escaneo': None, 'sueltos': [], 'problema_entrada': None,
                        'analizando': None}
         self._tanda = []
+        self.cliente_mb = edicion.Cliente(almacen.ruta)
 
     def ya(self):
         """Fuerza un escaneo inmediato (botón «Revisar ahora» o cambio de ajustes)."""
@@ -124,7 +125,12 @@ class Vigilante(threading.Thread):
             trabajadores = 3
         try:
             unidad = {'ruta': fila['ruta'], 'carpetas': []}
-            rep = analisis.analizar_album(unidad, aj, progreso=progreso, trabajadores=trabajadores)
+            completo = self.almacen.album(aid) or {}
+            eleccion = json.loads(completo['eleccion']).get('mbid') if completo.get('eleccion') else None
+            previo = completo.get('reporte') if isinstance(completo.get('reporte'), dict) else None
+            cliente = self.cliente_mb if aj.get('musicbrainz', '1') == '1' else None
+            rep = analisis.analizar_album(unidad, aj, progreso=progreso, trabajadores=trabajadores,
+                                          cliente_mb=cliente, eleccion=eleccion, previo=previo)
         except Exception as e:
             log.error('Error revisando %s:\n%s', fila['ruta'], traceback.format_exc())
             self.almacen.actualizar(aid, estado='error', progreso=None, analizado=time.time(),
