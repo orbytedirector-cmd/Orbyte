@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block titulo %}{{ (r.album if r and r.album else a.rel) }}{% endblock %}
-{% set NOMBRES = {'copiando': 'Copiándose', 'en_cola': 'En cola', 'analizando': 'Revisando', 'revisado': 'Lista',
+{% set NOMBRES = {'copiando': 'Esperando', 'en_cola': 'En cola', 'analizando': 'Revisando', 'revisado': 'Lista',
                   'requiere_revision': 'Requiere revisión', 'error': 'Con errores'} %}
 {% set ICONO_DISCO %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>{% endset %}
 {% block contenido %}
@@ -15,7 +15,7 @@
       <h1 class="h-alb">{{ a.rel }}</h1>
       {% if vivo %}
         <div class="estado-vivo"><span class="giro"></span>
-          <span id="progreso">{% if a.estado == 'copiando' %}Esperando a que termine la copia…{% elif a.estado == 'en_cola' %}En cola para revisar…{% else %}{{ a.progreso or 'Revisando…' }}{% endif %}</span></div>
+          <span id="progreso">{% if a.estado == 'copiando' %}Esperando a que la carpeta deje de cambiar (por si aún se está copiando o descargando). Luego se revisa, sin mover nada…{% elif a.estado == 'en_cola' %}En cola para revisar…{% else %}{{ a.progreso or 'Revisando…' }}{% endif %}</span></div>
       {% elif r and r.fallo %}
         <div class="flash error">La revisión falló: {{ r.fallo }}</div>
         <div class="acciones"><button class="btn" id="btn-revisar">Volver a revisar</button></div>
