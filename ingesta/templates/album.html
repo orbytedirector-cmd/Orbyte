@@ -100,7 +100,7 @@
 
 {# ── pistas ── #}
 <section class="seccion">
-  <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivos de audio</span></h2>
+  <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivo{{ 's' if r.n_archivos_audio != 1 }} de audio</span></h2>
   <div class="tabla-wrap">
   {% for disco in r.discos %}
     {% if r.n_discos > 1 %}<div class="disco-tit">DISCO {{ disco.numero }}</div>{% endif %}
@@ -119,8 +119,10 @@
             {% if p.portada_incrustada %}<div class="s">con carátula incrustada</div>{% endif %}
           {% else %}<span class="mal">ilegible</span>{% endif %}</td>
         <td class="der">{{ p.duracion|duracion }}</td>
-        <td class="der oculto-movil {{ 'mal' if p.pico_db is not none and p.pico_db > -0.1 }}">{% if p.pico_db is not none %}{{ '%+.1f'|format(p.pico_db) }} dB{% else %}—{% endif %}</td>
-        <td>{% if p.decodifica %}<span class="ok">✓</span>{% elif p.legible %}<span class="mal">✗ dañado</span>
+        <td class="der oculto-movil {{ 'mal' if p.float and p.pico_db is not none and p.pico_db > 0 }}">{% if p.pico_db is not none %}{{ '%+.1f'|format(p.pico_db) }} dB{% else %}—{% endif %}</td>
+        <td>{% if p.error_por_id3 %}<span class="ok">✓</span><div class="s med">avisa por el tag ID3 pegado; audio completo</div>
+            {% elif p.decodifica %}<span class="ok">✓</span>{% elif p.error_completo %}<span class="med">⚠ errores, pero completo</span>
+            {% for e in p.errores or [] %}<div class="s med mono err">{{ e }}</div>{% endfor %}{% elif p.legible %}<span class="mal">✗ dañado</span>
             {% for e in p.errores or [] %}<div class="s mal mono err">{{ e }}</div>{% endfor %}{% endif %}</td>
         <td class="oculto-movil">{% if p.imagen_cue %}<span class="s">imagen de {{ p.imagen_cue }} pistas (cue) ↓</span>{% else %}<span class="nombre">{{ p.nombre_destino or '' }}</span>{% endif %}</td>
       </tr>
@@ -150,15 +152,27 @@
       {% if car.ancho %}<dt>Tamaño</dt><dd>{{ car.ancho }}×{{ car.alto }} px · {{ car.formato }} · {{ car.tamano|tamano }}</dd>{% endif %}
       <dt>Quedará como</dt><dd><span class="mono">Cover.jpg</span>{% if car.por_disco %} + una por disco{% endif %}</dd>
     </dl>
-    {% if car.por_disco %}<div class="miniaturas">
-      {% for d in car.por_disco %}<figure><img src="{{ url_for('caratula', aid=a.id) }}?disco={{ d.disco }}&mini=1" alt=""><figcaption>Disco {{ d.disco }}</figcaption></figure>{% endfor %}
+    {% set base_img = url_for('caratula', aid=a.id) %}
+    {% if car.por_disco %}<div class="s tenue" style="margin-top:.7rem;font-size:.78rem">Portada de cada disco</div><div class="miniaturas">
+      {% for d in car.por_disco %}<figure><img src="{{ base_img }}?disco={{ d.disco }}&mini=1" alt=""><figcaption>Disco {{ d.disco }}</figcaption></figure>{% endfor %}
     </div>{% endif %}
-    {% if car.otras %}<p class="s tenue" style="margin-top:.6rem;font-size:.8rem">Otras imágenes: {{ car.otras|join(', ') }}</p>{% endif %}
+    {% if car.candidatos|length > 1 or (car.candidatos and car.incrustada_en) or car.tipo == 'ninguna' %}
+    <div class="s tenue" style="margin-top:.8rem;font-size:.78rem">Imágenes disponibles{% if car.tipo != 'ninguna' %} · la marcada es la propuesta{% endif %}</div>
+    <div class="miniaturas">
+      {% if car.incrustada_en %}<figure class="{{ 'propuesta' if car.tipo == 'incrustada' }}"><img src="{{ base_img }}?incrustada=1&mini=1" alt=""><figcaption>incrustada</figcaption></figure>{% endif %}
+      {% for c2 in car.candidatos %}<figure class="{{ 'propuesta' if car.tipo == 'archivo' and c2.archivo == car.archivo }}" title="{{ c2.archivo }}">
+        <img loading="lazy" src="{{ base_img }}?r={{ c2.archivo|urlencode }}&mini=1" alt="">
+        <figcaption>{{ c2.archivo.split('/')[-1] }}{% if c2.ancho %}<br><span class="muy-tenue">{{ c2.ancho }}×{{ c2.alto }}</span>{% endif %}</figcaption></figure>{% endfor %}
+    </div>{% endif %}
+    <p class="s muy-tenue" style="margin-top:.6rem;font-size:.76rem">Elegir otra o buscar en línea (Cover Art Archive, iTunes, Deezer): etapa 2.</p>
   </div>
   <div class="panel">
     <h2 class="rotulo" style="margin-bottom:.6rem">Carpeta de origen</h2>
     <dl>
       <dt>Ruta</dt><dd><span class="mono">{{ r.carpeta }}</span></dd>
+      {% set e = r.edicion or {} %}
+      {% if e.sello or e.catalogo or e.mbid or e.barcode or e.pais %}<dt>Edición</dt><dd>{{ [e.sello, e.catalogo, e.pais, e.fecha_edicion]|select|join(' · ') }}{% if e.anio_original and e.anio_original != e.fecha_edicion %} · original {{ e.anio_original }}{% endif %}
+        {% if e.mbid %}<br><span class="mono">MusicBrainz {{ e.mbid }}</span>{% endif %}{% if e.barcode %}<br><span class="mono">EAN {{ e.barcode }}</span>{% endif %}</dd>{% endif %}
       <dt>Tags</dt><dd>artista y álbum desde {{ r.origen_tags.artista }}{% if r.origen_tags.album != r.origen_tags.artista %} / {{ r.origen_tags.album }}{% endif %}{% if r.artista_album %} · artista del álbum: {{ r.artista_album }}{% endif %}</dd>
       {% if r.cues %}<dt>Cue</dt><dd>{% for cue in r.cues %}<span class="mono">{{ cue.archivo }}</span> ({{ cue.n_pistas }} pistas){% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
       {% if r.otros_archivos %}<dt>Otros</dt><dd>{% for o in r.otros_archivos[:12] %}<span class="mono">{{ o }}</span>{% if not loop.last %}, {% endif %}{% endfor %}{% if r.otros_archivos|length > 12 %} … y {{ r.otros_archivos|length - 12 }} más{% endif %}</dd>{% endif %}

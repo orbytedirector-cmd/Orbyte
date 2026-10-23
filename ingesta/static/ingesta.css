@@ -203,6 +203,9 @@ td .nombre { font-family: var(--mono); font-size: .74rem; color: var(--texto-2);
 .panel dd { word-break: break-word; }
 .miniaturas { display: flex; gap: .6rem; flex-wrap: wrap; margin-top: .7rem; }
 .miniaturas figure { text-align: center; font-size: .72rem; color: var(--texto-2); }
+.miniaturas figure { max-width: 96px; word-break: break-all; }
+.miniaturas figure.propuesta img { border: 2px solid var(--oro); box-shadow: 0 0 0 3px var(--oro-tenue); }
+.miniaturas figure.propuesta figcaption { color: var(--oro-claro); }
 .miniaturas img { width: 96px; height: 96px; object-fit: cover; border-radius: 6px; border: 1px solid var(--borde); display: block; margin-bottom: .25rem; }
 
 .estado-vivo { display: flex; align-items: center; gap: .7rem; padding: 1rem; background: var(--card); border: 1px solid var(--borde-oro);

@@ -276,22 +276,25 @@ def tags_ffprobe(info):
 
 
 def decodificar(ruta):
-    """Decodifica la pista completa: (ok, errores[], pico_dB)."""
+    """Decodifica la pista completa: (ok, errores[], pico_dB, segundos_decodificados)."""
     cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'level+info',
            '-i', ruta, '-map', '0:a:0', '-af',
            'astats=measure_perchannel=none:measure_overall=Peak_level', '-f', 'null', '-']
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, errors='replace')
     except subprocess.TimeoutExpired:
-        return False, ['la decodificación no terminó en 30 minutos'], None
+        return False, ['la decodificación no terminó en 30 minutos'], None, None
     except Exception as e:
-        return False, [str(e)], None
-    errores, pico = [], None
+        return False, [str(e)], None, None
+    errores, pico, segundos = [], None, None
     for linea in r.stderr.splitlines():
         if '[error]' in linea or '[fatal]' in linea:
             limpio = re.sub(r'^.*?\[(?:error|fatal)\]\s*', '', linea).strip()
             if limpio and limpio not in errores:
                 errores.append(limpio)
+        t = re.search(r'\btime=(\d+):(\d+):(\d+(?:\.\d+)?)', linea)
+        if t:
+            segundos = int(t.group(1)) * 3600 + int(t.group(2)) * 60 + float(t.group(3))
         m = re.search(r'Peak level dB:\s*(-?[\d.]+|-?inf)', linea)
         if m:
             try:
@@ -301,7 +304,22 @@ def decodificar(ruta):
     ok = r.returncode == 0 and not errores
     if r.returncode != 0 and not errores:
         errores.append(f'ffmpeg terminó con código {r.returncode}')
-    return ok, errores[:4], pico
+    return ok, errores[:4], pico, segundos
+
+
+def id3_en_flac(ruta):
+    """Tags ID3 pegados a un FLAC (no estándar): (al inicio, al final)."""
+    try:
+        with open(ruta, 'rb') as f:
+            inicio = f.read(3) == b'ID3'
+            f.seek(0, os.SEEK_END)
+            if f.tell() < 128:
+                return inicio, False
+            f.seek(-128, os.SEEK_END)
+            final = f.read(3) == b'TAG'
+        return inicio, final
+    except OSError:
+        return False, False
 
 
 def leer_cue(ruta):
@@ -439,8 +457,44 @@ def analizar_pista(ruta, base):
               'lossy': lossy, 'canales': canales, 'duracion': round(duracion, 2),
               'kbps': kbps_nominal(br, codec) if lossy else (round(br / 1000) if br else None),
               'mqa': es_mqa, 'mqa_tipo': mqa_tipo, 'mqa_sr_original': orig_sr,
-              'clase': clase, 'portada_incrustada': portada, 'tags': tags})
+              'clase': clase, 'portada_incrustada': portada, 'tags': tags,
+              'edicion': _edicion(crudo)})
+    if codec == 'flac':
+        ini, fin = id3_en_flac(ruta)
+        if ini or fin:
+            p['id3'] = [x for x, v in (('inicio', ini), ('final', fin)) if v]
     return p
+
+
+_CLAVES_EDICION = {
+    'mbid': ('musicbrainz_albumid', 'musicbrainz album id'),
+    'mb_grupo': ('musicbrainz_releasegroupid', 'musicbrainz release group id'),
+    'sello': ('label', 'organization', 'publisher', 'tpub'),
+    'catalogo': ('catalognumber', 'catalog #', 'catalog', 'labelno'),
+    'barcode': ('barcode', 'upc', 'ean'),
+    'pais': ('releasecountry', 'musicbrainz album release country'),
+    'anio_original': ('originaldate', 'originalyear', 'original year', 'tdor', 'tory'),
+    'fecha_edicion': ('releasedate', 'date', 'tdrc', 'year'),
+}
+
+
+def _edicion(crudo):
+    """Datos de la edición si vienen en los tags (Picard, tiendas, rips de EAC…)."""
+    limpio = {}
+    for k, v in crudo.items():
+        k = re.sub(r'^----:com\.apple\.itunes:', '', str(k).lower()).strip()
+        if v not in (None, ''):
+            limpio.setdefault(k, v)
+    d = {}
+    for campo, claves in _CLAVES_EDICION.items():
+        for c in claves:
+            if limpio.get(c):
+                d[campo] = str(limpio[c]).strip()[:80]
+                break
+    for c in ('anio_original', 'fecha_edicion'):
+        if d.get(c):
+            d[c] = _anio(d[c]) or d[c]
+    return {k: v for k, v in d.items() if v}
 
 
 # ─────────────────────────── carátulas ───────────────────────────
@@ -468,6 +522,33 @@ def _info_imagen(ruta):
     with open(ruta, 'rb') as f:
         d['md5'] = hashlib.md5(f.read()).hexdigest()
     return d
+
+
+CARPETAS_ARTE = re.compile(r'^(covers?|art(work)?s?|scans?|images?|imagenes|booklet|fotos?|pics?|caratulas?|carátulas?)$', re.I)
+
+
+def _candidatos_caratula(ruta, imagenes, limite=40):
+    """Todas las imágenes del álbum (raíz, discos y subcarpetas de arte), de más a menos probable."""
+    lista = []
+    for img in imagenes:
+        rel = os.path.relpath(img, ruta)
+        partes = rel.split(os.sep)
+        nombre = Path(partes[-1]).stem.lower()
+        puntaje = _puntaje_imagen(partes[-1])
+        if len(partes) > 1 and any(CARPETAS_ARTE.match(x) for x in partes[:-1]):
+            if puntaje == 5 and re.fullmatch(r'0*1|00|a', nombre):
+                puntaje = 2               # «Covers/01.jpg»: suele ser la portada
+            elif puntaje == 5:
+                puntaje = 6
+        lista.append((puntaje, len(partes), rel.lower(), img, rel))
+    lista.sort()
+    salida = []
+    for puntaje, _, _, img, rel in lista[:limite]:
+        d = _info_imagen(img)
+        d['archivo'] = rel
+        d['puntaje'] = puntaje
+        salida.append(d)
+    return salida
 
 
 def mejor_imagen(carpeta):
@@ -732,26 +813,43 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
     hechas = [0]
 
     def _dec(p):
-        ok, errores, pico = decodificar(os.path.join(ruta, p['archivo']))
+        res = decodificar(os.path.join(ruta, p['archivo']))
         hechas[0] += 1
         if progreso:
             progreso(f'Decodificando {hechas[0]}/{total}')
-        return ok, errores, pico
+        return res
 
     legibles = [p for p in pistas if p.get('legible')]
     with ThreadPoolExecutor(max_workers=max(1, trabajadores)) as ex:
-        for p, (ok, errores, pico) in zip(legibles, ex.map(_dec, legibles)):
-            p['decodifica'] = ok
+        for p, (ok, errores, pico, segundos) in zip(legibles, ex.map(_dec, legibles)):
             p['errores'] = errores
             p['pico_db'] = None if pico is None else round(pico, 2)
+            p['decodificado_s'] = None if segundos is None else round(segundos, 2)
+            completo = segundos is not None and p.get('duracion') and segundos >= p['duracion'] - 0.5
+            if not ok and completo and p.get('id3'):
+                # El audio salió entero: el error es el tag ID3 pegado al FLAC (flac -t dice lo mismo)
+                ok = True
+                p['error_por_id3'] = True
+            elif not ok and completo:
+                p['error_completo'] = True
+            p['decodifica'] = ok
 
     # ── problemas por pista ──
     ilegibles = [p['archivo'] for p in pistas if not p.get('legible')]
     if ilegibles:
         problema('error', 'ilegible', 'Archivos que ffprobe no reconoce como audio', ilegibles)
-    danados = [p['archivo'] for p in legibles if not p.get('decodifica')]
+    danados = [p['archivo'] for p in legibles if not p.get('decodifica') and not p.get('error_completo')]
     if danados:
         problema('error', 'danado', 'Archivos con errores al decodificar (dañados o incompletos)', danados)
+    raros = [p['archivo'] for p in legibles if p.get('error_completo')]
+    if raros:
+        problema('decision', 'errores_menores',
+                 'Errores al decodificar, aunque el audio se leyó completo: escúchalos antes de aceptarlos', raros)
+    con_id3 = [p['archivo'] for p in legibles if p.get('id3')]
+    if con_id3:
+        problema('correccion', 'id3_en_flac',
+                 'Tags ID3 pegados al FLAC (no estándar; hacen fallar a algunos decodificadores): '
+                 'se quitarán dejando los tags FLAC. El audio está completo.', con_id3)
 
     convertir = [p['archivo'] for p in legibles if p['codec'] in A_FLAC
                  or (p['codec'] or '').startswith('pcm_') and not p['dsd']]
@@ -842,10 +940,32 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         problema('correccion', 'album_con_artista',
                  f'El nombre del álbum trae el artista adelante: se usará «{pref.group(2).strip()}»')
         album = pref.group(2).strip()
+    anio_tags = _mayoria(tag('anio'))
+    anio_orig = _mayoria(tag('anio_original'))
+    anios_carpeta = sorted(set(re.findall(r'(?<!\d)(1[89]\d\d|20\d\d)(?!\d)', os.path.basename(ruta))))
+    fuentes = []
+    if anio_tags:
+        fuentes.append(('tags', anio_tags))
+    if anio_orig and anio_orig != anio_tags:
+        fuentes.append(('año original (tags)', anio_orig))
+    if cue0.get('anio'):
+        fuentes.append(('cue', cue0['anio']))
+    if anios_carpeta:
+        fuentes.append(('carpeta', ' / '.join(anios_carpeta)))
     if not anio:
         problema('decision', 'sin_anio', 'Falta el año del álbum')
-    elif origen['anio'] != 'tags':
-        problema('aviso', 'anio_inferido', f'Año tomado del {origen["anio"]}: {anio}')
+    else:
+        distintos = {anio_tags, cue0.get('anio')} - {None}
+        choca = len(distintos) > 1 or (anios_carpeta and anio not in anios_carpeta
+                                       and not (anio_orig and anio_orig in anios_carpeta))
+        if choca:
+            problema('decision', 'anio_conflicto',
+                     'El año no coincide entre fuentes (' + ', '.join(f'{k}: {v}' for k, v in fuentes) +
+                     f') — se propone {anio}; puede ser una reedición o remaster')
+        elif origen['anio'] != 'tags':
+            problema('aviso', 'anio_inferido', f'Año tomado del {origen["anio"]}: {anio}')
+        if anio_orig and anio_tags and anio_orig != anio_tags:
+            problema('aviso', 'reedicion', f'Reedición: año original {anio_orig}, esta edición {anio_tags}')
     if not artista_album and len(artistas) > 3:
         problema('decision', 'varios_artistas',
                  f'{len(artistas)} artistas distintos y sin «artista del álbum»: ¿recopilatorio (Various Artists)?')
@@ -944,18 +1064,29 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         con_portada = next((p for p in legibles if p.get('portada_incrustada')), None)
         if con_portada:
             car = {'tipo': 'incrustada', 'pista': con_portada['archivo']}
+    candidatos = _candidatos_caratula(ruta, imagenes)
+    if car['tipo'] == 'ninguna':
+        utiles = [c for c in candidatos if c['puntaje'] <= 2]
+        if utiles:
+            elegido = utiles[0]
+            car = {'tipo': 'archivo', **_info_imagen(os.path.join(ruta, elegido['archivo']))}
+    con_incrustada = next((p['archivo'] for p in legibles if p.get('portada_incrustada')), None)
     if car.get('archivo'):
         car['archivo'] = os.path.relpath(car['archivo'], ruta)
     for d in por_disco:
         d['archivo'] = os.path.relpath(d['archivo'], ruta)
     distintas = len({d['md5'] for d in por_disco} | ({car['md5']} if car.get('md5') else set())) > 1
     car['por_disco'] = por_disco if distintas else []
-    car['otras'] = sorted(os.path.relpath(i, ruta) for i in imagenes
-                          if os.path.relpath(i, ruta) != car.get('archivo')
-                          and os.path.relpath(i, ruta) not in {d['archivo'] for d in por_disco})
+    car['candidatos'] = candidatos
+    car['incrustada_en'] = con_incrustada
+    n_opciones = len({c['md5'] for c in candidatos if c['puntaje'] < 9}) + (1 if car['tipo'] == 'incrustada' else 0)
 
     if car['tipo'] == 'ninguna':
-        problema('decision', 'sin_caratula', 'Sin carátula: habrá que elegir una (buscador en la etapa 2)')
+        if candidatos:
+            problema('decision', 'sin_caratula',
+                     f'Ninguna imagen parece la portada: elige entre las {len(candidatos)} de la carpeta o búscala en línea')
+        else:
+            problema('decision', 'sin_caratula', 'Sin carátula: habrá que buscarla en línea')
     elif car['tipo'] == 'incrustada':
         problema('correccion', 'caratula_extraer', 'Carátula solo incrustada: se guardará como Cover.jpg')
     else:
@@ -966,6 +1097,9 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         lado = min(car.get('ancho') or 0, car.get('alto') or 0)
         if lado and lado < 500:
             problema('aviso', 'caratula_chica', f'Carátula pequeña ({car["ancho"]}×{car["alto"]} px)')
+    if car['tipo'] != 'ninguna' and n_opciones > 1:
+        problema('aviso', 'caratula_opciones',
+                 f'Hay {n_opciones} imágenes que podrían ser la carátula: se propone la marcada; podrás elegir otra')
     if distintas:
         problema('correccion', 'caratula_por_disco',
                  'Cada disco trae su portada: se incrustará en sus pistas y se guardará como «Cover CD2.jpg»…')
@@ -1015,6 +1149,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         for cp in c['pistas']:
             cp['nombre_destino'] = nombre_pista(disco_c, cp['num'], cp['titulo'], 'flac')
 
+    # ── edición (si los tags la traen) ──
+    edicion = {}
+    for campo in _CLAVES_EDICION:
+        v = _mayoria([(p.get('edicion') or {}).get(campo) for p in legibles])
+        if v:
+            edicion[campo] = v
+
     # ── duplicados ──
     duplicados = buscar_duplicados(bib, artista, album)
     if duplicados:
@@ -1058,7 +1199,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3):
         'n_discos': n_discos, 'n_pistas': n_pistas_final, 'n_archivos_audio': len(pistas),
         'duracion': round(sum(p.get('duracion') or 0 for p in legibles), 1),
         'tamano': sum(p['tamano'] for p in pistas),
-        'discos': discos, 'cues': info_cues, 'caratula': car, 'otros_archivos': otros,
+        'discos': discos, 'cues': info_cues, 'caratula': car, 'otros_archivos': otros, 'edicion': edicion,
         'destino': destino, 'duplicados': duplicados,
         'problemas': problemas, 'conteo_problemas': dict(niveles), 'estado': estado,
     }
