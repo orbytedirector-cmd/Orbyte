@@ -26,7 +26,11 @@ from werkzeug.security import check_password_hash
 
 from . import analisis
 from .almacen import Almacen
+from .trabajador import Procesador
 from .vigilante import Vigilante
+from . import metadata as metadata_mod
+from . import procesar
+from .almacen import PREVIOS
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(BASE)
@@ -64,6 +68,8 @@ app.config.update(
 )
 
 vigilante = Vigilante(almacen)
+procesador = Procesador(almacen)
+vigilante.procesador = procesador
 
 
 # ─────────────────────────── seguridad ───────────────────────────
@@ -213,7 +219,9 @@ def album(aid):
     if not a:
         flash('Ese álbum ya no está en la bandeja.')
         return redirect(url_for('bandeja'))
-    return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'))
+    aj = almacen.ajustes()
+    return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'),
+                           aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
 
 @app.route('/avisos')
@@ -231,6 +239,12 @@ def ajustes():
         nuevo = {k: (request.form.get(k) or '').strip() for k in
                  ('carpeta_entrada', 'biblioteca', 'db_orbyte', 'espera_min', 'intervalo_seg', 'trabajadores')}
         nuevo['musicbrainz'] = '1' if request.form.get('musicbrainz') else '0'
+        for k in ('desatendido', 'borrar_origen', 'metadata'):
+            nuevo[k] = '1' if request.form.get(k) else '0'
+        nuevo['python_scripts'] = (request.form.get('python_scripts') or '').strip()
+        if nuevo['python_scripts'] and not (os.path.isfile(nuevo['python_scripts'])
+                                             and os.access(nuevo['python_scripts'], os.X_OK)):
+            errores.append('El Python para los scripts no existe o no es ejecutable.')
         entrada = os.path.abspath(nuevo['carpeta_entrada']) if nuevo['carpeta_entrada'] else ''
         bib = os.path.abspath(nuevo['biblioteca'] or '/mnt/musica')
         nuevo['carpeta_entrada'], nuevo['biblioteca'] = entrada, bib
@@ -295,7 +309,117 @@ def api_album_estado(aid):
     a = almacen.album(aid)
     if not a:
         return jsonify(estado=None)
-    return jsonify(estado=a['estado'], progreso=a['progreso'], analizado=a['analizado'])
+    registro = (a.get('registro') or '').splitlines()
+    return jsonify(estado=a['estado'], progreso=a['progreso'], analizado=a['analizado'],
+                   registro=registro[-400:])
+
+
+def _requeue(aid, **campos):
+    almacen.actualizar(aid, estado='en_cola', progreso=None, silencioso=1, **campos)
+    vigilante.ya()
+
+
+@app.route('/api/album/<int:aid>/cambios', methods=['POST'])
+def api_cambios(aid):
+    """Guarda lo que decides en pantalla (tags, carátula, decisiones aceptadas, año) y vuelve a revisar."""
+    a = almacen.album(aid)
+    if not a or a['estado'] not in PREVIOS or a['estado'] == 'analizando':
+        return jsonify(ok=False, error='El álbum no se puede cambiar en este estado'), 409
+    d = request.get_json(silent=True) or {}
+    c = a.get('cambios') or {}
+    if 'tags' in d:
+        t = {k: str(v).strip()[:300] for k, v in (d['tags'] or {}).items()
+             if k in ('artista', 'album', 'anio', 'genero') and str(v or '').strip()}
+        if t.get('anio') and not re.fullmatch(r'(1[89]|20)\d\d', t['anio']):
+            return jsonify(ok=False, error='Año inválido'), 400
+        c['tags'] = t
+    if 'pistas' in d:
+        pistas = {}
+        for k, v in (d['pistas'] or {}).items():
+            v = {kk: str(vv).strip()[:300] for kk, vv in (v or {}).items()
+                 if kk in ('titulo', 'artista', 'numero') and str(vv or '').strip()}
+            if v:
+                pistas[str(k)[:500]] = v
+        c['pistas'] = pistas
+    if 'caratula' in d:
+        car = d['caratula']
+        if car is None:
+            c.pop('caratula', None)
+        elif isinstance(car, dict) and car.get('tipo') in ('archivo', 'incrustada', 'caa', 'url'):
+            if car['tipo'] == 'url':
+                host = re.sub(r'^https?://([^/]+).*$', r'\1', car.get('url') or '')
+                if not car.get('url', '').startswith('https://') or not any(
+                        host == h or host.endswith('.' + h) for h in procesar.HOSTS_PORTADA):
+                    return jsonify(ok=False, error='Origen de imagen no permitido'), 400
+            c['caratula'] = {k: car.get(k) for k in ('tipo', 'archivo', 'mb', 'url', 'miniatura') if car.get(k)}
+    if d.get('aceptar'):
+        c['aceptadas'] = sorted(set(c.get('aceptadas') or []) | {d['aceptar']})
+    if d.get('desaceptar'):
+        c['aceptadas'] = sorted(set(c.get('aceptadas') or []) - {d['desaceptar']})
+    _requeue(aid, cambios=c)
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/ubicar', methods=['POST'])
+def api_ubicar(aid):
+    a = almacen.album(aid)
+    if not a or a['estado'] not in ('revisado', 'error_ubicar'):
+        return jsonify(ok=False, error='Solo se ubican álbumes revisados sin decisiones pendientes'), 409
+    if a['estado'] == 'error_ubicar':        # tras un error se revisa de nuevo antes de reintentar
+        _requeue(aid)
+        return jsonify(ok=True, revisar=True)
+    almacen.actualizar(aid, estado='por_ubicar', progreso='En cola para ubicar')
+    procesador.ya()
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/metadata', methods=['POST'])
+def api_metadata(aid):
+    a = almacen.album(aid)
+    if not a or a['estado'] not in ('error_metadata', 'completado', 'ubicado'):
+        return jsonify(ok=False), 409
+    almacen.actualizar(aid, estado='por_metadata', progreso='En cola para la metadata', registro=None)
+    procesador.ya()
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/descartar', methods=['POST'])
+def api_descartar(aid):
+    a = almacen.album(aid)
+    if not a or a['estado'] not in PREVIOS or a['estado'] == 'analizando':
+        return jsonify(ok=False), 409
+    almacen.actualizar(aid, estado='descartado', progreso=None)
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/restaurar', methods=['POST'])
+def api_restaurar(aid):
+    a = almacen.album(aid)
+    if not a or a['estado'] != 'descartado':
+        return jsonify(ok=False), 409
+    _requeue(aid)
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/buscar_caratula')
+def api_buscar_caratula(aid):
+    a = almacen.album(aid)
+    r = (a or {}).get('reporte') or {}
+    if not r:
+        return jsonify(resultados=[])
+    ediciones = ((r.get('edicion_mb') or {}).get('candidatas') or [])
+    artista = request.args.get('artista') or r.get('artista') or ''
+    album_q = request.args.get('album') or r.get('album') or ''
+    return jsonify(resultados=procesar.buscar_caratulas(artista, album_q, ediciones))
+
+
+@app.route('/api/probar_python', methods=['POST'])
+def api_probar_python():
+    aj = almacen.ajustes()
+    py = (request.get_json(silent=True) or {}).get('python')
+    if py is not None:
+        aj['python_scripts'] = py
+    return jsonify(metadata_mod.probar_python(aj))
 
 
 @app.route('/api/album/<int:aid>/revisar', methods=['POST'])
@@ -303,9 +427,8 @@ def api_revisar(aid):
     a = almacen.album(aid)
     if not a:
         return jsonify(ok=False), 404
-    if a['estado'] != 'analizando':
-        almacen.actualizar(aid, estado='en_cola', progreso=None)
-        vigilante.ya()
+    if a['estado'] in PREVIOS and a['estado'] != 'analizando':
+        _requeue(aid)
     return jsonify(ok=True)
 
 
@@ -374,6 +497,11 @@ def caratula(aid):
         abort(404)
     r = a['reporte']
     car = r['caratula']
+    if a.get('ubicado_en') and not request.args.get('r') and not request.args.get('disco'):
+        final = os.path.join(a['ubicado_en'], 'Cover.jpg')     # ya está en la biblioteca: la definitiva
+        if os.path.isfile(final):
+            return send_file(_miniatura(final) or final if request.args.get('mini') else final, max_age=300)
+        abort(404)
     if car.get('tipo') == 'caa' and car.get('mb') and not request.args.get('r') and not request.args.get('disco'):
         return redirect(f'https://coverartarchive.org/release/{car["mb"]}/front-250')
     raiz = os.path.realpath(a['ruta'])
@@ -444,5 +572,6 @@ def _miniatura(origen):
 
 def main():
     vigilante.start()
+    procesador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)

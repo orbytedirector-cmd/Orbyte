@@ -61,6 +61,11 @@ RANGO_TAG = {'Lossy': 0, 'CD': 1, 'HR': 2, 'MQA': 2, 'DSD': 3}
 
 NIVELES = ('error', 'decision', 'correccion', 'aviso')
 
+# Decisiones que se pueden aceptar tal cual con un botón (las demás se resuelven eligiendo algo)
+ACEPTABLES = {'multicanal', 'lossy_bajo', 'errores_menores', 'varios_artistas', 'artista_inferido',
+              'album_inferido', 'subcarpetas', 'pista_repetida', 'sin_numero', 'unknown_artist', 'duplicado',
+              'anio_conflicto', 'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla'}
+
 
 # ─────────────────────────── utilidades ───────────────────────────
 
@@ -800,7 +805,8 @@ def _datos_para_edicion(ruta, pistas, legibles, info_cues, otros, artista, album
             'rutas_audio': [os.path.join(ruta, p['archivo']) for p in legibles[:3]]}
 
 
-def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=None, eleccion=None, previo=None):
+def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=None, eleccion=None, previo=None,
+                   cambios=None):
     """
     unidad: dict de detectar_albumes() (ruta, carpetas).
     ajustes: {'biblioteca': '/mnt/musica', 'db_orbyte': '.../music.db'}
@@ -810,8 +816,9 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     ruta = unidad['ruta']
     problemas = []
 
-    def problema(nivel, codigo, texto, pistas=None):
-        problemas.append({'nivel': nivel, 'codigo': codigo, 'texto': texto, 'pistas': pistas or []})
+    def problema(nivel, codigo, texto, pistas=None, opciones=None):
+        problemas.append({'nivel': nivel, 'codigo': codigo, 'texto': texto, 'pistas': pistas or [],
+                          'opciones': opciones or []})
 
     # ── inventario de archivos ──
     audio, imagenes, cues, otros = [], [], [], []
@@ -894,6 +901,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     for p in pistas:
         if p['archivo'] in imagenes_cue:
             p['imagen_cue'] = imagenes_cue[p['archivo']]
+    for c in info_cues:
+        for cp in c['pistas']:
+            o = ((cambios or {}).get('pistas') or {}).get(f'{c["archivo"]}#{cp["num"]}') or {}
+            if o.get('titulo'):
+                cp['titulo'] = o['titulo']
+            if o.get('artista'):
+                cp['interprete'] = o['artista']
 
     # ── decodificación completa (en paralelo) ──
     hechas = [0]
@@ -1037,6 +1051,19 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         problema('correccion', 'album_con_artista',
                  f'El nombre del álbum trae el artista adelante: se usará «{pref.group(2).strip()}»')
         album = pref.group(2).strip()
+    # ── cambios hechos por ti en la herramienta (editor de tags) ──
+    cambios = cambios or {}
+    ov = cambios.get('tags') or {}
+    if ov.get('artista'):
+        artista, origen['artista'] = ov['artista'], 'tuyo'
+        problemas[:] = [x for x in problemas if x['codigo'] not in ('sin_artista', 'artista_inferido', 'artista_cue')]
+    if ov.get('album'):
+        album, origen['album'] = ov['album'], 'tuyo'
+        problemas[:] = [x for x in problemas if x['codigo'] not in ('sin_album', 'album_inferido', 'album_cue',
+                                                                    'album_con_artista')]
+    if ov.get('genero'):
+        genero = ov['genero']
+    ov_pistas = cambios.get('pistas') or {}
     anio_tags = _mayoria(tag('anio'))
     anio_orig = _mayoria(tag('anio_original'))
     anios_carpeta = sorted(set(re.findall(r'(?<!\d)(1[89]\d\d|20\d\d)(?!\d)', os.path.basename(ruta))))
@@ -1056,9 +1083,10 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         choca = len(distintos) > 1 or (anios_carpeta and anio not in anios_carpeta
                                        and not (anio_orig and anio_orig in anios_carpeta))
         if choca:
+            opciones = sorted({a for a in [anio_tags, anio_orig, cue0.get('anio')] + list(anios_carpeta) if a})
             problema('decision', 'anio_conflicto',
                      'El año no coincide entre fuentes (' + ', '.join(f'{k}: {v}' for k, v in fuentes) +
-                     f') — se propone {anio}; puede ser una reedición o remaster')
+                     f') — se propone {anio}; puede ser una reedición o remaster', opciones=opciones)
         elif origen['anio'] != 'tags':
             problema('aviso', 'anio_inferido', f'Año tomado del {origen["anio"]}: {anio}')
         if anio_orig and anio_tags and anio_orig != anio_tags:
@@ -1098,17 +1126,19 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         del_disco = [p for p in pistas if p['disco'] == d and p.get('legible') and not p.get('imagen_cue')]
         usados = Counter()
         for p in del_disco:
-            n = p['tags'].get('pista')
+            o = ov_pistas.get(p['archivo']) or {}
+            n = _num(o.get('numero')) or p['tags'].get('pista')
             dn, nn, tn = _desde_nombre_archivo(p['archivo'].split('/')[-1])
             if not n and nn:
                 n = nn
                 sin_num.append(p['archivo'])
             p['numero'] = n
-            titulo = p['tags'].get('titulo')
+            titulo = o.get('titulo') or p['tags'].get('titulo')
             if not titulo:
                 titulo = tn
                 sin_titulo.append(p['archivo'])
             p['titulo'] = titulo
+            p['artista_final'] = o.get('artista') or p['tags'].get('artista') or artista
             if n:
                 usados[n] += 1
         repetidos = [n for n, c in usados.items() if c > 1]
@@ -1246,13 +1276,45 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         elif ed_mb['estado'] == 'dudosa':
             problemas[:] = [x for x in problemas if x['codigo'] != 'anio_conflicto']
             problema('decision', 'elegir_edicion',
-                     f'No hay una edición clara en MusicBrainz: elige entre {len(ed_mb["candidatas"])} candidatas')
+                     f'No hay una edición clara en MusicBrainz: elige entre {len(ed_mb["candidatas"])} candidatas '
+                     f'(o fija el año a mano)',
+                     opciones=sorted({c['anio'] for c in ed_mb['candidatas'] if c.get('anio')} | ({anio} if anio else set())))
         elif ed_mb['estado'] == 'sin_red':
             problema('aviso', 'mb_sin_red', 'No se pudo consultar MusicBrainz (sin conexión): se usó el año de los tags')
         elif ed_mb['estado'] == 'error':
             problema('aviso', 'mb_error', f'Falló la consulta a MusicBrainz: {ed_mb.get("error")}')
         else:
             problema('aviso', 'mb_sin_resultado', 'MusicBrainz no encontró esta edición: se usó el año de los tags')
+
+    # ── año y carátula elegidos por ti ──
+    if ov.get('anio'):
+        anio = str(ov['anio'])
+        problemas[:] = [x for x in problemas if x['codigo'] not in ('anio_conflicto', 'sin_anio', 'elegir_edicion',
+                                                                    'anio_inferido')]
+        problema('aviso', 'anio_tuyo', f'Año elegido por ti: {anio}')
+    elegida_car = cambios.get('caratula')
+    if elegida_car and elegida_car.get('tipo') in ('archivo', 'incrustada', 'caa', 'url'):
+        valida = True
+        if elegida_car['tipo'] == 'archivo':
+            valida = os.path.isfile(os.path.join(ruta, elegida_car.get('archivo') or ''))
+        if valida:
+            car['eleccion'] = elegida_car
+            car['tipo_propuesto'] = car['tipo']
+            car['tipo'] = elegida_car['tipo']
+            if elegida_car['tipo'] == 'archivo':
+                car.update(_info_imagen(os.path.join(ruta, elegida_car['archivo'])))
+                car['archivo'] = elegida_car['archivo']
+            elif elegida_car['tipo'] == 'incrustada':
+                car['pista'] = car.get('incrustada_en')
+            elif elegida_car['tipo'] == 'caa':
+                car['mb'] = elegida_car.get('mb')
+            else:
+                car['url'] = elegida_car.get('url')
+                car['miniatura'] = elegida_car.get('miniatura')
+            problemas[:] = [x for x in problemas if x['codigo'] not in (
+                'sin_caratula', 'caratula_renombrar', 'caratula_extraer', 'caratula_caa', 'caratula_opciones',
+                'caratula_chica', 'caratula_ilegible')]
+            problema('correccion', 'caratula_elegida', 'Carátula elegida por ti: se guardará como Cover.jpg')
 
     # ── destino propuesto ──
     bib = None
@@ -1311,6 +1373,57 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         problema('decision', 'duplicado',
                  f'Ya está en la biblioteca: {d0["artista"]} — {d0["album"]} [{d0["tag"] or "?"}]{comp}')
 
+    # ── decisiones que ya aceptaste ──
+    aceptadas = set(cambios.get('aceptadas') or [])
+    for x in problemas:
+        if x['nivel'] == 'decision' and x['codigo'] in aceptadas and x['codigo'] in ACEPTABLES:
+            x['nivel'] = 'aviso'
+            x['texto'] += ' — aceptado'
+
+    # ── plan para la etapa 2 (qué archivo sale de dónde y con qué tags) ──
+    ed_el = (ed_mb or {}).get('elegida') or {}
+    tags_album = {
+        'artista': artista, 'album': album, 'anio': anio,
+        'fecha': ed_el.get('fecha') if ed_el.get('anio') == anio else anio,
+        'anio_original': ed_el.get('anio_original') or edicion.get('anio_original'),
+        'genero': genero, 'mbid': ed_el.get('id') or edicion.get('mbid'),
+        'mb_grupo': ed_el.get('grupo_id') or edicion.get('mb_grupo'),
+        'sello': ed_el.get('sello') or edicion.get('sello'), 'catalogo': ed_el.get('catalogo') or edicion.get('catalogo'),
+        'pais': ed_el.get('pais') or edicion.get('pais'), 'barcode': ed_el.get('barcode') or edicion.get('barcode'),
+        'total_discos': n_discos,
+    }
+    plan = []
+    for p in sorted(legibles, key=lambda p: (p['disco'], p.get('numero') or 999, p['archivo'])):
+        convertir_p = (p['codec'] in A_FLAC or (p['codec'] or '').startswith('pcm_') or p.get('float')) and not p['dsd']
+        base = {'origen': p['archivo'], 'codec': p['codec'], 'sr': p.get('sr'), 'bits': p.get('bits'),
+                'duracion_origen': p.get('duracion'), 'dsd': p.get('dsd'), 'lossy': p.get('lossy'),
+                'float': p.get('float'), 'mqa': p.get('mqa'), 'quitar_id3': bool(p.get('id3')),
+                'portada_disco': None}
+        if p.get('imagen_cue'):
+            cue = next((c for c in info_cues for r in c['referencias'] if r['archivo'] == p['archivo']), None)
+            ref = next(r for r in cue['referencias'] if r['archivo'] == p['archivo'])
+            cps = [cp for cp in cue['pistas'] if cp['archivo_cue'] == ref['archivo_cue']]
+            for i, cp in enumerate(cps):
+                fin = cps[i + 1]['inicio'] if i + 1 < len(cps) else None
+                plan.append(dict(base, accion='convertir', corte=[cp['inicio'], fin], destino=cp['nombre_destino'],
+                                 clave=f'{cue["archivo"]}#{cp["num"]}',
+                                 disco=p['disco'], numero=cp['num'], titulo=cp['titulo'] or f'Pista {cp["num"]}',
+                                 artista=cp.get('interprete') or artista))
+        else:
+            plan.append(dict(base, accion='convertir' if convertir_p else 'copiar', corte=None, clave=p['archivo'],
+                             destino=p.get('nombre_destino'), disco=p['disco'], numero=p.get('numero'),
+                             titulo=p.get('titulo'), artista=p.get('artista_final') or artista))
+    por_disco_total = Counter(x['disco'] for x in plan)
+    for x in plan:
+        x['total_pistas'] = por_disco_total[x['disco']]
+    if car.get('por_disco'):
+        for d in car['por_disco']:
+            for x in plan:
+                if x['disco'] == d['disco']:
+                    x['portada_disco'] = d['archivo']
+    flot = [p['pico_db'] for p in legibles if p.get('float') and p.get('pico_db') is not None]
+    ganancia = round(-(max(flot) + 0.1), 2) if flot and max(flot) > -0.1 else 0.0
+
     # ── estado ──
     niveles = Counter(p['nivel'] for p in problemas)
     if niveles.get('error'):
@@ -1343,7 +1456,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         'duracion': round(sum(p.get('duracion') or 0 for p in legibles), 1),
         'tamano': sum(p['tamano'] for p in pistas),
         'discos': discos, 'cues': info_cues, 'caratula': car, 'otros_archivos': otros, 'edicion': edicion,
-        'edicion_mb': ed_mb,
+        'edicion_mb': ed_mb, 'tags_album': tags_album, 'plan': plan, 'ganancia_db': ganancia,
+        'cambios': cambios,
         'destino': destino, 'duplicados': duplicados,
         'problemas': problemas, 'conteo_problemas': dict(niveles), 'estado': estado,
     }

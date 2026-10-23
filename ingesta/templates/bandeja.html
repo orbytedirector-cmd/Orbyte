@@ -18,10 +18,17 @@
 {% block js %}
 <script>
 const NOMBRES = {copiando: 'Esperando', en_cola: 'En cola', analizando: 'Revisando',
-                 revisado: 'Lista', requiere_revision: 'Requiere revisión', error: 'Con errores'};
-const FILTROS = [['todos', 'Todos', null], ['requiere_revision', 'Requieren revisión', ['requiere_revision']],
-                 ['revisado', 'Listas', ['revisado']], ['error', 'Con errores', ['error']],
-                 ['proceso', 'En proceso', ['copiando', 'en_cola', 'analizando']]];
+                 revisado: 'Lista', requiere_revision: 'Requiere revisión', error: 'Con errores', descartado: 'Descartado',
+                 por_ubicar: 'En cola para ubicar', ubicando: 'Ubicando', ubicado: 'Ubicado',
+                 por_metadata: 'En cola: metadata', metadata: 'Metadata', completado: 'Completo',
+                 error_ubicar: 'Error al ubicar', error_metadata: 'Error en metadata'};
+const VIVOS = ['copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata'];
+const ACTIVOS = ['copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error',
+                 'por_ubicar', 'ubicando', 'ubicado', 'por_metadata', 'metadata', 'error_ubicar', 'error_metadata'];
+const FILTROS = [['todos', 'Bandeja', ACTIVOS], ['requiere_revision', 'Requieren revisión', ['requiere_revision']],
+                 ['revisado', 'Listas', ['revisado']], ['error', 'Con errores', ['error', 'error_ubicar', 'error_metadata']],
+                 ['proceso', 'En proceso', VIVOS], ['completado', 'Completos', ['completado']],
+                 ['descartado', 'Descartados', ['descartado']]];
 const NIVEL_COLOR = {error: 'var(--error)', decision: 'var(--decision)', correccion: 'var(--correccion)', aviso: 'var(--aviso)'};
 const NIVEL_NOMBRE = {error: ['error', 'errores'], decision: ['decisión', 'decisiones'],
                       correccion: ['corrección', 'correcciones'], aviso: ['aviso', 'avisos']};
@@ -60,8 +67,9 @@ function pintar() {
 
   const est = (FILTROS.find(f => f[0] === filtro) || FILTROS[0])[2];
   const lista = d.albumes.filter(a => !est || est.includes(a.estado));
+  const enBandeja = d.albumes.filter(a => ACTIVOS.includes(a.estado));
   const cont = document.getElementById('lista');
-  if (!d.albumes.length) {
+  if (!enBandeja.length && filtro === 'todos') {
     cont.innerHTML = `<div class="vacio">${ICONO_DISCO}<h3>La bandeja está vacía</h3>
       <p>${d.entrada ? 'Copia carpetas de álbumes a la carpeta de entrada: aparecen aquí solas y se revisan cuando termina la copia.'
                      : 'Elige en Ajustes la carpeta donde vas a dejar el material nuevo.'}</p>
@@ -70,21 +78,21 @@ function pintar() {
   }
   if (!lista.length) { cont.innerHTML = '<div class="vacio"><p>Nada con este filtro.</p></div>'; return; }
   cont.innerHTML = lista.map(a => {
-    const analizado = !!a.analizado && !['copiando', 'en_cola', 'analizando'].includes(a.estado);
+    const analizado = !!a.analizado && !['copiando'].includes(a.estado) && !(a.estado === 'en_cola' && !a.album);
     const portada = analizado ? `<img loading="lazy" alt="" src="/album/${a.id}/caratula?mini=1&v=${Math.round(a.analizado)}" onerror="this.remove()">` : '';
     const titulo = a.album ? `${esc(a.album)}${a.anio ? ` <span class="art">(${esc(a.anio)})</span>` : ''}` : esc(a.rel);
     const art = a.artista ? `<span class="art">${esc(a.artista)} — </span>` : '';
     let destino = a.destino || '';
     if (d.biblioteca && destino.startsWith(d.biblioteca.replace(/\/$/, '') + '/')) destino = destino.slice(d.biblioteca.replace(/\/$/, '').length + 1);
     const dest = destino ? `<div class="f-dest" title="${esc(a.destino)}"><span class="flecha">→</span> ${esc(destino)}</div>` : '';
-    const vivo = ['copiando', 'en_cola', 'analizando'].includes(a.estado);
+    const vivo = VIVOS.includes(a.estado);
     const chips = [];
     if (a.calidad) chips.push(`<span class="chip q-${a.calidad}"><span class="led"></span>${esc(a.calidad)}</span>`);
     chips.push(`<span class="chip e-${a.estado} ${vivo ? 'pulso' : ''}"><span class="led"></span>${NOMBRES[a.estado] || a.estado}</span>`);
     const conteo = a.conteo || {};
     const cuentas = ['error', 'decision', 'correccion'].filter(k => conteo[k])
       .map(k => `<span><i style="background:${NIVEL_COLOR[k]}"></i>${conteo[k]} ${NIVEL_NOMBRE[k][conteo[k] === 1 ? 0 : 1]}</span>`).join('');
-    const extra = a.estado === 'analizando' && a.progreso ? `<div class="progreso">${esc(a.progreso)}</div>`
+    const extra = vivo && a.progreso ? `<div class="progreso">${esc(a.progreso)}</div>`
       : (a.n_pistas && analizado ? `<div class="cuentas">${cuentas}<span class="muy-tenue">${a.n_pistas} pistas</span></div>` : '');
     return `<a class="fila" href="/album/${a.id}">
       <div class="portada">${ICONO_DISCO}${portada}</div>
@@ -101,7 +109,7 @@ async function cargar() {
     if (r.status === 401) { location.href = '/login'; return; }
     datos = await r.json(); pintar();
   } catch (e) {}
-  const activo = datos && datos.albumes.some(a => ['copiando', 'en_cola', 'analizando'].includes(a.estado));
+  const activo = datos && datos.albumes.some(a => VIVOS.includes(a.estado));
   temporizador = setTimeout(cargar, activo ? 2500 : 15000);
 }
 document.getElementById('btn-escanear').onclick = async (ev) => {
