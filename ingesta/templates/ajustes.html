@@ -51,6 +51,28 @@
       <div class="ayuda">AcoustID (huella del audio, solo cuando faltan tags): {% if acoustid %}<span class="ok">disponible</span>{% else %}<span class="med">no disponible</span> — falta <span class="mono">fpcalc</span> (paquete libchromaprint-tools) o <span class="mono">ACOUSTID_API_KEY</span> en el .env{% endif %}.</div>
     </div>
   </div>
+  <div class="bloque">
+    <div class="rotulo">Al ubicar y después</div>
+    {% for clave, titulo, ayuda in [
+        ('borrar_origen', 'Borrar el original de la entrada (mover)', 'Solo después de verificar que la copia en la biblioteca es idéntica. Si lo apagas, el original queda en la entrada.'),
+        ('metadata', 'Correr los 5 scripts de metadata', 'Indexar, RichMeta, importar, relaciones y Last.fm para el álbum recién ubicado, con validación final.'),
+        ('desatendido', 'Modo desatendido', 'Los álbumes que quedan «Listos» (sin decisiones pendientes) se ubican y procesan solos, de a uno.')] %}
+    <div class="campo">
+      <label style="display:flex;gap:.6rem;align-items:center;cursor:pointer">
+        <input type="checkbox" name="{{ clave }}" value="1" {{ 'checked' if aj[clave] == '1' }} style="width:18px;height:18px;accent-color:var(--oro)">{{ titulo }}</label>
+      <div class="ayuda" style="margin-top:.3rem">{{ ayuda }}</div>
+    </div>
+    {% endfor %}
+    <div class="campo">
+      <label for="python_scripts">Python para los scripts de metadata</label>
+      <div class="ayuda">El que tiene instalados requests, tqdm, rapidfuzz, python-dotenv y mutagen (numpy y langdetect, opcionales). Vacío = <span class="mono">python3</span> del sistema.</div>
+      <div class="fila-in">
+        <input class="mono" type="text" id="python_scripts" name="python_scripts" value="{{ aj.python_scripts }}" placeholder="/usr/bin/python3">
+        <button type="button" class="btn" id="probar-python">Probar</button>
+      </div>
+      <div class="ayuda" id="probar-res" style="margin-top:.4rem"></div>
+    </div>
+  </div>
   <div><button class="btn oro">Guardar</button></div>
 </form>
 
@@ -95,5 +117,12 @@ document.getElementById('m-cancelar').onclick = () => modal.hidden = true;
 modal.onclick = (e) => { if (e.target === modal) modal.hidden = true; };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.hidden = true; });
 document.getElementById('m-elegir').onclick = () => { campo.value = actual; modal.hidden = true; };
+document.getElementById('probar-python').onclick = async () => {
+  const out = document.getElementById('probar-res'); out.textContent = 'Probando…';
+  const d = await post('/api/probar_python', {python: document.getElementById('python_scripts').value.trim()});
+  const opc = d.opcionales_faltan && d.opcionales_faltan.length ? ` <span class="med">(opcional, falta ${esc(d.opcionales_faltan.join(', '))})</span>` : '';
+  out.innerHTML = d.ok ? `<span class="ok">✓ ${esc(d.python)}: tiene lo necesario</span>${opc}`
+    : `<span class="mal">✗ ${esc(d.python)}: ${d.faltan && d.faltan.length ? 'faltan ' + esc(d.faltan.join(', ')) : esc(d.error || 'no responde')}</span>`;
+};
 </script>
 {% endblock %}

@@ -1,15 +1,17 @@
 # Orbyte Ingesta (C-12)
 
-Herramienta web aparte de Orbyte para revisar el material nuevo antes de pasarlo a la biblioteca.
+Herramienta web aparte de Orbyte (puerto `5005`) para incorporar material nuevo a la biblioteca.
 
-**Etapa 1 (esta):** detecta los álbumes que llegan a la carpeta de entrada, espera a que termine la copia y los revisa:
-formato y calidad, imagen + cue, conversiones necesarias, decodificación completa (archivos dañados) y pico,
-tags (mutagen + ffprobe), carátula, MQA, duplicados contra `music.db` y nombre final propuesto
-(`<Letra>/<Artista>/<Álbum (Año) [Tag]>`). **No mueve ni modifica ningún archivo.**
+1. **Revisión** (solo lectura): detecta los álbumes de la carpeta de entrada, espera a que termine la copia y revisa
+   formatos, cue, conversiones, decodificación completa, tags, carátula, MQA, duplicados en `music.db` y la
+   **edición exacta en MusicBrainz** (año de la edición para el nombre de la carpeta).
+2. **Decisiones** en pantalla: aceptar, elegir edición o año, carátula (de la carpeta, incrustada, Cover Art Archive o búsqueda en línea), editor de tags.
+3. **Ubicar** (etapa 2): copia/convierte en una carpeta temporal dentro de la biblioteca, escribe tags, Cover.jpg y Extras,
+   verifica cada archivo (audio idéntico cuando no hay conversión) y recién ahí lo deja en
+   `<Letra>/<Artista>/<Álbum (Año) [Tag]>` y borra el original de la entrada.
+4. **Metadata** (etapa 3): los 5 scripts de `tools/metadata/` para ese álbum y validación final.
+5. **Modo desatendido** (Ajustes): lo que queda «Listo» pasa solo por 3 y 4.
 
-- Puerto `5005` (variable `INGESTA_PORT`). Solo responde a la red de la casa / Tailscale.
-- Entra una cuenta **admin** de Orbyte (se lee `users` de `music.db`).
-- Datos propios en `ingesta_datos/` (fuera de git): `ingesta.db`, clave de sesión y caché de carátulas.
-- Corre con `Nice=10` e IO en prioridad baja para no afectar la reproducción.
-
-Prueba manual sin servicio: `python -m ingesta.analisis /ruta/entrada /ruta/music.db`
+- Solo responde a la red de la casa / Tailscale; entra una cuenta **admin** de Orbyte.
+- Datos propios en `ingesta_datos/` (fuera de git). Claves en el `.env` del repo: `LASTFM_API_KEY`, `ACOUSTID_API_KEY`.
+- AcoustID en la identificación de edición necesita `fpcalc` (`sudo apt install libchromaprint-tools`).

@@ -1,36 +1,46 @@
 {% extends 'base.html' %}
 {% block titulo %}{{ (r.album if r and r.album else a.rel) }}{% endblock %}
 {% set NOMBRES = {'copiando': 'Esperando', 'en_cola': 'En cola', 'analizando': 'Revisando', 'revisado': 'Lista',
-                  'requiere_revision': 'Requiere revisión', 'error': 'Con errores'} %}
+                  'requiere_revision': 'Requiere revisión', 'error': 'Con errores', 'descartado': 'Descartado',
+                  'por_ubicar': 'En cola para ubicar', 'ubicando': 'Ubicando', 'ubicado': 'Ubicado',
+                  'por_metadata': 'En cola: metadata', 'metadata': 'Metadata', 'completado': 'Completo',
+                  'error_ubicar': 'Error al ubicar', 'error_metadata': 'Error en metadata'} %}
+{% set PREVIOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error', 'descartado') %}
+{% set VIVOS = ('copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata') %}
+{% set editable = a.estado in PREVIOS and a.estado != 'analizando' %}
 {% set ICONO_DISCO %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>{% endset %}
+{% set ICONO_REVISAR %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>{% endset %}
 {% block contenido %}
 <a class="volver" href="{{ url_for('bandeja') }}">← Bandeja</a>
 
-{% set vivo = a.estado in ('copiando', 'en_cola', 'analizando') %}
-{% if vivo or not r or r.fallo %}
+{% if not r or r.fallo %}
   <div class="heroe">
     <div class="portada">{{ ICONO_DISCO }}</div>
     <div>
       <div class="h-art">Carpeta</div>
       <h1 class="h-alb">{{ a.rel }}</h1>
-      {% if vivo %}
+      {% if a.estado in VIVOS %}
         <div class="estado-vivo"><span class="giro"></span>
           <span id="progreso">{% if a.estado == 'copiando' %}Esperando a que la carpeta deje de cambiar (por si aún se está copiando o descargando). Luego se revisa, sin mover nada…{% elif a.estado == 'en_cola' %}En cola para revisar…{% else %}{{ a.progreso or 'Revisando…' }}{% endif %}</span></div>
       {% elif r and r.fallo %}
         <div class="flash error">La revisión falló: {{ r.fallo }}</div>
-        <div class="acciones"><button class="btn" id="btn-revisar">Volver a revisar</button></div>
+        <div class="acciones"><button class="btn" data-accion="revisar">{{ ICONO_REVISAR }}Volver a revisar</button></div>
       {% endif %}
     </div>
   </div>
 {% else %}
 {% set c = r.calidad %}
+{% if a.estado in VIVOS %}
+<div class="estado-vivo" style="margin-bottom:1rem"><span class="giro"></span>
+  <span id="progreso">{{ NOMBRES[a.estado] }}{% if a.progreso %} · {{ a.progreso }}{% endif %}{% if a.estado in ('en_cola', 'analizando') %} — se está actualizando la revisión con tus cambios{% endif %}</span></div>
+{% endif %}
 <div class="heroe">
-  <div class="portada">{{ ICONO_DISCO }}{% if r.caratula.tipo != 'ninguna' %}<img alt="Carátula" src="{{ url_for('caratula', aid=a.id) }}?v={{ a.analizado|int }}" onerror="this.remove()">{% endif %}</div>
+  <div class="portada">{{ ICONO_DISCO }}{% if r.caratula.tipo == 'url' and r.caratula.miniatura %}<img alt="Carátula" src="{{ r.caratula.miniatura }}" onerror="this.remove()">{% elif r.caratula.tipo != 'ninguna' %}<img alt="Carátula" src="{{ url_for('caratula', aid=a.id) }}?v={{ a.analizado|int }}" onerror="this.remove()">{% endif %}</div>
   <div>
     <div class="h-art">{{ r.artista }}</div>
     <h1 class="h-alb">{{ r.album }}{% if r.anio %} <span class="anio">({{ r.anio }})</span>{% endif %}</h1>
     <div class="h-chips">
-      <span class="chip e-{{ a.estado }}"><span class="led"></span>{{ NOMBRES[a.estado] }}</span>
+      <span class="chip e-{{ a.estado }} {{ 'pulso' if a.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(a.estado, a.estado) }}</span>
       {% if c.tag %}<span class="chip q-{{ c.tag }}"><span class="led"></span>{{ c.tag }}</span>{% endif %}
       {% if c.formato %}<span class="chip">{{ c.formato }}</span>{% endif %}
       <span class="chip">{{ r.n_pistas }} pistas{% if r.n_discos > 1 %} · {{ r.n_discos }} discos{% endif %}</span>
@@ -39,26 +49,76 @@
       {% if r.genero %}<span class="chip">{{ r.genero }}</span>{% endif %}
     </div>
     <div class="destino">
-      <div class="rotulo">Quedaría en</div>
+      <div class="rotulo">{{ 'Quedó en' if a.ubicado_en else 'Quedaría en' }}</div>
       {% set d = r.destino %}
       <div class="ruta"><span class="seg-raiz">{{ d.ruta[:d.ruta|length - (d.letra|length + d.artista|length + d.album|length + 2)] }}</span><span class="seg-letra">{{ d.letra }}/</span><span class="seg-art">{{ d.artista }}/</span><span class="seg-alb">{{ d.album }}</span></div>
       <div class="nota">{% if d.artista_existe %}El artista ya está en la biblioteca: se usa su carpeta actual.{% else %}Artista nuevo en la biblioteca.{% endif %}
         {% if r.n_discos > 1 %} Los {{ r.n_discos }} discos quedan en una sola carpeta.{% endif %}</div>
     </div>
     <div class="acciones">
-      <button class="btn" id="btn-revisar">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
-        Volver a revisar</button>
-      <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s · Etapa 1: solo lectura, no se movió nada.</span>
+      {% if a.estado == 'revisado' %}
+        <button class="btn oro" data-accion="ubicar">Ubicar en la biblioteca</button>
+      {% elif a.estado == 'requiere_revision' %}
+        <button class="btn" disabled title="Resuelve las decisiones pendientes">Ubicar en la biblioteca</button>
+      {% elif a.estado == 'error_ubicar' %}
+        <button class="btn oro" data-accion="ubicar">Reintentar</button>
+      {% elif a.estado in ('error_metadata', 'completado') %}
+        <button class="btn" data-accion="metadata">Correr la metadata de nuevo</button>
+      {% endif %}
+      {% if a.estado == 'completado' and a.resultado and a.resultado.album_id %}
+        <a class="btn oro" target="_blank" rel="noopener" href="http://{{ request.host.split(':')[0] }}:5001/album/{{ a.resultado.album_id }}">Abrir en Orbyte</a>
+      {% endif %}
+      {% if editable and a.estado != 'descartado' %}
+        <button class="btn" data-accion="revisar">{{ ICONO_REVISAR }}Volver a revisar</button>
+        <button class="btn" data-accion="descartar" title="No se ubica; los archivos quedan donde están">Descartar</button>
+      {% elif a.estado == 'descartado' %}
+        <button class="btn" data-accion="restaurar">Volver a la bandeja</button>
+      {% endif %}
+      <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s{% if a.estado in PREVIOS %} · los archivos aún no se han tocado{% endif %}</span>
     </div>
+    {% if a.estado == 'revisado' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: se corrige, se copia y verifica en la biblioteca{% if aj_borrar %}, se borra de la entrada{% endif %}{% if aj_metadata %} y se corren los 5 scripts de metadata{% endif %}.</p>{% endif %}
   </div>
 </div>
 
+{# ── resultado de la etapa 3 ── #}
+{% set res = a.resultado %}
+{% if res %}
+<section class="seccion">
+  <h2 class="rotulo">Resultado en Orbyte <span class="cuenta">álbum ID {{ res.album_id }}</span></h2>
+  <div class="panel">
+    <div class="h-chips" style="margin:0 0 .6rem">
+      <span class="chip {{ 'e-revisado' if res.ok else 'e-error' }}"><span class="led"></span>{{ 'Validación OK' if res.ok else 'Validación con errores' }}</span>
+      <span class="chip">{{ res.pistas }} pistas</span>
+      <span class="chip">letras: {{ res.letras.sincronizadas }} sincronizadas · {{ res.letras.planas }} planas · {{ res.letras.faltantes }} sin letra</span>
+      {% if res.estrellas is not none %}<span class="chip">{{ '★' * (res.estrellas|int) }}{{ '☆' * (5 - res.estrellas|int) }}</span>{% endif %}
+    </div>
+    {% for e in res.errores %}<div class="mal" style="font-size:.88rem">✗ {{ e }}</div>{% endfor %}
+    {% for w in res.advertencias %}<div class="med" style="font-size:.88rem">⚠ {{ w }}</div>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ── registro en vivo ── #}
+{% if a.registro or a.estado in ('por_ubicar', 'ubicando', 'por_metadata', 'metadata') %}
+<section class="seccion">
+  <h2 class="rotulo">Registro</h2>
+  <pre class="registro" id="registro">{{ a.registro or '' }}</pre>
+</section>
+{% endif %}
+
 {# ── problemas ── #}
-{% set GRUPOS = [('error', 'Errores', 'Bloquean el álbum hasta resolverlos.'),
-                 ('decision', 'Decisiones pendientes', 'Necesitan que elijas algo antes de ubicarlo.'),
-                 ('correccion', 'Correcciones automáticas', 'Se harán solas al ubicar el álbum (etapa 2).'),
+{% set GRUPOS = [('error', 'Errores', 'Bloquean el álbum: descártalo o corrige los archivos.'),
+                 ('decision', 'Decisiones pendientes', 'Elige o acepta cada una para poder ubicarlo.'),
+                 ('correccion', 'Correcciones automáticas', 'Se harán solas al ubicar el álbum.'),
                  ('aviso', 'Avisos', 'Para tu información.')] %}
+{% set ACEPTAR = {'duplicado': 'Conservar ambos', 'elegir_edicion': 'Mantener el año propuesto',
+                  'sin_caratula': 'Seguir sin carátula', 'anio_conflicto': 'Aceptar el propuesto',
+                  'sin_anio': 'Seguir sin año'} %}
+{% set ACEPTABLES = ('multicanal', 'lossy_bajo', 'errores_menores', 'varios_artistas', 'artista_inferido', 'album_inferido',
+                     'subcarpetas', 'pista_repetida', 'sin_numero', 'unknown_artist', 'duplicado', 'anio_conflicto',
+                     'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla') %}
+{% set A_TAGS = ('sin_artista', 'artista_inferido', 'sin_album', 'album_inferido', 'unknown_artist', 'varios_artistas',
+                 'pista_repetida', 'sin_numero', 'sin_anio') %}
 <section class="seccion">
   <h2 class="rotulo">Revisión <span class="cuenta">{{ r.problemas|length }} observaciones</span></h2>
   {% if not r.problemas %}
@@ -74,7 +134,14 @@
           <details><summary>{{ p.pistas|length }} archivo{{ 's' if p.pistas|length != 1 }}</summary>
             {% for f in p.pistas[:40] %}<span class="mono">{{ f }}</span>{% endfor %}
             {% if p.pistas|length > 40 %}<span class="mono">… y {{ p.pistas|length - 40 }} más</span>{% endif %}
-          </details>{% endif %}</li>
+          </details>{% endif %}
+          {% if nivel == 'decision' and editable %}<div class="dec-acciones">
+            {% for o in p.opciones or [] %}<button class="btn chico" data-anio="{{ o }}">Usar {{ o }}</button>{% endfor %}
+            {% if p.codigo == 'elegir_edicion' %}<a class="btn chico" href="#edicion">Ver ediciones ↓</a>{% endif %}
+            {% if p.codigo == 'sin_caratula' %}<a class="btn chico" href="#caratula">Elegir carátula ↓</a>{% endif %}
+            {% if p.codigo in A_TAGS %}<a class="btn chico" href="#tags" data-abrir="tags">Editar tags ↓</a>{% endif %}
+            {% if p.codigo in ACEPTABLES %}<button class="btn chico" data-aceptar="{{ p.codigo }}">{{ ACEPTAR.get(p.codigo, 'Aceptar') }}</button>{% endif %}
+          </div>{% endif %}</li>
       {% endfor %}</ul>
     </div>
     {% endif %}{% endfor %}
@@ -86,7 +153,7 @@
 {% if ed %}
 {% set ESTADO_ED = {'alta': 'identificada', 'anio': 'año seguro', 'dudosa': 'elige una', 'sin_resultado': 'sin resultado',
                     'sin_red': 'sin conexión', 'error': 'error'} %}
-<section class="seccion">
+<section class="seccion" id="edicion">
   <h2 class="rotulo">Edición <span class="cuenta">MusicBrainz · {{ ESTADO_ED.get(ed.estado, ed.estado) }}{% if ed.metodo %} · por {{ ed.metodo }}{% endif %}</span></h2>
   {% if ed.elegida %}{% set el = ed.elegida %}
   <div class="panel edicion-elegida">
@@ -103,7 +170,7 @@
         <span class="chip">duraciones {{ ((el.calce or 0) * 100)|round|int }}%</span>
       </div>
       <div class="s" style="margin-top:.5rem"><a href="{{ el.url }}" target="_blank" rel="noopener" style="text-decoration:underline">Ver en MusicBrainz</a>
-        {% if ed.metodo == 'elegida por ti' %} · <button class="btn-link" data-mbid="">Quitar mi elección</button>{% endif %}</div>
+        {% if ed.metodo == 'elegida por ti' and editable %} · <button class="btn-link" data-mbid="">Quitar mi elección</button>{% endif %}</div>
     </div>
   </div>
   {% elif ed.estado in ('sin_red', 'error', 'sin_resultado') %}
@@ -123,7 +190,7 @@
         <td class="oculto-movil">{{ c.sello or '' }}{% if c.catalogo %}<div class="s mono">{{ c.catalogo }}</div>{% endif %}</td>
         <td>{{ c.formato or '' }}<div class="s">{{ c.discos|join(' + ') }} pistas</div></td>
         <td class="der">{{ ((c.calce or 0) * 100)|round|int }}%</td>
-        <td class="der">{% if ed.elegida and ed.elegida.id == c.id %}<span class="ok">✓ en uso</span>{% else %}<button class="btn" data-mbid="{{ c.id }}">Usar esta</button>{% endif %}</td>
+        <td class="der">{% if ed.elegida and ed.elegida.id == c.id %}<span class="ok">✓ en uso</span>{% elif editable %}<button class="btn chico" data-mbid="{{ c.id }}">Usar esta</button>{% endif %}</td>
       </tr>
       {% endfor %}
     </table></div>
@@ -145,6 +212,40 @@
       <td class="der">{{ (d.similitud * 100)|round|int }}%</td></tr>
     {% endfor %}
   </table></div>
+</section>
+{% endif %}
+
+{# ── editor de tags ── #}
+{% if editable %}
+{% set ta = r.tags_album or {} %}
+{% set cam = (r.cambios or {}) %}
+<section class="seccion" id="tags">
+  <details id="det-tags" {{ 'open' if cam.tags or cam.pistas }}>
+    <summary class="rotulo" style="cursor:pointer">Editar tags {% if cam.tags or cam.pistas %}<span class="cuenta">con cambios tuyos</span>{% endif %}</summary>
+    <div class="panel" style="margin-top:.7rem">
+      <div class="trio cuatro">
+        <div class="campo"><label>Artista del álbum</label><input type="text" id="t-artista" value="{{ ta.artista or '' }}"></div>
+        <div class="campo"><label>Álbum</label><input type="text" id="t-album" value="{{ ta.album or '' }}"></div>
+        <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ (cam.tags or {}).anio or '' }}" placeholder="{{ ta.anio or '' }}"></div>
+        <div class="campo"><label>Género</label><input type="text" id="t-genero" value="{{ ta.genero or '' }}"></div>
+      </div>
+      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">El año vacío = el de la edición identificada (o de los tags). Lo que escribas aquí manda sobre los tags de los archivos.</p>
+      <div class="tabla-wrap"><table class="tabla-tags">
+        <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
+        {% for x in r.plan or [] %}
+        {% set o = (cam.pistas or {}).get(x.clave) or {} %}
+        <tr data-clave="{{ x.clave }}">
+          <td class="num">{{ x.disco }}</td>
+          <td style="width:70px"><input type="text" class="p-numero" inputmode="numeric" value="{{ o.numero or x.numero or '' }}"></td>
+          <td><input type="text" class="p-titulo" value="{{ o.titulo or x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"></td>
+          <td><input type="text" class="p-artista" value="{{ o.artista or x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      <div class="acciones"><button class="btn oro" id="guardar-tags">Guardar y volver a revisar</button>
+        {% if cam.tags or cam.pistas %}<button class="btn" id="borrar-tags">Deshacer mis cambios</button>{% endif %}</div>
+    </div>
+  </details>
 </section>
 {% endif %}
 
@@ -193,31 +294,33 @@
 </section>
 
 {# ── carátula y archivos ── #}
-<section class="seccion dos-col">
+<section class="seccion dos-col" id="caratula">
   <div class="panel">
     <h2 class="rotulo" style="margin-bottom:.6rem">Carátula</h2>
     {% set car = r.caratula %}
     <dl>
-      <dt>Origen</dt><dd>{% if car.tipo == 'caa' %}Portada de la edición en Cover Art Archive{% elif car.tipo == 'archivo' %}<span class="mono">{{ car.archivo }}</span>{% elif car.tipo == 'incrustada' %}Incrustada en <span class="mono">{{ car.pista }}</span>{% else %}<span class="med">No hay</span>{% endif %}</dd>
-      {% if car.ancho %}<dt>Tamaño</dt><dd>{{ car.ancho }}×{{ car.alto }} px · {{ car.formato }} · {{ car.tamano|tamano }}</dd>{% endif %}
+      <dt>Origen</dt><dd>{% if car.eleccion %}<span class="ok">Elegida por ti</span> · {% endif %}{% if car.tipo == 'caa' %}Portada de la edición en Cover Art Archive{% elif car.tipo == 'url' %}Descarga en línea{% elif car.tipo == 'archivo' %}<span class="mono">{{ car.archivo }}</span>{% elif car.tipo == 'incrustada' %}Incrustada en <span class="mono">{{ car.pista }}</span>{% else %}<span class="med">No hay</span>{% endif %}</dd>
+      {% if car.ancho and car.tipo == 'archivo' %}<dt>Tamaño</dt><dd>{{ car.ancho }}×{{ car.alto }} px · {{ car.formato }} · {{ car.tamano|tamano }}</dd>{% endif %}
       <dt>Quedará como</dt><dd><span class="mono">Cover.jpg</span>{% if car.por_disco %} + una por disco{% endif %}</dd>
     </dl>
     {% set base_img = url_for('caratula', aid=a.id) %}
-    {% if car.por_disco %}<div class="s tenue" style="margin-top:.7rem;font-size:.78rem">Portada de cada disco</div><div class="miniaturas">
+    {% if car.por_disco and editable %}<div class="s tenue" style="margin-top:.7rem;font-size:.78rem">Portada de cada disco</div><div class="miniaturas">
       {% for d in car.por_disco %}<figure><img src="{{ base_img }}?disco={{ d.disco }}&mini=1" alt=""><figcaption>Disco {{ d.disco }}</figcaption></figure>{% endfor %}
     </div>{% endif %}
-    {% if car.candidatos|length > 1 or (car.candidatos and car.incrustada_en) or (car.tipo in ('ninguna', 'caa') and car.candidatos) %}
-    <div class="s tenue" style="margin-top:.8rem;font-size:.78rem">Imágenes disponibles{% if car.tipo != 'ninguna' %} · la marcada es la propuesta{% endif %}</div>
-    <div class="miniaturas">
-      {% if car.incrustada_en %}<figure class="{{ 'propuesta' if car.tipo == 'incrustada' }}"><img src="{{ base_img }}?incrustada=1&mini=1" alt=""><figcaption>incrustada</figcaption></figure>{% endif %}
-      {% for c2 in car.candidatos %}{% if c2.mb %}<figure title="Portada de la edición en Cover Art Archive">
+    {% if editable and (car.candidatos or car.incrustada_en or car.url) %}
+    <div class="s tenue" style="margin-top:.8rem;font-size:.78rem">Imágenes disponibles · la marcada es la que se usará{% if editable %}; toca otra para elegirla{% endif %}</div>
+    <div class="miniaturas {{ 'elegibles' if editable }}">
+      {% if car.tipo == 'url' %}<figure class="propuesta"><img src="{{ car.miniatura or car.url }}" alt=""><figcaption>en línea</figcaption></figure>{% endif %}
+      {% if car.incrustada_en %}<figure class="{{ 'propuesta' if car.tipo == 'incrustada' }}" data-car='{"tipo":"incrustada"}'><img src="{{ base_img }}?incrustada=1&mini=1" alt=""><figcaption>incrustada</figcaption></figure>{% endif %}
+      {% for c2 in car.candidatos %}{% if c2.mb %}<figure class="{{ 'propuesta' if car.tipo == 'caa' and car.mb == c2.mb }}" title="Portada de la edición en Cover Art Archive" data-car='{"tipo":"caa","mb":"{{ c2.mb }}"}'>
         <img loading="lazy" src="https://coverartarchive.org/release/{{ c2.mb }}/front-250" alt="" onerror="this.parentNode.remove()">
         <figcaption>MusicBrainz</figcaption></figure>
-      {% else %}<figure class="{{ 'propuesta' if car.tipo == 'archivo' and c2.archivo == car.archivo }}" title="{{ c2.archivo }}">
+      {% else %}<figure class="{{ 'propuesta' if car.tipo == 'archivo' and c2.archivo == car.archivo }}" title="{{ c2.archivo }}" data-car="{{ {'tipo': 'archivo', 'archivo': c2.archivo}|tojson|forceescape }}">
         <img loading="lazy" src="{{ base_img }}?r={{ c2.archivo|urlencode }}&mini=1" alt="">
         <figcaption>{{ c2.archivo.split('/')[-1] }}{% if c2.ancho %}<br><span class="muy-tenue">{{ c2.ancho }}×{{ c2.alto }}</span>{% endif %}</figcaption></figure>{% endif %}{% endfor %}
     </div>{% endif %}
-    <p class="s muy-tenue" style="margin-top:.6rem;font-size:.76rem">Elegir otra o buscar en línea (Cover Art Archive, iTunes, Deezer): etapa 2.</p>
+    {% if editable %}<div class="acciones"><button class="btn" id="buscar-portada">Buscar en línea</button>
+      {% if car.eleccion %}<button class="btn" id="portada-propuesta">Volver a la propuesta</button>{% endif %}</div>{% endif %}
   </div>
   <div class="panel">
     <h2 class="rotulo" style="margin-bottom:.6rem">Carpeta de origen</h2>
@@ -232,24 +335,106 @@
     </dl>
   </div>
 </section>
+
+<div class="modal-fondo" id="modal-portada" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mp-tit" style="width:min(820px,100%)">
+    <div class="modal-cab"><div class="rotulo" id="mp-tit">Buscar carátula en línea</div>
+      <div class="fila-in" style="display:flex;gap:.5rem;margin-top:.6rem">
+        <input type="text" id="mp-artista" value="{{ r.artista }}" aria-label="Artista">
+        <input type="text" id="mp-album" value="{{ r.album }}" aria-label="Álbum">
+        <button class="btn" id="mp-buscar">Buscar</button></div></div>
+    <div class="carpetas" id="mp-res" style="padding:.8rem"><div class="nada">Buscando…</div></div>
+    <div class="modal-pie"><span class="tenue" style="font-size:.8rem">Cover Art Archive (ediciones comparadas), iTunes y Deezer</span>
+      <button class="btn" id="mp-cerrar">Cerrar</button></div>
+  </div>
+</div>
 {% endif %}
 {% endblock %}
 {% block js %}
 <script>
 const AID = {{ a.id }}, ESTADO = {{ a.estado|tojson }};
-const btn = document.getElementById('btn-revisar');
-if (btn) btn.onclick = async () => { btn.disabled = true; await post(`/api/album/${AID}/revisar`); location.reload(); };
-document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = async () => {
-  b.disabled = true; await post(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); location.reload();
+const VIVOS = {{ VIVOS|list|tojson }};
+async function accion(url, datos) {
+  const r = await post(url, datos || {});
+  if (r && r.ok === false) { toast('No se pudo', r.error || ''); return false; }
+  location.reload(); return true;
+}
+document.querySelectorAll('[data-accion]').forEach(b => b.onclick = () => {
+  const a = b.dataset.accion;
+  if (a === 'descartar' && !confirm('¿Descartar este álbum? No se borra nada: queda fuera de la bandeja.')) return;
+  b.disabled = true; accion(`/api/album/${AID}/${a}`);
 });
-if (['copiando', 'en_cola', 'analizando'].includes(ESTADO)) {
+document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); });
+document.querySelectorAll('[data-aceptar]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {aceptar: b.dataset.aceptar}); });
+document.querySelectorAll('[data-anio]').forEach(b => b.onclick = () => {
+  b.disabled = true;
+  const tags = Object.assign({}, {{ ((r.cambios or {}).tags or {}) | tojson if r else '{}' }}, {anio: b.dataset.anio});
+  accion(`/api/album/${AID}/cambios`, {tags});
+});
+document.querySelectorAll('[data-abrir]').forEach(a => a.onclick = () => { const d = document.getElementById('det-tags'); if (d) d.open = true; });
+function val(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; }
+
+// editor de tags
+const gt = document.getElementById('guardar-tags');
+if (gt) gt.onclick = () => {
+  const ta = {{ (r.tags_album or {}) |tojson if r else '{}' }};
+  const tags = {};
+  for (const k of ['artista', 'album', 'genero']) { const v = val('t-' + k); if (v && v !== (ta[k] || '')) tags[k] = v; }
+  const anio = val('t-anio'); if (anio) tags.anio = anio;
+  const pistas = {};
+  document.querySelectorAll('tr[data-clave]').forEach(tr => {
+    const o = {};
+    const t = tr.querySelector('.p-titulo'), ar = tr.querySelector('.p-artista'), n = tr.querySelector('.p-numero');
+    if (t.value.trim() && t.value.trim() !== t.dataset.orig) o.titulo = t.value.trim();
+    if (ar.value.trim() && ar.value.trim() !== ar.dataset.orig) o.artista = ar.value.trim();
+    if (n.value.trim() && n.value.trim() !== n.defaultValue) o.numero = n.value.trim();
+    if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
+  });
+  gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
+};
+const bt = document.getElementById('borrar-tags');
+if (bt) bt.onclick = () => { bt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags: {}, pistas: {}}); };
+
+// carátula
+document.querySelectorAll('.miniaturas.elegibles [data-car]').forEach(f => f.onclick = () => {
+  if (f.classList.contains('propuesta')) return;
+  accion(`/api/album/${AID}/cambios`, {caratula: JSON.parse(f.dataset.car)});
+});
+const pp = document.getElementById('portada-propuesta');
+if (pp) pp.onclick = () => accion(`/api/album/${AID}/cambios`, {caratula: null});
+const modal = document.getElementById('modal-portada');
+async function buscarPortadas() {
+  const res = document.getElementById('mp-res');
+  res.innerHTML = '<div class="nada">Buscando…</div>';
+  const q = new URLSearchParams({artista: val('mp-artista'), album: val('mp-album')});
+  const d = await (await fetch(`/api/album/${AID}/buscar_caratula?` + q)).json();
+  if (!d.resultados.length) { res.innerHTML = '<div class="nada">Sin resultados (¿el servidor tiene internet?)</div>'; return; }
+  res.innerHTML = '<div class="miniaturas grandes">' + d.resultados.map((x, i) =>
+    `<figure data-i="${i}" title="${esc(x.titulo)}"><img loading="lazy" src="${esc(x.miniatura)}" alt="" onerror="this.parentNode.remove()"><figcaption>${esc(x.fuente)}<br><span class="muy-tenue">${esc(x.titulo)}</span></figcaption></figure>`).join('') + '</div>';
+  res.querySelectorAll('figure').forEach(f => f.onclick = () => {
+    const x = d.resultados[+f.dataset.i];
+    accion(`/api/album/${AID}/cambios`, {caratula: x.mb ? {tipo: 'caa', mb: x.mb} : {tipo: 'url', url: x.url, miniatura: x.miniatura}});
+  });
+}
+const bp = document.getElementById('buscar-portada');
+if (bp) bp.onclick = () => { modal.hidden = false; buscarPortadas(); };
+const mb = document.getElementById('mp-buscar'); if (mb) mb.onclick = buscarPortadas;
+const mc = document.getElementById('mp-cerrar'); if (mc) mc.onclick = () => modal.hidden = true;
+if (modal) modal.onclick = e => { if (e.target === modal) modal.hidden = true; };
+
+// estado en vivo + registro
+if (VIVOS.includes(ESTADO)) {
   setInterval(async () => {
     const r = await fetch(`/api/album/${AID}/estado`); const d = await r.json();
     if (!d.estado) { location.href = '/'; return; }
-    if (d.estado !== ESTADO && !['copiando', 'en_cola', 'analizando'].includes(d.estado)) location.reload();
+    if (d.estado !== ESTADO) { location.reload(); return; }
     const el = document.getElementById('progreso');
-    if (el && d.estado === 'analizando') el.textContent = d.progreso || 'Revisando…';
+    if (el && d.progreso) el.textContent = d.progreso;
+    const reg = document.getElementById('registro');
+    if (reg && d.registro) { const abajo = reg.scrollTop + reg.clientHeight >= reg.scrollHeight - 30;
+      reg.textContent = d.registro.join('\n'); if (abajo) reg.scrollTop = reg.scrollHeight; }
   }, 1500);
 }
+const reg0 = document.getElementById('registro'); if (reg0) reg0.scrollTop = reg0.scrollHeight;
 </script>
 {% endblock %}

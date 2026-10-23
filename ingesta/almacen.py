@@ -15,7 +15,15 @@ AJUSTES_DEFECTO = {
     'intervalo_seg': '30',      # cada cuánto se mira la carpeta de entrada
     'trabajadores': '3',        # decodificaciones en paralelo durante la revisión
     'musicbrainz': '1',         # identificar la edición exacta durante la revisión
+    'desatendido': '0',         # álbumes sin decisiones pendientes se procesan solos
+    'borrar_origen': '1',       # tras verificar la copia, borrar el original de la entrada (mover)
+    'metadata': '1',            # etapa 3: correr los 5 scripts de metadata tras ubicar
+    'python_scripts': '',       # Python que corre los 5 scripts (vacío = python3 del sistema)
 }
+
+PREVIOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error', 'descartado')
+POSTERIORES = ('por_ubicar', 'ubicando', 'ubicado', 'por_metadata', 'metadata', 'completado',
+               'error_ubicar', 'error_metadata')
 
 ESTADOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error')
 
@@ -50,7 +58,9 @@ class Almacen:
                 CREATE INDEX IF NOT EXISTS ix_avisos_leido ON avisos(leido, ts);
             ''')
             columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
-            for col, tipo in (('eleccion', 'TEXT'),):
+            for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
+                              ('silencioso', 'INTEGER'), ('ubicado_en', 'TEXT'), ('terminado', 'REAL'),
+                              ('resultado', 'TEXT')):
                 if col not in columnas:
                     c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
 
@@ -77,7 +87,8 @@ class Almacen:
         with self._con() as c:
             return [dict(r) for r in c.execute(
                 'SELECT id, ruta, rel, estado, progreso, detectado, analizado, artista, album, anio, '
-                'calidad, destino, n_pistas, conteo FROM albumes ORDER BY detectado DESC, rel')]
+                'calidad, destino, n_pistas, conteo, ubicado_en, terminado FROM albumes '
+                'ORDER BY detectado DESC, rel')]
 
     def album(self, aid):
         with self._con() as c:
@@ -86,6 +97,8 @@ class Almacen:
             return None
         d = dict(r)
         d['reporte'] = json.loads(d['reporte']) if d.get('reporte') else None
+        d['cambios'] = json.loads(d['cambios']) if d.get('cambios') else {}
+        d['resultado'] = json.loads(d['resultado']) if d.get('resultado') else None
         return d
 
     def por_ruta(self):
@@ -106,8 +119,9 @@ class Almacen:
             campos['firma'] = json.dumps(campos['firma'])
         if 'reporte' in campos and campos['reporte'] is not None and not isinstance(campos['reporte'], str):
             campos['reporte'] = json.dumps(campos['reporte'], ensure_ascii=False)
-        if 'conteo' in campos and not isinstance(campos['conteo'], str):
-            campos['conteo'] = json.dumps(campos['conteo'])
+        for k in ('conteo', 'cambios', 'resultado'):
+            if k in campos and campos[k] is not None and not isinstance(campos[k], str):
+                campos[k] = json.dumps(campos[k], ensure_ascii=False)
         sets = ', '.join(f'{k}=?' for k in campos)
         with _lock, self._con() as c:
             c.execute(f'UPDATE albumes SET {sets} WHERE id=?', (*campos.values(), aid))
@@ -116,6 +130,24 @@ class Almacen:
         with _lock, self._con() as c:
             c.execute('DELETE FROM albumes WHERE id=?', (aid,))
             c.execute('UPDATE avisos SET album_id=NULL WHERE album_id=?', (aid,))
+
+    def registrar(self, aid, linea):
+        sello = time.strftime('%H:%M:%S')
+        with _lock, self._con() as c:
+            r = c.execute('SELECT registro FROM albumes WHERE id=?', (aid,)).fetchone()
+            previo = (r[0] if r and r[0] else '').splitlines()[-1500:]
+            previo.append(f'{sello}  {linea}')
+            c.execute('UPDATE albumes SET registro=? WHERE id=?', ('\n'.join(previo), aid))
+
+    def siguiente(self, estado):
+        with self._con() as c:
+            r = c.execute('SELECT id FROM albumes WHERE estado=? ORDER BY detectado, rel LIMIT 1', (estado,)).fetchone()
+        return r[0] if r else None
+
+    def con_estado(self, *estados):
+        with self._con() as c:
+            return [dict(r) for r in c.execute(
+                f'SELECT id, ruta, rel, estado FROM albumes WHERE estado IN ({",".join("?" * len(estados))})', estados)]
 
     def siguiente_en_cola(self):
         with self._con() as c:
