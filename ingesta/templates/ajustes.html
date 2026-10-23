@@ -1,0 +1,90 @@
+{% extends 'base.html' %}
+{% block titulo %}Ajustes{% endblock %}
+{% set ICONO_CARPETA %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>{% endset %}
+{% block contenido %}
+<div class="barra"><div><h1 class="titulo">Ajustes</h1><div class="sub">Dónde llega el material nuevo y cómo se revisa.</div></div></div>
+{% for e in errores %}<div class="flash error">{{ e }}</div>{% endfor %}
+<form class="form" method="post">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <div class="bloque">
+    <div class="campo">
+      <label for="carpeta_entrada">Carpeta de entrada</label>
+      <div class="ayuda">Aquí dejas las carpetas de los álbumes nuevos (una por álbum; los discos pueden venir en subcarpetas «CD 1», «CD 2»…). La herramienta la mira sola cada pocos segundos.</div>
+      <div class="fila-in">
+        <input class="mono" type="text" id="carpeta_entrada" name="carpeta_entrada" value="{{ aj.carpeta_entrada }}" placeholder="/mnt/musica-entrada">
+        <button type="button" class="btn" data-elegir="carpeta_entrada">{{ ICONO_CARPETA }}Elegir…</button>
+      </div>
+    </div>
+    <div class="campo">
+      <label for="biblioteca">Biblioteca</label>
+      <div class="ayuda">Raíz de la música de Orbyte. Se usa para proponer la ruta final y ver si la carpeta ya existe.</div>
+      <div class="fila-in">
+        <input class="mono" type="text" id="biblioteca" name="biblioteca" value="{{ aj.biblioteca }}">
+        <button type="button" class="btn" data-elegir="biblioteca">{{ ICONO_CARPETA }}Elegir…</button>
+      </div>
+    </div>
+    <div class="campo">
+      <label for="db_orbyte">Base de datos de Orbyte</label>
+      <div class="ayuda">music.db: de aquí salen las cuentas admin para entrar y los álbumes para detectar duplicados. Solo se lee.</div>
+      <input class="mono" type="text" id="db_orbyte" name="db_orbyte" value="{{ aj.db_orbyte }}">
+    </div>
+  </div>
+  <div class="bloque">
+    <div class="trio">
+      <div class="campo"><label for="espera_min">Espera (min)</label>
+        <div class="ayuda">Sin cambios este tiempo = copia terminada.</div>
+        <input type="number" id="espera_min" name="espera_min" min="0" max="120" step="0.5" value="{{ aj.espera_min }}"></div>
+      <div class="campo"><label for="intervalo_seg">Revisar cada (s)</label>
+        <div class="ayuda">Frecuencia con que se mira la entrada.</div>
+        <input type="number" id="intervalo_seg" name="intervalo_seg" min="5" max="3600" value="{{ aj.intervalo_seg }}"></div>
+      <div class="campo"><label for="trabajadores">Pistas en paralelo</label>
+        <div class="ayuda">Decodificaciones simultáneas al revisar.</div>
+        <input type="number" id="trabajadores" name="trabajadores" min="1" max="8" value="{{ aj.trabajadores }}"></div>
+    </div>
+  </div>
+  <div><button class="btn oro">Guardar</button></div>
+</form>
+
+<div class="modal-fondo" id="modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-tit">
+    <div class="modal-cab"><div class="rotulo" id="modal-tit">Elegir carpeta</div><div class="migas" id="migas"></div></div>
+    <div class="carpetas" id="carpetas"></div>
+    <div class="modal-pie">
+      <span class="tenue" id="modal-info" style="font-size:.8rem"></span>
+      <span style="display:flex;gap:.5rem"><button type="button" class="btn" id="m-cancelar">Cancelar</button>
+        <button type="button" class="btn oro" id="m-elegir">Elegir esta carpeta</button></span>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+const ICONO = {{ ICONO_CARPETA|tojson }};
+const modal = document.getElementById('modal');
+let campo = null, actual = null;
+async function abrir(ruta) {
+  const r = await fetch('/api/carpetas?ruta=' + encodeURIComponent(ruta || ''));
+  const d = await r.json(); actual = d.ruta;
+  const partes = d.ruta.split('/').filter(Boolean);
+  let acum = '';
+  document.getElementById('migas').innerHTML = `<button data-r="/">/</button>` + partes.map((p, i) => {
+    acum += '/' + p; return `${i ? '<span>/</span>' : ''}<button data-r="${esc(acum)}">${esc(p)}</button>`;
+  }).join('');
+  const lista = document.getElementById('carpetas');
+  let html = d.padre ? `<button data-r="${esc(d.padre)}">${ICONO}<span class="tenue">.. (subir)</span></button>` : '';
+  html += d.carpetas.map(c => `<button data-r="${esc((d.ruta === '/' ? '' : d.ruta) + '/' + c)}">${ICONO}${esc(c)}</button>`).join('');
+  if (!d.carpetas.length) html += `<div class="nada">${esc(d.error || 'Sin subcarpetas')}</div>`;
+  lista.innerHTML = html; lista.scrollTop = 0;
+  document.getElementById('modal-info').textContent = d.escribible === false ? 'Sin permiso de escritura aquí' : (d.truncado ? 'Se muestran las primeras 500' : '');
+  modal.querySelectorAll('[data-r]').forEach(b => b.onclick = () => abrir(b.dataset.r));
+}
+document.querySelectorAll('[data-elegir]').forEach(b => b.onclick = () => {
+  campo = document.getElementById(b.dataset.elegir);
+  modal.hidden = false; abrir(campo.value || '/mnt');
+});
+document.getElementById('m-cancelar').onclick = () => modal.hidden = true;
+modal.onclick = (e) => { if (e.target === modal) modal.hidden = true; };
+document.addEventListener('keydown', e => { if (e.key === 'Escape') modal.hidden = true; });
+document.getElementById('m-elegir').onclick = () => { campo.value = actual; modal.hidden = true; };
+</script>
+{% endblock %}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Orbyte Ingesta (revisión de material nuevo)
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=USUARIO
+WorkingDirectory=RUTA_REPO
+ExecStart=/bin/bash RUTA_REPO/ingesta/start.sh
+Restart=on-failure
+RestartSec=5
+# Prioridad baja: que una revisión larga nunca le quite CPU/disco a la reproducción de Orbyte
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target

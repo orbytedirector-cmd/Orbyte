@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="csrf" content="{{ csrf }}">
+<meta name="theme-color" content="#000000">
+<title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}">
+</head>
+<body>
+<header class="cab">
+  <div class="cab-in">
+    <a class="marca" href="{{ url_for('bandeja') }}"><b>ORBYTE</b><span>INGESTA</span></a>
+    <nav class="nav">
+      <a href="{{ url_for('bandeja') }}" class="{{ 'activo' if pagina == 'bandeja' }}">Bandeja</a>
+      <a href="{{ url_for('avisos') }}" class="{{ 'activo' if pagina == 'avisos' }}">Avisos</a>
+      <a href="{{ url_for('ajustes') }}" class="{{ 'activo' if pagina == 'ajustes' }}">Ajustes</a>
+    </nav>
+    <div class="cab-der">
+      <a class="campana" href="{{ url_for('avisos') }}" title="Avisos" aria-label="Avisos">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        <span class="n" id="campana-n" {{ 'hidden' if not sin_leer }}>{{ sin_leer }}</span>
+      </a>
+      <span class="usuario">{{ usuario }}</span>
+      <form method="post" action="{{ url_for('salir') }}"><input type="hidden" name="csrf" value="{{ csrf }}"><button class="btn-salir">Salir</button></form>
+    </div>
+  </div>
+</header>
+<main class="pagina">
+  {% with mensajes = get_flashed_messages() %}{% for m in mensajes %}<div class="flash">{{ m }}</div>{% endfor %}{% endwith %}
+  {% block contenido %}{% endblock %}
+</main>
+<div class="toasts" id="toasts"></div>
+<script>
+const CSRF = document.querySelector('meta[name=csrf]').content;
+function post(url, datos) {
+  return fetch(url, {method: 'POST', headers: {'X-CSRF': CSRF, 'Content-Type': 'application/json'},
+                     body: JSON.stringify(datos || {})}).then(r => r.json());
+}
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function toast(titulo, texto) {
+  const t = document.createElement('div'); t.className = 'toast';
+  t.innerHTML = `<b>${esc(titulo)}</b>${texto ? `<span class="tenue">${esc(texto)}</span>` : ''}`;
+  document.getElementById('toasts').appendChild(t); setTimeout(() => t.remove(), 7000);
+}
+// Campana: cuenta de no leídos + toast con lo nuevo
+(function () {
+  let ultimo = null;
+  async function mirar() {
+    try {
+      const r = await fetch('/api/avisos'); if (!r.ok) return;
+      const d = await r.json();
+      const n = document.getElementById('campana-n');
+      n.textContent = d.sin_leer; n.hidden = !d.sin_leer;
+      const max = d.avisos.length ? d.avisos[0].id : 0;
+      if (ultimo !== null && max > ultimo)
+        d.avisos.filter(a => a.id > ultimo).reverse().forEach(a => toast(a.titulo, a.texto));
+      ultimo = max;
+    } catch (e) {}
+  }
+  mirar(); setInterval(mirar, 15000);
+})();
+</script>
+{% block js %}{% endblock %}
+</body>
+</html>
