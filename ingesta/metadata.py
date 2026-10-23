@@ -54,7 +54,10 @@ def _correr(nombre, args, reg, aj, limite):
     reg(f'▶ {args[0]} {" ".join(args[1:])}')
     t0 = time.time()
     env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1', TERM='dumb')
-    p = subprocess.Popen(cmd, cwd=CARPETA_SCRIPTS, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+    # los scripts dejan sus .log en la carpeta de trabajo: que sea la de datos de la herramienta, no el repo
+    trabajo = os.path.join(os.environ.get('INGESTA_DATOS') or os.path.join(BASE, 'ingesta_datos'), 'logs_scripts')
+    os.makedirs(trabajo, exist_ok=True)
+    p = subprocess.Popen(cmd, cwd=trabajo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, errors='replace', env=env)
     ultimas = []
     try:
