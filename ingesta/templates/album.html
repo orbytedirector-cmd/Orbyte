@@ -1,0 +1,185 @@
+{% extends 'base.html' %}
+{% block titulo %}{{ (r.album if r and r.album else a.rel) }}{% endblock %}
+{% set NOMBRES = {'copiando': 'Copiándose', 'en_cola': 'En cola', 'analizando': 'Revisando', 'revisado': 'Lista',
+                  'requiere_revision': 'Requiere revisión', 'error': 'Con errores'} %}
+{% set ICONO_DISCO %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>{% endset %}
+{% block contenido %}
+<a class="volver" href="{{ url_for('bandeja') }}">← Bandeja</a>
+
+{% set vivo = a.estado in ('copiando', 'en_cola', 'analizando') %}
+{% if vivo or not r or r.fallo %}
+  <div class="heroe">
+    <div class="portada">{{ ICONO_DISCO }}</div>
+    <div>
+      <div class="h-art">Carpeta</div>
+      <h1 class="h-alb">{{ a.rel }}</h1>
+      {% if vivo %}
+        <div class="estado-vivo"><span class="giro"></span>
+          <span id="progreso">{% if a.estado == 'copiando' %}Esperando a que termine la copia…{% elif a.estado == 'en_cola' %}En cola para revisar…{% else %}{{ a.progreso or 'Revisando…' }}{% endif %}</span></div>
+      {% elif r and r.fallo %}
+        <div class="flash error">La revisión falló: {{ r.fallo }}</div>
+        <div class="acciones"><button class="btn" id="btn-revisar">Volver a revisar</button></div>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+{% set c = r.calidad %}
+<div class="heroe">
+  <div class="portada">{{ ICONO_DISCO }}{% if r.caratula.tipo != 'ninguna' %}<img alt="Carátula" src="{{ url_for('caratula', aid=a.id) }}?v={{ a.analizado|int }}" onerror="this.remove()">{% endif %}</div>
+  <div>
+    <div class="h-art">{{ r.artista }}</div>
+    <h1 class="h-alb">{{ r.album }}{% if r.anio %} <span class="anio">({{ r.anio }})</span>{% endif %}</h1>
+    <div class="h-chips">
+      <span class="chip e-{{ a.estado }}"><span class="led"></span>{{ NOMBRES[a.estado] }}</span>
+      {% if c.tag %}<span class="chip q-{{ c.tag }}"><span class="led"></span>{{ c.tag }}</span>{% endif %}
+      {% if c.formato %}<span class="chip">{{ c.formato }}</span>{% endif %}
+      <span class="chip">{{ r.n_pistas }} pistas{% if r.n_discos > 1 %} · {{ r.n_discos }} discos{% endif %}</span>
+      <span class="chip">{{ r.duracion|duracion }}</span>
+      <span class="chip">{{ r.tamano|tamano }}</span>
+      {% if r.genero %}<span class="chip">{{ r.genero }}</span>{% endif %}
+    </div>
+    <div class="destino">
+      <div class="rotulo">Quedaría en</div>
+      {% set d = r.destino %}
+      <div class="ruta"><span class="seg-raiz">{{ d.ruta[:d.ruta|length - (d.letra|length + d.artista|length + d.album|length + 2)] }}</span><span class="seg-letra">{{ d.letra }}/</span><span class="seg-art">{{ d.artista }}/</span><span class="seg-alb">{{ d.album }}</span></div>
+      <div class="nota">{% if d.artista_existe %}El artista ya está en la biblioteca: se usa su carpeta actual.{% else %}Artista nuevo en la biblioteca.{% endif %}
+        {% if r.n_discos > 1 %} Los {{ r.n_discos }} discos quedan en una sola carpeta.{% endif %}</div>
+    </div>
+    <div class="acciones">
+      <button class="btn" id="btn-revisar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>
+        Volver a revisar</button>
+      <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s · Etapa 1: solo lectura, no se movió nada.</span>
+    </div>
+  </div>
+</div>
+
+{# ── problemas ── #}
+{% set GRUPOS = [('error', 'Errores', 'Bloquean el álbum hasta resolverlos.'),
+                 ('decision', 'Decisiones pendientes', 'Necesitan que elijas algo antes de ubicarlo.'),
+                 ('correccion', 'Correcciones automáticas', 'Se harán solas al ubicar el álbum (etapa 2).'),
+                 ('aviso', 'Avisos', 'Para tu información.')] %}
+<section class="seccion">
+  <h2 class="rotulo">Revisión <span class="cuenta">{{ r.problemas|length }} observaciones</span></h2>
+  {% if not r.problemas %}
+    <div class="sin-problemas">Todo en orden: formato, tags, carátula y nombre listos.</div>
+  {% else %}
+  <div class="problemas">
+    {% for nivel, titulo, expl in GRUPOS %}{% set lista = r.problemas|selectattr('nivel', 'equalto', nivel)|list %}{% if lista %}
+    <div class="grupo n-{{ nivel }}">
+      <h3>{{ titulo }} · {{ lista|length }}</h3>
+      <div class="expl">{{ expl }}</div>
+      <ul>{% for p in lista %}
+        <li>{{ p.texto }}{% if p.pistas %}
+          <details><summary>{{ p.pistas|length }} archivo{{ 's' if p.pistas|length != 1 }}</summary>
+            {% for f in p.pistas[:40] %}<span class="mono">{{ f }}</span>{% endfor %}
+            {% if p.pistas|length > 40 %}<span class="mono">… y {{ p.pistas|length - 40 }} más</span>{% endif %}
+          </details>{% endif %}</li>
+      {% endfor %}</ul>
+    </div>
+    {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+</section>
+
+{% if r.duplicados %}
+<section class="seccion">
+  <h2 class="rotulo">Ya en la biblioteca <span class="cuenta">{{ r.duplicados|length }}</span></h2>
+  <div class="tabla-wrap"><table>
+    <tr><th>Álbum</th><th>Calidad</th><th class="oculto-movil">Pistas</th><th>Carpeta</th><th>Parecido</th></tr>
+    {% for d in r.duplicados %}
+    <tr><td><div class="t">{{ d.album }}{% if d.anio %} <span class="tenue">({{ d.anio }})</span>{% endif %}</div><div class="s">{{ d.artista }}</div></td>
+      <td>{% if d.tag %}<span class="chip q-{{ d.tag }}"><span class="led"></span>{{ d.tag }}</span>{% endif %} <span class="s">{{ d.formato or '' }}</span></td>
+      <td class="der oculto-movil">{{ d.pistas }}</td>
+      <td><span class="nombre">{{ d.ruta }}</span></td>
+      <td class="der">{{ (d.similitud * 100)|round|int }}%</td></tr>
+    {% endfor %}
+  </table></div>
+</section>
+{% endif %}
+
+{# ── pistas ── #}
+<section class="seccion">
+  <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivos de audio</span></h2>
+  <div class="tabla-wrap">
+  {% for disco in r.discos %}
+    {% if r.n_discos > 1 %}<div class="disco-tit">DISCO {{ disco.numero }}</div>{% endif %}
+    <table>
+      <tr><th>#</th><th>Título</th><th>Formato</th><th class="der">Duración</th><th class="der oculto-movil">Pico</th><th>Decodifica</th><th class="oculto-movil">Nombre final</th></tr>
+      {% for p in disco.pistas %}
+      <tr>
+        <td class="num">{{ p.numero or '—' }}</td>
+        <td><div class="t">{{ p.titulo or p.tags.titulo or p.archivo.split('/')[-1] }}</div>
+          {% if p.tags.artista and p.tags.artista != r.artista %}<div class="s">{{ p.tags.artista }}</div>{% endif %}
+          <div class="s mono">{{ p.archivo }}</div>
+          {% for n in p.notas or [] %}<div class="s med">{{ n }}</div>{% endfor %}</td>
+        <td>{% if p.legible %}<span class="chip q-{{ p.clase }}"><span class="led"></span>{{ p.formato }}</span>
+            {% if p.mqa %}<div class="s">MQA{% if p.mqa_sr_original %} · original {{ (p.mqa_sr_original|int / 1000) }} kHz{% endif %}</div>{% endif %}
+            {% if p.canales > 2 %}<div class="s med">{{ p.canales }} canales</div>{% endif %}
+            {% if p.portada_incrustada %}<div class="s">con carátula incrustada</div>{% endif %}
+          {% else %}<span class="mal">ilegible</span>{% endif %}</td>
+        <td class="der">{{ p.duracion|duracion }}</td>
+        <td class="der oculto-movil {{ 'mal' if p.pico_db is not none and p.pico_db > -0.1 }}">{% if p.pico_db is not none %}{{ '%+.1f'|format(p.pico_db) }} dB{% else %}—{% endif %}</td>
+        <td>{% if p.decodifica %}<span class="ok">✓</span>{% elif p.legible %}<span class="mal">✗ dañado</span>
+            {% for e in p.errores or [] %}<div class="s mal mono err">{{ e }}</div>{% endfor %}{% endif %}</td>
+        <td class="oculto-movil">{% if p.imagen_cue %}<span class="s">imagen de {{ p.imagen_cue }} pistas (cue) ↓</span>{% else %}<span class="nombre">{{ p.nombre_destino or '' }}</span>{% endif %}</td>
+      </tr>
+      {% if p.imagen_cue %}
+        {% for cue in r.cues %}{% for ref in cue.referencias if ref.archivo == p.archivo %}
+          {% for cp in cue.pistas if cp.archivo_cue == ref.archivo_cue %}
+          <tr><td class="num">{{ cp.num }}</td>
+            <td><div class="t">{{ cp.titulo }}</div>{% if cp.interprete and cp.interprete != r.artista %}<div class="s">{{ cp.interprete }}</div>{% endif %}</td>
+            <td><span class="s">desde {{ cp.inicio|duracion }}</span></td><td></td><td class="oculto-movil"></td><td></td>
+            <td class="oculto-movil"><span class="nombre">{{ cp.nombre_destino }}</span></td></tr>
+          {% endfor %}
+        {% endfor %}{% endfor %}
+      {% endif %}
+      {% endfor %}
+    </table>
+  {% endfor %}
+  </div>
+</section>
+
+{# ── carátula y archivos ── #}
+<section class="seccion dos-col">
+  <div class="panel">
+    <h2 class="rotulo" style="margin-bottom:.6rem">Carátula</h2>
+    {% set car = r.caratula %}
+    <dl>
+      <dt>Origen</dt><dd>{% if car.tipo == 'archivo' %}<span class="mono">{{ car.archivo }}</span>{% elif car.tipo == 'incrustada' %}Incrustada en <span class="mono">{{ car.pista }}</span>{% else %}<span class="med">No hay</span>{% endif %}</dd>
+      {% if car.ancho %}<dt>Tamaño</dt><dd>{{ car.ancho }}×{{ car.alto }} px · {{ car.formato }} · {{ car.tamano|tamano }}</dd>{% endif %}
+      <dt>Quedará como</dt><dd><span class="mono">Cover.jpg</span>{% if car.por_disco %} + una por disco{% endif %}</dd>
+    </dl>
+    {% if car.por_disco %}<div class="miniaturas">
+      {% for d in car.por_disco %}<figure><img src="{{ url_for('caratula', aid=a.id) }}?disco={{ d.disco }}&mini=1" alt=""><figcaption>Disco {{ d.disco }}</figcaption></figure>{% endfor %}
+    </div>{% endif %}
+    {% if car.otras %}<p class="s tenue" style="margin-top:.6rem;font-size:.8rem">Otras imágenes: {{ car.otras|join(', ') }}</p>{% endif %}
+  </div>
+  <div class="panel">
+    <h2 class="rotulo" style="margin-bottom:.6rem">Carpeta de origen</h2>
+    <dl>
+      <dt>Ruta</dt><dd><span class="mono">{{ r.carpeta }}</span></dd>
+      <dt>Tags</dt><dd>artista y álbum desde {{ r.origen_tags.artista }}{% if r.origen_tags.album != r.origen_tags.artista %} / {{ r.origen_tags.album }}{% endif %}{% if r.artista_album %} · artista del álbum: {{ r.artista_album }}{% endif %}</dd>
+      {% if r.cues %}<dt>Cue</dt><dd>{% for cue in r.cues %}<span class="mono">{{ cue.archivo }}</span> ({{ cue.n_pistas }} pistas){% if not loop.last %}<br>{% endif %}{% endfor %}</dd>{% endif %}
+      {% if r.otros_archivos %}<dt>Otros</dt><dd>{% for o in r.otros_archivos[:12] %}<span class="mono">{{ o }}</span>{% if not loop.last %}, {% endif %}{% endfor %}{% if r.otros_archivos|length > 12 %} … y {{ r.otros_archivos|length - 12 }} más{% endif %}</dd>{% endif %}
+    </dl>
+  </div>
+</section>
+{% endif %}
+{% endblock %}
+{% block js %}
+<script>
+const AID = {{ a.id }}, ESTADO = {{ a.estado|tojson }};
+const btn = document.getElementById('btn-revisar');
+if (btn) btn.onclick = async () => { btn.disabled = true; await post(`/api/album/${AID}/revisar`); location.reload(); };
+if (['copiando', 'en_cola', 'analizando'].includes(ESTADO)) {
+  setInterval(async () => {
+    const r = await fetch(`/api/album/${AID}/estado`); const d = await r.json();
+    if (!d.estado) { location.href = '/'; return; }
+    if (d.estado !== ESTADO && !['copiando', 'en_cola', 'analizando'].includes(d.estado)) location.reload();
+    const el = document.getElementById('progreso');
+    if (el && d.estado === 'analizando') el.textContent = d.progreso || 'Revisando…';
+  }, 1500);
+}
+</script>
+{% endblock %}

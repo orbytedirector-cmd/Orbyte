@@ -1,0 +1,18 @@
+{% extends 'base.html' %}
+{% block titulo %}Avisos{% endblock %}
+{% block contenido %}
+<div class="barra"><div><h1 class="titulo">Avisos</h1><div class="sub">Resultados de las revisiones, cambios de ajustes y resúmenes por tanda.</div></div></div>
+{% if not avisos %}
+  <div class="vacio"><h3>Sin avisos</h3><p>Cuando termine la revisión de un álbum aparecerá aquí.</p></div>
+{% else %}
+<div class="avisos">
+  {% for v in avisos %}
+  {% set cuerpo %}<span class="punto"></span>
+    <div><div class="tit">{{ v.titulo }}</div>{% if v.texto %}<div class="txt">{{ v.texto }}</div>{% endif %}</div>
+    <span class="cuando">{{ v.ts|fecha }}</span>{% endset %}
+  {% if v.album_id %}<a href="{{ url_for('album', aid=v.album_id) }}" class="aviso t-{{ v.tipo }} {{ 'nuevo' if not v.leido }}">{{ cuerpo }}</a>
+  {% else %}<div class="aviso t-{{ v.tipo }} {{ 'nuevo' if not v.leido }}">{{ cuerpo }}</div>{% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

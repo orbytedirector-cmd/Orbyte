@@ -10,3 +10,6 @@ venv/
 .env
 logs/
 apk/
+
+# Orbyte Ingesta (C-12): base, clave de sesión y caché locales
+ingesta_datos/

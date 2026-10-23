@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#000000">
+<title>Entrar · Orbyte Ingesta</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}">
+</head>
+<body>
+<div class="login">
+  <div class="login-caja">
+    <div class="marca"><b>ORBYTE</b><span>INGESTA</span></div>
+    {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+    <form method="post">
+      <div class="campo"><label for="email">Correo</label>
+        <input type="email" id="email" name="email" autocomplete="username" required autofocus value="{{ request.form.email or '' }}"></div>
+      <div class="campo"><label for="clave">Contraseña</label>
+        <input type="password" id="clave" name="clave" autocomplete="current-password" required></div>
+      <button class="btn oro">Entrar</button>
+    </form>
+    <p class="pie">Cuenta de administrador de Orbyte</p>
+  </div>
+</div>
+</body>
+</html>
