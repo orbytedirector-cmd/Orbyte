@@ -23,6 +23,7 @@ USO:
   python3 tools/convertir_wv.py "/mnt/musica/O/Ozzy Osbourne/DSD/Black Rain" --aplicar
   python3 tools/convertir_wv.py --buscar /mnt/musica          # lista carpetas con .wv
   python3 tools/convertir_wv.py "<carpeta>" --album "Nombre limpio" --aplicar
+  python3 tools/convertir_wv.py "<carpeta>" --verificar       # compara FLAC vs .wv
 """
 import argparse, json, os, re, shlex, subprocess, sys
 from pathlib import Path
@@ -107,8 +108,6 @@ def comando_flac(origen, destino, tags, portada_img, ganancia_db, inicio=None, d
     if inicio is not None:
         cmd += ['-ss', f'{inicio:.6f}']
     cmd += ['-i', str(origen)]
-    if duracion is not None:
-        cmd += ['-t', f'{duracion:.6f}']
     if portada_img:
         cmd += ['-i', str(portada_img), '-map', '0:a', '-map', '1:v',
                 '-c:v', 'copy', '-disposition:v', 'attached_pic',
@@ -120,6 +119,10 @@ def comando_flac(origen, destino, tags, portada_img, ganancia_db, inicio=None, d
         filtros.append(f'volume={ganancia_db:.2f}dB')
     if filtros:
         cmd += ['-af', ','.join(filtros)]
+    if duracion is not None:
+        # Opción de SALIDA (después de todas las entradas): antes quedaba pegada a la
+        # entrada de la carátula y no cortaba el audio.
+        cmd += ['-t', f'{duracion:.6f}']
     cmd += ['-c:a', 'flac', '-sample_fmt', 's32', '-bits_per_raw_sample', '24',
             '-compression_level', '8', '-map_metadata', '-1']
     for k, v in tags.items():
@@ -177,11 +180,49 @@ def plan_carpeta(carpeta):
     return trabajos
 
 
+def verificar(carpeta, trabajos):
+    """Compara los FLAC generados contra los .wv: cantidad, formato, duración y picos."""
+    print(f'Verificando: {carpeta}\n')
+    problemas = 0
+    dur_flac = 0.0
+    for t in trabajos:
+        f = t['destino']
+        if not f.exists():
+            print(f'  FALTA     {f.name}'); problemas += 1; continue
+        r = subprocess.run(['ffprobe', '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams',
+                            '-select_streams', 'a:0', str(f)], capture_output=True, text=True)
+        d = json.loads(r.stdout or '{}')
+        st = (d.get('streams') or [{}])[0]
+        dur = float((d.get('format') or {}).get('duration') or 0)
+        dur_flac += dur
+        bits = st.get('bits_per_raw_sample'); sr = st.get('sample_rate')
+        pico = pico_db(f)
+        esperado = t['duracion']
+        estado = []
+        if st.get('codec_name') != 'flac' or str(bits) != '24' or str(sr) != str(ffprobe(t['origen'])['sr']):
+            estado.append(f'formato {st.get("codec_name")} {bits}-bit {sr} Hz')
+        if esperado and abs(dur - esperado) > 0.1:
+            estado.append(f'dura {dur:.2f}s y debía {esperado:.2f}s')
+        if pico >= -0.01:
+            estado.append(f'pico {pico:+.2f} dB (posible saturación)')
+        problemas += bool(estado)
+        print(f"  {'OK   ' if not estado else 'REVISA'}  {f.name}  ·  {bits}-bit/{int(sr or 0)/1000:g} kHz · {int(dur//60)}:{dur%60:05.2f} · pico {pico:+.2f} dB"
+              + ('  ← ' + '; '.join(estado) if estado else ''))
+    dur_wv = sum(ffprobe(w)['dur'] for w in sorted({t['origen'] for t in trabajos}))
+    diff = dur_flac - dur_wv
+    print(f'\n  Duración total: FLAC {int(dur_flac//60)}:{dur_flac%60:05.2f}  vs  WV {int(dur_wv//60)}:{dur_wv%60:05.2f}  (diferencia {diff:+.2f} s)')
+    if abs(diff) > 1.0:
+        problemas += 1
+        print('  REVISA: la duración total no coincide')
+    print(f'\n{"Todo correcto: puedes respaldar los .wv." if not problemas else f"{problemas} punto(s) a revisar antes de mover los .wv."}')
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('carpeta', nargs='?')
     ap.add_argument('--buscar', metavar='RAIZ', help='lista carpetas con .wv bajo RAIZ')
     ap.add_argument('--aplicar', action='store_true', help='convertir (sin esto, solo muestra el plan)')
+    ap.add_argument('--verificar', action='store_true', help='compara los FLAC ya convertidos con los .wv')
     ap.add_argument('--album', help='reemplaza el nombre del álbum en los tags (ej. para quitar "[32/192]")')
     a = ap.parse_args()
 
@@ -200,6 +241,9 @@ def main():
     if a.album:
         for t in trabajos:
             t['tags']['album'] = a.album
+    if a.verificar:
+        verificar(carpeta, trabajos)
+        return
 
     print(f'Carpeta: {carpeta}')
     print(f'Portada: {trabajos[0]["portada"].name if trabajos[0]["portada"] else "(ninguna)"}')
