@@ -22,6 +22,7 @@ USO:
   python3 tools/convertir_wv.py "/mnt/musica/O/Ozzy Osbourne/DSD/Black Rain"
   python3 tools/convertir_wv.py "/mnt/musica/O/Ozzy Osbourne/DSD/Black Rain" --aplicar
   python3 tools/convertir_wv.py --buscar /mnt/musica          # lista carpetas con .wv
+  python3 tools/convertir_wv.py "<carpeta>" --album "Nombre limpio" --aplicar
 """
 import argparse, json, os, re, shlex, subprocess, sys
 from pathlib import Path
@@ -181,6 +182,7 @@ def main():
     ap.add_argument('carpeta', nargs='?')
     ap.add_argument('--buscar', metavar='RAIZ', help='lista carpetas con .wv bajo RAIZ')
     ap.add_argument('--aplicar', action='store_true', help='convertir (sin esto, solo muestra el plan)')
+    ap.add_argument('--album', help='reemplaza el nombre del álbum en los tags (ej. para quitar "[32/192]")')
     a = ap.parse_args()
 
     if a.buscar:
@@ -195,6 +197,9 @@ def main():
     trabajos = plan_carpeta(carpeta)
     if not trabajos:
         sys.exit(f'No hay .wv en {carpeta}')
+    if a.album:
+        for t in trabajos:
+            t['tags']['album'] = a.album
 
     print(f'Carpeta: {carpeta}')
     print(f'Portada: {trabajos[0]["portada"].name if trabajos[0]["portada"] else "(ninguna)"}')
