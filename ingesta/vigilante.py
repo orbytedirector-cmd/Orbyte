@@ -99,6 +99,10 @@ class Vigilante(threading.Thread):
             if ruta not in vistos and fila['estado'] in PREVIOS + ('por_ubicar',) and fila['estado'] != 'analizando':
                 self.almacen.borrar_album(fila['id'])
 
+        # revisiones hechas con una versión anterior de la herramienta: se rehacen solas (sin avisos)
+        for aid in self.almacen.revisiones_antiguas(analisis.VERSION_REPORTE):
+            self.almacen.actualizar(aid, estado='en_cola', progreso='Actualizando la revisión', silencioso=1)
+
         # revisión: de a un álbum, hasta vaciar la cola
         while True:
             sig = self.almacen.siguiente_en_cola()
@@ -165,7 +169,8 @@ class Vigilante(threading.Thread):
             aid, estado=rep['estado'], progreso=None, analizado=rep['analizado'],
             artista=rep['artista'], album=rep['album'], anio=rep['anio'],
             calidad=rep['calidad']['tag'], destino=rep['destino']['ruta'], n_pistas=rep['n_pistas'],
-            conteo=rep['conteo_problemas'], reporte=rep, firma=firma_antes, silencioso=0)
+            conteo=rep['conteo_problemas'], reporte=rep, firma=firma_antes, silencioso=0,
+            version_reporte=rep.get('version'))
         desatendido = aj.get('desatendido') == '1' and rep['estado'] == 'revisado'
         if desatendido:
             self.almacen.actualizar(aid, estado='por_ubicar')

@@ -30,7 +30,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 1
+VERSION_REPORTE = 3   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -919,7 +919,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                 anteriores[(t['archivo'], t['tamano'], t.get('mtime'))] = t
 
     def _dec(p):
-        ant = anteriores.get((p['archivo'], p['tamano'], p.get('mtime')))
+        ant = anteriores.get((p['archivo'], p['tamano'], p.get('mtime'))) \
+            or anteriores.get((p['archivo'], p['tamano'], None))   # revisiones viejas no guardaban la fecha
         if ant:          # mismo archivo y mismo tamaño que en la revisión anterior: no se decodifica de nuevo
             hechas[0] += 1
             ok_ant = ant.get('decodifica') and not ant.get('error_por_id3')

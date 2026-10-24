@@ -42,6 +42,8 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
     """Ejecuta la etapa 2. Devuelve la ruta final. Lanza FalloProceso con el motivo si algo sale mal."""
     if mutagen is None:
         raise FalloProceso('Falta mutagen en el entorno de Python')
+    if (rep.get('version') or 0) < analisis.VERSION_REPORTE or 'plan' not in rep:
+        raise FalloProceso('La revisión es de una versión anterior: vuelve a revisar el álbum')
     origen = rep['carpeta']
     destino = rep['destino']['ruta']
     biblioteca = os.path.abspath(ajustes.get('biblioteca') or '/mnt/musica')

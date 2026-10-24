@@ -60,7 +60,7 @@ class Almacen:
             columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
             for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
                               ('silencioso', 'INTEGER'), ('ubicado_en', 'TEXT'), ('terminado', 'REAL'),
-                              ('resultado', 'TEXT')):
+                              ('resultado', 'TEXT'), ('version_reporte', 'INTEGER')):
                 if col not in columnas:
                     c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
 
@@ -143,6 +143,12 @@ class Almacen:
         with self._con() as c:
             r = c.execute('SELECT id FROM albumes WHERE estado=? ORDER BY detectado, rel LIMIT 1', (estado,)).fetchone()
         return r[0] if r else None
+
+    def revisiones_antiguas(self, version):
+        with self._con() as c:
+            return [r[0] for r in c.execute(
+                "SELECT id FROM albumes WHERE estado IN ('revisado', 'requiere_revision', 'error') "
+                'AND COALESCE(version_reporte, 0) < ?', (version,))]
 
     def con_estado(self, *estados):
         with self._con() as c:
