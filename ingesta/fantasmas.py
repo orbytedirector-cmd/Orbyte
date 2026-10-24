@@ -83,6 +83,10 @@ def buscar(db, progreso=None):
             gemelo, emparejadas = None, 0
             candidatos = [b for b in por_artista.get(a['artist_id'], [])
                           if analisis._norm_album(b['name']) == analisis._norm_album(a['name'])]
+            if not candidatos:
+                # artista escrito distinto («Christian Castro» / «Cristian Castro»): misma carpeta de álbum y mismo nombre
+                candidatos = [b for lista in por_artista.values() for b in lista
+                              if _misma_carpeta(a, b)]
             mejor = None
             for b in candidatos:
                 mapa = emparejar(con, pistas, b['id'])
@@ -100,6 +104,11 @@ def buscar(db, progreso=None):
         return {'total': len(albumes), 'fantasmas': salida}
     finally:
         con.close()
+
+
+def _misma_carpeta(a, b):
+    return (analisis._norm_album(b['name']) == analisis._norm_album(a['name']) and a['path'] and b['path']
+            and os.path.basename(a['path'].rstrip('/')) == os.path.basename(b['path'].rstrip('/')))
 
 
 def emparejar(con, pistas, gemelo_id):
@@ -148,10 +157,11 @@ def limpiar(db, ids, registro):
                                  (aid,)).fetchall()
             pids = [p['id'] for p in pistas]
             gemelo = None
-            for b in con.execute('SELECT id, name, path FROM albums WHERE artist_id=? AND id<>?',
-                                 (a['artist_id'], aid)).fetchall():
-                if analisis._norm_album(b['name']) == analisis._norm_album(a['name']) and b['path'] \
-                        and os.path.isdir(b['path']):
+            cands = [b for b in con.execute('SELECT id, name, path, artist_id FROM albums WHERE id<>?', (aid,)).fetchall()
+                     if analisis._norm_album(b['name']) == analisis._norm_album(a['name'])]
+            mismos = [b for b in cands if b['artist_id'] == a['artist_id']] or [b for b in cands if _misma_carpeta(a, b)]
+            for b in mismos:
+                if b['path'] and os.path.isdir(b['path']):
                     mapa = emparejar(con, pistas, b['id'])
                     if gemelo is None or len(mapa) > len(gemelo[1]):
                         gemelo = (b, mapa)
