@@ -33,6 +33,7 @@ from . import procesar
 from .almacen import PREVIOS
 from . import recursos
 from . import artistas as artistas_mod
+from . import fantasmas as fantasmas_mod
 import threading
 import traceback
 
@@ -533,6 +534,77 @@ def api_artistas_unificar():
 def api_artistas_unificacion(uid):
     u = next((x for x in almacen.unificaciones(50) if x['id'] == uid), None)
     return jsonify(u or {})
+
+
+# ─────────────────────────── álbumes fantasma ───────────────────────────
+
+_busqueda_fantasmas = {'estado': None, 'avance': [0, 0], 'resultado': None, 'error': None, 'ts': None}
+
+
+@app.route('/fantasmas')
+def fantasmas_pagina():
+    return render_template('fantasmas.html', pagina='fantasmas')
+
+
+@app.route('/api/fantasmas')
+def api_fantasmas():
+    b = dict(_busqueda_fantasmas)
+    b['historial'] = [u for u in almacen.unificaciones(30) if u.get('clave') == 'fantasmas']
+    b['ocupado'] = _unificando.locked()
+    return jsonify(b)
+
+
+@app.route('/api/fantasmas/buscar', methods=['POST'])
+def api_fantasmas_buscar():
+    if _busqueda_fantasmas['estado'] == 'buscando':
+        return jsonify(ok=True)
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    aj = almacen.ajustes()
+    _busqueda_fantasmas.update(estado='buscando', avance=[0, 0], resultado=None, error=None)
+
+    def trabajo():
+        try:
+            r = fantasmas_mod.buscar(aj['db_orbyte'],
+                                     lambda i, n: _busqueda_fantasmas.update(avance=[i, n]))
+            _busqueda_fantasmas.update(estado='listo', resultado=r, ts=time.time())
+        except Exception as e:
+            _busqueda_fantasmas.update(estado='error', error=str(e))
+
+    threading.Thread(target=trabajo, daemon=True, name='fantasmas').start()
+    return jsonify(ok=True)
+
+
+@app.route('/api/fantasmas/limpiar', methods=['POST'])
+def api_fantasmas_limpiar():
+    ids = [int(i) for i in (request.get_json(silent=True) or {}).get('ids') or [] if str(i).isdigit()]
+    if not ids:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    if procesador.actual:
+        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    if not _unificando.acquire(blocking=False):
+        return jsonify(ok=False, error='Hay otra operación sobre la base en curso'), 409
+    aj = almacen.ajustes()
+    uid = almacen.nueva_unificacion('fantasmas', ' '.join(map(str, ids)), f'{len(ids)} álbumes fantasma')
+
+    def trabajo():
+        try:
+            res = fantasmas_mod.limpiar(aj['db_orbyte'], ids, lambda m: almacen.unificacion_log(uid, m))
+            almacen.cerrar_unificacion(uid, 'ok', res)
+            almacen.avisar('ok', f'Álbumes fantasma eliminados: {res["borrados"]}',
+                           f'{res["movidas"]} referencias pasadas a su gemelo')
+            _busqueda_fantasmas.update(estado=None, resultado=None)
+        except Exception as e:
+            log.error('Fantasmas:\n%s', traceback.format_exc())
+            almacen.unificacion_log(uid, f'ERROR: {type(e).__name__}: {e}')
+            almacen.cerrar_unificacion(uid, 'error', {'error': str(e)})
+        finally:
+            _unificando.release()
+
+    threading.Thread(target=trabajo, daemon=True, name='limpiar-fantasmas').start()
+    return jsonify(ok=True, id=uid)
 
 
 @app.route('/api/reintentar_errores', methods=['POST'])

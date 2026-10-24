@@ -1,0 +1,91 @@
+{% extends 'base.html' %}
+{% block titulo %}Fantasmas{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Álbumes fantasma</h1>
+  <div class="sub">Álbumes que Orbyte tiene registrados pero cuya carpeta ya no existe (se movieron o borraron a mano). Si hay un «gemelo» que sí existe, sus playlists, favoritos e historial pasan a él antes de borrar el fantasma.</div>
+</div>
+  <button class="btn" id="buscar">Buscar en toda la biblioteca</button>
+</div>
+<div id="estado"></div>
+<div id="lista"></div>
+<div id="trabajo"></div>
+<section class="seccion" id="historial-sec" hidden>
+  <h2 class="rotulo">Historial</h2>
+  <div id="historial" class="avisos"></div>
+</section>
+{% endblock %}
+{% block js %}
+<script>
+const NOMBRE_REF = {playlist_tracks: 'playlists', listening_events: 'escuchas', collab_queue_items: 'cola colaborativa',
+                    social_toques: 'toques', social_recomendaciones: 'recomendaciones', social_likes: 'likes'};
+let datos = null, timer = null;
+
+function pintar() {
+  const d = datos, est = document.getElementById('estado'), lista = document.getElementById('lista');
+  clearTimeout(timer);
+  if (d.estado === 'buscando') {
+    const [i, n] = d.avance;
+    est.innerHTML = `<div class="estado-vivo"><span class="giro"></span>Revisando carpetas… ${i}${n ? ' de ' + n : ''}</div>`;
+    lista.innerHTML = ''; timer = setTimeout(cargar, 1500);
+  } else if (d.estado === 'error') {
+    est.innerHTML = `<div class="flash error">${esc(d.error)}</div>`; lista.innerHTML = '';
+  } else if (d.estado === 'listo' && d.resultado) {
+    const f = d.resultado.fantasmas;
+    est.innerHTML = `<p class="sub" style="margin-bottom:1rem">${d.resultado.total.toLocaleString('es-CL')} álbumes revisados · <b>${f.length}</b> fantasma${f.length === 1 ? '' : 's'}</p>`;
+    if (!f.length) { lista.innerHTML = '<div class="sin-problemas">No hay álbumes fantasma: todo lo que Orbyte tiene registrado existe en el disco.</div>'; }
+    else {
+      lista.innerHTML = `<div class="tabla-wrap"><table>
+        <tr><th><input type="checkbox" id="todos" checked></th><th>Álbum</th><th>Gemelo que sí existe</th><th class="oculto-movil">Lo que apunta a sus pistas</th></tr>
+        ${f.map(x => `<tr>
+          <td style="width:1%"><input type="checkbox" class="sel" value="${x.id}" ${x.gemelo ? 'checked' : ''}></td>
+          <td><div class="t">${esc(x.album)}${x.anio ? ` <span class="tenue">(${esc(x.anio)})</span>` : ''}</div>
+            <div class="s">${esc(x.artista)} · ${x.pistas} pistas · ID ${x.id}</div><div class="s mono">${esc(x.ruta || '')}</div></td>
+          <td>${x.gemelo ? `<span class="ok">✓</span> ID ${x.gemelo.id} · ${x.emparejadas}/${x.pistas} pistas emparejadas<div class="s mono">${esc(x.gemelo.ruta)}</div>`
+                         : '<span class="med">sin gemelo</span><div class="s">se borra sin poder pasar sus referencias</div>'}</td>
+          <td class="oculto-movil">${Object.entries(x.refs).map(([k, v]) => `${v} ${esc(NOMBRE_REF[k] || k)}`).join(' · ') || '<span class="muy-tenue">nada</span>'}</td>
+        </tr>`).join('')}
+      </table></div>
+      <div class="acciones"><button class="btn oro" id="limpiar" ${d.ocupado ? 'disabled' : ''}>Limpiar seleccionados</button>
+        <span class="tenue" style="font-size:.8rem">Antes se respalda music.db. Los que no tienen gemelo van desmarcados.</span></div>`;
+      document.getElementById('todos').onchange = e => document.querySelectorAll('.sel').forEach(c => c.checked = e.target.checked);
+      document.getElementById('limpiar').onclick = limpiar;
+    }
+  } else {
+    est.innerHTML = '<div class="vacio"><p>Presiona «Buscar en toda la biblioteca». Revisa cada carpeta en el disco: puede tardar un par de minutos.</p></div>';
+    lista.innerHTML = '';
+  }
+  const h = d.historial || [];
+  document.getElementById('historial-sec').hidden = !h.length;
+  document.getElementById('historial').innerHTML = h.map(u => `
+    <details class="aviso t-${u.estado === 'ok' ? 'ok' : u.estado === 'error' ? 'error' : 'resumen'}" style="display:block">
+      <summary style="cursor:pointer"><b>${esc(u.final)}</b> <span class="tenue">· ${u.estado === 'ok' ? 'limpiado' : u.estado === 'error' ? 'con error' : 'en curso'} · ${new Date(u.ts * 1000).toLocaleString('es-CL')}</span></summary>
+      <pre class="registro" style="margin-top:.6rem">${esc(u.registro || '')}</pre></details>`).join('');
+  const curso = h.find(u => u.estado === 'en_curso'); if (curso) seguir(curso.id);
+}
+
+async function limpiar() {
+  const ids = [...document.querySelectorAll('.sel:checked')].map(c => +c.value);
+  if (!ids.length) { toast('No hay nada seleccionado'); return; }
+  if (!confirm(`¿Eliminar ${ids.length} álbum(es) fantasma de Orbyte?\n\n• se respalda music.db\n• playlists, favoritos e historial pasan al gemelo cuando existe\n• no se toca ningún archivo del disco`)) return;
+  const r = await post('/api/fantasmas/limpiar', {ids});
+  if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+  seguir(r.id);
+}
+
+async function seguir(uid) {
+  const u = await (await fetch('/api/artistas/unificacion/' + uid)).json();
+  document.getElementById('trabajo').innerHTML = `<section class="seccion"><h2 class="rotulo">Limpiando</h2><pre class="registro">${esc(u.registro || '')}</pre></section>`;
+  if (u.estado === 'en_curso') setTimeout(() => seguir(uid), 1200);
+  else { document.getElementById('trabajo').innerHTML = ''; cargar(); }
+}
+
+async function cargar() { datos = await (await fetch('/api/fantasmas')).json(); pintar(); }
+document.getElementById('buscar').onclick = async (e) => {
+  const b = e.currentTarget; b.disabled = true;
+  const r = await post('/api/fantasmas/buscar'); if (!r.ok) toast('No se pudo', r.error || '');
+  b.disabled = false; cargar();
+};
+cargar();
+</script>
+{% endblock %}
