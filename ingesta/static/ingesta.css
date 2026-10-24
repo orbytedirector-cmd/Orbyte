@@ -251,7 +251,16 @@ input:focus { border-color: var(--oro); box-shadow: 0 0 0 3px var(--oro-tenue); 
 input.mono { font-family: var(--mono); font-size: .86rem; }
 .trio { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .9rem; }
 .trio.cuatro { grid-template-columns: 2fr 2fr 1fr 1.4fr; }
+.trio.dos { grid-template-columns: repeat(2, minmax(0,1fr)); }
 .bloque { border: 1px solid var(--borde); background: var(--card); border-radius: var(--radio); padding: 1.1rem; display: flex; flex-direction: column; gap: 1.1rem; }
+
+.opciones-cpu { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: .6rem; margin-top: .4rem; }
+.opcion-cpu { display: flex; gap: .6rem; align-items: flex-start; padding: .7rem .8rem; border: 1px solid var(--borde-2); border-radius: 10px; cursor: pointer; }
+.opcion-cpu:has(input:checked) { border-color: var(--oro); background: var(--oro-tenue); }
+.opcion-cpu input { accent-color: var(--oro); margin-top: .2rem; }
+.opcion-cpu b { display: block; font-size: .92rem; }
+.opcion-cpu small { color: var(--texto-2); font-size: .78rem; }
+@media (max-width: 760px) { .opciones-cpu { grid-template-columns: 1fr; } }
 
 /* ── navegador de carpetas ── */
 .modal-fondo { position: fixed; inset: 0; background: rgba(0,0,0,.7); display: grid; place-items: center; z-index: 50; padding: 1rem; }
@@ -316,6 +325,6 @@ input.mono { font-family: var(--mono); font-size: .86rem; }
   .heroe { grid-template-columns: 1fr; }
   .heroe .portada { width: 160px; height: 160px; }
   .h-alb { font-size: 1.35rem; }
-  .trio, .trio.cuatro { grid-template-columns: 1fr; }
+  .trio, .trio.cuatro, .trio.dos { grid-template-columns: 1fr; }
   .oculto-movil { display: none; }
 }

@@ -13,7 +13,8 @@ AJUSTES_DEFECTO = {
     'db_orbyte': '',            # se completa al arrancar con el music.db del repo
     'espera_min': '2',          # minutos sin cambios para dar por terminada una copia
     'intervalo_seg': '30',      # cada cuánto se mira la carpeta de entrada
-    'trabajadores': '3',        # decodificaciones en paralelo durante la revisión
+    'trabajadores': '3',        # (en desuso: lo define «uso_cpu»)
+    'uso_cpu': 'medio',         # bajo / medio / alto — ver recursos.py
     'musicbrainz': '1',         # identificar la edición exacta durante la revisión
     'desatendido': '0',         # álbumes sin decisiones pendientes se procesan solos
     'borrar_origen': '1',       # tras verificar la copia, borrar el original de la entrada (mover)
