@@ -234,6 +234,18 @@ def unificar(db, biblioteca, ids, nombre_final, registro):
                        if a['path'] and a['path'].startswith(c + os.sep)}
             for nombre in sorted(propias):
                 o, d = os.path.join(c, nombre), os.path.join(objetivo, nombre)
+                if not os.path.exists(o):
+                    avisos.append(f'{os.path.relpath(o, biblioteca)} no existe en el disco: es un registro de Orbyte '
+                                  f'sin carpeta (álbum fantasma)')
+                    continue
+                ajenos = con.execute(
+                    f'SELECT COUNT(*) FROM albums WHERE (path = ? OR substr(path, 1, ?) = ?) '
+                    f'AND artist_id NOT IN ({",".join("?" * len(ids))})',
+                    [o, len(o) + 1, o + os.sep] + list(ids)).fetchone()[0]
+                if ajenos:
+                    avisos.append(f'No se movió {os.path.relpath(o, biblioteca)}: contiene {ajenos} álbum(es) de otro '
+                                  f'artista en Orbyte')
+                    continue
                 if os.path.exists(d):
                     avisos.append(f'No se movió {os.path.relpath(o, biblioteca)}: ya existe en la carpeta destino')
                     continue
@@ -338,10 +350,16 @@ def unificar(db, biblioteca, ids, nombre_final, registro):
                 for t in con.execute(f'SELECT id, {col} FROM tracks WHERE album_id IN ({m2})', ids_alb).fetchall():
                     if t[col] and clave(t[col]) == k and t[col] != nombre_final:
                         con.execute(f'UPDATE tracks SET {col}=? WHERE id=?', (nombre_final, t['id']))
+    fantasmas = [a for a in albumes if a['path'] and not os.path.isdir(nueva_ruta(a['path']))]
+    if fantasmas:
+        avisos.append(f'{len(fantasmas)} álbum(es) de este artista están en Orbyte pero su carpeta ya no existe '
+                      f'(fantasmas): ' + ', '.join(f'{a["name"]} [{os.path.relpath(nueva_ruta(a["path"]), biblioteca)}]'
+                                                  for a in fantasmas[:6]))
     con.close()
     registro(f'Base actualizada: queda un solo artista (ID {keep["id"]}) con {len(albumes)} álbumes')
     for a in avisos:
         registro('⚠ ' + a)
     return {'artista_id': keep['id'], 'albumes': len(albumes), 'tags': escritas, 'avisos': avisos,
+            'fantasmas': [a['id'] for a in fantasmas],
             'carpeta': os.path.relpath(objetivo, biblioteca)}
 
