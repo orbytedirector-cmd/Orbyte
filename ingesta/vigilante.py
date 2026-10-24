@@ -107,6 +107,15 @@ class Vigilante(threading.Thread):
             self.revisar(sig, aj)
         self._cerrar_tanda()
 
+        # modo desatendido: también lo que ya estaba «Lista» antes de encenderlo
+        if aj.get('desatendido') == '1':
+            listos = self.almacen.con_estado('revisado')
+            for fila in listos:
+                self.almacen.actualizar(fila['id'], estado='por_ubicar', progreso='En cola para ubicar')
+                self.almacen.registrar(fila['id'], 'Modo desatendido: pasa solo a ubicarse')
+            if listos and self.procesador:
+                self.procesador.ya()
+
     def revisar(self, fila, aj):
         aid = fila['id']
         if not os.path.isdir(fila['ruta']):
