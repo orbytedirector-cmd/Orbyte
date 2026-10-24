@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 
-from . import analisis, metadata, procesar
+from . import analisis, metadata, procesar, recursos
 
 log = logging.getLogger('ingesta')
 
@@ -55,15 +55,21 @@ class Procesador(threading.Thread):
                     self._recuperar()
                     recuperado = True
                 trabajo = False
-                aid = self.almacen.siguiente('por_ubicar')
-                if aid:
-                    self.ubicar(aid)
-                    trabajo = True
-                aid = self.almacen.siguiente('por_metadata')
+                aid = self.almacen.siguiente('por_metadata')     # primero terminar lo ya ubicado
                 if aid:
                     self.metadata(aid)
                     trabajo = True
+                else:
+                    aid = self.almacen.siguiente('por_ubicar')
+                    if aid:
+                        self.ubicar(aid)
+                        trabajo = True
                 if trabajo:
+                    descanso = recursos.pausa(self.almacen.ajustes())
+                    if descanso and not self.almacen.siguiente('por_metadata'):
+                        # entre un álbum y el siguiente el procesador descansa (Ajustes → uso del procesador)
+                        self.despertar.wait(descanso)
+                        self.despertar.clear()
                     continue
             except Exception:
                 log.error('Error en el procesador:\n%s', traceback.format_exc())
@@ -104,10 +110,7 @@ class Procesador(threading.Thread):
             if analisis.firma(a['ruta']) != _firma(a):
                 raise procesar.FalloProceso('La carpeta cambió desde la revisión: se vuelve a revisar')
             reg(f'Etapa 2: {rep.get("artista")} — {rep.get("album")}')
-            try:
-                trab = max(1, min(4, int(aj.get('trabajadores') or 3) - 1))
-            except ValueError:
-                trab = 2
+            trab = recursos.nucleos(aj)
             destino = procesar.ubicar(rep, aj, reg, borrar_origen=aj.get('borrar_origen', '1') == '1',
                                       trabajadores=trab)
         except procesar.FalloProceso as e:

@@ -30,16 +30,26 @@
     </div>
   </div>
   <div class="bloque">
-    <div class="trio">
+    <div class="campo">
+      <label>Uso del procesador</label>
+      <div class="ayuda">Cuánto puede usar la herramienta (y ffmpeg y los 5 scripts que lanza) al revisar, ubicar y procesar. Orbyte no se ve afectado. Tu equipo tiene {{ n_cpus }} hilos.</div>
+      <div class="opciones-cpu">
+        {% for clave, titulo, desc in [('bajo', 'Bajo', '1 núcleo · pausa de 1 min entre álbumes'),
+                                       ('medio', 'Medio', '2 núcleos · pausa de 15 s entre álbumes'),
+                                       ('alto', 'Alto', '4 núcleos · sin pausa')] %}
+        <label class="opcion-cpu"><input type="radio" name="uso_cpu" value="{{ clave }}" {{ 'checked' if (aj.uso_cpu or 'medio') == clave }}>
+          <span><b>{{ titulo }}</b><small>{{ desc }}</small></span></label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="trio dos">
       <div class="campo"><label for="espera_min">Espera (min)</label>
         <div class="ayuda">Sin cambios este tiempo = copia terminada.</div>
         <input type="number" id="espera_min" name="espera_min" min="0" max="120" step="0.5" value="{{ aj.espera_min }}"></div>
       <div class="campo"><label for="intervalo_seg">Revisar cada (s)</label>
         <div class="ayuda">Frecuencia con que se mira la entrada.</div>
         <input type="number" id="intervalo_seg" name="intervalo_seg" min="5" max="3600" value="{{ aj.intervalo_seg }}"></div>
-      <div class="campo"><label for="trabajadores">Pistas en paralelo</label>
-        <div class="ayuda">Decodificaciones simultáneas al revisar.</div>
-        <input type="number" id="trabajadores" name="trabajadores" min="1" max="8" value="{{ aj.trabajadores }}"></div>
+
     </div>
   </div>
   <div class="bloque">

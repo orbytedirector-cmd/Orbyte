@@ -31,6 +31,7 @@ from .vigilante import Vigilante
 from . import metadata as metadata_mod
 from . import procesar
 from .almacen import PREVIOS
+from . import recursos
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(BASE)
@@ -237,7 +238,8 @@ def ajustes():
     errores, avisos_aj = [], []
     if request.method == 'POST':
         nuevo = {k: (request.form.get(k) or '').strip() for k in
-                 ('carpeta_entrada', 'biblioteca', 'db_orbyte', 'espera_min', 'intervalo_seg', 'trabajadores')}
+                 ('carpeta_entrada', 'biblioteca', 'db_orbyte', 'espera_min', 'intervalo_seg')}
+        nuevo['uso_cpu'] = request.form.get('uso_cpu') if request.form.get('uso_cpu') in recursos.NIVELES else 'medio'
         nuevo['musicbrainz'] = '1' if request.form.get('musicbrainz') else '0'
         for k in ('desatendido', 'borrar_origen', 'metadata'):
             nuevo[k] = '1' if request.form.get(k) else '0'
@@ -264,7 +266,7 @@ def ajustes():
             errores.append('La carpeta de la biblioteca no existe (¿está montado el disco?).')
         if not os.path.isfile(nuevo['db_orbyte']):
             errores.append('No se encontró el music.db de Orbyte en esa ruta.')
-        for campo, mini, maxi in (('espera_min', 0, 120), ('intervalo_seg', 5, 3600), ('trabajadores', 1, 8)):
+        for campo, mini, maxi in (('espera_min', 0, 120), ('intervalo_seg', 5, 3600)):
             try:
                 v = float(nuevo[campo])
                 if not mini <= v <= maxi:
@@ -275,6 +277,7 @@ def ajustes():
         if not errores:
             cambio_entrada = entrada != aj.get('carpeta_entrada')
             almacen.guardar_ajustes(nuevo)
+            recursos.aplicar(nuevo)
             if cambio_entrada:
                 almacen.avisar('info', 'Carpeta de entrada cambiada', entrada or '(ninguna)')
             vigilante.ya()
@@ -285,7 +288,7 @@ def ajustes():
         aj.update(nuevo)
     from .edicion import acoustid_disponible
     return render_template('ajustes.html', pagina='ajustes', aj=aj, errores=errores,
-                           acoustid=acoustid_disponible())
+                           acoustid=acoustid_disponible(), n_cpus=len(recursos.ORIGINALES))
 
 
 # ─────────────────────────── API ───────────────────────────
@@ -583,6 +586,8 @@ def _miniatura(origen):
 
 
 def main():
+    cpus = recursos.aplicar(almacen.ajustes())
+    log.info('Uso del procesador: núcleos %s', cpus)
     vigilante.start()
     procesador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)

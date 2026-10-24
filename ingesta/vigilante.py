@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 
-from . import analisis, edicion
+from . import analisis, edicion, recursos
 from .almacen import PREVIOS
 
 log = logging.getLogger('ingesta')
@@ -136,10 +136,7 @@ class Vigilante(threading.Thread):
                 ultimo[0] = ahora
                 self.almacen.actualizar(aid, progreso=msg)
 
-        try:
-            trabajadores = max(1, min(8, int(aj.get('trabajadores') or 3)))
-        except ValueError:
-            trabajadores = 3
+        trabajadores = recursos.nucleos(aj)
         try:
             unidad = {'ruta': fila['ruta'], 'carpetas': []}
             completo = self.almacen.album(aid) or {}

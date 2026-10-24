@@ -17,7 +17,7 @@ import subprocess
 import sys
 import time
 
-from . import analisis
+from . import analisis, recursos
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CARPETA_SCRIPTS = os.path.join(BASE, 'tools', 'metadata')
@@ -53,7 +53,7 @@ def _correr(nombre, args, reg, aj, limite):
     cmd = [py, '-u', script] + args[1:]
     reg(f'▶ {args[0]} {" ".join(args[1:])}')
     t0 = time.time()
-    env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1', TERM='dumb')
+    env = dict(os.environ, PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1', TERM='dumb', **recursos.entorno_scripts(aj))
     # los scripts dejan sus .log en la carpeta de trabajo: que sea la de datos de la herramienta, no el repo
     trabajo = os.path.join(os.environ.get('INGESTA_DATOS') or os.path.join(BASE, 'ingesta_datos'), 'logs_scripts')
     os.makedirs(trabajo, exist_ok=True)
