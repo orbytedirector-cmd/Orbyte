@@ -57,6 +57,11 @@ class Almacen:
                     album_id INTEGER, leido INTEGER DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS ix_avisos_leido ON avisos(leido, ts);
+                CREATE TABLE IF NOT EXISTS artistas_ignorados (clave TEXT PRIMARY KEY, ts REAL);
+                CREATE TABLE IF NOT EXISTS unificaciones (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, clave TEXT, nombres TEXT, final TEXT,
+                    estado TEXT, registro TEXT, resultado TEXT
+                );
             ''')
             columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
             for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
@@ -156,6 +161,35 @@ class Almacen:
             n = c.execute("UPDATE albumes SET estado='en_cola', progreso=NULL, silencioso=1 "
                           "WHERE estado='error_ubicar'").rowcount
         return n
+
+    # ── artistas duplicados ──
+    def ignorados(self):
+        with self._con() as c:
+            return {r[0] for r in c.execute('SELECT clave FROM artistas_ignorados')}
+
+    def ignorar(self, clave):
+        with _lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO artistas_ignorados VALUES (?, ?)', (clave, time.time()))
+
+    def nueva_unificacion(self, clave, nombres, final):
+        with _lock, self._con() as c:
+            return c.execute('INSERT INTO unificaciones (ts, clave, nombres, final, estado, registro) '
+                             "VALUES (?, ?, ?, ?, 'en_curso', '')", (time.time(), clave, nombres, final)).lastrowid
+
+    def unificacion_log(self, uid, linea):
+        with _lock, self._con() as c:
+            r = c.execute('SELECT registro FROM unificaciones WHERE id=?', (uid,)).fetchone()
+            c.execute('UPDATE unificaciones SET registro=? WHERE id=?',
+                      (((r[0] or '') + '\n' if r and r[0] else '') + time.strftime('%H:%M:%S  ') + linea, uid))
+
+    def cerrar_unificacion(self, uid, estado, resultado):
+        with _lock, self._con() as c:
+            c.execute('UPDATE unificaciones SET estado=?, resultado=? WHERE id=?',
+                      (estado, json.dumps(resultado, ensure_ascii=False), uid))
+
+    def unificaciones(self, limite=20):
+        with self._con() as c:
+            return [dict(r) for r in c.execute('SELECT * FROM unificaciones ORDER BY id DESC LIMIT ?', (limite,))]
 
     def con_estado(self, *estados):
         with self._con() as c:
