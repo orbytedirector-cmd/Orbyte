@@ -58,6 +58,9 @@ class Almacen:
                 );
                 CREATE INDEX IF NOT EXISTS ix_avisos_leido ON avisos(leido, ts);
                 CREATE TABLE IF NOT EXISTS artistas_ignorados (clave TEXT PRIMARY KEY, ts REAL);
+                CREATE TABLE IF NOT EXISTS repetidos_revisados (clave TEXT PRIMARY KEY, firma TEXT, ts REAL);
+                CREATE TABLE IF NOT EXISTS mediciones (ruta TEXT PRIMARY KEY, bytes INTEGER, datos TEXT, ts REAL);
+                CREATE TABLE IF NOT EXISTS sugerencias_ia (clave TEXT PRIMARY KEY, firma TEXT, datos TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS unificaciones (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, clave TEXT, nombres TEXT, final TEXT,
                     estado TEXT, registro TEXT, resultado TEXT
@@ -170,6 +173,35 @@ class Almacen:
     def ignorar(self, clave):
         with _lock, self._con() as c:
             c.execute('INSERT OR REPLACE INTO artistas_ignorados VALUES (?, ?)', (clave, time.time()))
+
+    # ── repetidos ──
+    def repetidos_revisados(self):
+        with self._con() as c:
+            return dict(c.execute('SELECT clave, firma FROM repetidos_revisados').fetchall())
+
+    def marcar_repetido(self, clave, firma):
+        with _lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO repetidos_revisados VALUES (?, ?, ?)', (clave, firma, time.time()))
+
+    def medicion(self, ruta, bytes_):
+        with self._con() as c:
+            r = c.execute('SELECT datos FROM mediciones WHERE ruta=? AND bytes=?', (ruta, bytes_)).fetchone()
+        return json.loads(r[0]) if r else None
+
+    def guardar_medicion(self, ruta, bytes_, datos):
+        with _lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO mediciones VALUES (?, ?, ?, ?)',
+                      (ruta, bytes_, json.dumps(datos), time.time()))
+
+    def sugerencia(self, clave, firma):
+        with self._con() as c:
+            r = c.execute('SELECT datos FROM sugerencias_ia WHERE clave=? AND firma=?', (clave, firma)).fetchone()
+        return json.loads(r[0]) if r else None
+
+    def guardar_sugerencia(self, clave, firma, datos):
+        with _lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO sugerencias_ia VALUES (?, ?, ?, ?)',
+                      (clave, firma, json.dumps(datos, ensure_ascii=False), time.time()))
 
     def nueva_unificacion(self, clave, nombres, final):
         with _lock, self._con() as c:
