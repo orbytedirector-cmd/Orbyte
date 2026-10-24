@@ -29,10 +29,31 @@ class Procesador(threading.Thread):
     def ya(self):
         self.despertar.set()
 
+    def biblioteca_lista(self):
+        """La biblioteca existe y se puede escribir (tras un reinicio el disco de red puede tardar en montarse)."""
+        bib = self.almacen.ajustes().get('biblioteca') or '/mnt/musica'
+        try:
+            return os.path.isdir(bib) and os.access(bib, os.W_OK) and bool(os.listdir(bib))
+        except OSError:
+            return False
+
     def run(self):
-        self._recuperar()
+        recuperado = False
+        avisado = False
         while True:
             try:
+                if not self.biblioteca_lista():
+                    # sin biblioteca no se toca la cola: los álbumes esperan, no se marcan con error
+                    if not avisado and (self.almacen.siguiente('por_ubicar') or self.almacen.siguiente('por_metadata')):
+                        log.warning('La biblioteca no está disponible: la cola de proceso espera')
+                        avisado = True
+                    self.despertar.wait(20)
+                    self.despertar.clear()
+                    continue
+                avisado = False
+                if not recuperado:
+                    self._recuperar()
+                    recuperado = True
                 trabajo = False
                 aid = self.almacen.siguiente('por_ubicar')
                 if aid:

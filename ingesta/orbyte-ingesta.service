@@ -1,7 +1,8 @@
 [Unit]
 Description=Orbyte Ingesta (revisión de material nuevo)
-After=network-online.target local-fs.target
+After=network-online.target local-fs.target remote-fs.target
 Wants=network-online.target
+# la biblioteca es un disco de red (CIFS): si al arrancar aún no está montada, la cola de proceso espera
 
 [Service]
 Type=simple
@@ -13,6 +14,8 @@ RestartSec=5
 # Prioridad baja: que una revisión larga nunca le quite CPU/disco a la reproducción de Orbyte
 Nice=10
 IOSchedulingClass=idle
+# como máximo 2 núcleos para conversiones y scripts (evita picos de carga completa)
+CPUQuota=200%
 
 [Install]
 WantedBy=multi-user.target
