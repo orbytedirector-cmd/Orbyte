@@ -1,0 +1,110 @@
+{% extends 'base.html' %}
+{% block titulo %}Artistas{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Artistas duplicados</h1>
+  <div class="sub">Artistas que Orbyte tiene separados pero son el mismo (mayúsculas, tildes, signos, «The», «&/and»). Al unificar se valida el nombre oficial, se respalda la base y se corrigen carpetas, tags y base.</div>
+</div></div>
+<div id="trabajo"></div>
+<div id="grupos" class="lista-artistas"><div class="vacio"><p>Buscando…</p></div></div>
+<section class="seccion" id="historial-sec" hidden>
+  <h2 class="rotulo">Historial</h2>
+  <div id="historial" class="avisos"></div>
+</section>
+{% endblock %}
+{% block js %}
+<script>
+let datos = null, enCurso = null;
+
+function filaVariante(v) {
+  const albs = v.albumes.map(a => `${esc(a.nombre)}${a.anio ? ` <span class="muy-tenue">(${esc(a.anio)})</span>` : ''}`).join(' · ');
+  return `<tr><td><label class="var"><input type="checkbox" checked data-id="${v.id}"><b>${esc(v.nombre)}</b></label>
+      <div class="s">${albs}</div></td>
+    <td>${v.albumes.length}<div class="s">${v.pistas} pistas</div></td>
+    <td class="oculto-movil">${v.carpetas.map(c => `<span class="nombre">${esc(c)}</span>`).join('<br>') || '—'}</td>
+    <td class="oculto-movil">${esc(v.nacionalidad || '—')}<div class="s">${v.oyentes ? v.oyentes.toLocaleString('es-CL') + ' oyentes' : 'sin Last.fm'}${v.favoritos ? ` · ${v.favoritos} fav.` : ''}</div></td></tr>`;
+}
+
+function pintar() {
+  const cont = document.getElementById('grupos');
+  if (datos.error) { cont.innerHTML = `<div class="flash error">${esc(datos.error)}</div>`; return; }
+  if (!datos.grupos.length) {
+    cont.innerHTML = '<div class="vacio"><h3>Sin duplicados</h3><p>Cada artista de la biblioteca aparece una sola vez.</p></div>';
+  } else {
+    cont.innerHTML = datos.grupos.map((g, i) => `
+      <div class="panel grupo-art" data-i="${i}">
+        <div class="tabla-wrap"><table>
+          <tr><th>Variante</th><th>Álbumes</th><th class="oculto-movil">Carpeta</th><th class="oculto-movil">Datos</th></tr>
+          ${g.variantes.map(filaVariante).join('')}
+        </table></div>
+        <div class="unificar">
+          <div class="campo" style="flex:1;min-width:240px"><label>Nombre que se queda</label>
+            <input type="text" class="nombre-final" value="${esc(g.variantes[0].nombre)}">
+            <div class="ayuda fuente">Validando el nombre oficial…</div></div>
+          <div class="acciones" style="margin:0">
+            <button class="btn oro" data-unificar="${i}" ${datos.ocupado ? 'disabled' : ''}>Unificar</button>
+            <button class="btn" data-ignorar="${i}">No son el mismo</button></div>
+        </div>
+      </div>`).join('');
+    cont.querySelectorAll('[data-unificar]').forEach(b => b.onclick = () => unificar(+b.dataset.unificar, b));
+    cont.querySelectorAll('[data-ignorar]').forEach(b => b.onclick = async () => {
+      await post('/api/artistas/ignorar', {clave: datos.grupos[+b.dataset.ignorar].clave}); cargar();
+    });
+    validarNombres();
+  }
+  const h = datos.historial || [];
+  document.getElementById('historial-sec').hidden = !h.length;
+  document.getElementById('historial').innerHTML = h.map(u => `
+    <details class="aviso t-${u.estado === 'ok' ? 'ok' : u.estado === 'error' ? 'error' : 'resumen'}" style="display:block">
+      <summary style="cursor:pointer"><b>${esc(u.final)}</b> <span class="tenue">· ${u.estado === 'ok' ? 'unificado' : u.estado === 'error' ? 'con error' : 'en curso'} · ${new Date(u.ts * 1000).toLocaleString('es-CL')}</span></summary>
+      <pre class="registro" style="margin-top:.6rem">${esc(u.registro || '')}</pre></details>`).join('');
+}
+
+async function validarNombres() {
+  const cards = [...document.querySelectorAll('.grupo-art')];
+  for (const card of cards) {       // de a uno: MusicBrainz admite 1 consulta por segundo
+    const g = datos.grupos[+card.dataset.i];
+    const f = card.querySelector('.fuente'), inp = card.querySelector('.nombre-final');
+    try {
+      const r = await (await fetch('/api/artistas/nombre?clave=' + encodeURIComponent(g.clave))).json();
+      if (r.nombre && inp.value === g.variantes[0].nombre) inp.value = r.nombre;
+      f.innerHTML = r.fuente
+        ? `<span class="ok">✓ Nombre oficial en ${esc(r.fuente)}</span>${r.detalle ? ' · ' + esc(r.detalle) : ''}${r.url ? ` · <a href="${esc(r.url)}" target="_blank" rel="noopener" style="text-decoration:underline">ver ficha</a>` : ''}`
+        : `<span class="med">${esc(r.detalle || 'Sin validar')}</span>`;
+    } catch (e) { f.innerHTML = '<span class="med">No se pudo validar en línea</span>'; }
+  }
+}
+
+async function unificar(i, b) {
+  const g = datos.grupos[i], card = document.querySelector(`.grupo-art[data-i="${i}"]`);
+  const ids = [...card.querySelectorAll('input[data-id]:checked')].map(x => +x.dataset.id);
+  const nombre = card.querySelector('.nombre-final').value.trim();
+  if (ids.length < 2) { toast('Marca al menos dos variantes'); return; }
+  const nAlb = g.variantes.filter(v => ids.includes(v.id)).reduce((s, v) => s + v.albumes.length, 0);
+  if (!confirm(`Unificar ${ids.length} variantes (${nAlb} álbumes) como «${nombre}»?\n\n` +
+               `• se respalda music.db\n• se mueven/renombran las carpetas del artista si hace falta\n` +
+               `• se reescribe el artista en los tags de los archivos\n• queda un solo artista en Orbyte`)) return;
+  b.disabled = true;
+  const r = await post('/api/artistas/unificar', {clave: g.clave, ids, nombre});
+  if (!r.ok) { toast('No se pudo', r.error || ''); b.disabled = false; return; }
+  seguir(r.id);
+}
+
+async function seguir(uid) {
+  const caja = document.getElementById('trabajo');
+  const u = await (await fetch('/api/artistas/unificacion/' + uid)).json();
+  caja.innerHTML = `<section class="seccion" style="margin-top:0"><h2 class="rotulo">Unificando: ${esc(u.final || '')}</h2>
+    <pre class="registro" id="reg-u">${esc(u.registro || '')}</pre></section>`;
+  const reg = document.getElementById('reg-u'); reg.scrollTop = reg.scrollHeight;
+  if (u.estado === 'en_curso') setTimeout(() => seguir(uid), 1200);
+  else { toast(u.estado === 'ok' ? 'Artista unificado' : 'La unificación falló', u.final); setTimeout(() => { caja.innerHTML = ''; cargar(); }, 2500); }
+}
+
+async function cargar() {
+  datos = await (await fetch('/api/artistas')).json(); pintar();
+  const curso = (datos.historial || []).find(u => u.estado === 'en_curso');
+  if (curso) seguir(curso.id);
+}
+cargar();
+</script>
+{% endblock %}

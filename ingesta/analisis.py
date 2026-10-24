@@ -640,7 +640,9 @@ def biblioteca(db, raiz='/mnt/musica'):
     con.close()
     grupos = {}
     artistas = {}
+    nombres = {}
     for f in filas:
+        nombres.setdefault(_norm(f['artista']), Counter())[f['artista']] += 1
         ruta = f['path'] or ''
         if dividir_por_disco(os.path.basename(ruta)) is not None:
             ruta = os.path.dirname(ruta)
@@ -659,7 +661,7 @@ def biblioteca(db, raiz='/mnt/musica'):
         g['tags'] = dict(g['tags'])
         g['n_artista'] = _norm(g['artista'])
         g['n_album'] = _norm_album(g['album'])
-    datos = {'grupos': list(grupos.values()), 'artistas': artistas}
+    datos = {'grupos': list(grupos.values()), 'artistas': artistas, 'nombres': nombres}
     _CACHE_BIB.update(clave=clave, datos=datos)
     return datos
 
@@ -1327,6 +1329,21 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             problema('aviso', 'db_orbyte', f'No se pudo leer la base de Orbyte para buscar duplicados: {e}')
     else:
         problema('aviso', 'db_orbyte', 'No se encontró music.db: no se revisaron duplicados')
+    # el artista se graba como ya está en la biblioteca (o con el nombre oficial de MusicBrainz si es nuevo),
+    # así el indexador no crea «Vilma Palma E Vampiros» y «VILMA PALMA E VAMPIROS» como dos artistas
+    if not ov.get('artista'):
+        en_bib = ((bib or {}).get('nombres') or {}).get(_norm(artista))
+        oficial = (((ed_mb or {}).get('elegida') or {}).get('artista') or '').strip()
+        if en_bib:
+            nombre_bib = en_bib.most_common(1)[0][0]
+            if nombre_bib != artista:
+                problema('correccion', 'artista_como_biblioteca',
+                         f'El artista se escribirá como en tu biblioteca: «{nombre_bib}» (los tags dicen «{artista}»)')
+                artista = nombre_bib
+        elif oficial and _norm(oficial) == _norm(artista) and oficial != artista:
+            problema('correccion', 'artista_oficial',
+                     f'El artista se escribirá con su nombre oficial en MusicBrainz: «{oficial}» (los tags dicen «{artista}»)')
+            artista = oficial
     existente = carpeta_artista_existente(bib, artista)
     if existente:
         letra, carpeta_artista = existente
@@ -1414,6 +1431,9 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             plan.append(dict(base, accion='convertir' if convertir_p else 'copiar', corte=None, clave=p['archivo'],
                              destino=p.get('nombre_destino'), disco=p['disco'], numero=p.get('numero'),
                              titulo=p.get('titulo'), artista=p.get('artista_final') or artista))
+    for x in plan:              # pistas del mismo artista: con el nombre unificado
+        if x.get('artista') and _norm(x['artista']) == _norm(artista):
+            x['artista'] = artista
     por_disco_total = Counter(x['disco'] for x in plan)
     for x in plan:
         x['total_pistas'] = por_disco_total[x['disco']]

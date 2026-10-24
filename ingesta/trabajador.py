@@ -14,7 +14,7 @@ import threading
 import time
 import traceback
 
-from . import analisis, metadata, procesar, recursos
+from . import analisis, artistas, metadata, procesar, recursos
 
 log = logging.getLogger('ingesta')
 
@@ -42,6 +42,10 @@ class Procesador(threading.Thread):
         avisado = False
         while True:
             try:
+                if artistas.BLOQUEO.locked():          # se está unificando un artista: esperar
+                    self.despertar.wait(10)
+                    self.despertar.clear()
+                    continue
                 if not self.biblioteca_lista():
                     # sin biblioteca no se toca la cola: los álbumes esperan, no se marcan con error
                     if not avisado and (self.almacen.siguiente('por_ubicar') or self.almacen.siguiente('por_metadata')):

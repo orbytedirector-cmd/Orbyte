@@ -32,6 +32,9 @@ from . import metadata as metadata_mod
 from . import procesar
 from .almacen import PREVIOS
 from . import recursos
+from . import artistas as artistas_mod
+import threading
+import traceback
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(BASE)
@@ -451,6 +454,85 @@ def api_edicion(aid):
     almacen.actualizar(aid, eleccion=json.dumps({'mbid': mbid}) if mbid else None, estado='en_cola', progreso=None)
     vigilante.ya()
     return jsonify(ok=True)
+
+
+# ─────────────────────────── artistas duplicados ───────────────────────────
+
+_unificando = artistas_mod.BLOQUEO
+
+
+@app.route('/artistas')
+def artistas_pagina():
+    return render_template('artistas.html', pagina='artistas')
+
+
+@app.route('/api/artistas')
+def api_artistas():
+    aj = almacen.ajustes()
+    try:
+        grupos = artistas_mod.detectar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', almacen.ignorados())
+    except Exception as e:
+        return jsonify(grupos=[], error=str(e), historial=almacen.unificaciones())
+    return jsonify(grupos=grupos, historial=almacen.unificaciones(), ocupado=_unificando.locked())
+
+
+@app.route('/api/artistas/nombre')
+def api_artistas_nombre():
+    aj = almacen.ajustes()
+    clave = request.args.get('clave') or ''
+    grupo = next((g for g in artistas_mod.detectar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica')
+                  if g['clave'] == clave), None)
+    if not grupo:
+        return jsonify(error='grupo no encontrado'), 404
+    return jsonify(artistas_mod.nombre_oficial(vigilante.cliente_mb, grupo['variantes']))
+
+
+@app.route('/api/artistas/ignorar', methods=['POST'])
+def api_artistas_ignorar():
+    clave = (request.get_json(silent=True) or {}).get('clave')
+    if clave:
+        almacen.ignorar(clave)
+    return jsonify(ok=True)
+
+
+@app.route('/api/artistas/unificar', methods=['POST'])
+def api_artistas_unificar():
+    d = request.get_json(silent=True) or {}
+    ids = [int(i) for i in d.get('ids') or [] if str(i).isdigit()]
+    final = (d.get('nombre') or '').strip()
+    if len(ids) < 2 or not final:
+        return jsonify(ok=False, error='Faltan datos'), 400
+    if procesador.actual:
+        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
+    if not _unificando.acquire(blocking=False):
+        return jsonify(ok=False, error='Ya hay una unificación en curso'), 409
+    aj = almacen.ajustes()
+    uid = almacen.nueva_unificacion(d.get('clave'), ' / '.join(str(i) for i in ids), final)
+
+    def trabajo():
+        try:
+            res = artistas_mod.unificar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', ids, final,
+                                        lambda m: almacen.unificacion_log(uid, m))
+            almacen.cerrar_unificacion(uid, 'ok', res)
+            almacen.avisar('ok', f'Artista unificado: {final}',
+                           f'{res["albumes"]} álbumes en {res["carpeta"]}' +
+                           (f' · {len(res["avisos"])} avisos' if res['avisos'] else ''))
+        except Exception as e:
+            log.error('Unificar %s:\n%s', final, traceback.format_exc())
+            almacen.unificacion_log(uid, f'ERROR: {type(e).__name__}: {e}')
+            almacen.cerrar_unificacion(uid, 'error', {'error': str(e)})
+            almacen.avisar('error', f'No se pudo unificar {final}', str(e))
+        finally:
+            _unificando.release()
+
+    threading.Thread(target=trabajo, daemon=True, name='unificar').start()
+    return jsonify(ok=True, id=uid)
+
+
+@app.route('/api/artistas/unificacion/<int:uid>')
+def api_artistas_unificacion(uid):
+    u = next((x for x in almacen.unificaciones(50) if x['id'] == uid), None)
+    return jsonify(u or {})
 
 
 @app.route('/api/reintentar_errores', methods=['POST'])
