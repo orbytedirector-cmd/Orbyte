@@ -112,7 +112,7 @@ class Vigilante(threading.Thread):
         self._cerrar_tanda()
 
         # modo desatendido: también lo que ya estaba «Lista» antes de encenderlo
-        if aj.get('desatendido') == '1':
+        if aj.get('desatendido') == '1' and (not self.procesador or self.procesador.biblioteca_lista()):
             listos = self.almacen.con_estado('revisado')
             for fila in listos:
                 self.almacen.actualizar(fila['id'], estado='por_ubicar', progreso='En cola para ubicar')

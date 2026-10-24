@@ -53,8 +53,13 @@ function pintar() {
   const av = document.getElementById('aviso-entrada');
   let html = '';
   if (d.problema) html += `<div class="flash error">${esc(d.problema)} ${d.entrada ? '' : '<a href="/ajustes" style="text-decoration:underline">Elegirla</a>'}</div>`;
+  if (d.biblioteca_lista === false) html += `<div class="flash error">La biblioteca (${esc(d.biblioteca || '')}) no está disponible o no se puede escribir: la cola de proceso espera a que vuelva.</div>`;
+  const errUbicar = d.albumes.filter(a => a.estado === 'error_ubicar').length;
+  if (errUbicar) html += `<div class="flash error" style="display:flex;justify-content:space-between;gap:1rem;align-items:center;flex-wrap:wrap">${errUbicar} álbum${errUbicar === 1 ? '' : 'es'} con error al ubicar (los originales no se tocaron). <button class="btn chico" id="reintentar">Volver a revisarlos</button></div>`;
   if (d.sueltos && d.sueltos.length) html += `<div class="flash">${d.sueltos.length === 1 ? 'Hay 1 archivo de audio suelto' : `Hay ${d.sueltos.length} archivos de audio sueltos`} en la raíz de la entrada (${esc(d.sueltos.slice(0, 3).join(', '))}${d.sueltos.length > 3 ? '…' : ''}). Ponlos dentro de una carpeta por álbum para revisarlos.</div>`;
   av.innerHTML = html;
+  const ri = document.getElementById('reintentar');
+  if (ri) ri.onclick = async () => { ri.disabled = true; await post('/api/reintentar_errores'); cargar(); };
 
   const fil = document.getElementById('filtros');
   fil.innerHTML = FILTROS.map(([k, n, est]) => {

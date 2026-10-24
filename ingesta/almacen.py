@@ -150,6 +150,12 @@ class Almacen:
                 "SELECT id FROM albumes WHERE estado IN ('revisado', 'requiere_revision', 'error') "
                 'AND COALESCE(version_reporte, 0) < ?', (version,))]
 
+    def reintentar_errores_ubicar(self):
+        with _lock, self._con() as c:
+            n = c.execute("UPDATE albumes SET estado='en_cola', progreso=NULL, silencioso=1 "
+                          "WHERE estado='error_ubicar'").rowcount
+        return n
+
     def con_estado(self, *estados):
         with self._con() as c:
             return [dict(r) for r in c.execute(

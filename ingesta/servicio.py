@@ -301,6 +301,7 @@ def api_bandeja():
     return jsonify(albumes=lista, entrada=aj.get('carpeta_entrada'), biblioteca=aj.get('biblioteca'),
                    ultimo_escaneo=est.get('ultimo_escaneo'), problema=est.get('problema_entrada'),
                    sueltos=est.get('sueltos', []), ahora=time.time(),
+                   biblioteca_lista=procesador.biblioteca_lista(),
                    sin_leer=almacen.avisos_sin_leer())
 
 
@@ -447,6 +448,14 @@ def api_edicion(aid):
     almacen.actualizar(aid, eleccion=json.dumps({'mbid': mbid}) if mbid else None, estado='en_cola', progreso=None)
     vigilante.ya()
     return jsonify(ok=True)
+
+
+@app.route('/api/reintentar_errores', methods=['POST'])
+def api_reintentar_errores():
+    """Los «Error al ubicar» vuelven a revisarse (y luego se ubican con el botón o el modo desatendido)."""
+    n = almacen.reintentar_errores_ubicar()
+    vigilante.ya()
+    return jsonify(ok=True, n=n)
 
 
 @app.route('/api/escanear', methods=['POST'])
