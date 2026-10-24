@@ -250,7 +250,10 @@ def unificar(db, biblioteca, ids, nombre_final, registro):
                 os.rmdir(c)
                 registro(f'Carpeta vacía eliminada: {os.path.relpath(c, biblioteca)}')
             except OSError:
-                avisos.append(f'La carpeta {os.path.relpath(c, biblioteca)} quedó con archivos que no se movieron')
+                quedan = sorted(os.listdir(c)) if os.path.isdir(c) else []
+                avisos.append(f'La carpeta {os.path.relpath(c, biblioteca)} quedó con contenido que no pertenece a '
+                              f'los álbumes de este artista en Orbyte: ' + ', '.join(quedan[:8]) +
+                              (' …' if len(quedan) > 8 else ''))
 
     # ── 2) rutas en la base ──
     def nueva_ruta(p):
