@@ -365,6 +365,9 @@ def api_ubicar(aid):
     a = almacen.album(aid)
     if not a or a['estado'] not in ('revisado', 'error_ubicar'):
         return jsonify(ok=False, error='Solo se ubican álbumes revisados sin decisiones pendientes'), 409
+    if ((a.get('reporte') or {}).get('version') or 0) < analisis.VERSION_REPORTE:
+        _requeue(aid)                         # revisión antigua: primero se actualiza
+        return jsonify(ok=True, revisar=True)
     if a['estado'] == 'error_ubicar':        # tras un error se revisa de nuevo antes de reintentar
         _requeue(aid)
         return jsonify(ok=True, revisar=True)
