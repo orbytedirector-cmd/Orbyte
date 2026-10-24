@@ -167,56 +167,8 @@ def limpiar(db, ids, registro):
                         gemelo = (b, mapa)
             mapa = gemelo[1] if gemelo else {}
             with con:
-                movidas = quitadas = 0
-                for viejo in pids:
-                    nuevo = mapa.get(viejo)
-                    for tabla, col, extra in REFS_PISTA:
-                        if tabla not in tablas:
-                            continue
-                        if nuevo:
-                            movidas += con.execute(f'UPDATE {tabla} SET {col}=? WHERE {col}=? {extra}',
-                                                   (nuevo, viejo)).rowcount
-                        elif tabla not in CONSERVAR_SIN_GEMELO:
-                            quitadas += con.execute(f'DELETE FROM {tabla} WHERE {col}=? {extra}', (viejo,)).rowcount
-                    if nuevo:
-                        con.execute("INSERT OR IGNORE INTO user_item_favorites (user_id, item_type, item_id, added_at) "
-                                    "SELECT user_id, 'track', ?, added_at FROM user_item_favorites "
-                                    "WHERE item_type='track' AND item_id=?", (nuevo, viejo))
-                    n = con.execute("DELETE FROM user_item_favorites WHERE item_type='track' AND item_id=?",
-                                    (viejo,)).rowcount
-                    if not nuevo:
-                        quitadas += n
-                if gemelo:
-                    gid = gemelo[0]['id']
-                    con.execute("INSERT OR IGNORE INTO user_item_favorites (user_id, item_type, item_id, added_at) "
-                                "SELECT user_id, 'album', ?, added_at FROM user_item_favorites "
-                                "WHERE item_type='album' AND item_id=?", (gid, aid))
-                    if 'descubrir_items' in tablas:
-                        con.execute('UPDATE descubrir_items SET album_id=? WHERE album_id=?', (gid, aid))
-                    if 'descubrir_albums_ext' in tablas and not con.execute(
-                            'SELECT 1 FROM descubrir_albums_ext WHERE album_id=?', (gid,)).fetchone():
-                        con.execute('UPDATE descubrir_albums_ext SET album_id=? WHERE album_id=?', (gid, aid))
-                else:
-                    if 'descubrir_items' in tablas:
-                        con.execute('UPDATE descubrir_items SET album_id=NULL WHERE album_id=?', (aid,))
-                con.execute("DELETE FROM user_item_favorites WHERE item_type='album' AND item_id=?", (aid,))
-                if 'descubrir_albums_ext' in tablas:
-                    con.execute('DELETE FROM descubrir_albums_ext WHERE album_id=?', (aid,))
-                if pids:
-                    m = ','.join('?' * len(pids))
-                    for tabla in ('track_meta', 'track_pop_cache'):
-                        if tabla in tablas:
-                            con.execute(f'DELETE FROM {tabla} WHERE track_id IN ({m})', pids)
-                    con.execute(f'DELETE FROM tracks WHERE id IN ({m})', pids)
-                for tabla in ('album_meta', 'album_pop_cache'):
-                    if tabla in tablas:
-                        con.execute(f'DELETE FROM {tabla} WHERE album_id=?', (aid,))
-                con.execute('DELETE FROM albums WHERE id=?', (aid,))
-                # artista sin álbumes ni favoritos: se va, como hace el indexador
-                if not con.execute('SELECT 1 FROM albums WHERE artist_id=?', (a['artist_id'],)).fetchone() and \
-                        not con.execute('SELECT 1 FROM user_favorite_artists WHERE artist_id=?',
-                                        (a['artist_id'],)).fetchone():
-                    con.execute('DELETE FROM artists WHERE id=?', (a['artist_id'],))
+                movidas, quitadas = borrar_album_db(con, tablas, a, pids, mapa,
+                                                    gemelo[0]['id'] if gemelo else None)
             resumen['borrados'] += 1
             resumen['pistas'] += len(pids)
             resumen['movidas'] += movidas
@@ -231,3 +183,58 @@ def limpiar(db, ids, registro):
         con.close()
     registro(f'Listo: {resumen["borrados"]} álbumes fantasma eliminados de Orbyte')
     return resumen
+
+
+def borrar_album_db(con, tablas, a, pids, mapa, destino_id):
+    """
+    Saca un álbum de music.db. Lo que apunta a sus pistas pasa a la pista equivalente de `destino_id`
+    (mapa {pista vieja: pista nueva}); lo que no tiene equivalente se quita (el historial se conserva).
+    Devuelve (referencias movidas, referencias quitadas). Debe llamarse dentro de una transacción.
+    """
+    aid = a['id']
+    movidas = quitadas = 0
+    for viejo in pids:
+        nuevo = mapa.get(viejo)
+        for tabla, col, extra in REFS_PISTA:
+            if tabla not in tablas:
+                continue
+            if nuevo:
+                movidas += con.execute(f'UPDATE {tabla} SET {col}=? WHERE {col}=? {extra}', (nuevo, viejo)).rowcount
+            elif tabla not in CONSERVAR_SIN_GEMELO:
+                quitadas += con.execute(f'DELETE FROM {tabla} WHERE {col}=? {extra}', (viejo,)).rowcount
+        if nuevo:
+            con.execute("INSERT OR IGNORE INTO user_item_favorites (user_id, item_type, item_id, added_at) "
+                        "SELECT user_id, 'track', ?, added_at FROM user_item_favorites "
+                        "WHERE item_type='track' AND item_id=?", (nuevo, viejo))
+        n = con.execute("DELETE FROM user_item_favorites WHERE item_type='track' AND item_id=?", (viejo,)).rowcount
+        if not nuevo:
+            quitadas += n
+    if destino_id:
+        con.execute("INSERT OR IGNORE INTO user_item_favorites (user_id, item_type, item_id, added_at) "
+                    "SELECT user_id, 'album', ?, added_at FROM user_item_favorites "
+                    "WHERE item_type='album' AND item_id=?", (destino_id, aid))
+        if 'descubrir_items' in tablas:
+            con.execute('UPDATE descubrir_items SET album_id=? WHERE album_id=?', (destino_id, aid))
+        if 'descubrir_albums_ext' in tablas and not con.execute(
+                'SELECT 1 FROM descubrir_albums_ext WHERE album_id=?', (destino_id,)).fetchone():
+            con.execute('UPDATE descubrir_albums_ext SET album_id=? WHERE album_id=?', (destino_id, aid))
+    elif 'descubrir_items' in tablas:
+        con.execute('UPDATE descubrir_items SET album_id=NULL WHERE album_id=?', (aid,))
+    con.execute("DELETE FROM user_item_favorites WHERE item_type='album' AND item_id=?", (aid,))
+    if 'descubrir_albums_ext' in tablas:
+        con.execute('DELETE FROM descubrir_albums_ext WHERE album_id=?', (aid,))
+    if pids:
+        m = ','.join('?' * len(pids))
+        for tabla in ('track_meta', 'track_pop_cache'):
+            if tabla in tablas:
+                con.execute(f'DELETE FROM {tabla} WHERE track_id IN ({m})', pids)
+        con.execute(f'DELETE FROM tracks WHERE id IN ({m})', pids)
+    for tabla in ('album_meta', 'album_pop_cache'):
+        if tabla in tablas:
+            con.execute(f'DELETE FROM {tabla} WHERE album_id=?', (aid,))
+    con.execute('DELETE FROM albums WHERE id=?', (aid,))
+    # artista sin álbumes ni favoritos: se va, como hace el indexador
+    if not con.execute('SELECT 1 FROM albums WHERE artist_id=?', (a['artist_id'],)).fetchone() and \
+            not con.execute('SELECT 1 FROM user_favorite_artists WHERE artist_id=?', (a['artist_id'],)).fetchone():
+        con.execute('DELETE FROM artists WHERE id=?', (a['artist_id'],))
+    return movidas, quitadas

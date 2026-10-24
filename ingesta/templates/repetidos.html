@@ -1,0 +1,328 @@
+{% extends 'base.html' %}
+{% block titulo %}Repetidos{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Álbumes repetidos</h1>
+  <div class="sub">El mismo álbum en varias ediciones o calidades. Compara los datos técnicos, mide el master o pide una sugerencia a la IA, y decide cuáles conservar. Lo que eliminas se borra del disco y de Orbyte: sus escuchas, favoritos y playlists pasan a la edición que se queda.</div>
+</div>
+  <div class="acciones" style="margin:0">
+    <button class="btn" id="medir-todo">Medir todos los masters</button>
+    <button class="btn" id="recalcular">Volver a buscar</button>
+  </div>
+</div>
+<div id="resumen"></div>
+<div id="midiendo"></div>
+<div id="trabajo"></div>
+<div class="filtros" id="filtros">
+  <button class="filtro activo" data-f="todos">Todos <b id="n-todos">0</b></button>
+  <button class="filtro" data-f="distinta">Distinta calidad <b id="n-distinta">0</b></button>
+  <button class="filtro" data-f="misma">Misma calidad <b id="n-misma">0</b></button>
+  <input type="search" id="buscar" placeholder="Buscar artista o álbum" class="buscar-rep">
+</div>
+<div id="grupos"><div class="vacio"><p>Buscando repetidos…</p></div></div>
+<div class="acciones" id="mas-wrap" style="display:none"><button class="btn" id="mas">Ver más</button></div>
+<section class="seccion" id="historial-sec" hidden>
+  <h2 class="rotulo">Historial</h2>
+  <div id="historial" class="avisos"></div>
+</section>
+
+<div class="modal-fondo" id="modal" hidden>
+  <div class="modal">
+    <div class="modal-cab"><b id="m-titulo"></b></div>
+    <div class="modal-cuerpo" id="m-cuerpo"></div>
+    <div class="modal-pie">
+      <button class="btn" id="m-cancelar">Cancelar</button>
+      <button class="btn oro" id="m-ok"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+const PAG = 40;
+let datos = null, filtro = 'todos', texto = '', mostrar = PAG, timer = null;
+const abiertos = new Set(), detalles = {}, eleccion = {}, destinoDe = {};
+
+const GB = b => (b / 1e9).toLocaleString('es-CL', {maximumFractionDigits: b >= 1e10 ? 0 : 1}) + ' GB';
+const MB = b => b >= 1e9 ? GB(b) : Math.round(b / 1e6).toLocaleString('es-CL') + ' MB';
+const MIN = s => { s = Math.round(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+                   return h ? `${h} h ${m} min` : `${m} min`; };
+const rel = r => r.startsWith(datos.raiz + '/') ? r.slice(datos.raiz.length + 1) : r;
+const corto = r => { const p = rel(r).split('/'); return p.slice(2).join('/') || p.join('/'); };
+
+function visibles() {
+  const t = texto.toLowerCase();
+  return datos.grupos.filter(g => (filtro === 'todos' || (filtro === 'misma') === g.misma_calidad)
+    && (!t || (g.artista + ' ' + g.album).toLowerCase().includes(t)));
+}
+
+function eleccionDe(g) {
+  if (!eleccion[g.clave]) eleccion[g.clave] = Object.fromEntries(g.ediciones.map(e => [e.ruta, 'conservar']));
+  return eleccion[g.clave];
+}
+
+function medicionHtml(e) {
+  const m = e.medicion;
+  if (m && m.lufs != null) return `<div class="medida">
+      <span title="Volumen integrado"><b>${m.lufs}</b> LUFS</span>
+      <span title="Rango de volumen (mediana por pista)">LRA <b>${m.lra ?? '—'}</b></span>
+      <span title="Pico real">pico <b>${m.pico ?? '—'}</b> dBTP</span>
+      <span title="Pico menos volumen: más alto = master menos comprimido">PLR <b>${m.plr ?? '—'}</b></span></div>`;
+  if (m && m.error) return `<div class="s mal">No se pudo medir: ${esc(m.error)}</div>`;
+  const md = datos.midiendo;
+  if (md.actual === e.ruta) return `<div class="s"><span class="giro mini"></span> Midiendo… ${md.avance[0]}/${md.avance[1]} pistas</div>`;
+  if (e.en_cola || md.cola.includes(e.ruta)) return '<div class="s tenue">En cola para medir</div>';
+  return '<div class="s muy-tenue">Master sin medir</div>';
+}
+
+function edicionHtml(g, e, i) {
+  const d = (detalles[g.clave] || {}).porRuta?.[e.ruta] || {};
+  const sel = eleccionDe(g)[e.ruta], t = d.tags || {};
+  const sug = g.sugerencia, letra = String.fromCharCode(65 + i);
+  const datosEd = [t.sello && `sello ${esc(t.sello)}`, t.catalogo && `cat. ${esc(t.catalogo)}`, t.pais && esc(t.pais),
+                   t.fecha_edicion && `edición ${esc(t.fecha_edicion)}`, t.anio_original && `original ${esc(t.anio_original)}`,
+                   t.barcode && `EAN ${esc(t.barcode)}`,
+                   t.mbid && `<a href="https://musicbrainz.org/release/${encodeURIComponent(t.mbid)}" target="_blank" rel="noopener" class="btn-link">MusicBrainz</a>`]
+                  .filter(Boolean).join(' · ');
+  const uso = [e.escuchas && `${e.escuchas} escuchas`, e.playlists && `${e.playlists} en playlists`, e.favoritos && `${e.favoritos} favoritos`]
+              .filter(Boolean).join(' · ');
+  return `<div class="edicion ${sel === 'eliminar' ? 'borrar' : ''} ${sug && sug.recomendada === e.ruta ? 'recomendada' : ''}">
+    <div class="ed-cab">
+      ${e.portada ? `<img class="ed-portada" loading="lazy" src="/api/repetidos/portada?ruta=${encodeURIComponent(e.portada)}" alt="">` : '<div class="ed-portada"></div>'}
+      <div style="min-width:0">
+        <div class="t"><span class="letra">${letra}</span>${esc(corto(e.ruta))}</div>
+        <div class="f-chips" style="justify-content:flex-start;margin-top:.3rem">
+          <span class="chip q-${e.calidad}"><span class="led"></span>${esc(e.calidad)}</span>
+          <span class="chip">${esc(e.formato)}</span>
+          ${sug && sug.recomendada === e.ruta ? '<span class="chip q-MQA">IA recomienda</span>' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="s">${e.n} pistas · ${MIN(e.dur)} · <b>${MB(e.bytes)}</b>${d.relacion && d.relacion !== 'referencia' ? ` · <span class="${d.relacion === 'mismas pistas' ? 'ok' : 'med'}">${esc(d.relacion)}</span>` : ''}</div>
+    ${datosEd ? `<div class="s">${datosEd}</div>` : ''}
+    ${t.comment ? `<div class="s muy-tenue">«${esc(t.comment)}»</div>` : ''}
+    <div class="s">${uso || '<span class="muy-tenue">sin uso en Orbyte</span>'}</div>
+    ${e.anidada_en ? `<div class="s med">Está dentro de la carpeta de otra edición</div>` : ''}
+    ${e.contiene.length ? `<div class="s med">Contiene otra edición en una subcarpeta</div>` : ''}
+    ${medicionHtml(e)}
+    <div class="decision" role="group">
+      <button class="filtro ${sel === 'conservar' ? 'activo' : ''}" data-dec="conservar" data-ruta="${esc(e.ruta)}">Conservar</button>
+      <button class="filtro ${sel === 'eliminar' ? 'activo peligro' : ''}" data-dec="eliminar" data-ruta="${esc(e.ruta)}">Eliminar</button>
+    </div>
+  </div>`;
+}
+
+function grupoHtml(g) {
+  const el = eleccionDe(g), borrar = g.ediciones.filter(e => el[e.ruta] === 'eliminar');
+  const quedan = g.ediciones.filter(e => el[e.ruta] !== 'eliminar');
+  const libera = borrar.reduce((s, e) => s + e.bytes, 0);
+  const sug = g.sugerencia, abierto = abiertos.has(g.clave);
+  const calidades = [...new Set(g.ediciones.map(e => e.calidad))];
+  if (!quedan.some(e => e.ruta === destinoDe[g.clave])) destinoDe[g.clave] = quedan[0]?.ruta;
+  return `<div class="panel grupo-rep ${abierto ? 'abierto' : ''}" data-clave="${esc(g.clave)}">
+    <button class="gr-cab" data-abrir>
+      <div style="min-width:0"><div class="t">${esc(g.album)}</div><div class="s">${esc(g.artista)} · ${g.ediciones.length} ediciones</div></div>
+      <div class="f-chips">${calidades.map(c => `<span class="chip q-${c}"><span class="led"></span>${c}</span>`).join('')}
+        <span class="libera" title="Espacio que se libera dejando solo la edición más pesada… o la que elijas">hasta ${GB(g.liberable)}</span>
+        <span class="flecha">▾</span></div>
+    </button>
+    ${abierto ? `<div class="gr-cuerpo">
+      ${detalles[g.clave]?.cargando ? '<div class="s"><span class="giro mini"></span> Leyendo tags…</div>' : ''}
+      <div class="ediciones">${g.ediciones.map((e, i) => edicionHtml(g, e, i)).join('')}</div>
+      ${sug ? `<div class="sugerencia">
+          <div class="rotulo">Sugerencia de la IA <span class="tenue">· ${esc(sug.fuente)} · confianza ${esc(sug.confianza || '—')}${sug.con_medicion ? '' : ' · sin medición del master'}</span></div>
+          <p>${esc(sug.razon)}</p>
+          <div class="s">Conservar: ${sug.conservar.map(r => sug.letras[r]).join(', ') || '—'} · Eliminar: ${sug.eliminar.map(r => sug.letras[r]).join(', ') || '—'}
+            <button class="btn-link" data-aplicar>Aplicar sugerencia</button></div>
+          <div class="s muy-tenue">Es solo una sugerencia: la decisión es tuya.</div></div>` : ''}
+      <div class="gr-acciones">
+        <div class="acciones" style="margin:0">
+          <button class="btn chico" data-medir>Medir masters</button>
+          ${datos.ia ? `<button class="btn chico" data-ia>Pedir sugerencia a la IA</button>` : '<span class="s muy-tenue">IA: falta GEMINI_API_KEY o GROQ_API_KEY</span>'}
+          <button class="btn chico" data-conservar title="No vuelve a aparecer salvo que el grupo cambie">Conservar todas</button>
+        </div>
+        <div class="acciones" style="margin:0">
+          ${borrar.length && quedan.length > 1 ? `<label class="s">Escuchas y playlists pasan a
+            <select data-destino>${quedan.map(e => `<option value="${esc(e.ruta)}" ${e.ruta === destinoDe[g.clave] ? 'selected' : ''}>${String.fromCharCode(65 + g.ediciones.indexOf(e))} · ${esc(e.formato)}</option>`).join('')}</select></label>` : ''}
+          <button class="btn oro" data-eliminar ${!borrar.length || !quedan.length || datos.ocupado ? 'disabled' : ''}>
+            ${borrar.length ? `Eliminar ${borrar.length} · libera ${GB(libera)}` : 'Marca qué eliminar'}</button>
+        </div>
+      </div>
+      ${!quedan.length ? '<div class="s mal">Debe quedar al menos una edición.</div>' : ''}
+    </div>` : ''}
+  </div>`;
+}
+
+function pintar() {
+  clearTimeout(timer);
+  const cont = document.getElementById('grupos');
+  if (datos.error) { cont.innerHTML = `<div class="flash error">${esc(datos.error)}</div>`; return; }
+  document.getElementById('n-todos').textContent = datos.grupos.length;
+  document.getElementById('n-distinta').textContent = datos.grupos.filter(g => !g.misma_calidad).length;
+  document.getElementById('n-misma').textContent = datos.grupos.filter(g => g.misma_calidad).length;
+  document.getElementById('resumen').innerHTML = datos.grupos.length
+    ? `<div class="total-rep"><b>${GB(datos.liberable)}</b><span>se podrían liberar dejando una edición por álbum · ${datos.grupos.length} álbumes repetidos</span></div>` : '';
+  const md = datos.midiendo;
+  document.getElementById('midiendo').innerHTML = md.actual
+    ? `<div class="estado-vivo"><span class="giro"></span>Midiendo masters · ${esc(corto(md.actual))} ${md.avance[0]}/${md.avance[1]} · ${md.cola.length} en cola
+       <button class="btn chico" id="cancelar-medir" style="margin-left:auto">Detener</button></div>` : '';
+  const cm = document.getElementById('cancelar-medir');
+  if (cm) cm.onclick = async () => { await post('/api/repetidos/medir/cancelar'); cargar(); };
+  const v = visibles();
+  cont.innerHTML = !datos.grupos.length
+    ? '<div class="sin-problemas">No hay álbumes repetidos (o ya revisaste todos).</div>'
+    : v.length ? v.slice(0, mostrar).map(grupoHtml).join('') : '<div class="vacio"><p>Nada coincide con el filtro.</p></div>';
+  document.getElementById('mas-wrap').style.display = v.length > mostrar ? '' : 'none';
+  enlazar(cont);
+  historial();
+  if (md.actual || md.cola.length) timer = setTimeout(cargar, 3000);
+}
+
+function repintar(clave) {
+  const g = datos.grupos.find(x => x.clave === clave);
+  const viejo = document.querySelector(`.grupo-rep[data-clave="${CSS.escape(clave)}"]`);
+  if (!g || !viejo) return pintar();
+  const t = document.createElement('div'); t.innerHTML = grupoHtml(g);
+  const nuevo = t.firstElementChild; viejo.replaceWith(nuevo); enlazar(nuevo.parentElement, nuevo);
+}
+
+function enlazar(cont, solo) {
+  (solo ? [solo] : cont.querySelectorAll('.grupo-rep')).forEach(card => {
+    const clave = card.dataset.clave, g = datos.grupos.find(x => x.clave === clave);
+    card.querySelector('[data-abrir]').onclick = () => {
+      if (abiertos.has(clave)) abiertos.delete(clave); else { abiertos.add(clave); cargarDetalle(g); }
+      repintar(clave);
+    };
+    card.querySelectorAll('[data-dec]').forEach(b => b.onclick = () => {
+      eleccionDe(g)[b.dataset.ruta] = b.dataset.dec; repintar(clave);
+    });
+    const sel = card.querySelector('[data-destino]'); if (sel) sel.onchange = () => { destinoDe[clave] = sel.value; };
+    const ap = card.querySelector('[data-aplicar]');
+    if (ap) ap.onclick = () => {
+      const s = g.sugerencia, el = eleccionDe(g);
+      g.ediciones.forEach(e => el[e.ruta] = s.eliminar.includes(e.ruta) && !s.conservar.includes(e.ruta) ? 'eliminar' : 'conservar');
+      if (!g.ediciones.some(e => el[e.ruta] === 'conservar')) g.ediciones.forEach(e => el[e.ruta] = 'conservar');
+      if (s.recomendada) destinoDe[clave] = s.recomendada;
+      repintar(clave);
+    };
+    const m = card.querySelector('[data-medir]');
+    if (m) m.onclick = async () => { m.disabled = true; const r = await post('/api/repetidos/medir', {clave});
+                                     if (!r.ok) toast('No se pudo medir', r.error || ''); cargar(); };
+    const ia = card.querySelector('[data-ia]');
+    if (ia) ia.onclick = async () => {
+      ia.disabled = true; ia.innerHTML = '<span class="giro mini"></span> Consultando…';
+      const r = await post('/api/repetidos/sugerir', {clave});
+      if (r.ok) g.sugerencia = r.sugerencia; else toast('La IA no respondió', r.error || '');
+      repintar(clave);
+    };
+    const c = card.querySelector('[data-conservar]');
+    if (c) c.onclick = async () => {
+      const r = await post('/api/repetidos/conservar', {clave, firma: g.firma});
+      if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+      toast('Grupo revisado', `${g.album}: se conservan todas las ediciones`);
+      datos.grupos = datos.grupos.filter(x => x.clave !== clave); abiertos.delete(clave); pintar();
+    };
+    const el = card.querySelector('[data-eliminar]'); if (el) el.onclick = () => confirmar(g);
+  });
+}
+
+async function cargarDetalle(g) {
+  if (detalles[g.clave] && !detalles[g.clave].error) return;
+  detalles[g.clave] = {cargando: true};
+  try {
+    const r = await (await fetch('/api/repetidos/detalle?clave=' + encodeURIComponent(g.clave))).json();
+    if (r.error) throw new Error(r.error);
+    detalles[g.clave] = {porRuta: Object.fromEntries(r.ediciones.map(e => [e.ruta, e]))};
+  } catch (e) { detalles[g.clave] = {error: true}; toast('No se pudieron leer los tags', e.message); }
+  repintar(g.clave);
+}
+
+// ── doble confirmación ──
+function modal(titulo, cuerpo, boton, alAceptar, validar) {
+  const m = document.getElementById('modal'), ok = document.getElementById('m-ok');
+  document.getElementById('m-titulo').textContent = titulo;
+  document.getElementById('m-cuerpo').innerHTML = cuerpo;
+  ok.textContent = boton; ok.disabled = !!validar; ok.classList.toggle('peligro', !!validar);
+  const inp = m.querySelector('input');
+  if (inp) { inp.oninput = () => ok.disabled = !validar(inp.value); setTimeout(() => inp.focus(), 50); }
+  ok.onclick = alAceptar;
+  document.getElementById('m-cancelar').onclick = () => m.hidden = true;
+  m.hidden = false;
+}
+
+function confirmar(g) {
+  const el = eleccionDe(g), borrar = g.ediciones.filter(e => el[e.ruta] === 'eliminar');
+  const quedan = g.ediciones.filter(e => el[e.ruta] !== 'eliminar');
+  const destino = g.ediciones.find(e => e.ruta === destinoDe[g.clave]) || quedan[0];
+  const libera = borrar.reduce((s, e) => s + e.bytes, 0);
+  const uso = borrar.reduce((s, e) => s + e.escuchas + e.playlists + e.favoritos, 0);
+  const letra = e => String.fromCharCode(65 + g.ediciones.indexOf(e));
+  modal(`${g.artista} — ${g.album}`, `
+    <p>Se eliminarán <b>${borrar.length}</b> edición(es) y se liberarán <b>${GB(libera)}</b>:</p>
+    <ul class="lista-conf">${borrar.map(e => `<li><b>${letra(e)}</b> · ${esc(e.formato)} · ${MB(e.bytes)}<div class="s mono">${esc(rel(e.ruta))}</div></li>`).join('')}</ul>
+    <p>Se conserva${quedan.length > 1 ? 'n' : ''}: ${quedan.map(e => `<b>${letra(e)}</b> (${esc(e.formato)})`).join(', ')}.</p>
+    <p class="s">${uso ? `Sus escuchas, favoritos y playlists pasan a <b>${letra(destino)}</b>.` : 'No tienen escuchas, favoritos ni playlists.'} Antes se respalda music.db.</p>`,
+    'Continuar', () => segundo(g, borrar, destino, libera));
+}
+
+function segundo(g, borrar, destino, libera) {
+  modal('Esto no se puede deshacer', `
+    <div class="flash error" style="margin:0 0 .9rem">Los archivos se borran del disco de forma <b>permanente</b>: no van a una papelera y no hay copia.
+      Las ${borrar.length} edición(es) (${GB(libera)}) desaparecen también de Orbyte y del índice.</div>
+    <div class="campo"><label>Escribe <b class="mono">ELIMINAR</b> para confirmar</label>
+      <input type="text" autocomplete="off" autocapitalize="characters" spellcheck="false"></div>`,
+    'Eliminar definitivamente', async () => {
+      document.getElementById('modal').hidden = true;
+      const r = await post('/api/repetidos/eliminar', {clave: g.clave, firma: g.firma, confirmacion: 'ELIMINAR',
+                             borrar: borrar.map(e => e.ruta), destino: destino.ruta});
+      if (!r.ok) { toast('No se pudo eliminar', r.error || ''); return; }
+      abiertos.delete(g.clave); delete eleccion[g.clave]; delete detalles[g.clave];
+      seguir(r.id);
+    }, v => v.trim() === 'ELIMINAR');
+}
+
+async function seguir(uid) {
+  const u = await (await fetch('/api/artistas/unificacion/' + uid)).json();
+  document.getElementById('trabajo').innerHTML = `<section class="seccion"><h2 class="rotulo">Eliminando</h2><pre class="registro">${esc(u.registro || '')}</pre></section>`;
+  if (u.estado === 'en_curso') setTimeout(() => seguir(uid), 1200);
+  else { document.getElementById('trabajo').innerHTML = ''; cargar(); }
+}
+
+function historial() {
+  const h = datos.historial || [];
+  document.getElementById('historial-sec').hidden = !h.length;
+  document.getElementById('historial').innerHTML = h.map(u => `
+    <details class="aviso t-${u.estado === 'ok' ? 'ok' : u.estado === 'error' ? 'error' : 'resumen'}" style="display:block">
+      <summary style="cursor:pointer"><b>${esc(u.final)}</b> <span class="tenue">· ${u.estado === 'ok' ? `${GB((u.resultado || {}).liberado || 0)} liberados` : u.estado === 'error' ? 'con error' : 'en curso'} · ${new Date(u.ts * 1000).toLocaleString('es-CL')}</span></summary>
+      <pre class="registro" style="margin-top:.6rem">${esc(u.registro || '')}</pre></details>`).join('');
+  const curso = h.find(u => u.estado === 'en_curso');
+  if (curso && !document.getElementById('trabajo').innerHTML) seguir(curso.id);
+}
+
+async function cargar(recalcular) {
+  const sug = Object.fromEntries((datos?.grupos || []).filter(g => g.sugerencia).map(g => [g.clave, g.sugerencia]));
+  datos = await (await fetch('/api/repetidos' + (recalcular ? '?recalcular=1' : ''))).json();
+  datos.grupos.forEach(g => { if (!g.sugerencia && sug[g.clave]) g.sugerencia = sug[g.clave]; });
+  datos.midiendo = datos.midiendo || {cola: [], avance: [0, 0]};
+  pintar();
+}
+
+document.querySelectorAll('#filtros [data-f]').forEach(b => b.onclick = () => {
+  filtro = b.dataset.f; mostrar = PAG;
+  document.querySelectorAll('#filtros [data-f]').forEach(x => x.classList.toggle('activo', x === b)); pintar();
+});
+document.getElementById('buscar').oninput = e => { texto = e.target.value.trim(); mostrar = PAG; pintar(); };
+document.getElementById('mas').onclick = () => { mostrar += PAG; pintar(); };
+document.getElementById('recalcular').onclick = () => cargar(true);
+document.getElementById('medir-todo').onclick = () => {
+  const v = visibles(), sin = v.filter(g => g.ediciones.some(e => !e.medicion));
+  if (!sin.length) { toast('Todo medido', 'Los masters visibles ya están medidos'); return; }
+  modal('Medir todos los masters', `<p>Se medirán <b>${sin.length}</b> álbumes (${sin.reduce((s, g) => s + g.ediciones.length, 0)} ediciones).
+    Cada pista se decodifica completa, así que puede tardar horas; usa el «Uso del procesador» de Ajustes y lo puedes detener cuando quieras.</p>`,
+    'Medir', async () => { document.getElementById('modal').hidden = true;
+      const r = await post('/api/repetidos/medir', {claves: sin.map(g => g.clave)});
+      if (!r.ok) toast('No se pudo medir', r.error || ''); cargar(); });
+};
+cargar();
+</script>
+{% endblock %}

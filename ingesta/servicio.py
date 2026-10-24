@@ -34,6 +34,7 @@ from .almacen import PREVIOS
 from . import recursos
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
+from . import repetidos as repetidos_mod
 import threading
 import traceback
 
@@ -604,6 +605,203 @@ def api_fantasmas_limpiar():
             _unificando.release()
 
     threading.Thread(target=trabajo, daemon=True, name='limpiar-fantasmas').start()
+    return jsonify(ok=True, id=uid)
+
+
+# ─────────────────────────── álbumes repetidos ───────────────────────────
+
+_cache_repetidos = {'clave': None, 'grupos': []}
+_midiendo = {'cola': [], 'actual': None, 'avance': [0, 0], 'hilo': None}
+_lock_medir = threading.Lock()
+
+
+def _repetidos(forzar=False):
+    """Grupos de repetidos (sin los marcados «conservar todas»); se recalcula si cambia music.db."""
+    aj = almacen.ajustes()
+    db = aj['db_orbyte']
+    revisados = almacen.repetidos_revisados()
+    try:
+        clave = (os.path.getmtime(db), tuple(sorted(revisados.items())))
+    except OSError:
+        clave = None
+    if forzar or clave is None or _cache_repetidos['clave'] != clave:
+        _cache_repetidos.update(clave=clave, grupos=repetidos_mod.detectar(db, revisados))
+    return _cache_repetidos['grupos']
+
+
+def _grupo(clave, firma=None):
+    g = next((x for x in _repetidos() if x['clave'] == clave), None)
+    if g and firma and g['firma'] != firma:
+        return None
+    return g
+
+
+def _con_mediciones(g):
+    for e in g['ediciones']:
+        e['medicion'] = almacen.medicion(e['ruta'], e['bytes'])
+        e['en_cola'] = e['ruta'] in _midiendo['cola'] or _midiendo['actual'] == e['ruta']
+    return g
+
+
+@app.route('/repetidos')
+def repetidos_pagina():
+    return render_template('repetidos.html', pagina='repetidos')
+
+
+@app.route('/api/repetidos')
+def api_repetidos():
+    try:
+        grupos = [_con_mediciones(dict(g, ediciones=[dict(e) for e in g['ediciones']]))
+                  for g in _repetidos(request.args.get('recalcular') == '1')]
+    except Exception as e:
+        log.error('Repetidos:\n%s', traceback.format_exc())
+        return jsonify(grupos=[], error=str(e))
+    for g in grupos:
+        g['sugerencia'] = almacen.sugerencia(g['clave'], g['firma'])
+    return jsonify(grupos=grupos, liberable=sum(g['liberable'] for g in grupos),
+                   raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica',
+                   ocupado=_unificando.locked(), midiendo=dict(_midiendo, hilo=None),
+                   historial=[u for u in almacen.unificaciones(30) if u.get('clave') == 'repetidos'],
+                   ia=bool(os.environ.get('GEMINI_API_KEY') or os.environ.get('GROQ_API_KEY')))
+
+
+@app.route('/api/repetidos/detalle')
+def api_repetidos_detalle():
+    g = _grupo(request.args.get('clave') or '')
+    if not g:
+        return jsonify(error='El grupo cambió o ya no existe: recarga la página'), 404
+    g = repetidos_mod.detalle(almacen.ajustes()['db_orbyte'], dict(g, ediciones=[dict(e) for e in g['ediciones']]))
+    return jsonify(_con_mediciones(g))
+
+
+@app.route('/api/repetidos/portada')
+def api_repetidos_portada():
+    ruta = request.args.get('ruta') or ''
+    if not any(e.get('portada') == ruta for g in _repetidos() for e in g['ediciones']) or not os.path.isfile(ruta):
+        abort(404)
+    return send_file(_miniatura(ruta) or ruta, max_age=3600)
+
+
+def _medidor():
+    while True:
+        with _lock_medir:
+            if not _midiendo['cola']:
+                _midiendo.update(actual=None, avance=[0, 0], hilo=None)
+                return
+            ruta = _midiendo['cola'].pop(0)
+            _midiendo.update(actual=ruta, avance=[0, 0])
+        e = next((x for g in _repetidos() for x in g['ediciones'] if x['ruta'] == ruta), None)
+        if not e or almacen.medicion(ruta, e['bytes']):
+            continue
+        try:
+            datos = repetidos_mod.medir(almacen.ajustes()['db_orbyte'], e,
+                                        lambda i, n: _midiendo.update(avance=[i, n]),
+                                        recursos.nucleos(almacen.ajustes()))
+        except Exception as ex:
+            log.error('Medir %s:\n%s', ruta, traceback.format_exc())
+            datos = {'error': str(ex)}
+        almacen.guardar_medicion(ruta, e['bytes'], datos)
+
+
+@app.route('/api/repetidos/medir', methods=['POST'])
+def api_repetidos_medir():
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    d = request.get_json(silent=True) or {}
+    claves = d.get('claves') or ([d['clave']] if d.get('clave') else [])
+    rutas = []
+    for g in _repetidos():
+        if g['clave'] in claves:
+            rutas += [e['ruta'] for e in g['ediciones'] if not almacen.medicion(e['ruta'], e['bytes'])]
+    with _lock_medir:
+        for r in rutas:
+            if r not in _midiendo['cola'] and r != _midiendo['actual']:
+                _midiendo['cola'].append(r)
+        if _midiendo['cola'] and not _midiendo['hilo']:
+            _midiendo['hilo'] = threading.Thread(target=_medidor, daemon=True, name='medir-master')
+            _midiendo['hilo'].start()
+    return jsonify(ok=True, en_cola=len(_midiendo['cola']))
+
+
+@app.route('/api/repetidos/medir/cancelar', methods=['POST'])
+def api_repetidos_medir_cancelar():
+    with _lock_medir:
+        _midiendo['cola'].clear()
+    return jsonify(ok=True)
+
+
+@app.route('/api/repetidos/sugerir', methods=['POST'])
+def api_repetidos_sugerir():
+    d = request.get_json(silent=True) or {}
+    g = _grupo(d.get('clave') or '')
+    if not g:
+        return jsonify(ok=False, error='El grupo cambió o ya no existe: recarga la página'), 404
+    g = repetidos_mod.detalle(almacen.ajustes()['db_orbyte'], dict(g, ediciones=[dict(e) for e in g['ediciones']]))
+    mediciones = {e['ruta']: almacen.medicion(e['ruta'], e['bytes']) for e in g['ediciones']}
+    r = repetidos_mod.sugerir(g, mediciones)
+    if r.get('error'):
+        return jsonify(ok=False, error=r['error'])
+    r['con_medicion'] = sum(1 for m in mediciones.values() if m and m.get('lufs') is not None)
+    almacen.guardar_sugerencia(g['clave'], g['firma'], r)
+    return jsonify(ok=True, sugerencia=r)
+
+
+@app.route('/api/repetidos/conservar', methods=['POST'])
+def api_repetidos_conservar():
+    d = request.get_json(silent=True) or {}
+    g = _grupo(d.get('clave') or '', d.get('firma'))
+    if not g:
+        return jsonify(ok=False, error='El grupo cambió: recarga la página'), 409
+    almacen.marcar_repetido(g['clave'], g['firma'])
+    return jsonify(ok=True)
+
+
+@app.route('/api/repetidos/eliminar', methods=['POST'])
+def api_repetidos_eliminar():
+    d = request.get_json(silent=True) or {}
+    if d.get('confirmacion') != 'ELIMINAR':
+        return jsonify(ok=False, error='Falta la confirmación'), 400
+    if procesador.actual:
+        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    g = _grupo(d.get('clave') or '', d.get('firma'))
+    if not g:
+        return jsonify(ok=False, error='El grupo cambió desde que lo miraste: recarga la página'), 409
+    rutas = {e['ruta'] for e in g['ediciones']}
+    borrar = [r for r in d.get('borrar') or [] if r in rutas]
+    quedan = [e['ruta'] for e in g['ediciones'] if e['ruta'] not in borrar]
+    destino = d.get('destino') if d.get('destino') in quedan else (quedan[0] if quedan else None)
+    if not borrar or not destino:
+        return jsonify(ok=False, error='Debe quedar al menos una edición'), 400
+    if _midiendo['actual'] in borrar:
+        return jsonify(ok=False, error='Se está midiendo una de esas ediciones: espera a que termine'), 409
+    if not _unificando.acquire(blocking=False):
+        return jsonify(ok=False, error='Hay otra operación sobre la base en curso'), 409
+    aj = almacen.ajustes()
+    titulo = f'{g["artista"]} — {g["album"]}'
+    uid = almacen.nueva_unificacion('repetidos', ' | '.join(borrar), titulo)
+
+    def trabajo():
+        try:
+            res = repetidos_mod.eliminar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', g, borrar, destino,
+                                         lambda m: almacen.unificacion_log(uid, m))
+            almacen.cerrar_unificacion(uid, 'ok', res)
+            if len(quedan) > 1:          # elegiste quedarte con varias: el grupo queda revisado así
+                almacen.marcar_repetido(g['clave'], '|'.join(sorted(quedan)))
+            almacen.avisar('ok', f'Repetido resuelto: {titulo}',
+                           f'{res["liberado"] / 1e9:.2f} GB liberados · {res["movidas"]} referencias pasadas '
+                           f'a la edición que se queda')
+        except Exception as e:
+            log.error('Repetidos %s:\n%s', titulo, traceback.format_exc())
+            almacen.unificacion_log(uid, f'ERROR: {type(e).__name__}: {e}')
+            almacen.cerrar_unificacion(uid, 'error', {'error': str(e)})
+            almacen.avisar('error', f'No se pudo eliminar: {titulo}', str(e))
+        finally:
+            _cache_repetidos['clave'] = None
+            _unificando.release()
+
+    threading.Thread(target=trabajo, daemon=True, name='eliminar-repetidos').start()
     return jsonify(ok=True, id=uid)
 
 
