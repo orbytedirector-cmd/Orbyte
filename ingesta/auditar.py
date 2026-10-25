@@ -93,7 +93,9 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4):
                 if not p['is_dsd']:
                     cambios['is_dsd'] = 1
                 color = led(True, nombre, None)
-                if color and p['led_color'] != color and not p['is_mqa']:
+                # el LED solo se corrige si era el automático de la tasa mal leída; si es otro, lo curaste tú
+                if color and p['led_color'] != color and not p['is_mqa'] \
+                        and p['led_color'] in (None, '', led(True, p['dsd_rate'], None)):
                     cambios['led_color'] = color
                 if cambios:
                     hallazgos['tasa DSD mal catalogada'].append(
@@ -110,12 +112,14 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4):
                 if real.get('canales') and p['channels'] and p['channels'] != real['canales']:
                     cambios['channels'] = real['canales']
                     det.append(f'{p["channels"]} → {real["canales"]} canales')
-                color = led(False, None, cambios.get('sample_rate') or p['sample_rate'])
-                if p['led_color'] in ('yellow', 'white') and p['led_color'] != color:
-                    cambios['led_color'] = color
-                    det.append(f'LED {p["led_color"]} → {color}')
                 if cambios:
                     hallazgos['datos técnicos PCM distintos al archivo'].append((p, ', '.join(det), cambios))
+                color = led(False, None, cambios.get('sample_rate') or p['sample_rate'])
+                if p['led_color'] in ('yellow', 'white') and p['led_color'] != color:
+                    # el indexador no reescribe led_color (campo curado a mano): solo se informa
+                    hallazgos['LED distinto al que da la frecuencia (¿curado a mano?) — no se toca'].append(
+                        (p, f'{p["led_color"]} con {(cambios.get("sample_rate") or p["sample_rate"]) / 1000:g} kHz '
+                            f'{p["bit_depth"] or ""} bits'.strip(), {}))
 
     salida('')
     faltan = len(hallazgos.get('archivo que ya no existe', []))
@@ -136,6 +140,17 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4):
             salida(f'    {n:4d}  {c}')
         if len(por_carpeta) > 6:
             salida(f'    … y {len(por_carpeta) - 6} carpetas más')
+    informe = os.path.join(os.path.dirname(os.path.abspath(db)), 'ingesta_datos', 'auditoria.tsv')
+    try:
+        os.makedirs(os.path.dirname(informe), exist_ok=True)
+        with open(informe, 'w', encoding='utf-8') as f:
+            f.write('tipo\tid\tarchivo\tdetalle\n')
+            for tipo, lista in hallazgos.items():
+                for p, det, _ in lista:
+                    f.write(f'{tipo}\t{p["id"]}\t{p["file_path"]}\t{det}\n')
+        salida(f'\nInforme completo: {informe}')
+    except OSError:
+        pass
     corregibles = [(p, c) for t, l in hallazgos.items() for p, _, c in l if c]
     if not aplicar:
         salida(f'\nNada se cambió. {len(corregibles)} pistas se pueden corregir con --aplicar '
