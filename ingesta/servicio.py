@@ -657,7 +657,8 @@ def api_repetidos():
         log.error('Repetidos:\n%s', traceback.format_exc())
         return jsonify(grupos=[], error=str(e))
     for g in grupos:
-        g['sugerencia'] = almacen.sugerencia(g['clave'], g['firma'])
+        sug = almacen.sugerencia(g['clave'], g['firma'])
+        g['sugerencia'] = sug if sug and sug.get('v') == repetidos_mod.VERSION_IA else None
     return jsonify(grupos=grupos, liberable=sum(g['liberable'] for g in grupos),
                    raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica',
                    ocupado=_unificando.locked(), midiendo=dict(_midiendo, hilo=None),

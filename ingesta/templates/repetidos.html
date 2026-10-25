@@ -94,6 +94,7 @@ function edicionHtml(g, e, i) {
         <div class="f-chips" style="justify-content:flex-start;margin-top:.3rem">
           <span class="chip q-${e.calidad}"><span class="led"></span>${esc(e.calidad)}</span>
           <span class="chip">${esc(e.formato)}</span>
+          ${e.multicanal ? `<span class="chip q-DSD" title="Otra mezcla, no una copia del estéreo">${esc(e.multicanal)}</span>` : ''}
           ${sug && sug.recomendada === e.ruta ? '<span class="chip q-MQA">IA recomienda</span>' : ''}
         </div>
       </div>
@@ -123,6 +124,7 @@ function grupoHtml(g) {
     <button class="gr-cab" data-abrir>
       <div style="min-width:0"><div class="t">${esc(g.album)}</div><div class="s">${esc(g.artista)} · ${g.ediciones.length} ediciones</div></div>
       <div class="f-chips">${calidades.map(c => `<span class="chip q-${c}"><span class="led"></span>${c}</span>`).join('')}
+        ${g.ediciones.some(e => e.multicanal) ? '<span class="chip q-DSD">Multicanal</span>' : ''}
         <span class="libera" title="Espacio que se libera dejando solo la edición más pesada… o la que elijas">hasta ${GB(g.liberable)}</span>
         <span class="flecha">▾</span></div>
     </button>
