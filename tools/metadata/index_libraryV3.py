@@ -44,10 +44,29 @@ COVER_FILENAMES  = [
     'front.jpg', 'front.png', 'albumart.jpg', 'artwork.jpg', 'thumb.jpg',
 ]
 
-DSD_RATES = {
-    176400: "DSD64", 352800: "DSD128",
-    705600: "DSD256", 1411200: "DSD512",
-}
+def dsd_fs_real(file_path, sample_rate_ffprobe=0):
+    """Frecuencia DSD real (2822400 = DSD64) leída de la cabecera del .dsf/.dff.
+    ffprobe informa fs/8 (DSD64 → 352800); el mapa antiguo la tomaba como fs/16 y
+    marcaba todo un nivel más alto (DSD64 como DSD128, DSD128 como DSD256)."""
+    try:
+        with open(file_path, "rb") as f:
+            cab = f.read(65536)
+        if cab[:4] == b"DSD " and cab[28:32] == b"fmt ":
+            return int.from_bytes(cab[56:60], "little")
+        i = cab.find(b"FS  ")
+        if i >= 0 and b"FRM8" in cab[:i]:
+            return int.from_bytes(cab[i + 12:i + 16], "big")
+    except OSError:
+        pass
+    return (sample_rate_ffprobe or 0) * 8
+
+
+def dsd_nombre(fs):
+    """2822400 → DSD64, 5644800 → DSD128… (también la familia de 48 kHz: 3072000 → DSD64)."""
+    if not fs:
+        return None
+    base = 44100 if fs % 44100 == 0 else 48000
+    return f"DSD{round(fs / base)}"
 
 CHANNEL_LAYOUT_MAP = {
     "mono":        "Center",
@@ -219,7 +238,7 @@ def extract_metadata(file_path: str) -> dict:
     # ── DSD ──────────────────────────────────────────────────
     ext    = Path(file_path).suffix.lower()
     is_dsd = ext in {'.dsf', '.dff'}
-    dsd_rate = DSD_RATES.get(sample_rate) if is_dsd else None
+    dsd_rate = dsd_nombre(dsd_fs_real(file_path, sample_rate)) if is_dsd else None
 
     # ── MQA ──────────────────────────────────────────────────
     is_mqa   = False
