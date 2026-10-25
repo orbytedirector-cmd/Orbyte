@@ -9,6 +9,7 @@ Orbyte Ingesta — álbumes repetidos: el mismo álbum en varias ediciones o cal
   eliminar()  respaldo de music.db → escuchas/favoritos/playlists a la edición que se queda → borra los archivos
               del disco (irrecuperable) y la saca de Orbyte
 """
+import difflib
 import json
 import math
 import os
@@ -27,7 +28,6 @@ from .fantasmas import _titulo, _tablas, borrar_album_db
 
 LOSSY_SQL = ("(COALESCE(t.compression_mode,'')='Lossy' OR LOWER(COALESCE(t.codec,'')) IN ("
              + ','.join(f"'{c}'" for c in sorted(analisis.LOSSY_CODECS)) + "))")
-DSD_NOMBRE = {2822400: 'DSD64', 5644800: 'DSD128', 11289600: 'DSD256', 22579200: 'DSD512'}
 RANGO = {'Lossy': 0, 'CD': 1, 'HR': 2, 'MQA': 2, 'DSD': 3}
 
 
@@ -40,7 +40,7 @@ def _base_edicion(ruta):
 
 def _formato(e):
     if e['dsd']:
-        return DSD_NOMBRE.get(e['dsd_rate'] or 0, 'DSD')
+        return f'DSD{e["dsd_rate"]}' if e['dsd_rate'] else 'DSD'
     if e['lossy'] * 2 > e['n']:
         codec = (e['codecs'] or 'mp3').split(',')[0].upper()
         k = analisis.kbps_nominal(e['bitrate'], codec.lower()) if e['bitrate'] else None
@@ -62,6 +62,16 @@ def _nombre_limpio(nombre):
     return n.strip() or (nombre or '')
 
 
+def _multicanal(e):
+    """«Cuadrafónico 4.0», «5.1»… o None si es estéreo/mono."""
+    c = e.get('canales') or 0
+    if c <= 2:
+        return None
+    lay = (e.get('layout') or '').strip()
+    nombre = lay if re.match(r'^\d\.\d', lay) else {3: '3.0', 4: '4.0', 5: '5.0', 6: '5.1', 8: '7.1'}.get(c, f'{c} canales')
+    return f'Cuadrafónico {nombre}' if c == 4 else f'Multicanal {nombre}'
+
+
 def detectar(db, revisados=None):
     """Grupos de ediciones repetidas, de mayor a menor espacio liberable."""
     revisados = revisados or {}
@@ -71,7 +81,8 @@ def detectar(db, revisados=None):
         filas = con.execute(f'''
             SELECT al.id, al.name, al.year, al.path, al.cover_path, al.artist_id, ar.name AS artista,
                    COUNT(t.id) AS n, COALESCE(SUM(t.duration), 0) AS dur, COALESCE(SUM(t.file_size), 0) AS bytes,
-                   MAX(t.sample_rate) AS sr, MAX(CAST(t.bit_depth AS INTEGER)) AS bits, MAX(CASE WHEN t.is_dsd=1 THEN t.sample_rate END) AS dsd_sr, MAX(t.sample_rate_real) AS sr_real,
+                   MAX(t.sample_rate) AS sr, MAX(CAST(t.bit_depth AS INTEGER)) AS bits, GROUP_CONCAT(DISTINCT t.dsd_rate) AS dsd_txt, MAX(t.channels) AS canales,
+                   GROUP_CONCAT(DISTINCT t.channel_layout) AS layouts, MAX(t.sample_rate_real) AS sr_real,
                    SUM(CASE WHEN t.is_dsd=1 THEN 1 ELSE 0 END) AS dsd, SUM(CASE WHEN t.is_mqa=1 THEN 1 ELSE 0 END) AS mqa,
                    SUM(CASE WHEN {LOSSY_SQL} THEN 1 ELSE 0 END) AS lossy, MAX(t.bitrate) AS bitrate,
                    GROUP_CONCAT(DISTINCT LOWER(t.codec)) AS codecs
@@ -103,7 +114,11 @@ def detectar(db, revisados=None):
         e['sr'] = max(e['sr'], f['sr'] or 0)
         e['bits'] = max(e['bits'], f['bits'] or 0)
         e['bitrate'] = max(e['bitrate'], f['bitrate'] or 0)
-        e['dsd_rate'] = max(e['dsd_rate'], f['dsd_sr'] or 0)
+        for x in re.findall(r'\d+', f['dsd_txt'] or ''):        # «DSD64», «DSD128»…
+            e['dsd_rate'] = max(e['dsd_rate'], int(x))
+        e['canales'] = max(e.get('canales', 0), f['canales'] or 0)
+        if f['layouts']:
+            e['layout'] = f['layouts'].split(',')[0]
         e['sr_real'] = max(e.get('sr_real', 0), f['sr_real'] or 0)
         e['escuchas'] += escuchas.get(f['id'], 0)
         e['playlists'] += en_playlists.get(f['id'], 0)
@@ -128,6 +143,7 @@ def detectar(db, revisados=None):
             e['calidad'] = ('DSD' if e['dsd'] * 2 >= e['n'] else 'MQA' if e['mqa'] * 2 >= e['n']
                             else 'Lossy' if e['lossy'] * 2 > e['n'] else 'HR' if e['sr'] > 48000 else 'CD')
             e['formato'] = _formato(e)
+            e['multicanal'] = _multicanal(e)
             e['anidada_en'] = next((o['ruta'] for o in eds if o is not e and e['ruta'].startswith(o['ruta'] + '/')),
                                    None)
             e['contiene'] = [o['ruta'] for o in eds if o is not e and o['ruta'].startswith(e['ruta'] + '/')]
@@ -165,18 +181,36 @@ def detalle(db, grupo):
     finally:
         con.close()
     ref = max(grupo['ediciones'], key=lambda e: e['n'])
-    ref_t = {_titulo(p['t']) for p in ref['pistas_lista']}
     for e in grupo['ediciones']:
-        t = {_titulo(p['t']) for p in e['pistas_lista']}
-        if e is ref:
-            e['relacion'] = 'referencia'
-        elif t == ref_t:
-            e['relacion'] = 'mismas pistas'
-        else:
-            partes = [f'{len(t - ref_t)} pista(s) que las otras no tienen' if t - ref_t else '',
-                      f'le faltan {len(ref_t - t)}' if ref_t - t else '']
-            e['relacion'] = ' · '.join(x for x in partes if x)
+        e['relacion'] = 'referencia' if e is ref else _comparar(e['pistas_lista'], ref['pistas_lista'])
     return grupo
+
+
+def _mismo_titulo(a, b):
+    a, b = _titulo(a), _titulo(b)
+    if not a or not b:
+        return False
+    return a == b or (min(len(a), len(b)) >= 6 and (a in b or b in a)) or \
+        difflib.SequenceMatcher(None, a, b).ratio() >= 0.85
+
+
+def _comparar(pistas, ref):
+    """Cuántas pistas comparte con la edición de referencia (por título parecido o, si no, por duración)."""
+    if len(pistas) == len(ref) and all(abs(p['d'] - r['d']) <= 3 for p, r in zip(pistas, ref)):
+        return 'mismas pistas'
+    libres, comunes = list(ref), 0
+    for p in pistas:
+        r = next((r for r in libres if _mismo_titulo(p['t'], r['t'])), None) or \
+            next((r for r in libres if abs(p['d'] - r['d']) <= 2), None)
+        if r:
+            libres.remove(r)
+            comunes += 1
+    propias, faltan = len(pistas) - comunes, len(libres)
+    if not propias and not faltan:
+        return 'mismas pistas'
+    partes = [f'{propias} pista(s) que las otras no tienen' if propias else '',
+              f'le faltan {faltan}' if faltan else '']
+    return ' · '.join(x for x in partes if x)
 
 
 def _tags_edicion(ruta):
@@ -247,6 +281,7 @@ def medir(db, edicion, progreso=None, trabajadores=1):
 
 # ─────────────────────────── sugerencia de la IA ───────────────────────────
 
+VERSION_IA = 2      # sube cuando cambia lo que ve la IA: las sugerencias anteriores dejan de mostrarse
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 
@@ -261,6 +296,8 @@ def _prompt(grupo, mediciones):
         t = e.get('tags') or {}
         datos = [f'carpeta «{os.path.basename(e["ruta"])}»', f'calidad {e["calidad"]} ({e["formato"]})',
                  f'{e["n"]} pistas', f'{round(e["dur"] / 60)} min', f'{e["bytes"] / 1e6:.0f} MB']
+        if e.get('multicanal'):
+            datos.append(f'{e["multicanal"]} ({e["canales"]} canales: es otra mezcla, no una copia del estéreo)')
         if e.get('relacion') and e['relacion'] != 'referencia':
             datos.append(f'lista de pistas: {e["relacion"]}')
         for k, nombre in (('sello', 'sello'), ('catalogo', 'catálogo'), ('pais', 'país'),
@@ -274,7 +311,9 @@ def _prompt(grupo, mediciones):
     lineas += ['', 'Soy audiófilo y quiero liberar espacio. Dime qué edición conviene conservar y cuáles se pueden '
                    'eliminar. Considera la calidad técnica, la masterización (rango dinámico: PLR y LRA más altos '
                    'suelen indicar menos compresión), la reputación conocida de esas ediciones o prensajes '
-                   '(por ejemplo japonesas, remasters, MFSL) y si alguna trae pistas que las otras no. '
+                   '(por ejemplo japonesas, remasters, MFSL), si alguna es una mezcla multicanal o cuadrafónica distinta '
+                   'y si alguna trae pistas que las otras no. No compares el volumen (LUFS) entre DSD y PCM: '
+                   'el DSD suele ir 6 dB más bajo por convención; compara PLR y LRA. '
                    'Si dos valen la pena por motivos distintos, dilo.',
                'Responde SOLO con JSON: {"conservar": ["A"], "eliminar": ["B"], "recomendada": "A", '
                '"razon": "2 o 3 frases en español", "confianza": "alta|media|baja"}']
@@ -335,7 +374,7 @@ def _normalizar(r, letras, fuente):
     rec = (r.get('recomendada') or '').strip().upper()[:1]
     return {'conservar': rutas(r.get('conservar')), 'eliminar': rutas(r.get('eliminar')),
             'recomendada': letras.get(rec), 'razon': str(r.get('razon') or '')[:800],
-            'confianza': r.get('confianza'), 'fuente': fuente,
+            'confianza': r.get('confianza'), 'fuente': fuente, 'v': VERSION_IA,
             'letras': {v: k for k, v in letras.items()}}
 
 
