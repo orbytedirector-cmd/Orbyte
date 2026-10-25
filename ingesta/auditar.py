@@ -57,11 +57,13 @@ def leer(ruta):
         return None, f'{type(e).__name__}: {e}'
 
 
-def auditar(db, aplicar=False, salida=print, trabajadores=4):
+def auditar(db, aplicar=False, salida=print, trabajadores=4, solo_dsd=False):
     con = sqlite3.connect(db, timeout=60)
     con.row_factory = sqlite3.Row
     pistas = con.execute('SELECT id, file_path, file_size, sample_rate, bit_depth, channels, is_dsd, dsd_rate, '
-                         'is_mqa, led_color, compression_mode FROM tracks').fetchall()
+                         'is_mqa, led_color, compression_mode FROM tracks' +
+                         (" WHERE is_dsd=1 OR LOWER(file_path) LIKE '%.dsf' OR LOWER(file_path) LIKE '%.dff'"
+                          if solo_dsd else '')).fetchall()
     salida(f'Revisando {len(pistas)} pistas…')
     hallazgos = defaultdict(list)          # tipo → [(pista, detalle, cambios)]
     errores = Counter()
@@ -82,7 +84,7 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4):
                 errores[err.split(':')[0]] += 1
                 hallazgos['no se pudo leer la cabecera'].append((p, err, {}))
                 continue
-            if real.get('tam') != p['file_size'] and p['file_size'] is not None:
+            if not solo_dsd and real.get('tam') != p['file_size'] and p['file_size'] is not None:
                 hallazgos['el archivo cambió desde que se indexó (tamaño distinto)'].append(
                     (p, f'{p["file_size"]} → {real["tam"]} bytes', {'file_size': real['tam']}))
             if real.get('dsd'):
@@ -95,12 +97,14 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4):
                 color = led(True, nombre, None)
                 # el LED solo se corrige si era el automático de la tasa mal leída; si es otro, lo curaste tú
                 if color and p['led_color'] != color and not p['is_mqa'] \
-                        and p['led_color'] in (None, '', led(True, p['dsd_rate'], None)):
+                        and (solo_dsd or p['led_color'] in (None, '', led(True, p['dsd_rate'], None))):
                     cambios['led_color'] = color
                 if cambios:
-                    hallazgos['tasa DSD mal catalogada'].append(
-                        (p, f'{p["dsd_rate"] or "—"} → {nombre}', cambios))
-            elif real.get('sr') and not p['is_mqa'] and not p['is_dsd']:
+                    det = f'{p["dsd_rate"] or "—"} → {nombre}' if 'dsd_rate' in cambios else nombre
+                    if 'led_color' in cambios:
+                        det += f', LED {p["led_color"] or "—"} → {cambios["led_color"]}'
+                    hallazgos['tasa o LED DSD mal catalogado'].append((p, det, cambios))
+            elif not solo_dsd and real.get('sr') and not p['is_mqa'] and not p['is_dsd']:
                 cambios, det = {}, []
                 if p['sample_rate'] and real['sr'] != p['sample_rate']:
                     cambios['sample_rate'] = real['sr']
@@ -174,10 +178,12 @@ def main():
     ap.add_argument('--db', default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                                  'music.db'))
     ap.add_argument('--aplicar', action='store_true')
+    ap.add_argument('--solo-dsd', action='store_true',
+                    help='solo pistas DSD: tasa y LED (cian DSD64/128, rojo DSD256, magenta DSD512); no toca nada más')
     a = ap.parse_args()
     if not os.path.isfile(a.db):
         sys.exit(f'No existe {a.db}')
-    auditar(a.db, a.aplicar)
+    auditar(a.db, a.aplicar, solo_dsd=a.solo_dsd)
 
 
 if __name__ == '__main__':
