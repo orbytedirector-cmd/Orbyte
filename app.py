@@ -3875,11 +3875,22 @@ def _hls_asegurar(absolute_path, codec):
 
 
 def _hls_duracion(absolute_path):
-    """Duracion de la pista segun ffprobe (lee solo la cabecera), en cache."""
+    """Duracion de la pista, en cache. DSF/DFF: por el conteo de muestras de su
+    cabecera — ffprobe la estima por el tamaño del archivo y cuenta la carátula
+    incrustada (segundos de más): la playlist prevista anunciaba segmentos
+    finales que nunca existían (404 al final de la pista)."""
     try:
         clave = (absolute_path, os.path.getmtime(absolute_path))
     except OSError:
         return None
+    if clave not in _hls_duraciones and absolute_path.lower().endswith(('.dsf', '.dff')):
+        try:
+            from ingesta import dsd as _dsd
+            i = _dsd.info(absolute_path)
+            if i.get('muestras') and i.get('fs'):
+                _hls_duraciones[clave] = i['muestras'] / i['fs']
+        except Exception:
+            pass
     if clave not in _hls_duraciones:
         try:
             r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
