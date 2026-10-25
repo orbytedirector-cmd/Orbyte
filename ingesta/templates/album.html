@@ -229,7 +229,10 @@
         <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ (cam.tags or {}).anio or '' }}" placeholder="{{ ta.anio or '' }}"></div>
         <div class="campo"><label>Género</label><input type="text" id="t-genero" value="{{ ta.genero or '' }}"></div>
       </div>
+      <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
+        <input type="text" id="t-genero2" value="{{ (cam.tags or {}).genero_secundario or (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
       <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">El año vacío = el de la edición identificada (o de los tags). Lo que escribas aquí manda sobre los tags de los archivos.</p>
+      <div id="auto-panel" class="auto-panel" hidden></div>
       <div class="tabla-wrap"><table class="tabla-tags">
         <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
         {% for x in r.plan or [] %}
@@ -242,7 +245,8 @@
         </tr>
         {% endfor %}
       </table></div>
-      <div class="acciones"><button class="btn oro" id="guardar-tags">Guardar y volver a revisar</button>
+      <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+        <button class="btn oro" id="guardar-tags">Guardar y volver a revisar</button>
         {% if cam.tags or cam.pistas %}<button class="btn" id="borrar-tags">Deshacer mis cambios</button>{% endif %}</div>
     </div>
   </details>
@@ -380,6 +384,8 @@ if (gt) gt.onclick = () => {
   const ta = {{ (r.tags_album or {}) |tojson if r else '{}' }};
   const tags = {};
   for (const k of ['artista', 'album', 'genero']) { const v = val('t-' + k); if (v && v !== (ta[k] || '')) tags[k] = v; }
+  const g2 = val('t-genero2'), g2i = document.getElementById('t-genero2');
+  if (g2 && g2 !== g2i.dataset.orig) tags.genero_secundario = g2;
   const anio = val('t-anio'); if (anio) tags.anio = anio;
   const pistas = {};
   document.querySelectorAll('tr[data-clave]').forEach(tr => {
@@ -391,6 +397,45 @@ if (gt) gt.onclick = () => {
     if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
   });
   gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
+};
+// ✦ Autocorregir: llena el formulario con la propuesta (antes → después) y se puede desmarcar por grupo
+const CAMPO_TAG = {artista: 't-artista', album: 't-album', genero: 't-genero', genero_secundario: 't-genero2'};
+const CAMPO_PISTA = {titulo: '.p-titulo', artista: '.p-artista', numero: '.p-numero'};
+let propuesta = null;
+function camposPropuesta() {
+  const l = [];
+  for (const [k, c] of Object.entries(propuesta.tags)) l.push([document.getElementById(CAMPO_TAG[k]), c]);
+  for (const [clave, cs] of Object.entries(propuesta.pistas)) {
+    const tr = [...document.querySelectorAll('tr[data-clave]')].find(t => t.dataset.clave === clave);
+    if (tr) for (const [k, c] of Object.entries(cs)) l.push([tr.querySelector(CAMPO_PISTA[k]), c]);
+  }
+  return l.filter(([el]) => el);
+}
+function aplicarPropuesta() {
+  const activos = new Set([...document.querySelectorAll('#auto-panel input[data-grupo]:checked')].map(c => c.dataset.grupo));
+  for (const [el, c] of camposPropuesta()) {
+    const si = activos.has(c.grupo);
+    el.value = si ? c.despues : c.antes;
+    el.classList.toggle('auto', si);
+    el.title = si ? `Antes: ${c.antes || '(vacío)'}` : '';
+  }
+}
+const ac = document.getElementById('autocorregir');
+if (ac) ac.onclick = async () => {
+  ac.disabled = true; ac.textContent = 'Revisando…';
+  const r = await post(`/api/album/${AID}/autocorregir`);
+  ac.disabled = false; ac.textContent = '✦ Autocorregir';
+  if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+  propuesta = r;
+  const panel = document.getElementById('auto-panel');
+  panel.hidden = false;
+  panel.innerHTML = r.grupos.length ? `
+    <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
+    <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
+    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «Guardar y volver a revisar».</div>`
+    : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
+  panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicarPropuesta);
+  aplicarPropuesta();
 };
 const bt = document.getElementById('borrar-tags');
 if (bt) bt.onclick = () => { bt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags: {}, pistas: {}}); };

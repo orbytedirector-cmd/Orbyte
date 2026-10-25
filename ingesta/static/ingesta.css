@@ -307,6 +307,13 @@ input.mono { font-family: var(--mono); font-size: .86rem; }
 .toast b { display: block; margin-bottom: .1rem; }
 @keyframes entra { from { transform: translateY(10px); opacity: 0; } }
 
+/* ── autocorregir ── */
+.auto-panel { margin: 0 0 .9rem; padding: .75rem .9rem; border: 1px solid var(--borde-oro); border-radius: var(--radio); background: var(--oro-tenue); }
+.auto-grupos { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; font-size: .86rem; }
+.auto-grupos label { display: flex; gap: .4rem; align-items: center; cursor: pointer; }
+.auto-grupos input { accent-color: var(--oro); }
+input.auto { border-color: var(--oro) !important; background: rgba(200,146,10,.12) !important; }
+
 /* ── repetidos ── */
 .total-rep { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; padding: .9rem 1rem; margin-bottom: 1rem;
              background: var(--card); border: 1px solid var(--borde-oro); border-radius: var(--radio); }

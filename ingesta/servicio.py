@@ -35,6 +35,7 @@ from . import recursos
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
+from . import autocorregir as autocorregir_mod
 import threading
 import traceback
 
@@ -338,7 +339,7 @@ def api_cambios(aid):
     c = a.get('cambios') or {}
     if 'tags' in d:
         t = {k: str(v).strip()[:300] for k, v in (d['tags'] or {}).items()
-             if k in ('artista', 'album', 'anio', 'genero') and str(v or '').strip()}
+             if k in ('artista', 'album', 'anio', 'genero', 'genero_secundario') and str(v or '').strip()}
         if t.get('anio') and not re.fullmatch(r'(1[89]|20)\d\d', t['anio']):
             return jsonify(ok=False, error='Año inválido'), 400
         c['tags'] = t
@@ -367,6 +368,21 @@ def api_cambios(aid):
         c['aceptadas'] = sorted(set(c.get('aceptadas') or []) - {d['desaceptar']})
     _requeue(aid, cambios=c)
     return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/autocorregir', methods=['POST'])
+def api_autocorregir(aid):
+    """Propuesta de tags ordenados (no guarda nada: la pantalla la muestra y tú decides)."""
+    a = almacen.album(aid)
+    rep = (a or {}).get('reporte')
+    if not rep or not rep.get('plan'):
+        return jsonify(ok=False, error='El álbum todavía no tiene revisión'), 409
+    rep = dict(rep, cambios=a.get('cambios') or rep.get('cambios') or {})
+    try:
+        bib = analisis.biblioteca(almacen.ajustes().get('db_orbyte'), almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    except Exception:
+        bib = None
+    return jsonify(ok=True, **autocorregir_mod.proponer(rep, bib))
 
 
 @app.route('/api/album/<int:aid>/ubicar', methods=['POST'])
