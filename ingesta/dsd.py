@@ -59,12 +59,25 @@ def _chunks(f, fin):
         f.seek(pos + tam + (tam & 1))
 
 
+def _id3_al_inicio(f):
+    """Largo de un ID3 pegado al inicio del archivo (lo hacía Ingesta antes con los DFF), o 0."""
+    f.seek(0)
+    cab = f.read(10)
+    f.seek(0)
+    if len(cab) < 10 or cab[:3] != b'ID3':
+        return 0
+    tam = (cab[6] << 21) | (cab[7] << 14) | (cab[8] << 7) | cab[9]
+    return 10 + tam + (10 if cab[5] & 0x10 else 0)
+
+
 def _info_dff(f, ruta):
+    base = _id3_al_inicio(f)
+    f.seek(base)
     cab = f.read(16)
     if len(cab) < 16 or cab[:4] != b'FRM8' or cab[12:16] != b'DSD ':
         raise ErrorDSD(f'{os.path.basename(ruta)}: no es un DFF válido')
-    fin = 12 + struct.unpack('>Q', cab[4:12])[0]
-    d = {'tipo_archivo': 'dff', 'msb': True, 'dst': False}
+    fin = base + 12 + struct.unpack('>Q', cab[4:12])[0]
+    d = {'tipo_archivo': 'dff', 'msb': True, 'dst': False, 'id3_al_inicio': base}
     ids = []
     for cid, pos, tam in _chunks(f, fin):
         if cid == b'PROP':
@@ -104,9 +117,10 @@ def _info_dff(f, ruta):
 
 
 def info(ruta):
-    with open(ruta, 'rb') as f:
-        ext = os.path.splitext(ruta)[1].lower()
-        return _info_dsf(f, ruta) if ext == '.dsf' else _info_dff(f, ruta)
+    with open(ruta, 'rb') as f:                     # por el contenido, no por la extensión
+        es_dsf = f.read(4) == b'DSD '
+        f.seek(0)
+        return _info_dsf(f, ruta) if es_dsf else _info_dff(f, ruta)
 
 
 def _leer(ruta, d, b0, b1):

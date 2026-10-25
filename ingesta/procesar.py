@@ -433,7 +433,11 @@ def verificar(fuente, salida, x, ganancia):
     ok, errores, _, segundos = analisis.decodificar(salida)
     if not ok:
         return 'no decodifica: ' + '; '.join(errores[:2])
-    if x.get('corte'):
+    if x['accion'] in ('a_dsf', 'cortar_dsd'):           # DSD: lo exacto sale del conteo de muestras
+        d = dsd.info(fuente)
+        b0, b1 = _bytes_dsd(fuente, x)
+        esperado = ((b1 if b1 is not None else d['bytes_canal']) - b0) * 8 / d['fs']
+    elif x.get('corte'):
         ini, fin = x['corte']
         esperado = (fin if fin is not None else (x.get('duracion_origen') or 0)) - ini
     else:
