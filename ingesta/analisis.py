@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import struct
 import subprocess
 import time
 import unicodedata
@@ -19,6 +20,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import dsd
 from . import edicion as edicion_mod
 
 try:
@@ -406,6 +408,13 @@ def analizar_pista(ruta, base):
         duracion = float(stream.get('duration') or fmt.get('duration') or 0)
     except ValueError:
         duracion = 0.0
+    if ext in ('.dsf', '.dff'):      # ffprobe estima por tamaño (cuenta la carátula incrustada): el conteo de muestras manda
+        try:
+            d = dsd.info(ruta)
+            if d.get('muestras') and d.get('fs'):
+                duracion = d['muestras'] / d['fs']
+        except (dsd.ErrorDSD, OSError, struct.error):
+            pass
     br = stream.get('bit_rate') or (fmt.get('bit_rate') if not lossy else None) or fmt.get('bit_rate')
     try:
         br = int(float(br)) if br else None
