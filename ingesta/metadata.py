@@ -86,6 +86,39 @@ def _correr(nombre, args, reg, aj, limite):
     return ultimas
 
 
+def corregir_album(db, ruta, aid, reg):
+    """El indexador crea el álbum con los tags de la primera pista que lee y después nunca le cambia el nombre.
+    Si quedó «Unknown Album» / «Unknown Artist» (tags ilegibles en esa pasada), se corrige con los tags actuales."""
+    pista = next((os.path.join(r, f) for r, _, fs in sorted(os.walk(ruta)) for f in sorted(fs)
+                  if os.path.splitext(f)[1].lower() in analisis.AUDIO_EXT), None)
+    if not pista:
+        return
+    tags = analisis.tags_mutagen(pista)[0]
+    con = sqlite3.connect(db, timeout=60)
+    try:
+        al = con.execute('SELECT al.name, al.year, ar.name FROM albums al JOIN artists ar ON ar.id = al.artist_id '
+                         'WHERE al.id=?', (aid,)).fetchone()
+        if not al:
+            return
+        nombre, anio, artista = al
+        with con:
+            if (not nombre or nombre == 'Unknown Album') and tags.get('album'):
+                con.execute('UPDATE albums SET name=?, letter=? WHERE id=?',
+                            (tags['album'], tags['album'][0].upper(), aid))
+                reg(f'   nombre del álbum corregido: «{nombre}» → «{tags["album"]}»')
+            if not anio and tags.get('anio'):
+                con.execute('UPDATE albums SET year=? WHERE id=?', (analisis._anio(tags['anio']), aid))
+            correcto = tags.get('artista_album') or tags.get('artista')
+            if artista == 'Unknown Artist' and correcto:
+                con.execute('INSERT OR IGNORE INTO artists (name, letter) VALUES (?, ?)',
+                            (correcto, analisis.letra_de(correcto)))
+                nuevo = con.execute('SELECT id FROM artists WHERE name=?', (correcto,)).fetchone()[0]
+                con.execute('UPDATE albums SET artist_id=? WHERE id=?', (nuevo, aid))
+                reg(f'   artista del álbum corregido: «Unknown Artist» → «{correcto}»')
+    finally:
+        con.close()
+
+
 def album_id(db, ruta):
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     try:
@@ -105,12 +138,14 @@ def correr(ruta, aj, reg):
         raise RuntimeError(f'Al Python de los scripts ({prueba["python"]}) le faltan módulos: '
                            f'{", ".join(prueba["faltan"]) or prueba.get("error")}')
     reg('Etapa 3: metadata')
-    _correr('index', ['index_libraryV3.py', '--incremental', '--album', ruta, '--db', db, '--root', raiz, '--quiet'],
+    # --update: si el álbum ya estaba (otra pasada de metadata), se vuelven a leer sus archivos conservando los IDs
+    _correr('index', ['index_libraryV3.py', '--update', '--album', ruta, '--db', db, '--root', raiz, '--quiet'],
             reg, aj, LIMITE_S['index'])
     aid = album_id(db, ruta)
     if not aid:
         raise RuntimeError('El indexador terminó pero el álbum no aparece en music.db')
     reg(f'   álbum ID {aid} en Orbyte')
+    corregir_album(db, ruta, aid, reg)
     _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'pending'], reg, aj, LIMITE_S['richmeta'])
     _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, LIMITE_S['import'])
     _correr('relations', ['RichMetaRelations3.py', '--album', str(aid), '--all', '--db', db], reg, aj,
