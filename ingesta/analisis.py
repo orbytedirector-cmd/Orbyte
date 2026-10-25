@@ -30,7 +30,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 3   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 4   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -605,6 +605,15 @@ def _norm_album(s):
     return _norm(s)
 
 
+def _es_dst(p):
+    return (p.get('codec') or '').lower() == 'dst'
+
+
+def _segundos_cue(cp):
+    """Inicio exacto de una pista del cue (cuadros de 1/75 s), sin el redondeo de la vista."""
+    return cp['cuadros'] / 75 if cp.get('cuadros') is not None else cp['inicio']
+
+
 def _tag_existente(row):
     if row['dsd']:
         return 'DSD'
@@ -722,6 +731,20 @@ def _desde_nombre_archivo(nombre):
     return None, None, stem
 
 
+def _lados_vinilo(nombres):
+    """Archivos nombrados por cara de vinilo (A1, A2, B1…): {nombre: (número correlativo, título)}.
+    Solo si la mayoría del disco viene así."""
+    caras = {}
+    for nombre in nombres:
+        m = re.match(r'^\s*([A-Ha-h])(\d{1,2})[\s._-]+(.*)$', Path(nombre).stem)
+        if m:
+            caras[nombre] = (m.group(1).upper(), int(m.group(2)), m.group(3).strip(' -._') or None)
+    if not nombres or len(caras) * 2 < len(nombres):
+        return {}
+    orden = sorted(caras, key=lambda n: caras[n][:2])
+    return {n: (i, caras[n][2]) for i, n in enumerate(orden, 1)}
+
+
 def _desde_carpeta(nombre):
     """«Artista - Álbum (2007) [tag]» / «2007 - Álbum» → (artista, álbum, año)."""
     anio = _anio(nombre)
@@ -734,7 +757,8 @@ def _desde_carpeta(nombre):
     return (artista or '').strip() or None, s.strip() or None, anio
 
 
-VINILO_RE = re.compile(r'(?<![a-z])(lp|vinyl|vinilo|vinyl[- ]?rip|needledrop)(?![a-z])', re.I)
+VINILO_RE = re.compile(r'(?<![a-z])(lp|vinyl|vinilo|vinyl[- ]?rip|needledrop|side ?[a-h1-8]|record ?\d)(?![a-z0-9])', re.I)
+LADO_RE = re.compile(r'^[A-H]\d{1,2}(?:\b|[ ._-])')     # «A1.Iron Fist.dff», «B3 - …»: caras de un vinilo
 CATALOGO_RE = re.compile(r'(?<![A-Z0-9])([A-Z]{2,6}[- ]?[A-Z]{0,2}\d{3,7}[A-Z]?)(?![A-Z0-9])')
 
 
@@ -792,10 +816,12 @@ def _datos_para_edicion(ruta, pistas, legibles, info_cues, otros, artista, album
     barcodes = [b for b in barcodes if len(b) in (12, 13)]
 
     anios = {a for a in [anio_tags, anio_orig, cue0.get('anio')] + list(anios_carpeta) if a}
-    if any(p.get('dsd') for p in legibles):
+    lados = sum(1 for p in legibles if LADO_RE.match(os.path.basename(p['archivo'])))
+    if VINILO_RE.search(nombres + ' ' + ' '.join(os.path.basename(p['archivo']) for p in legibles[:8])) \
+            or (legibles and lados * 2 >= len(legibles)):
+        formato = 'vinilo'                  # un DSD grabado de vinilo es vinilo, no SACD
+    elif any(p.get('dsd') for p in legibles):
         formato = 'sacd'
-    elif VINILO_RE.search(nombres):
-        formato = 'vinilo'
     elif any(p.get('lossy') for p in legibles) or any((p.get('sr') or 0) > 48000 for p in legibles):
         formato = 'digital'
     else:
@@ -890,6 +916,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                           'referencias': refs,
                           'pistas': [{'num': cp['num'], 'titulo': cp['title'],
                                       'interprete': cp['performer'], 'inicio': round(cp['start'], 2),
+                                      'cuadros': int(round(cp['start'] * 75)),
                                       'archivo_cue': os.path.basename(cp['file'].replace('\\', '/'))}
                                      for cp in cpistas]})
         faltan = [r['archivo_cue'] for r in refs if not r['archivo']]
@@ -955,6 +982,16 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     danados = [p['archivo'] for p in legibles if not p.get('decodifica') and not p.get('error_completo')]
     if danados:
         problema('error', 'danado', 'Archivos con errores al decodificar (dañados o incompletos)', danados)
+    dst = [p for p in legibles if p.get('dsd') and _es_dst(p)]
+    if [p for p in dst if p.get('imagen_cue')]:
+        problema('error', 'dst_cue', 'DFF comprimido (DST) con cue: no se puede cortar en pistas sin pasarlo a PCM',
+                 [p['archivo'] for p in dst if p.get('imagen_cue')])
+    elif dst:
+        problema('aviso', 'dst_sin_tags', 'DFF comprimido (DST): se copia tal cual, sin escribirle tags',
+                 [p['archivo'] for p in dst])
+    dff = [p['archivo'] for p in legibles if p.get('dsd') and p['ext'].lower() == 'dff' and not _es_dst(p)]
+    if dff:
+        problema('correccion', 'dff_a_dsf', 'DFF → DSF: mismo DSD muestra por muestra, en un contenedor que lleva tags', dff)
     raros = [p['archivo'] for p in legibles if p.get('error_completo')]
     if raros:
         problema('decision', 'errores_menores',
@@ -1128,10 +1165,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     for d in discos_n:
         del_disco = [p for p in pistas if p['disco'] == d and p.get('legible') and not p.get('imagen_cue')]
         usados = Counter()
+        lados = _lados_vinilo([p['archivo'].split('/')[-1] for p in del_disco])
         for p in del_disco:
             o = ov_pistas.get(p['archivo']) or {}
             n = _num(o.get('numero')) or p['tags'].get('pista')
             dn, nn, tn = _desde_nombre_archivo(p['archivo'].split('/')[-1])
+            if p['archivo'].split('/')[-1] in lados:          # «A1.Iron Fist» → pista 1 «Iron Fist»
+                nn, tn = lados[p['archivo'].split('/')[-1]]
             if not n and nn:
                 n = nn
                 sin_num.append(p['archivo'])
@@ -1369,15 +1409,20 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             continue
         ext = 'flac' if (p['codec'] in A_FLAC or (p['codec'] or '').startswith('pcm_') or p.get('float')) \
             and not p['dsd'] else p['ext'].lower()
+        if p['dsd']:
+            ext = 'dff' if _es_dst(p) else 'dsf'     # DSD sigue siendo DSD; DFF → DSF (mismo flujo, con tags)
         if ext == 'm4a' and p['codec'] == 'alac':
             ext = 'flac'
         p['nombre_destino'] = nombre_pista(p['disco'], p.get('numero'), p.get('titulo'), ext)
+    por_archivo = {p['archivo']: p for p in pistas}
     for c in info_cues:
         disco_c = None
         carpeta_c = os.path.dirname(c['archivo'])
         disco_c = disco_de_carpeta.get(os.path.join(ruta, carpeta_c) if carpeta_c else ruta) or 1
+        dsd_de = {r['archivo_cue']: bool(por_archivo.get(r['archivo'], {}).get('dsd')) for r in c['referencias']}
         for cp in c['pistas']:
-            cp['nombre_destino'] = nombre_pista(disco_c, cp['num'], cp['titulo'], 'flac')
+            cp['nombre_destino'] = nombre_pista(disco_c, cp['num'], cp['titulo'],
+                                                'dsf' if dsd_de.get(cp['archivo_cue']) else 'flac')
 
     # ── duplicados ──
     duplicados = buscar_duplicados(bib, artista, album)
@@ -1422,13 +1467,18 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             ref = next(r for r in cue['referencias'] if r['archivo'] == p['archivo'])
             cps = [cp for cp in cue['pistas'] if cp['archivo_cue'] == ref['archivo_cue']]
             for i, cp in enumerate(cps):
-                fin = cps[i + 1]['inicio'] if i + 1 < len(cps) else None
-                plan.append(dict(base, accion='convertir', corte=[cp['inicio'], fin], destino=cp['nombre_destino'],
+                ini = _segundos_cue(cp)
+                fin = _segundos_cue(cps[i + 1]) if i + 1 < len(cps) else None
+                accion = 'cortar_dsd' if p.get('dsd') else 'convertir'      # el DSD se corta sin pasar por PCM
+                plan.append(dict(base, accion=accion, corte=[ini, fin], destino=cp['nombre_destino'],
                                  clave=f'{cue["archivo"]}#{cp["num"]}',
                                  disco=p['disco'], numero=cp['num'], titulo=cp['titulo'] or f'Pista {cp["num"]}',
                                  artista=cp.get('interprete') or artista))
         else:
-            plan.append(dict(base, accion='convertir' if convertir_p else 'copiar', corte=None, clave=p['archivo'],
+            accion = 'convertir' if convertir_p else 'copiar'
+            if p.get('dsd') and p['ext'].lower() == 'dff' and not _es_dst(p):
+                accion = 'a_dsf'
+            plan.append(dict(base, accion=accion, corte=None, clave=p['archivo'],
                              destino=p.get('nombre_destino'), disco=p['disco'], numero=p.get('numero'),
                              titulo=p.get('titulo'), artista=p.get('artista_final') or artista))
     for x in plan:              # pistas del mismo artista: con el nombre unificado

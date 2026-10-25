@@ -21,6 +21,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import analisis
+from . import dsd
 
 try:
     import mutagen
@@ -72,13 +73,18 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
             fuente = os.path.join(origen, x['origen'])
             if x['accion'] == 'copiar':
                 shutil.copy2(fuente, salida)
+            elif x['accion'] in ('a_dsf', 'cortar_dsd'):
+                b0, b1 = _bytes_dsd(fuente, x)
+                dsd.a_dsf(fuente, salida, b0, b1)
             else:
                 convertir(fuente, salida, x, rep.get('ganancia_db') or 0.0)
             escribir_tags(salida, x, rep['tags_album'], rep)
             if x.get('portada_disco'):
                 incrustar_portada(salida, os.path.join(origen, x['portada_disco']))
             hechas[0] += 1
-            registro(f'  {hechas[0]}/{len(plan)} {x["destino"]}' + ('  (convertida)' if x['accion'] == 'convertir' else ''))
+            nota = {'convertir': '  (convertida)', 'a_dsf': '  (DFF → DSF, mismo DSD)',
+                    'cortar_dsd': '  (cortada en DSD)'}.get(x['accion'], '')
+            registro(f'  {hechas[0]}/{len(plan)} {x["destino"]}{nota}')
             return salida
 
         with ThreadPoolExecutor(max_workers=max(1, trabajadores)) as ex:
@@ -120,6 +126,15 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
         borrar_de_entrada(origen, ajustes.get('carpeta_entrada'))
         registro('Original borrado de la carpeta de entrada')
     return destino
+
+
+def _bytes_dsd(fuente, x):
+    """Tramo (bytes por canal) que va a la pista: todo el archivo, o del cue con precisión de muestra."""
+    if not x.get('corte'):
+        return 0, None
+    fs = dsd.info(fuente)['fs']
+    ini, fin = x['corte']
+    return dsd.byte_de(ini, fs), (dsd.byte_de(fin, fs) if fin is not None else None)
 
 
 def _limpiar_tmp_vacio(biblioteca):
@@ -229,8 +244,9 @@ def escribir_tags(ruta, x, ta, rep):
             if viejo in f.tags:
                 del f.tags[viejo]
         f.save(deleteid3=bool(x.get('quitar_id3')))
-    elif ext in ('.mp3', '.dsf', '.dff', '.aif', '.aiff'):
+    elif ext in ('.mp3', '.dsf', '.aif', '.aiff'):
         _tags_id3(ruta, v, ext)
+    # .dff (solo queda si es DST): sin tags; un ID3 pegado al inicio lo deja inválido
     elif ext in ('.m4a', '.mp4'):
         from mutagen.easymp4 import EasyMP4
         f = EasyMP4(ruta)
@@ -431,6 +447,12 @@ def verificar(fuente, salida, x, ganancia):
         a, b = _md5_flac(fuente), _md5_flac(salida)
         if a and b:
             return None if a == b else 'el audio no es idéntico al original'
+    if x['accion'] in ('a_dsf', 'cortar_dsd'):           # DSD: muestra por muestra igual al original
+        b0, b1 = _bytes_dsd(fuente, x)
+        try:
+            return None if dsd.md5(fuente, b0, b1) == dsd.md5(salida) else 'el DSD no es idéntico al original'
+        except dsd.ErrorDSD as e:
+            return str(e)
     if x.get('dsd'):
         return None
     bits = None if x['accion'] == 'copiar' else _bits_salida(x)
