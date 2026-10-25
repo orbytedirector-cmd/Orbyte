@@ -1112,6 +1112,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                                                                     'album_con_artista')]
     if ov.get('genero'):
         genero = ov['genero']
+    genero_sec = [g.strip() for g in re.split(r'\s*;\s*', ov.get('genero_secundario') or '') if g.strip()][:3]
     ov_pistas = cambios.get('pistas') or {}
     anio_tags = _mayoria(tag('anio'))
     anio_orig = _mayoria(tag('anio_original'))
@@ -1458,7 +1459,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         'artista': artista, 'album': album, 'anio': anio,
         'fecha': ed_el.get('fecha') if ed_el.get('anio') == anio else anio,
         'anio_original': ed_el.get('anio_original') or edicion.get('anio_original'),
-        'genero': genero, 'mbid': ed_el.get('id') or edicion.get('mbid'),
+        'genero': genero, 'genero_secundario': genero_sec, 'mbid': ed_el.get('id') or edicion.get('mbid'),
         'mb_grupo': ed_el.get('grupo_id') or edicion.get('mb_grupo'),
         'sello': ed_el.get('sello') or edicion.get('sello'), 'catalogo': ed_el.get('catalogo') or edicion.get('catalogo'),
         'pais': ed_el.get('pais') or edicion.get('pais'), 'barcode': ed_el.get('barcode') or edicion.get('barcode'),

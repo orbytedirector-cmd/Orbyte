@@ -216,9 +216,9 @@ def _valores(x, ta):
         'disco': x.get('disco') or 1, 'total_discos': ta.get('total_discos') or 1,
         'genero': ta.get('genero'), 'mbid': ta.get('mbid'), 'mb_grupo': ta.get('mb_grupo'),
         'sello': ta.get('sello'), 'catalogo': ta.get('catalogo'), 'pais': ta.get('pais'),
-        'barcode': ta.get('barcode'),
+        'barcode': ta.get('barcode'), 'genero_secundario': ta.get('genero_secundario') or None,
     }
-    return {k: v for k, v in d.items() if v not in (None, '')}
+    return {k: v for k, v in d.items() if v not in (None, '', [])}
 
 
 VORBIS = {'titulo': 'TITLE', 'artista': 'ARTIST', 'artista_album': 'ALBUMARTIST', 'album': 'ALBUM',
@@ -240,6 +240,8 @@ def escribir_tags(ruta, x, ta, rep):
         for k, clave in VORBIS.items():
             if k in v:
                 f.tags[clave] = str(v[k])
+        if v.get('genero_secundario'):          # como lo escribe RichMeta: un valor por género
+            f.tags['GENRE_SECONDARY'] = list(v['genero_secundario'])
         for viejo in ('TOTALTRACKS', 'TOTALDISCS'):
             if viejo in f.tags:
                 del f.tags[viejo]
@@ -293,6 +295,9 @@ def _tags_id3(ruta, v, ext):
     for k, desc in TXXX_DESC.items():
         if k in v:
             t.setall(f'TXXX:{desc}', [TXXX(encoding=3, desc=desc, text=str(v[k]))])
+    if v.get('genero_secundario'):               # como lo escribe RichMeta: «a;b;c»
+        t.setall('TXXX:genre_secondary', [TXXX(encoding=3, desc='genre_secondary',
+                                                text=';'.join(v['genero_secundario']))])
     if f is not None:
         f.save()
     else:
