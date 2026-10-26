@@ -288,6 +288,9 @@ def tags_ffprobe(info):
     return norm, t
 
 
+DECODIFICAR_V = 2   # súbela cuando cambie cómo se interpretan los errores: se vuelve a decodificar todo
+
+
 def decodificar(ruta):
     """Decodifica la pista completa: (ok, errores[], pico_dB, segundos_decodificados)."""
     cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'level+info',
@@ -963,7 +966,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     anteriores = {}
     for d in (previo or {}).get('discos') or []:
         for t in d.get('pistas') or []:
-            if t.get('decodificado_s') is not None:
+            if t.get('decodificado_s') is not None and t.get('dec_v') == DECODIFICAR_V:
                 anteriores[(t['archivo'], t['tamano'], t.get('mtime'))] = t
 
     def _dec(p):
@@ -985,6 +988,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             p['errores'] = errores
             p['pico_db'] = None if pico is None else round(pico, 2)
             p['decodificado_s'] = None if segundos is None else round(segundos, 2)
+            p['dec_v'] = DECODIFICAR_V
             completo = segundos is not None and p.get('duracion') and segundos >= p['duracion'] - 0.5
             if not ok and completo and p.get('id3'):
                 # El audio salió entero: el error es el tag ID3 pegado al FLAC (flac -t dice lo mismo)
