@@ -33,7 +33,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 6   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 7   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -301,6 +301,10 @@ def decodificar(ruta):
         return False, [str(e)], None, None
     errores, pico, segundos = [], None, None
     for linea in r.stderr.splitlines():
+        # la carátula incrustada (mjpeg/png) se lee al abrir el archivo aunque solo se decodifique el audio:
+        # un JPEG con metadatos raros («unable to decode APP fields») no es un problema del audio
+        if re.match(r'^\[(?:mjpeg|png|bmp|gif|webp|tiff|jpeg2000)\s*@', linea):
+            continue
         if '[error]' in linea or '[fatal]' in linea:
             limpio = re.sub(r'^.*?\[(?:error|fatal)\]\s*', '', linea).strip()
             if limpio and limpio not in errores:
