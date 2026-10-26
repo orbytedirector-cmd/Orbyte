@@ -50,7 +50,7 @@ def _info_dsf(f, ruta):
     esperado = -(-((muestras + 7) // 8) // bl) * bl * canales
     return {'tipo_archivo': 'dsf', 'fs': fs, 'canales': canales, 'tipo_canales': tipo, 'muestras': muestras,
             'bytes_canal': (muestras + 7) // 8, 'bloque': bl, 'inicio': 28 + 52 + 12,
-            'msb': bps == 8, 'dst': False,
+            'msb': bps == 8, 'dst': False, 'segundos': muestras / fs if fs else None,
             # bloques de datos de más (o de menos) respecto del conteo de muestras: ffmpeg avisa «Invalid data»
             'irregular': declarado != esperado, 'bloques_de_mas': (declarado - esperado) // (bl * canales or 1)}
 
@@ -102,6 +102,15 @@ def _info_dff(f, ruta):
         elif cid in (b'DSD ', b'DST '):
             d['inicio'], d['largo'] = pos, tam
             d['dst'] = d['dst'] or cid == b'DST '
+            if cid == b'DST ':                       # FRTE: n.º de cuadros DST y cuadros por segundo
+                f.seek(pos)
+                fr = f.read(18)
+                if fr[:4] == b'FRTE':
+                    n, tasa = struct.unpack('>IH', fr[12:18])
+                    if tasa:
+                        d['segundos'] = n / tasa
+        elif cid == b'ID3 ':
+            d['id3'] = (pos, tam)
     if 'inicio' not in d or 'fs' not in d or not d.get('canales'):
         raise ErrorDSD(f'{os.path.basename(ruta)}: DFF incompleto')
     roles = [IDS_DFF.get(i) for i in ids]
@@ -118,6 +127,7 @@ def _info_dff(f, ruta):
     if not d['dst']:
         d['bytes_canal'] = d['largo'] // d['canales']
         d['muestras'] = d['bytes_canal'] * 8
+        d['segundos'] = d['muestras'] / d['fs']
     return d
 
 
@@ -126,6 +136,18 @@ def info(ruta):
         es_dsf = f.read(4) == b'DSD '
         f.seek(0)
         return _info_dsf(f, ruta) if es_dsf else _info_dff(f, ruta)
+
+
+def id3_dff(ruta):
+    """Los bytes del bloque «ID3 » de un .dff (o None). Lee solo las cabeceras de primer nivel: mutagen, en
+    cambio, recorre los miles de cuadros de un DST uno por uno, y sobre el disco de red eso tarda minutos."""
+    d = info(ruta)
+    if not d.get('id3'):
+        return None
+    pos, tam = d['id3']
+    with open(ruta, 'rb') as f:
+        f.seek(pos)
+        return f.read(tam)
 
 
 def _leer(ruta, d, b0, b1):

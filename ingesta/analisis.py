@@ -8,6 +8,7 @@ haría falta para dejar el álbum en la biblioteca.
 """
 import difflib
 import hashlib
+import io
 import json
 import os
 import re
@@ -219,13 +220,28 @@ _VORBIS = {'title': 'titulo', 'artist': 'artista', 'albumartist': 'artista_album
            'genre': 'genero', 'totaldiscs': 'total_discos', 'disctotal': 'total_discos'}
 
 
+class _SoloTags:
+    def __init__(self, tags):
+        self.tags = tags
+
+
+def abrir_tags(ruta):
+    """mutagen.File, salvo los .dff: de esos se lee solo el bloque ID3 (sin recorrer los cuadros DST)."""
+    if ruta.lower().endswith('.dff'):
+        from mutagen.id3 import ID3
+        from . import dsd
+        datos = dsd.id3_dff(ruta)
+        return _SoloTags(ID3(io.BytesIO(datos)) if datos else None)
+    return mutagen.File(ruta)
+
+
 def tags_mutagen(ruta):
     """Tags normalizados + dict crudo (claves en minúscula) leídos con mutagen."""
     norm, crudo = {}, {}
     if mutagen is None:
         return norm, crudo
     try:
-        f = mutagen.File(ruta)
+        f = abrir_tags(ruta)
     except Exception:
         return norm, crudo
     if f is None or f.tags is None:
