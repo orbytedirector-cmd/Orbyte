@@ -137,6 +137,11 @@ class Procesador(threading.Thread):
                                 **({} if es_iso else {'ruta': destino}))
         self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: ubicado en la biblioteca',
                             os.path.relpath(destino, aj.get('biblioteca') or '/'), aid)
+        if rep.get('_rehechas'):
+            self.almacen.avisar('revision', f'{rep.get("artista")} — {rep.get("album")}: '
+                                            f'{len(rep["_rehechas"])} pista(s) se copiaron de nuevo',
+                                'La primera copia no coincidió con el original y la segunda sí: '
+                                + ', '.join(rep['_rehechas'][:3]), aid)
         self.actual = None
 
     def _cerrar_iso(self, aid, rep, aj, reg):

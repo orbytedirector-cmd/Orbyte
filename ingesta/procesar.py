@@ -99,15 +99,27 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
             registro(f'Extras (escaneos, .log…): {n_extras} archivos en «Extras/»')
 
         registro('Verificando cada archivo')
-        problemas = []
-        for x in plan:
-            p = verificar(os.path.join(origen, x['origen']), os.path.join(tmp, x['destino']), x,
-                          rep.get('ganancia_db') or 0.0)
-            if p:
-                problemas.append(f'{x["destino"]}: {p}')
-        if problemas:
-            raise FalloProceso('La verificación falló:\n' + '\n'.join(problemas[:10]))
-        registro(f'Verificación OK ({len(plan)} pistas)')
+
+        def revisar(x):
+            return verificar(os.path.join(origen, x['origen']), os.path.join(tmp, x['destino']), x,
+                             rep.get('ganancia_db') or 0.0)
+
+        fallidas = [(x, p) for x in plan for p in [revisar(x)] if p]
+        # una copia que no calza se rehace UNA vez (fallos esporádicos de escritura/CPU bajo carga);
+        # si vuelve a fallar, el álbum no se ubica
+        rehechas = []
+        for x, p in fallidas:
+            registro(f'  ⟳ {x["destino"]}: {p}; se copia de nuevo')
+            if os.path.exists(os.path.join(tmp, x['destino'])):
+                os.remove(os.path.join(tmp, x['destino']))
+            una(x)
+            p2 = revisar(x)
+            if p2:
+                raise FalloProceso(f'La verificación falló dos veces:\n{x["destino"]}: {p2}')
+            registro(f'  ✓ {x["destino"]}: la segunda copia sí es idéntica')
+            rehechas.append(x['destino'])
+        rep['_rehechas'] = rehechas
+        registro(f'Verificación OK ({len(plan)} pistas)' + (f' · {len(rehechas)} copiada(s) de nuevo' if rehechas else ''))
 
         # el origen no debe haber cambiado mientras se trabajaba
         os.makedirs(os.path.dirname(destino), exist_ok=True)
