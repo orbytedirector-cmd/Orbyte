@@ -33,7 +33,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 5   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 6   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -412,11 +412,13 @@ def analizar_pista(ruta, base):
         duracion = float(stream.get('duration') or fmt.get('duration') or 0)
     except ValueError:
         duracion = 0.0
+    dsf_irregular = False
     if ext in ('.dsf', '.dff'):      # ffprobe estima por tamaño (cuenta la carátula incrustada): el conteo de muestras manda
         try:
             d = dsd.info(ruta)
             if d.get('muestras') and d.get('fs'):
                 duracion = d['muestras'] / d['fs']
+            dsf_irregular = bool(d.get('irregular'))
         except (dsd.ErrorDSD, OSError, struct.error):
             pass
     br = stream.get('bit_rate') or (fmt.get('bit_rate') if not lossy else None) or fmt.get('bit_rate')
@@ -473,7 +475,7 @@ def analizar_pista(ruta, base):
         etiqueta = f"{CODEC_LABEL.get(codec, codec.upper().replace('PCM_', 'PCM '))} {prof}/{sr / 1000:g}"
 
     p.update({'legible': True, 'codec': codec, 'codec_label': CODEC_LABEL.get(codec, codec.upper()),
-              'formato': etiqueta, 'sr': sr, 'bits': bits, 'float': bool(es_float), 'dsd': es_dsd,
+              'formato': etiqueta, 'sr': sr, 'bits': bits, 'float': bool(es_float), 'dsd': es_dsd, 'dsf_irregular': dsf_irregular,
               'lossy': lossy, 'canales': canales, 'duracion': round(duracion, 2),
               'kbps': kbps_nominal(br, codec) if lossy else (round(br / 1000) if br else None),
               'mqa': es_mqa, 'mqa_tipo': mqa_tipo, 'mqa_sr_original': orig_sr,
@@ -1005,7 +1007,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     dff = [p['archivo'] for p in legibles if p.get('dsd') and p['ext'].lower() == 'dff' and not _es_dst(p)]
     if dff:
         problema('correccion', 'dff_a_dsf', 'DFF → DSF: mismo DSD muestra por muestra, en un contenedor que lleva tags', dff)
-    raros = [p['archivo'] for p in legibles if p.get('error_completo')]
+    # DSF con bloques de datos de más tras el audio (rips): se reescribe con el mismo DSD y el aviso desaparece
+    irregulares = [p['archivo'] for p in legibles if p.get('dsf_irregular') and p['ext'].lower() == 'dsf']
+    if irregulares:
+        problema('correccion', 'dsf_reescribir', 'DSF con datos de más después del audio (por eso ffmpeg avisa '
+                                                  '«Invalid data»): se reescribe con el mismo DSD, muestra por muestra',
+                 irregulares)
+    raros = [p['archivo'] for p in legibles if p.get('error_completo') and p['archivo'] not in irregulares]
     if raros:
         problema('decision', 'errores_menores',
                  'Errores al decodificar, aunque el audio se leyó completo: escúchalos antes de aceptarlos', raros)
@@ -1502,8 +1510,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                                  artista=cp.get('interprete') or artista))
         else:
             accion = 'convertir' if convertir_p else 'copiar'
-            if p.get('dsd') and p['ext'].lower() == 'dff' and not _es_dst(p):
-                accion = 'a_dsf'
+            if p.get('dsd') and not _es_dst(p) and (p['ext'].lower() == 'dff' or p.get('dsf_irregular')):
+                accion = 'a_dsf'            # DFF → DSF, o DSF irregular reescrito: mismo DSD
             plan.append(dict(base, accion=accion, corte=None, clave=p['archivo'],
                              destino=p.get('nombre_destino'), disco=p['disco'], numero=p.get('numero'),
                              titulo=p.get('titulo'), artista=p.get('artista_final') or artista))
