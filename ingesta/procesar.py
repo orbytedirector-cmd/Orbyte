@@ -260,9 +260,8 @@ def escribir_tags(ruta, x, ta, rep):
             if viejo in f.tags:
                 del f.tags[viejo]
         f.save(deleteid3=bool(x.get('quitar_id3')))
-    elif ext in ('.mp3', '.dsf', '.aif', '.aiff'):
+    elif ext in ('.mp3', '.dsf', '.aif', '.aiff', '.dff'):
         _tags_id3(ruta, v, ext)
-    # .dff (solo queda si es DST): sin tags; un ID3 pegado al inicio lo deja inválido
     elif ext in ('.m4a', '.mp4'):
         from mutagen.easymp4 import EasyMP4
         f = EasyMP4(ruta)
@@ -286,6 +285,15 @@ def escribir_tags(ruta, x, ta, rep):
 
 
 def _tags_id3(ruta, v, ext):
+    if ext == '.dff':
+        # .dff (solo queda si es DST): el ID3 va como bloque «ID3 » al final, nunca pegado al inicio
+        datos = dsd.id3_dff(ruta)
+        t = ID3(io.BytesIO(datos)) if datos else ID3()
+        _frames_id3(t, v)
+        b = io.BytesIO()
+        t.save(b, v2_version=3)
+        dsd.escribir_id3_dff(ruta, b.getvalue())
+        return
     if ext == '.dsf':
         from mutagen.dsf import DSF
         f = DSF(ruta)
@@ -298,6 +306,14 @@ def _tags_id3(ruta, v, ext):
         except ID3NoHeaderError:
             t = ID3()
         f = None
+    _frames_id3(t, v)
+    if f is not None:
+        f.save()
+    else:
+        t.save(ruta, v2_version=3)
+
+
+def _frames_id3(t, v):
     simples = {'titulo': TIT2, 'artista': TPE1, 'artista_album': TPE2, 'album': TALB, 'fecha': TDRC,
                'anio_original': TDOR, 'genero': TCON, 'sello': TPUB}
     for k, frame in simples.items():
@@ -312,10 +328,6 @@ def _tags_id3(ruta, v, ext):
     if v.get('genero_secundario'):               # como lo escribe RichMeta: «a;b;c»
         t.setall('TXXX:genre_secondary', [TXXX(encoding=3, desc='genre_secondary',
                                                 text=';'.join(v['genero_secundario']))])
-    if f is not None:
-        f.save()
-    else:
-        t.save(ruta, v2_version=3)
 
 
 def incrustar_portada(ruta, imagen):
@@ -479,6 +491,11 @@ def verificar(fuente, salida, x, ganancia):
         b0, b1 = _bytes_dsd(fuente, x)
         try:
             return None if dsd.md5(fuente, b0, b1) == dsd.md5(salida) else 'el DSD no es idéntico al original'
+        except dsd.ErrorDSD as e:
+            return str(e)
+    if x.get('dsd') and salida.lower().endswith('.dff'):  # DST copiado: el bloque de audio intacto tras los tags
+        try:
+            return None if dsd.md5_bloque(fuente) == dsd.md5_bloque(salida) else 'el DST no es idéntico al original'
         except dsd.ErrorDSD as e:
             return str(e)
     if x.get('dsd'):

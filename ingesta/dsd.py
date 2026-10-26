@@ -150,6 +150,53 @@ def id3_dff(ruta):
         return f.read(tam)
 
 
+def escribir_id3_dff(ruta, datos):
+    """Deja `datos` (un ID3 completo) como bloque «ID3 » al final del FRM8 de un .dff, como lo hacen foobar2000
+    y mutagen. El audio (DSD o DST) no se toca: solo cambia el final del archivo y el largo del FRM8."""
+    d = info(ruta)
+    if d.get('id3_al_inicio'):
+        raise ErrorDSD(f'{os.path.basename(ruta)}: tiene un ID3 pegado al inicio; repáralo primero (reparar_dff)')
+    tam_archivo = os.path.getsize(ruta)
+    with open(ruta, 'r+b') as f:
+        f.seek(4)
+        fin = 12 + struct.unpack('>Q', f.read(8))[0]
+        if fin > tam_archivo:
+            raise ErrorDSD(f'{os.path.basename(ruta)}: el archivo termina antes de lo que declara')
+        corte = fin
+        if d.get('id3'):
+            pos, tam = d['id3']
+            if pos + tam + (tam & 1) != fin:
+                raise ErrorDSD(f'{os.path.basename(ruta)}: el bloque ID3 no está al final; no se reescribe')
+            corte = pos - 12                       # se reemplaza el bloque ID3 anterior
+        if corte % 2:
+            raise ErrorDSD(f'{os.path.basename(ruta)}: estructura DFF inesperada (largo impar)')
+        bloque = b'ID3 ' + struct.pack('>Q', len(datos)) + datos + (b'\0' if len(datos) & 1 else b'')
+        resto = f.seek(fin) and f.read()          # lo que hubiera después del FRM8 (normalmente nada)
+        f.seek(corte)
+        f.write(bloque)
+        f.write(resto or b'')
+        f.truncate()
+        f.seek(4)
+        f.write(struct.pack('>Q', corte + len(bloque) - 12))
+    return len(bloque)
+
+
+def md5_bloque(ruta):
+    """Huella de los bytes del bloque de audio («DSD » o «DST ») de un .dff, tal cual."""
+    d = info(ruta)
+    h = hashlib.md5()
+    with open(ruta, 'rb') as f:
+        f.seek(d['inicio'])
+        quedan = d['largo']
+        while quedan:
+            b = f.read(min(quedan, 4 << 20))
+            if not b:
+                raise ErrorDSD(f'{os.path.basename(ruta)}: termina antes de lo que declara')
+            h.update(b)
+            quedan -= len(b)
+    return h.hexdigest()
+
+
 def _leer(ruta, d, b0, b1):
     """Genera, por tramos, una lista con los bytes de cada canal (LSB primero) del rango [b0, b1)."""
     with open(ruta, 'rb') as f:

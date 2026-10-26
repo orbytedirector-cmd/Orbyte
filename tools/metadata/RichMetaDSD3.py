@@ -238,6 +238,62 @@ def _lrc_to_sylt(lrc_text: str) -> list[tuple[str, int]]:
                 result.append((text.strip(), ms))
     return result
 
+def _dff_bloques(path: str) -> dict:
+    """Bloques de primer nivel de un .dff (sin recorrer los cuadros DST, lento sobre el disco de red)."""
+    import struct
+    out = {}
+    with open(path, "rb") as f:
+        cab = f.read(16)
+        if cab[:4] != b"FRM8" or cab[12:16] != b"DSD ":
+            return out
+        fin = 12 + struct.unpack(">Q", cab[4:12])[0]
+        pos = 16
+        while pos + 12 <= fin:
+            f.seek(pos)
+            h = f.read(12)
+            if len(h) < 12:
+                break
+            tam = struct.unpack(">Q", h[4:12])[0]
+            cid = h[:4]
+            if cid == b"ID3 ":
+                out["id3"] = f.read(tam)
+            elif cid == b"PROP":
+                datos = f.read(min(tam, 4096))
+                i = datos.find(b"FS  ")
+                if i >= 0:
+                    out["fs"] = struct.unpack(">I", datos[i + 12:i + 16])[0]
+                j = datos.find(b"CHNL")
+                if j >= 0:
+                    out["canales"] = struct.unpack(">H", datos[j + 12:j + 14])[0]
+            elif cid == b"DSD ":
+                out["dsd_bytes"] = tam
+            elif cid == b"DST ":
+                fr = f.read(18)
+                if fr[:4] == b"FRTE":
+                    n, tasa = struct.unpack(">IH", fr[12:18])
+                    out["segundos"] = n / tasa if tasa else None
+            pos += 12 + tam + (tam & 1)
+    return out
+
+
+def _dff_id3(path: str):
+    import io
+    b = _dff_bloques(path).get("id3")
+    return ID3(io.BytesIO(b)) if b else None
+
+
+def _dff_duracion(path: str):
+    try:
+        b = _dff_bloques(path)
+    except OSError:
+        return None
+    if b.get("segundos"):
+        return b["segundos"]
+    if b.get("dsd_bytes") and b.get("fs"):
+        return b["dsd_bytes"] * 8 / (b.get("canales") or 2) / b["fs"]
+    return None
+
+
 def leer_tags_completo(path: str) -> Optional[dict]:
     result = {
         "standard": {}, "has_synced_lrc": False, "has_plain_lrc": False,
@@ -245,9 +301,13 @@ def leer_tags_completo(path: str) -> Optional[dict]:
         "duration": None, "format": None,
     }
     try:
-        audio_easy = File(path, easy=True)
-        if not audio_easy: return None
-        result["duration"] = audio_easy.info.length if audio_easy.info else None
+        if path.lower().endswith(".dff"):
+            audio_easy = {}
+            result["duration"] = _dff_duracion(path)
+        else:
+            audio_easy = File(path, easy=True)
+            if not audio_easy: return None
+            result["duration"] = audio_easy.info.length if audio_easy.info else None
         def _g(k): return audio_easy.get(k, [""])[0] or ""
         result["standard"] = {
             "artist": _g("artist"), "title": _g("title"), "album": _g("album"),
@@ -295,61 +355,62 @@ def leer_tags_completo(path: str) -> Optional[dict]:
                     result["plain_lrc_text"] = plain_val[0]
             except Exception as e:
                 log.debug("FLAC read error [%s]: %s", path, e)
-        elif ext.endswith(".dsf"):
-            result["format"] = "dsf"
+        elif ext.endswith((".dsf", ".dff")):
+            result["format"] = ext[-3:]
             try:
-                if HAS_DSF:
-                    _dsf = DSFFile(path)
-                    if _dsf.tags:
-                        _id3 = _dsf.tags
-                        for _k, _f in _id3.items():
-                            try:    result["all_tags"][_k] = str(_f)[:300]
-                            except: result["all_tags"][_k] = repr(_f)[:300]
+                if ext.endswith(".dff"):
+                    _id3 = _dff_id3(path)                       # bloque «ID3 » del FRM8
+                else:
+                    _id3 = DSFFile(path).tags if HAS_DSF else None
+                if _id3:
+                    for _k, _f in _id3.items():
+                        try:    result["all_tags"][_k] = str(_f)[:300]
+                        except: result["all_tags"][_k] = repr(_f)[:300]
 
-                        # FIX: mutagen NO soporta easy=True para DSF — File(path, easy=True)
-                        # devuelve el objeto crudo, por lo que result["standard"] (construido
-                        # arriba via audio_easy) queda con todos los campos vacíos.
-                        # Reconstruimos "standard" manualmente desde los frames ID3 ya leídos.
-                        def _frame_text(frame_id):
-                            fr = _id3.get(frame_id)
-                            if fr is None or not getattr(fr, "text", None):
-                                return ""
-                            return str(fr.text[0])
+                    # FIX: mutagen NO soporta easy=True para DSF — File(path, easy=True)
+                    # devuelve el objeto crudo, por lo que result["standard"] (construido
+                    # arriba via audio_easy) queda con todos los campos vacíos.
+                    # Reconstruimos "standard" manualmente desde los frames ID3 ya leídos.
+                    def _frame_text(frame_id):
+                        fr = _id3.get(frame_id)
+                        if fr is None or not getattr(fr, "text", None):
+                            return ""
+                        return str(fr.text[0])
 
-                        result["standard"]["title"]       = _frame_text("TIT2")
-                        result["standard"]["artist"]      = _frame_text("TPE1")
-                        result["standard"]["album"]       = _frame_text("TALB")
-                        result["standard"]["albumartist"] = _frame_text("TPE2")
-                        result["standard"]["date"]        = _frame_text("TDRC")
-                        result["standard"]["tracknumber"] = _frame_text("TRCK")
-                        result["standard"]["discnumber"]  = _frame_text("TPOS")
-                        result["standard"]["genre"]       = _frame_text("TCON")
-                        result["standard"]["composer"]    = _frame_text("TCOM")
-                        result["standard"]["bpm"]         = _frame_text("TBPM")
-                        _comm_keys = [k for k in _id3.keys() if k.startswith("COMM")
-                                     and "Mood" not in k]
-                        if _comm_keys:
-                            _comm_frame = _id3.get(_comm_keys[0])
-                            result["standard"]["comment"] = (
-                                str(_comm_frame.text[0]) if _comm_frame.text else ""
-                            )
-                        else:
-                            result["standard"]["comment"] = ""
-                        _sylt = _id3.getall("SYLT")
-                        if _sylt:
-                            result["has_synced_lrc"] = True
-                            _sl = []
-                            for _fr in _sylt:
-                                for _tx, _ms in _fr.text:
-                                    _m = _ms // 60000
-                                    _s = (_ms % 60000) // 1000
-                                    _c = (_ms % 1000) // 10
-                                    _sl.append(f"[{_m:02}:{_s:02}.{_c:02}]{_tx}")
-                            result["synced_lrc_text"] = "\n".join(_sl)
-                        _uslt = _id3.getall("USLT")
-                        if _uslt:
-                            result["has_plain_lrc"] = True
-                            result["plain_lrc_text"] = _uslt[0].text
+                    result["standard"]["title"]       = _frame_text("TIT2")
+                    result["standard"]["artist"]      = _frame_text("TPE1")
+                    result["standard"]["album"]       = _frame_text("TALB")
+                    result["standard"]["albumartist"] = _frame_text("TPE2")
+                    result["standard"]["date"]        = _frame_text("TDRC")
+                    result["standard"]["tracknumber"] = _frame_text("TRCK")
+                    result["standard"]["discnumber"]  = _frame_text("TPOS")
+                    result["standard"]["genre"]       = _frame_text("TCON")
+                    result["standard"]["composer"]    = _frame_text("TCOM")
+                    result["standard"]["bpm"]         = _frame_text("TBPM")
+                    _comm_keys = [k for k in _id3.keys() if k.startswith("COMM")
+                                 and "Mood" not in k]
+                    if _comm_keys:
+                        _comm_frame = _id3.get(_comm_keys[0])
+                        result["standard"]["comment"] = (
+                            str(_comm_frame.text[0]) if _comm_frame.text else ""
+                        )
+                    else:
+                        result["standard"]["comment"] = ""
+                    _sylt = _id3.getall("SYLT")
+                    if _sylt:
+                        result["has_synced_lrc"] = True
+                        _sl = []
+                        for _fr in _sylt:
+                            for _tx, _ms in _fr.text:
+                                _m = _ms // 60000
+                                _s = (_ms % 60000) // 1000
+                                _c = (_ms % 1000) // 10
+                                _sl.append(f"[{_m:02}:{_s:02}.{_c:02}]{_tx}")
+                        result["synced_lrc_text"] = "\n".join(_sl)
+                    _uslt = _id3.getall("USLT")
+                    if _uslt:
+                        result["has_plain_lrc"] = True
+                        result["plain_lrc_text"] = _uslt[0].text
             except Exception as e:
                 log.debug("DSF read error [%s]: %s", path, e)
     except Exception as e:

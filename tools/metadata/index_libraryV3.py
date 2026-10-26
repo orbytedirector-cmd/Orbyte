@@ -134,20 +134,63 @@ _MUTAGEN_KEYS = {
     "encodedby": "encoded_by", "isrc": "isrc",
 }
 
+class _SoloTags:
+    def __init__(self, tags):
+        self.tags = tags
+
+
+def _dff_id3(file_path: str):
+    """Tags de un .dff: el bloque «ID3 » de primer nivel del FRM8 (como lo escriben foobar2000 y Ingesta)."""
+    import io
+    import struct
+    from mutagen.id3 import ID3
+    with open(file_path, "rb") as f:
+        cab = f.read(16)
+        if cab[:4] != b"FRM8" or cab[12:16] != b"DSD ":
+            return None
+        fin = 12 + struct.unpack(">Q", cab[4:12])[0]
+        pos = 16
+        while pos + 12 <= fin:
+            f.seek(pos)
+            h = f.read(12)
+            if len(h) < 12:
+                break
+            tam = struct.unpack(">Q", h[4:12])[0]
+            if h[:4] == b"ID3 ":
+                return _SoloTags(ID3(io.BytesIO(f.read(tam))))
+            pos += 12 + tam + (tam & 1)
+    return None
+
+
+_ID3_FRAMES = {
+    "artist": "TPE1", "albumartist": "TPE2", "album": "TALB", "title": "TIT2", "tracknumber": "TRCK",
+    "discnumber": "TPOS", "date": "TDRC", "genre": "TCON", "organization": "TPUB", "copyright": "TCOP",
+    "encodedby": "TENC", "isrc": "TSRC",
+}
+
 def _tags_mutagen(file_path: str) -> dict:
     """Lee los tags con mutagen (más tolerante que ffprobe con ID3 dañados).
     Devuelve {} si mutagen no está o no puede leer el archivo."""
     try:
-        from mutagen import File as MutagenFile
-        audio = MutagenFile(file_path, easy=True)
+        if file_path.lower().endswith(".dff"):
+            audio = _dff_id3(file_path)      # sin recorrer los cuadros DST (lento en disco de red)
+        else:
+            from mutagen import File as MutagenFile
+            audio = MutagenFile(file_path, easy=True)
     except Exception:
         return {}
     if not audio or not getattr(audio, "tags", None):
         return {}
     out = {}
+    # DSF / DFF: mutagen no tiene «easy» para ellos y devuelve los frames ID3 crudos (TIT2, TPE1…)
+    crudo_id3 = hasattr(audio.tags, "getall") and not hasattr(audio.tags, "valid_keys")
     for k, destino in _MUTAGEN_KEYS.items():
         try:
-            v = audio.tags.get(k)
+            if crudo_id3:
+                fr = audio.tags.get(_ID3_FRAMES.get(k, ""))
+                v = [str(x) for x in fr.text] if fr is not None and getattr(fr, "text", None) else None
+            else:
+                v = audio.tags.get(k)
         except Exception:
             v = None
         if not v:
