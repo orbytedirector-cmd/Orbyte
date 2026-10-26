@@ -14,7 +14,8 @@ import threading
 import time
 import traceback
 
-from . import analisis, artistas, metadata, procesar, recursos
+from . import analisis, artistas, metadata, procesar, recursos, sacd
+from .almacen import PREVIOS
 
 log = logging.getLogger('ingesta')
 
@@ -126,12 +127,40 @@ class Procesador(threading.Thread):
                                     str(e).splitlines()[0], aid)
             self.actual = None
             return
+        es_iso = bool(rep.get('origen_entrada'))
+        if es_iso:
+            self._cerrar_iso(aid, rep, aj, reg)
         self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else 'completado',
-                                ruta=destino, ubicado_en=destino, progreso=None,
-                                terminado=None if aj.get('metadata', '1') == '1' else time.time())
+                                ubicado_en=destino, progreso=None,
+                                terminado=None if aj.get('metadata', '1') == '1' else time.time(),
+                                # una ISO conserva su ruta de la entrada: así no vuelve a aparecer como nueva
+                                **({} if es_iso else {'ruta': destino}))
         self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: ubicado en la biblioteca',
                             os.path.relpath(destino, aj.get('biblioteca') or '/'), aid)
         self.actual = None
+
+    def _cerrar_iso(self, aid, rep, aj, reg):
+        """Tras ubicar un área de una ISO: la ISO se borra de la entrada (si así está configurado) solo cuando
+        no queda otra área de la misma ISO por ubicar; la extracción local se borra siempre."""
+        real = rep['origen_entrada']
+        datos = os.path.dirname(self.almacen.ruta)
+        area_dir = os.path.dirname(rep.get('carpeta') or '')
+        if area_dir.startswith(os.path.join(datos, 'sacd') + os.sep) and os.path.isdir(area_dir):
+            shutil.rmtree(area_dir, ignore_errors=True)
+        pendientes = [x for x in self.almacen.albumes() if x['id'] != aid and sacd.separar(x['ruta'])[0] == real
+                      and x['estado'] in PREVIOS + ('por_ubicar', 'ubicando', 'error_ubicar')
+                      and x['estado'] != 'descartado']
+        if aj.get('borrar_origen', '1') != '1':
+            return
+        if pendientes:
+            reg('La ISO queda en la entrada hasta que la otra área también esté ubicada')
+            return
+        try:
+            procesar.borrar_de_entrada(real, aj.get('carpeta_entrada'))
+            sacd.limpiar(datos, entrada=real)
+            reg('ISO original borrada de la carpeta de entrada')
+        except Exception as e:
+            reg(f'No se pudo borrar la ISO de la entrada: {e}')
 
     # ── etapa 3 ──
     def metadata(self, aid):

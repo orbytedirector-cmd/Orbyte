@@ -36,6 +36,7 @@ from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
+from . import sacd as sacd_mod
 import threading
 import traceback
 
@@ -250,6 +251,10 @@ def ajustes():
         for k in ('desatendido', 'borrar_origen', 'metadata'):
             nuevo[k] = '1' if request.form.get(k) else '0'
         nuevo['python_scripts'] = (request.form.get('python_scripts') or '').strip()
+        nuevo['sacd_extract'] = (request.form.get('sacd_extract') or '').strip()
+        if nuevo['sacd_extract'] and not (os.path.isfile(nuevo['sacd_extract'])
+                                           and os.access(nuevo['sacd_extract'], os.X_OK)):
+            errores.append('sacd_extract no existe o no es ejecutable.')
         if nuevo['python_scripts'] and not (os.path.isfile(nuevo['python_scripts'])
                                              and os.access(nuevo['python_scripts'], os.X_OK)):
             errores.append('El Python para los scripts no existe o no es ejecutable.')
@@ -362,6 +367,8 @@ def api_cambios(aid):
                         host == h or host.endswith('.' + h) for h in procesar.HOSTS_PORTADA):
                     return jsonify(ok=False, error='Origen de imagen no permitido'), 400
             c['caratula'] = {k: car.get(k) for k in ('tipo', 'archivo', 'mb', 'url', 'miniatura') if car.get(k)}
+    if d.get('sacd_area') in ('estereo', 'multicanal', 'ambos'):
+        c['sacd_area'] = d['sacd_area']
     if d.get('aceptar'):
         c['aceptadas'] = sorted(set(c.get('aceptadas') or []) | {d['aceptar']})
     if d.get('desaceptar'):
@@ -448,6 +455,12 @@ def api_probar_python():
     if py is not None:
         aj['python_scripts'] = py
     return jsonify(metadata_mod.probar_python(aj))
+
+
+@app.route('/api/probar_sacd', methods=['POST'])
+def api_probar_sacd():
+    ruta = ((request.get_json(silent=True) or {}).get('ruta') or '').strip() or None
+    return jsonify(sacd_mod.probar(ruta))
 
 
 @app.route('/api/album/<int:aid>/revisar', methods=['POST'])
@@ -888,7 +901,14 @@ def caratula(aid):
         abort(404)
     if car.get('tipo') == 'caa' and car.get('mb') and not request.args.get('r') and not request.args.get('disco'):
         return redirect(f'https://coverartarchive.org/release/{car["mb"]}/front-250')
-    raiz = os.path.realpath(a['ruta'])
+    if r.get('origen_entrada') and r.get('carpeta'):
+        # ISO de SACD: las pistas están en la extracción local y lo que vino con la ISO, enlazado desde la entrada
+        base = os.path.realpath(r['carpeta'])
+        raices = (base, os.path.realpath(r['origen_entrada']))
+    else:
+        base = os.path.realpath(a['ruta'])
+        raices = (base,)
+    raiz = base
     disco = request.args.get('disco', type=int)
     archivo = None
     if request.args.get('r'):                   # cualquier imagen candidata del álbum
@@ -905,11 +925,11 @@ def caratula(aid):
     origen = None
     if archivo:
         origen = os.path.realpath(os.path.join(raiz, archivo))
-        if not origen.startswith(raiz + os.sep) or not os.path.isfile(origen):
+        if not any(origen.startswith(x + os.sep) for x in raices) or not os.path.isfile(origen):
             abort(404)
     elif car.get('tipo') == 'incrustada' and not disco and not request.args.get('r'):
         pista = os.path.realpath(os.path.join(raiz, car['pista']))
-        if not pista.startswith(raiz + os.sep) or not os.path.isfile(pista):
+        if not any(pista.startswith(x + os.sep) for x in raices) or not os.path.isfile(pista):
             abort(404)
         origen = _extraer_incrustada(pista)
     if not origen:

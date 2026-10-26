@@ -122,7 +122,7 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
     finally:
         _limpiar_tmp_vacio(biblioteca)
 
-    if borrar_origen:
+    if borrar_origen and not rep.get('origen_entrada'):     # una ISO la cierra el procesador (ver _cerrar_iso)
         borrar_de_entrada(origen, ajustes.get('carpeta_entrada'))
         registro('Original borrado de la carpeta de entrada')
     return destino
@@ -456,6 +456,11 @@ def verificar(fuente, salida, x, ganancia):
         a, b = _md5_flac(fuente), _md5_flac(salida)
         if a and b:
             return None if a == b else 'el audio no es idéntico al original'
+    if x.get('dsd') and x['accion'] == 'copiar' and salida.lower().endswith('.dsf'):
+        try:                                               # DSF copiado: el DSD intacto tras escribir los tags
+            return None if dsd.md5(fuente) == dsd.md5(salida) else 'el DSD no es idéntico al original'
+        except dsd.ErrorDSD as e:
+            return str(e)
     if x['accion'] in ('a_dsf', 'cortar_dsd'):           # DSD: muestra por muestra igual al original
         b0, b1 = _bytes_dsd(fuente, x)
         try:

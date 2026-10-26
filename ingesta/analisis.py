@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import dsd
+from . import sacd
 from . import edicion as edicion_mod
 
 try:
@@ -153,6 +154,8 @@ def detectar_albumes(entrada):
     for raiz, dirs, archivos in os.walk(entrada):
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not d.startswith('@'))
         audio = [a for a in archivos if Path(a).suffix.lower() in AUDIO_EXT and not a.startswith('._')]
+        if not audio and any(a.lower().endswith('.iso') for a in archivos) and sacd.iso_de(raiz):
+            audio = [os.path.basename(sacd.iso_de(raiz))]      # ISO de SACD: se extrae antes de revisar
         if not audio:
             continue
         if os.path.abspath(raiz) == entrada:
@@ -177,6 +180,7 @@ def detectar_albumes(entrada):
 
 def firma(carpeta):
     """(n.º de archivos, bytes, mtime más reciente) de todo lo que hay bajo la carpeta."""
+    carpeta = sacd.separar(carpeta)[0]          # «…#multicanal» de una ISO = la misma carpeta
     n = tam = 0
     ult = 0.0
     for raiz, dirs, archivos in os.walk(carpeta):
