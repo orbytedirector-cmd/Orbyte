@@ -277,6 +277,7 @@
         <td class="der">{{ p.duracion|duracion }}</td>
         <td class="der oculto-movil {{ 'mal' if p.float and p.pico_db is not none and p.pico_db > 0 }}">{% if p.pico_db is not none %}{{ '%+.1f'|format(p.pico_db) }} dB{% else %}—{% endif %}</td>
         <td>{% if p.error_por_id3 %}<span class="ok">✓</span><div class="s med">avisa por el tag ID3 pegado; audio completo</div>
+            {% elif p.error_completo and p.dsf_irregular %}<span class="ok">✓ completo</span><div class="s med">datos de más después del audio: se reescribe al ubicar (mismo DSD)</div>
             {% elif p.decodifica %}<span class="ok">✓</span>{% elif p.error_completo %}<span class="med">⚠ errores, pero completo</span>
             {% for e in p.errores or [] %}<div class="s med mono err">{{ e }}</div>{% endfor %}{% elif p.legible %}<span class="mal">✗ dañado</span>
             {% for e in p.errores or [] %}<div class="s mal mono err">{{ e }}</div>{% endfor %}{% endif %}</td>
