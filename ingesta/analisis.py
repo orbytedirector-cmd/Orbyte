@@ -34,7 +34,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 8   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 9   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -406,6 +406,41 @@ def leer_cue(ruta):
         elif up.startswith('REM GENRE '):
             album['genre'] = valor(l)
     return album, [p for p in pistas if p['start'] is not None and p['file']]
+
+
+def reparar_cue(cpistas, duracion_de):
+    """Cue de vinilo con el FILE de la cara B una pista antes de tiempo: la última de la cara A queda en la B con
+    su tiempo de la A (21:44) seguida de una que empieza en 00:00. Si el tiempo cabe al final del archivo anterior,
+    se devuelve a ese archivo. Lo que siga sin orden queda como error (cortar ahí dejaría pistas vacías).
+    Devuelve [(nivel, texto)]."""
+    grupos = []
+    for cp in cpistas:
+        if grupos and grupos[-1][0]['file'] == cp['file']:
+            grupos[-1].append(cp)
+        else:
+            grupos.append([cp])
+    out = []
+    for i in range(1, len(grupos)):
+        g, ant = grupos[i], grupos[i - 1]
+        while len(g) >= 2 and g[0]['start'] > g[1]['start']:
+            dur = duracion_de(ant[0]['file'])
+            if dur and ant[-1]['start'] < g[0]['start'] < dur - 1:
+                t = g.pop(0)
+                t['file'] = ant[0]['file']
+                ant.append(t)
+                out.append(('correccion', f'la pista {t["num"]} («{t["title"]}») está bajo el archivo equivocado: su tiempo '
+                                          f'({int(t["start"] // 60)}:{int(t["start"] % 60):02d}) es el final de '
+                                          f'«{os.path.basename(t["file"])}»; se corta de ahí'))
+            else:
+                break
+    for g in grupos:
+        dur = duracion_de(g[0]['file'])
+        malas = [b['num'] for a, b in zip(g, g[1:]) if b['start'] <= a['start']]
+        malas += [cp['num'] for cp in g if dur and cp['start'] >= dur]
+        if malas:
+            out.append(('error', f'los tiempos de las pistas {", ".join(map(str, sorted(set(malas))))} no calzan con '
+                                 f'«{os.path.basename(g[0]["file"])}» (desordenados o más allá de su final): revisa el cue'))
+    return out
 
 
 # ─────────────────────────── análisis de una pista ───────────────────────────
@@ -971,6 +1006,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         except Exception as e:
             problema('aviso', 'cue_ilegible', f'No se pudo leer {os.path.relpath(cue, ruta)}: {e}')
             continue
+        def _dur_de(fname, carpeta_rel=carpeta_rel):
+            base = os.path.basename(fname.replace('\\', '/'))
+            p = por_nombre.get((carpeta_rel, base.lower())) or por_nombre.get((carpeta_rel, Path(base).stem.lower()))
+            return (p or {}).get('duracion')
+        for tipo, texto in reparar_cue(cpistas, _dur_de):
+            problema(tipo, 'cue_archivo_corregido' if tipo == 'correccion' else 'cue_tiempos',
+                     f'{os.path.basename(cue)}: {texto}')
         refs = []
         for fname in sorted({cp['file'] for cp in cpistas}):
             base = os.path.basename(fname.replace('\\', '/'))
