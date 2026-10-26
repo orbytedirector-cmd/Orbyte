@@ -33,7 +33,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 4   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 5   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -1161,12 +1161,22 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         problema('decision', 'unknown_artist', 'Pistas con «Unknown Artist» en los tags', desconocidos)
 
     # ── discos y numeración ──
+    # pistas nombradas por cara de vinilo (A1, B1…): un solo disco con numeración corrida (decisión de Niko),
+    # aunque los tags traigan cada cara o cada LP como un disco aparte
+    caras = _lados_vinilo([p['archivo'].split('/')[-1] for p in pistas if p.get('legible')])
+    unificadas = []
     for p in pistas:
         d_tag = p.get('tags', {}).get('disco')
         d_car = disco_de_carpeta.get(os.path.join(ruta, p['carpeta']) if p['carpeta'] else ruta)
+        if caras and not d_car and (d_tag or 1) != 1:
+            unificadas.append(p['archivo'])
+            d_tag = 1
         p['disco'] = d_car or d_tag or 1
         if d_car and d_tag and d_car != d_tag:
             p.setdefault('notas', []).append(f'tag de disco {d_tag}, carpeta {d_car}')
+    if unificadas:
+        problema('correccion', 'vinilo_un_disco', 'Caras de vinilo (A1, B1…): un solo disco con numeración corrida',
+                 unificadas)
     discos_n = sorted({p['disco'] for p in pistas})
     n_discos = len(discos_n)
     if n_discos == 1 and multi and carpetas_audio != [ruta]:
@@ -1186,6 +1196,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             dn, nn, tn = _desde_nombre_archivo(p['archivo'].split('/')[-1])
             if p['archivo'].split('/')[-1] in lados:          # «A1.Iron Fist» → pista 1 «Iron Fist»
                 nn, tn = lados[p['archivo'].split('/')[-1]]
+                if not o.get('numero'):
+                    n = nn          # la numeración corrida de las caras manda sobre el n.º por cara de los tags
             if not n and nn:
                 n = nn
                 sin_num.append(p['archivo'])
