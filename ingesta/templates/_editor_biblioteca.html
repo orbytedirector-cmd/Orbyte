@@ -1,0 +1,100 @@
+{# Editor de tags de un álbum que ya está en la biblioteca. Variables: lib, lib_error, lib_api (…/autocorregir, …/ajustar), lib_abierto #}
+<section class="seccion" id="tags-lib">
+  <details id="det-tags-lib" {{ 'open' if lib_abierto }}>
+    <summary class="rotulo" style="cursor:pointer">Editar tags <span class="cuenta">en la biblioteca</span></summary>
+    {% if lib_error %}<div class="flash error" style="margin-top:.7rem">No se pudieron leer los archivos: {{ lib_error }}</div>
+    {% else %}
+    {% set ta = lib.tags_album %}
+    <div class="panel" style="margin-top:.7rem">
+      <div class="trio cuatro">
+        <div class="campo"><label>Artista del álbum</label><input type="text" data-tag="artista" value="{{ ta.artista or '' }}" data-orig="{{ ta.artista or '' }}"></div>
+        <div class="campo"><label>Álbum</label><input type="text" data-tag="album" value="{{ ta.album or '' }}" data-orig="{{ ta.album or '' }}"></div>
+        <div class="campo"><label>Año</label><input type="text" data-tag="anio" inputmode="numeric" maxlength="4" value="{{ ta.anio or '' }}" data-orig="{{ ta.anio or '' }}"></div>
+        <div class="campo"><label>Género</label><input type="text" data-tag="genero" value="{{ ta.genero or '' }}" data-orig="{{ ta.genero or '' }}"></div>
+      </div>
+      <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
+        <input type="text" data-tag="genero_secundario" value="{{ (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
+      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
+      <div id="auto-panel-lib" class="auto-panel" hidden></div>
+      <div class="tabla-wrap"><table class="tabla-tags">
+        <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
+        {% for x in lib.plan %}
+        <tr data-lib-clave="{{ x.clave }}">
+          <td class="num">{{ x.disco }}</td>
+          <td style="width:70px"><input type="text" data-campo="numero" inputmode="numeric" value="{{ x.numero or '' }}" data-orig="{{ x.numero or '' }}"></td>
+          <td><input type="text" data-campo="titulo" value="{{ x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"><div class="s mono tenue">{{ x.clave }}</div></td>
+          <td><input type="text" data-campo="artista" value="{{ x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      <div class="acciones"><button class="btn" id="auto-lib" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+        <button class="btn oro" id="guardar-lib">Guardar en la biblioteca</button></div>
+    </div>
+    {% endif %}
+  </details>
+</section>
+{% if lib %}
+<script>
+(function () {
+  const API = {{ lib_api|tojson }};
+  const raiz = document.getElementById('tags-lib');
+  const campoTag = k => raiz.querySelector(`[data-tag="${k}"]`);
+  const filas = () => [...raiz.querySelectorAll('tr[data-lib-clave]')];
+  let propuesta = null;
+  function campos() {
+    const l = [];
+    for (const [k, c] of Object.entries(propuesta.tags)) l.push([campoTag(k), c]);
+    for (const [clave, cs] of Object.entries(propuesta.pistas)) {
+      const tr = filas().find(t => t.dataset.libClave === clave);
+      if (tr) for (const [k, c] of Object.entries(cs)) l.push([tr.querySelector(`[data-campo="${k}"]`), c]);
+    }
+    return l.filter(([el]) => el);
+  }
+  function aplicar() {
+    const activos = new Set([...raiz.querySelectorAll('#auto-panel-lib input[data-grupo]:checked')].map(c => c.dataset.grupo));
+    for (const [el, c] of campos()) {
+      const si = activos.has(c.grupo);
+      el.value = si ? c.despues : c.antes;
+      el.classList.toggle('auto', si);
+      el.title = si ? `Antes: ${c.antes || '(vacío)'}` : '';
+    }
+  }
+  const ac = document.getElementById('auto-lib');
+  ac.onclick = async () => {
+    ac.disabled = true; ac.textContent = 'Revisando…';
+    const r = await post(`${API}/autocorregir`);
+    ac.disabled = false; ac.textContent = '✦ Autocorregir';
+    if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+    propuesta = r;
+    const panel = document.getElementById('auto-panel-lib');
+    panel.hidden = false;
+    panel.innerHTML = r.grupos.length ? `
+      <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
+      <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
+      <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «Guardar en la biblioteca».</div>`
+      : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
+    panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicar);
+    aplicar();
+  };
+  const gl = document.getElementById('guardar-lib');
+  gl.onclick = async () => {
+    const tags = {};
+    raiz.querySelectorAll('[data-tag]').forEach(e => {
+      const v = e.value.trim(), k = e.dataset.tag;
+      if (k === 'genero_secundario' ? v !== e.dataset.orig : (v && v !== e.dataset.orig)) tags[k] = v;
+    });
+    const pistas = {};
+    filas().forEach(tr => {
+      const o = {};
+      tr.querySelectorAll('[data-campo]').forEach(e => { const v = e.value.trim(); if (v && v !== e.dataset.orig) o[e.dataset.campo] = v; });
+      if (Object.keys(o).length) pistas[tr.dataset.libClave] = o;
+    });
+    if (!Object.keys(tags).length && !Object.keys(pistas).length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
+    gl.disabled = true;
+    const r = await post(`${API}/ajustar`, {tags, pistas});
+    if (r && r.ok === false) { toast('No se pudo', r.error || ''); gl.disabled = false; return; }
+    location.href = r.ir || location.href.split('#')[0];
+  };
+})();
+</script>
+{% endif %}

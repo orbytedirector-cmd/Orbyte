@@ -92,6 +92,13 @@ def leer(ruta):
                      'total_discos': t.get('total_discos'), 'duracion_origen': _duracion(full)})
     if not plan:
         raise FalloAjuste('La carpeta no tiene archivos de audio')
+
+    def _n(v):
+        try:
+            return int(str(v).split('/')[0])
+        except (TypeError, ValueError):
+            return 10 ** 6
+    plan.sort(key=lambda x: (_n(x['disco']), _n(x['numero']), x['clave']))   # orden del álbum, no alfabético
     discos = {x['disco'] for x in plan}
     ta = {'artista': _mayoria([x['artista_album'] for x in plan]) or _mayoria([x['artista'] for x in plan]) or '',
           'album': _mayoria([x['album'] for x in plan]) or '',
@@ -156,8 +163,9 @@ def propuesta(actual, cambios):
             p['numero'] = int(str(o['numero']).strip())
         p['cambio'] = any(p.get(k) != x.get(k) for k in ('titulo', 'artista', 'numero'))
         nuevo = nombre_pista(p['disco'], p['numero'], p['titulo'], x['ext'], actual['n_discos'])
-        p['nuevo'] = os.path.join(os.path.dirname(x['clave']), nuevo) if p['titulo'] != x['titulo'] \
-            or p['numero'] != x['numero'] else x['clave']
+        # sin número de pista no se inventa un «00 - …»: el archivo conserva su nombre
+        p['nuevo'] = os.path.join(os.path.dirname(x['clave']), nuevo) if p['numero'] and (
+            p['titulo'] != x['titulo'] or p['numero'] != x['numero']) else x['clave']
         pistas.append(p)
     nums = [(p['disco'], p['numero']) for p in pistas if p['numero']]
     if len(set(nums)) != len(nums):

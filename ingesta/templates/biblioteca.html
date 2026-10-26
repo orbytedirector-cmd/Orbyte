@@ -1,0 +1,128 @@
+{% extends 'base.html' %}
+{% block titulo %}Biblioteca{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Títulos de la biblioteca</h1>
+  <div class="sub">Álbumes de Orbyte cuyos títulos de pista no están normalizados (la regla tiene que cumplirla la mayoría de las pistas). Ábrelos uno a uno, o marca varios y aplica ✦ Autocorregir solo a los títulos, con vista previa. Cada pista conserva su ID.</div>
+</div></div>
+<div class="filtros" id="filtros"></div>
+<div class="campo" style="max-width:420px;margin-bottom:1rem"><input type="search" id="buscar" placeholder="Buscar artista o álbum…"></div>
+<div id="estado"><div class="estado-vivo"><span class="giro"></span>Revisando music.db…</div></div>
+<div id="lista"></div>
+<div id="previa"></div>
+{% endblock %}
+{% block js %}
+<script>
+const REGLAS = {{ REGLAS|tojson }};
+const MAX = 40;
+const PROCESO = {por_ajustar: 'En cola: ajustar tags', ajustando: 'Ajustando tags', por_metadata: 'En cola: metadata', metadata: 'Metadata'};
+let datos = null, filtro = 'todas', verIgnorados = false, limite = 150;
+const sel = new Set();
+
+async function cargar() {
+  const r = await fetch('/api/biblioteca/titulos' + (verIgnorados ? '?ignorados=1' : ''));
+  datos = await r.json();
+  if (datos.error) { document.getElementById('estado').innerHTML = `<div class="flash error">${esc(datos.error)}</div>`; return; }
+  pintar();
+}
+function visibles() {
+  const q = document.getElementById('buscar').value.trim().toLowerCase();
+  return datos.albumes.filter(a => (filtro === 'todas' || a.reglas[filtro])
+    && (!q || `${a.artista} ${a.album}`.toLowerCase().includes(q)));
+}
+function rel(r) { const raiz = (datos.raiz || '').replace(/\/$/, '') + '/'; return r && r.startsWith(raiz) ? r.slice(raiz.length) : r; }
+function pintar() {
+  const fil = document.getElementById('filtros');
+  const cuenta = k => datos.albumes.filter(a => k === 'todas' || a.reglas[k]).length;
+  fil.innerHTML = [['todas', 'Todos'], ...Object.entries(REGLAS)].map(([k, n]) =>
+      `<button class="filtro ${filtro === k ? 'activo' : ''}" data-f="${k}">${esc(n)}<b>${cuenta(k)}</b></button>`).join('')
+    + `<button class="filtro ${verIgnorados ? 'activo' : ''}" id="ver-ign">Ignorados<b>${datos.ignorados}</b></button>`;
+  fil.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filtro = b.dataset.f; limite = 150; pintar(); });
+  document.getElementById('ver-ign').onclick = () => { verIgnorados = !verIgnorados; sel.clear(); cargar(); };
+  const lista = visibles();
+  document.getElementById('estado').innerHTML = verIgnorados
+    ? '<p class="sub" style="margin-bottom:1rem">Álbumes que marcaste como «Ignorar»: no aparecen en la revisión.</p>'
+    : `<p class="sub" style="margin-bottom:1rem"><b>${datos.albumes.length}</b> álbumes con títulos sin normalizar</p>`;
+  const cont = document.getElementById('lista');
+  if (!lista.length) { cont.innerHTML = '<div class="sin-problemas">Nada que revisar con este filtro.</div>'; return; }
+  cont.innerHTML = `<div class="tabla-wrap"><table>
+    <tr>${verIgnorados ? '' : '<th style="width:1%"></th>'}<th>Álbum</th><th>Problemas</th><th class="oculto-movil">Ejemplo</th><th style="width:1%"></th></tr>
+    ${lista.slice(0, limite).map(a => `<tr>
+      ${verIgnorados ? '' : `<td>${a.proceso ? '' : `<input type="checkbox" class="sel" value="${a.id}" ${sel.has(a.id) ? 'checked' : ''}>`}</td>`}
+      <td><a href="/biblioteca/album/${a.id}"><div class="t">${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
+        <div class="s">${esc(a.artista)} · ${a.n_pistas} pistas</div><div class="s mono muy-tenue">${esc(rel(a.ruta))}</div></a></td>
+      <td>${a.proceso ? `<span class="chip e-${a.proceso} pulso"><span class="led"></span>${esc(PROCESO[a.proceso] || a.proceso)}</span>`
+        : Object.entries(a.reglas).map(([k, n]) => `<div class="s">${esc(REGLAS[k])} <span class="tenue">(${n})</span></div>`).join('')}</td>
+      <td class="oculto-movil"><span class="mono s">${esc(Object.values(a.ejemplos)[0] || '')}</span></td>
+      <td><button class="btn chico" data-ign="${a.id}">${verIgnorados ? 'Dejar de ignorar' : 'Ignorar'}</button></td>
+    </tr>`).join('')}
+  </table></div>
+  ${lista.length > limite ? `<div class="acciones"><button class="btn" id="mas">Mostrar más (${lista.length - limite})</button></div>` : ''}
+  ${verIgnorados ? '' : `<div class="acciones" style="position:sticky;bottom:0;background:var(--fondo, #000);padding:.6rem 0">
+    <button class="btn" id="marcar">Marcar los ${Math.min(MAX, lista.length)} primeros</button>
+    <button class="btn oro" id="ver-previa" ${sel.size ? '' : 'disabled'}>✦ Ver propuesta (${sel.size})</button>
+    <span class="tenue" style="font-size:.8rem">Hasta ${MAX} álbumes por vez</span></div>`}`;
+  cont.querySelectorAll('.sel').forEach(c => c.onchange = () => {
+    const id = +c.value;
+    if (c.checked && sel.size >= MAX) { c.checked = false; toast('Máximo ' + MAX, 'Aplica estos primero'); return; }
+    c.checked ? sel.add(id) : sel.delete(id); pintarBoton();
+  });
+  cont.querySelectorAll('[data-ign]').forEach(b => b.onclick = async () => {
+    b.disabled = true; await post(`/api/biblioteca/${b.dataset.ign}/ignorar`, {si: !verIgnorados}); sel.delete(+b.dataset.ign); cargar();
+  });
+  const mas = document.getElementById('mas'); if (mas) mas.onclick = () => { limite += 300; pintar(); };
+  const marcar = document.getElementById('marcar');
+  if (marcar) marcar.onclick = () => { lista.filter(a => !a.proceso).slice(0, MAX).forEach(a => sel.size < MAX && sel.add(a.id)); pintar(); };
+  const vp = document.getElementById('ver-previa'); if (vp) vp.onclick = verPrevia;
+}
+function pintarBoton() { const b = document.getElementById('ver-previa'); if (b) { b.disabled = !sel.size; b.textContent = `✦ Ver propuesta (${sel.size})`; } }
+
+async function verPrevia() {
+  const pv = document.getElementById('previa');
+  pv.innerHTML = `<div class="estado-vivo" style="margin-top:1rem"><span class="giro"></span>Leyendo los tags de ${sel.size} álbumes…</div>`;
+  pv.scrollIntoView({behavior: 'smooth'});
+  const r = await post('/api/biblioteca/lote/previa', {ids: [...sel]});
+  const conCambios = r.albumes.filter(a => a.pistas && a.pistas.length);
+  const sinCambios = r.albumes.filter(a => !a.error && !a.al_dia && (!a.pistas || !a.pistas.length));
+  const alDia = r.albumes.filter(a => !a.error && a.al_dia);
+  const conError = r.albumes.filter(a => a.error);
+  pv.innerHTML = `<section class="seccion"><h2 class="rotulo">Propuesta <span class="cuenta">solo títulos de pista · nada se guarda hasta «Aplicar»</span></h2>
+    ${conCambios.map(a => `<div class="panel" style="margin-bottom:.8rem" data-alb="${a.id}">
+      <label class="t"><input type="checkbox" class="alb" checked> ${esc(a.artista)} — ${esc(a.album)}${a.anio ? ` (${esc(a.anio)})` : ''}</label>
+      <div class="s tenue" style="margin:.2rem 0 .5rem">${esc(a.fuente)}</div>
+      <div class="tabla-wrap"><table>${a.pistas.map(p => `<tr>
+        <td style="width:1%"><input type="checkbox" class="pis" data-clave="${esc(p.clave)}" checked></td>
+        <td class="tenue">${esc(p.antes)}</td><td style="width:1%">→</td>
+        <td><input type="text" class="nuevo" value="${esc(p.despues)}"></td></tr>`).join('')}</table></div></div>`).join('')}
+    ${alDia.length ? `<div class="panel" style="margin-bottom:.8rem"><div class="t">Los archivos ya están bien; Orbyte todavía tiene los títulos viejos</div>
+      <div class="s tenue" style="margin:.2rem 0 .5rem">Falta releerlos con la metadata.</div>
+      ${alDia.map(a => `<label class="s" style="display:block"><input type="checkbox" class="releer" value="${a.id}" checked> ${esc(a.artista)} — ${esc(a.album)}</label>`).join('')}</div>` : ''}
+    ${sinCambios.length ? `<div class="flash">Sin propuesta automática (ábrelos uno a uno; los títulos genéricos como «Track 01» necesitan la edición de MusicBrainz o escribirlos):
+      ${sinCambios.map(a => `<a href="/biblioteca/album/${a.id}" style="text-decoration:underline">${esc(a.artista)} — ${esc(a.album)}</a>`).join(' · ')}</div>` : ''}
+    ${conError.length ? `<div class="flash error">${conError.map(a => `${esc(a.artista || '')} — ${esc(a.album || a.id)}: ${esc(a.error)}`).join('<br>')}</div>` : ''}
+    ${conCambios.length || alDia.length ? `<div class="acciones"><button class="btn oro" id="aplicar">Aplicar en la biblioteca</button>
+      <span class="tenue" style="font-size:.8rem">Se procesan de a uno en la cola: tags, nombres de archivo y metadata. Los errores llegan a la campana.</span></div>` : ''}
+  </section>`;
+  pv.querySelectorAll('.alb').forEach(c => c.onchange = () => c.closest('[data-alb]').querySelectorAll('.pis').forEach(x => x.checked = c.checked));
+  const ap = document.getElementById('aplicar');
+  if (ap) ap.onclick = async () => {
+    const albumes = {};
+    pv.querySelectorAll('[data-alb]').forEach(div => {
+      const c = {};
+      div.querySelectorAll('tr').forEach(tr => { const x = tr.querySelector('.pis'); if (x && x.checked) c[x.dataset.clave] = tr.querySelector('.nuevo').value; });
+      if (Object.keys(c).length) albumes[div.dataset.alb] = c;
+    });
+    const releer = [...pv.querySelectorAll('.releer:checked')].map(c => +c.value);
+    if (!Object.keys(albumes).length && !releer.length) { toast('Nada marcado', ''); return; }
+    ap.disabled = true;
+    const res = await post('/api/biblioteca/lote/aplicar', {albumes, releer});
+    toast(`${res.encolados} álbum${res.encolados === 1 ? '' : 'es'} en cola`, res.errores.length ? `${res.errores.length} con error` : 'Se ajustan de a uno');
+    pv.innerHTML = res.errores.length ? `<div class="flash error">${res.errores.map(esc).join('<br>')}</div>` : '';
+    sel.clear(); cargar();
+  };
+}
+setInterval(() => { if (datos && !verIgnorados && datos.albumes.some(a => a.proceso) && !document.querySelector('#previa .panel')) cargar(); }, 8000);
+document.getElementById('buscar').oninput = () => { limite = 150; pintar(); };
+cargar();
+</script>
+{% endblock %}

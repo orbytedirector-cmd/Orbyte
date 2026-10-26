@@ -143,7 +143,7 @@ class Procesador(threading.Thread):
         if es_iso:
             self._cerrar_iso(aid, rep, aj, reg)
         self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else 'completado',
-                                ubicado_en=destino, progreso=None,
+                                ubicado_en=destino, progreso=None, ubicado=time.time(),
                                 terminado=None if aj.get('metadata', '1') == '1' else time.time(),
                                 # una ISO conserva su ruta de la entrada: así no vuelve a aparecer como nueva
                                 **({} if es_iso else {'ruta': destino}))
@@ -186,6 +186,9 @@ class Procesador(threading.Thread):
         cam = dict(a.get('cambios') or {})
         pedido = cam.pop('biblioteca', None) or {}
         volver = pedido.get('volver') or 'completado'
+        nombre = _nombre(a)
+        if pedido.get('lote'):
+            cam['lote'] = True                       # la metadata de un lote tampoco avisa cuando sale bien
         aj = self.almacen.ajustes()
         ruta = a['ubicado_en'] or a['ruta']
         if not self.almacen.cambiar_estado(aid, 'por_ajustar', 'ajustando', progreso='Ajustando tags…',
@@ -206,8 +209,7 @@ class Procesador(threading.Thread):
             # lo hecho hasta el error ya quedó anotado en music.db; la metadata relee el resto
             self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
                                     progreso=None)
-            self.almacen.avisar('error', f'No se pudieron ajustar los tags de {rep.get("artista")} — '
-                                         f'{rep.get("album")}', str(e).splitlines()[0], aid)
+            self.almacen.avisar('error', f'No se pudieron ajustar los tags de {nombre}', str(e).splitlines()[0], aid)
             self.actual = None
             return
         campos = {'ubicado_en': final}
@@ -215,8 +217,9 @@ class Procesador(threading.Thread):
             campos['ruta'] = final
         self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
                                 progreso=None, **campos)
-        self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: tags ajustados',
-                            os.path.relpath(final, aj.get('biblioteca') or '/'), aid)
+        if not pedido.get('lote'):
+            self.almacen.avisar('ok', f'{nombre}: tags ajustados', os.path.relpath(final, aj.get('biblioteca') or '/'),
+                                aid)
         self.actual = None
 
     # ── etapa 3 ──
@@ -237,20 +240,30 @@ class Procesador(threading.Thread):
             log.error('Metadata %s:\n%s', aid, traceback.format_exc())
             reg(f'ERROR: {type(e).__name__}: {e}')
             self.almacen.actualizar(aid, estado='error_metadata', progreso=None)
-            self.almacen.avisar('error', f'Falló la metadata de {rep.get("artista")} — {rep.get("album")}', str(e), aid)
+            self.almacen.avisar('error', f'Falló la metadata de {_nombre(a)}', str(e), aid)
             self.actual = None
             return
         ok = resultado.get('ok')
+        cam = a.get('cambios') or {}
+        lote = cam.pop('lote', None)
         self.almacen.actualizar(aid, estado='completado' if ok else 'error_metadata', progreso=None,
-                                resultado=resultado, terminado=time.time())
-        if ok:
+                                resultado=resultado, terminado=time.time(),
+                                **({'cambios': json.dumps(cam, ensure_ascii=False)} if lote else {}))
+        if ok and lote:
+            pass
+        elif ok:
             txt = 'Listo en Orbyte' + (f' · {len(resultado.get("advertencias", []))} advertencias'
                                        if resultado.get('advertencias') else '')
-            self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: completo', txt, aid)
+            self.almacen.avisar('ok', f'{_nombre(a)}: completo', txt, aid)
         else:
-            self.almacen.avisar('error', f'{rep.get("artista")} — {rep.get("album")}: la metadata quedó incompleta',
+            self.almacen.avisar('error', f'{_nombre(a)}: la metadata quedó incompleta',
                                 '; '.join(resultado.get('errores', [])[:2]), aid)
         self.actual = None
+
+
+def _nombre(a):
+    rep = a.get('reporte') or {}
+    return f'{rep.get("artista") or a.get("artista") or "?"} — {rep.get("album") or a.get("album") or a.get("rel")}'
 
 
 def _firma(a):

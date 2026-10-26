@@ -263,42 +263,7 @@
 {% endif %}
 
 {# ── editor de tags de un álbum ya ubicado ── #}
-{% if lib or lib_error %}
-<section class="seccion" id="tags">
-  <details id="det-tags">
-    <summary class="rotulo" style="cursor:pointer">Editar tags <span class="cuenta">en la biblioteca</span></summary>
-    {% if lib_error %}<div class="flash error" style="margin-top:.7rem">No se pudieron leer los archivos: {{ lib_error }}</div>
-    {% else %}
-    {% set ta = lib.tags_album %}
-    <div class="panel" style="margin-top:.7rem">
-      <div class="trio cuatro">
-        <div class="campo"><label>Artista del álbum</label><input type="text" id="t-artista" value="{{ ta.artista or '' }}" data-orig="{{ ta.artista or '' }}"></div>
-        <div class="campo"><label>Álbum</label><input type="text" id="t-album" value="{{ ta.album or '' }}" data-orig="{{ ta.album or '' }}"></div>
-        <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ ta.anio or '' }}" data-orig="{{ ta.anio or '' }}"></div>
-        <div class="campo"><label>Género</label><input type="text" id="t-genero" value="{{ ta.genero or '' }}" data-orig="{{ ta.genero or '' }}"></div>
-      </div>
-      <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
-        <input type="text" id="t-genero2" value="{{ (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
-      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
-      <div id="auto-panel" class="auto-panel" hidden></div>
-      <div class="tabla-wrap"><table class="tabla-tags">
-        <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
-        {% for x in lib.plan %}
-        <tr data-clave="{{ x.clave }}">
-          <td class="num">{{ x.disco }}</td>
-          <td style="width:70px"><input type="text" class="p-numero" inputmode="numeric" value="{{ x.numero or '' }}"></td>
-          <td><input type="text" class="p-titulo" value="{{ x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"><div class="s mono tenue">{{ x.clave }}</div></td>
-          <td><input type="text" class="p-artista" value="{{ x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
-        </tr>
-        {% endfor %}
-      </table></div>
-      <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
-        <button class="btn oro" id="guardar-lib">Guardar en la biblioteca</button></div>
-    </div>
-    {% endif %}
-  </details>
-</section>
-{% endif %}
+{% if lib or lib_error %}{% set lib_api = '/api/album/%d' % a.id %}{% include '_editor_biblioteca.html' %}{% endif %}
 
 {# ── pistas ── #}
 <section class="seccion">
@@ -462,26 +427,6 @@ if (gt) gt.onclick = () => {
   });
   gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
 };
-// editor de un álbum ya ubicado: se mandan solo los campos que cambiaron respecto de los archivos
-const gl = document.getElementById('guardar-lib');
-if (gl) gl.onclick = () => {
-  const tags = {};
-  for (const k of ['artista', 'album', 'genero', 'anio']) {
-    const e = document.getElementById('t-' + k); if (e.value.trim() && e.value.trim() !== e.dataset.orig) tags[k] = e.value.trim();
-  }
-  const g2 = document.getElementById('t-genero2'); if (g2.value.trim() !== g2.dataset.orig) tags.genero_secundario = g2.value.trim();
-  const pistas = {};
-  document.querySelectorAll('tr[data-clave]').forEach(tr => {
-    const o = {};
-    const t = tr.querySelector('.p-titulo'), ar = tr.querySelector('.p-artista'), n = tr.querySelector('.p-numero');
-    if (t.value.trim() && t.value.trim() !== t.dataset.orig) o.titulo = t.value.trim();
-    if (ar.value.trim() && ar.value.trim() !== ar.dataset.orig) o.artista = ar.value.trim();
-    if (n.value.trim() && n.value.trim() !== n.defaultValue) o.numero = n.value.trim();
-    if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
-  });
-  if (!Object.keys(tags).length && !Object.keys(pistas).length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
-  gl.disabled = true; accion(`/api/album/${AID}/ajustar`, {tags, pistas}).then(ok => { if (!ok) gl.disabled = false; });
-};
 // ✦ Autocorregir: llena el formulario con la propuesta (antes → después) y se puede desmarcar por grupo
 const CAMPO_TAG = {artista: 't-artista', album: 't-album', genero: 't-genero', genero_secundario: 't-genero2'};
 const CAMPO_PISTA = {titulo: '.p-titulo', artista: '.p-artista', numero: '.p-numero'};
@@ -516,7 +461,7 @@ if (ac) ac.onclick = async () => {
   panel.innerHTML = r.grupos.length ? `
     <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
     <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
-    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «${gl ? 'Guardar en la biblioteca' : 'Guardar y volver a revisar'}».</div>`
+    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «Guardar y volver a revisar».</div>`
     : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
   panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicarPropuesta);
   aplicarPropuesta();

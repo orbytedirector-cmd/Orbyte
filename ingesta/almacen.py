@@ -61,6 +61,7 @@ class Almacen:
                 CREATE INDEX IF NOT EXISTS ix_avisos_leido ON avisos(leido, ts);
                 CREATE TABLE IF NOT EXISTS artistas_ignorados (clave TEXT PRIMARY KEY, ts REAL);
                 CREATE TABLE IF NOT EXISTS repetidos_revisados (clave TEXT PRIMARY KEY, firma TEXT, ts REAL);
+                CREATE TABLE IF NOT EXISTS titulos_ignorados (album_id INTEGER PRIMARY KEY, ruta TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS mediciones (ruta TEXT PRIMARY KEY, bytes INTEGER, datos TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS sugerencias_ia (clave TEXT PRIMARY KEY, firma TEXT, datos TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS unificaciones (
@@ -71,7 +72,8 @@ class Almacen:
             columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
             for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
                               ('silencioso', 'INTEGER'), ('ubicado_en', 'TEXT'), ('terminado', 'REAL'),
-                              ('resultado', 'TEXT'), ('version_reporte', 'INTEGER')):
+                              ('resultado', 'TEXT'), ('version_reporte', 'INTEGER'), ('ubicado', 'REAL'),
+                              ('origen', 'TEXT')):
                 if col not in columnas:
                     c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
 
@@ -99,7 +101,55 @@ class Almacen:
             return [dict(r) for r in c.execute(
                 'SELECT id, ruta, rel, estado, progreso, detectado, analizado, artista, album, anio, '
                 'calidad, destino, n_pistas, conteo, ubicado_en, terminado FROM albumes '
-                'ORDER BY detectado DESC, rel')]
+                "WHERE COALESCE(origen, '') != 'biblioteca' ORDER BY detectado DESC, rel")]
+
+    def recientes(self, desde):
+        """Álbumes que Ingesta ubicó desde `desde` (epoch), del más nuevo al más viejo."""
+        with self._con() as c:
+            return [dict(r) for r in c.execute(
+                'SELECT id, ruta, rel, estado, progreso, artista, album, anio, calidad, n_pistas, ubicado_en, '
+                'COALESCE(ubicado, terminado) AS cuando FROM albumes '
+                "WHERE ubicado_en IS NOT NULL AND COALESCE(origen, '') != 'biblioteca' "
+                'AND COALESCE(ubicado, terminado) >= ? ORDER BY cuando DESC', (desde,))]
+
+    def de_biblioteca(self, ruta, artista=None, album=None, anio=None):
+        """La fila de un álbum de la biblioteca (la que dejó Ingesta al ubicarlo, o una nueva solo para ajustar
+        sus tags: esas no aparecen en la Bandeja)."""
+        ruta = ruta.rstrip('/')
+        with _lock, self._con() as c:
+            r = c.execute('SELECT id FROM albumes WHERE ubicado_en=? OR ruta=? ORDER BY id DESC LIMIT 1',
+                          (ruta, ruta)).fetchone()
+            if r:
+                return r['id']
+            cur = c.execute('INSERT INTO albumes(ruta, rel, firma, detectado, estado, ubicado_en, artista, album, anio, '
+                            "origen) VALUES(?, ?, '[]', ?, 'completado', ?, ?, ?, ?, 'biblioteca')",
+                            (ruta, os.path.basename(ruta), time.time(), ruta, artista, album, anio))
+            return cur.lastrowid
+
+    def fila_de_ruta(self, ruta):
+        ruta = (ruta or '').rstrip('/')
+        with self._con() as c:
+            r = c.execute('SELECT id FROM albumes WHERE ubicado_en=? OR ruta=? ORDER BY id DESC LIMIT 1',
+                          (ruta, ruta)).fetchone()
+        return r['id'] if r else None
+
+    def estados_en_biblioteca(self):
+        """ruta en la biblioteca → estado, de los álbumes que se están procesando."""
+        with self._con() as c:
+            return {r[0].rstrip('/'): r[1] for r in c.execute(
+                "SELECT ubicado_en, estado FROM albumes WHERE ubicado_en IS NOT NULL "
+                "AND estado IN ('por_ajustar', 'ajustando', 'por_metadata', 'metadata')")}
+
+    def titulos_ignorados(self):
+        with self._con() as c:
+            return {r[0] for r in c.execute('SELECT album_id FROM titulos_ignorados')}
+
+    def ignorar_titulos(self, album_id, ruta, si=True):
+        with _lock, self._con() as c:
+            if si:
+                c.execute('INSERT OR REPLACE INTO titulos_ignorados VALUES(?, ?, ?)', (album_id, ruta, time.time()))
+            else:
+                c.execute('DELETE FROM titulos_ignorados WHERE album_id=?', (album_id,))
 
     def album(self, aid):
         with self._con() as c:

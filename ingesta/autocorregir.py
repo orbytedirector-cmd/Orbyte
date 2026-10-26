@@ -40,7 +40,11 @@ CANONICOS = [
     "Hip Hop", "Rap", "R&B", "Pop", "Disco",
 ]
 
-PREFIJO_RE = re.compile(r'^\s*(?:[A-Ha-h]\d{1,2}|\d{1,2}[.\-]\d{1,3}|\d{1,3})\s*[._)\-–—:]+\s*(?=\S)')
+# «01 - Título», «01. Título», «01.Título», «01_Título», «1-03. Título», «A1. Título», «A1 Título»; NO «4:30AM»,
+# «0-GRAVITY», «7 -seven-», «7.5 Seconds» ni «99 Luftballons» (sin separador claro no se toca)
+PREFIJO_RE = re.compile(r'^\s*(?:(?:[A-Ha-h]\d{1,2}|\d{1,2}[.\-]\d{1,3}|\d{1,3})'
+                        r'(?:\s*[.)](?!\d)\s*|\s+[-–—]+\s+|\s*[-–—_]+\s+|_+)'
+                        r'|[A-H]\d{1,2}\s+)(?=\S)')
 FORMATO = r'(?:dsd\d*|dsf|dff|sacd|flac|wav|alac|mp3|aac|mqa|hi-?res|hr|cd|lp\d*|\d?lp|vinyl|vinilo|web|' \
           r'\d{2}\s*-?\s*bit|\d{2,3}(?:[.,]\d)?\s*khz|24-?\d+|16-?44|\d{4})'
 GRUPO_FORMATO_RE = re.compile(r'\s*[\(\[]\s*(?:' + FORMATO + r')(?:[\s,/+_-]+(?:' + FORMATO + r'))*\s*[\)\]]', re.I)
@@ -55,6 +59,16 @@ MENORES = {'a', 'an', 'and', 'as', 'at', 'but', 'by', 'for', 'in', 'of', 'on', '
 
 def sin_prefijo(t):
     return PREFIJO_RE.sub('', t or '', count=1).strip()
+
+
+def quitar_artista(t, artistas):
+    """«Battle Beast - Unbroken» → «Unbroken» (si el título empieza con el artista y un guion)."""
+    for a in artistas:
+        if a and len(a) > 1:
+            m = re.match(r'^\s*' + re.escape(a) + r'\s*[-–—:]\s*(?=\S)', t or '', re.I)
+            if m:
+                return t[m.end():].strip()
+    return t
 
 
 def limpiar_album(a, artista=None):
@@ -81,6 +95,15 @@ def derecho(nombre):
     """«Clash, The» → «The Clash»."""
     m = INVERTIDO_RE.match((nombre or '').strip())
     return f'{m.group(2).capitalize() if m.group(2).islower() else m.group(2)} {m.group(1)}' if m else nombre
+
+
+def estilo(s):
+    """'upper' / 'lower' si todo el texto viene así (con letras suficientes), o None."""
+    s = re.sub(r'\s*[\(\[][^\)\]]*[\)\]]', '', s or '').strip()     # «evermore (Explicit)» → «evermore»
+    letras = [c for c in s if c.isalpha()]
+    if len(letras) < 3 or not any(c.isascii() for c in letras):
+        return None
+    return 'upper' if s.isupper() else 'lower' if s.islower() else None
 
 
 def mayusculas(s, conservar=()):
@@ -193,8 +216,20 @@ def proponer(rep, bib=None):
         cambio(tags, 'genero_secundario', sec_actual, '; '.join(secundarios), 'genero')
 
     # pistas
+    # «folklore», «THE STARS WILL LIGHT THE WAY»: si el álbum se escribe igual, las mayúsculas son a propósito
+    estilizado = bool(estilo(alb) or estilo(art))
     con_prefijo = sum(1 for x in plan if PREFIJO_RE.match((ovp.get(x['clave']) or {}).get('titulo') or x.get('titulo') or ''))
     quitar_prefijo = plan and con_prefijo * 2 >= len(plan)
+
+    def _arts(x):
+        o = ovp.get(x['clave']) or {}
+        return [o.get('artista') or x.get('artista'), art]
+
+    def _base(x):
+        t = (ovp.get(x['clave']) or {}).get('titulo') or x.get('titulo') or ''
+        return sin_prefijo(t) if quitar_prefijo else t
+    con_artista = sum(1 for x in plan if quitar_artista(_base(x), _arts(x)) != _base(x))
+    sacar_artista = plan and con_artista * 2 >= len(plan)       # «Artista - Título» en la mayoría de las pistas
     un_disco = len({x.get('disco') or 1 for x in plan}) == 1
     numeros = [(ovp.get(x['clave']) or {}).get('numero') or x.get('numero') for x in plan]
     renumerar = un_disco and (any(not n for n in numeros) or len(set(map(str, numeros))) != len(numeros)
@@ -207,9 +242,11 @@ def proponer(rep, bib=None):
             cambio(c, 'titulo', tit, titulos[i], 'titulos')
         else:
             nuevo = sin_prefijo(tit) if quitar_prefijo else tit
+            if sacar_artista:
+                nuevo = quitar_artista(nuevo, _arts(x)) or nuevo
             if nuevo != tit:
-                cambio(c, 'titulo', tit, mayusculas(nuevo, conservar), 'titulos')
-            else:
+                cambio(c, 'titulo', tit, nuevo if estilizado else mayusculas(nuevo, conservar), 'titulos')
+            elif not estilizado:
                 cambio(c, 'titulo', tit, mayusculas(tit, conservar), 'mayusculas')
         pa = o.get('artista') or x.get('artista') or ''
         if pa and pa == art:
