@@ -424,7 +424,9 @@ def reparar_cue(cpistas, duracion_de):
         g, ant = grupos[i], grupos[i - 1]
         while len(g) >= 2 and g[0]['start'] > g[1]['start']:
             dur = duracion_de(ant[0]['file'])
-            if dur and ant[-1]['start'] < g[0]['start'] < dur - 1:
+            # solo si de verdad queda una pista al final del archivo anterior (≥ 20 s); si su tiempo es el
+            # final exacto de ese archivo, el cue está mal de otra forma y no se adivina
+            if dur and ant[-1]['start'] < g[0]['start'] and dur - g[0]['start'] >= 20:
                 t = g.pop(0)
                 t['file'] = ant[0]['file']
                 ant.append(t)
@@ -438,8 +440,10 @@ def reparar_cue(cpistas, duracion_de):
         malas = [b['num'] for a, b in zip(g, g[1:]) if b['start'] <= a['start']]
         malas += [cp['num'] for cp in g if dur and cp['start'] >= dur]
         if malas:
+            detalle = ', '.join(f'{cp["num"]} en {int(cp["start"] // 60)}:{int(cp["start"] % 60):02d}' for cp in g)
             out.append(('error', f'los tiempos de las pistas {", ".join(map(str, sorted(set(malas))))} no calzan con '
-                                 f'«{os.path.basename(g[0]["file"])}» (desordenados o más allá de su final): revisa el cue'))
+                                 f'«{os.path.basename(g[0]["file"])}» (desordenados o más allá de su final): revisa el cue '
+                                 f'({detalle}' + (f'; el archivo dura {int(dur // 60)}:{int(dur % 60):02d}' if dur else '') + ')'))
     return out
 
 
