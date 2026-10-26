@@ -128,7 +128,7 @@ def album_id(db, ruta):
         con.close()
 
 
-def correr(ruta, aj, reg):
+def correr(ruta, aj, reg, richmeta_completo=False):
     db = aj.get('db_orbyte')
     raiz = aj.get('biblioteca') or '/mnt/musica'
     if not db or not os.path.isfile(db):
@@ -146,7 +146,9 @@ def correr(ruta, aj, reg):
         raise RuntimeError('El indexador terminó pero el álbum no aparece en music.db')
     reg(f'   álbum ID {aid} en Orbyte')
     corregir_album(db, ruta, aid, reg)
-    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'pending'], reg, aj, LIMITE_S['richmeta'])
+    # tras cambiar los tags (títulos, artista) RichMeta rehace todas las pistas: letras y ánimo dependen de ellos
+    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'pending'], reg, aj,
+            LIMITE_S['richmeta'])
     _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, LIMITE_S['import'])
     _correr('relations', ['RichMetaRelations3.py', '--album', str(aid), '--all', '--db', db], reg, aj,
             LIMITE_S['relations'])

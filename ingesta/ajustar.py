@@ -50,8 +50,17 @@ def _secundarios(ruta):
 
 
 def _quitar_secundarios(ruta):
+    import io
     import mutagen
     if ruta.lower().endswith('.dff'):
+        from mutagen.id3 import ID3
+        datos = dsd.id3_dff(ruta)
+        if datos:
+            t = ID3(io.BytesIO(datos))
+            t.delall('TXXX:genre_secondary')
+            b = io.BytesIO()
+            t.save(b, v2_version=3)
+            dsd.escribir_id3_dff(ruta, b.getvalue())
         return
     f = mutagen.File(ruta)
     if f is None or f.tags is None:
@@ -241,7 +250,7 @@ def aplicar(ruta, cambios, aj, reg):
             procesar.escribir_tags(os.path.join(ruta, p['clave']), x, base_ta, {})
             if ta0.get('genero_secundario') and not ta.get('genero_secundario'):
                 _quitar_secundarios(os.path.join(ruta, p['clave']))
-            reg(f'  ✎ {p["clave"]}' + ('  (DFF: sin tags; solo se renombra)' if p['clave'].lower().endswith('.dff') else ''))
+            reg(f'  ✎ {p["clave"]}')
 
         # 2) nombres de archivo (cada renombre queda anotado en music.db al tiro)
         renombres = [p for p in prop['pistas'] if p['nuevo'] != p['clave']]

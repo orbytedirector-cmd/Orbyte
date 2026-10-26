@@ -213,6 +213,8 @@ class Procesador(threading.Thread):
             self.actual = None
             return
         campos = {'ubicado_en': final}
+        cam_fin = dict((self.almacen.album(aid) or {}).get('cambios') or {}, richmeta_completo=True)
+        campos['cambios'] = json.dumps(cam_fin, ensure_ascii=False)
         if not rep.get('origen_entrada'):            # una ISO conserva su ruta de la entrada
             campos['ruta'] = final
         self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
@@ -235,7 +237,8 @@ class Procesador(threading.Thread):
             self.almacen.actualizar(aid, progreso=m.strip()[:120])
 
         try:
-            resultado = metadata.correr(a['ubicado_en'] or a['ruta'], aj, reg)
+            resultado = metadata.correr(a['ubicado_en'] or a['ruta'], aj, reg,
+                                        richmeta_completo=bool((a.get('cambios') or {}).get('richmeta_completo')))
         except Exception as e:
             log.error('Metadata %s:\n%s', aid, traceback.format_exc())
             reg(f'ERROR: {type(e).__name__}: {e}')
@@ -246,9 +249,10 @@ class Procesador(threading.Thread):
         ok = resultado.get('ok')
         cam = a.get('cambios') or {}
         lote = cam.pop('lote', None)
+        limpiar = cam.pop('richmeta_completo', None) or lote
         self.almacen.actualizar(aid, estado='completado' if ok else 'error_metadata', progreso=None,
                                 resultado=resultado, terminado=time.time(),
-                                **({'cambios': json.dumps(cam, ensure_ascii=False)} if lote else {}))
+                                **({'cambios': json.dumps(cam, ensure_ascii=False)} if limpiar else {}))
         if ok and lote:
             pass
         elif ok:
