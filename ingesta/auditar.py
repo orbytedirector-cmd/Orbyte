@@ -45,7 +45,8 @@ def leer(ruta):
     try:
         if ext in ('.dsf', '.dff'):
             d = dsd.info(ruta)
-            return {'tam': tam, 'dsd': True, 'fs': d['fs'], 'canales': d['canales'], 'dst': d['dst']}, None
+            return {'tam': tam, 'dsd': True, 'fs': d['fs'], 'canales': d['canales'], 'dst': d['dst'],
+                    'irregular': d.get('irregular')}, None
         import mutagen
         f = mutagen.File(ruta)
         if f is None or not getattr(f, 'info', None):
@@ -87,6 +88,9 @@ def auditar(db, aplicar=False, salida=print, trabajadores=4, solo_dsd=False):
             if not solo_dsd and real.get('tam') != p['file_size'] and p['file_size'] is not None:
                 hallazgos['el archivo cambió desde que se indexó (tamaño distinto)'].append(
                     (p, f'{p["file_size"]} → {real["tam"]} bytes', {'file_size': real['tam']}))
+            if real.get('dsd') and real.get('irregular'):
+                hallazgos['DSF con datos de más tras el audio (ffmpeg avisa «Invalid data»; solo informe)'].append(
+                    (p, 'bloque de datos más largo que el audio', {}))
             if real.get('dsd'):
                 nombre = nombre_dsd(real['fs'])
                 cambios = {}

@@ -82,7 +82,9 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
             if x.get('portada_disco'):
                 incrustar_portada(salida, os.path.join(origen, x['portada_disco']))
             hechas[0] += 1
-            nota = {'convertir': '  (convertida)', 'a_dsf': '  (DFF → DSF, mismo DSD)',
+            nota = {'convertir': '  (convertida)',
+                    'a_dsf': '  (DFF → DSF, mismo DSD)' if x['origen'].lower().endswith('.dff')
+                    else '  (DSF reescrito, mismo DSD)',
                     'cortar_dsd': '  (cortada en DSD)'}.get(x['accion'], '')
             registro(f'  {hechas[0]}/{len(plan)} {x["destino"]}{nota}')
             return salida

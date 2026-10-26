@@ -45,9 +45,14 @@ def _info_dsf(f, ruta):
     datos = f.read(12)
     if datos[:4] != b'data':
         raise ErrorDSD(f'{os.path.basename(ruta)}: DSF sin bloque de datos')
+    bl = bloque or BLOQUE
+    declarado = struct.unpack('<Q', datos[4:12])[0] - 12
+    esperado = -(-((muestras + 7) // 8) // bl) * bl * canales
     return {'tipo_archivo': 'dsf', 'fs': fs, 'canales': canales, 'tipo_canales': tipo, 'muestras': muestras,
-            'bytes_canal': (muestras + 7) // 8, 'bloque': bloque or BLOQUE, 'inicio': 28 + 52 + 12,
-            'msb': bps == 8, 'dst': False}
+            'bytes_canal': (muestras + 7) // 8, 'bloque': bl, 'inicio': 28 + 52 + 12,
+            'msb': bps == 8, 'dst': False,
+            # bloques de datos de más (o de menos) respecto del conteo de muestras: ffmpeg avisa «Invalid data»
+            'irregular': declarado != esperado, 'bloques_de_mas': (declarado - esperado) // (bl * canales or 1)}
 
 
 def _chunks(f, fin):
