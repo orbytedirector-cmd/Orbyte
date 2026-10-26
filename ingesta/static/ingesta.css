@@ -95,7 +95,7 @@ button, input, select { font: inherit; color: inherit; }
 .e-revisado { color: var(--ok); border-color: rgba(61,220,132,.35); }
 .e-requiere_revision { color: var(--decision); border-color: rgba(245,197,24,.35); }
 .e-error, .e-error_ubicar, .e-error_metadata { color: var(--error); border-color: rgba(255,77,106,.4); }
-.e-por_ubicar, .e-ubicando, .e-por_metadata, .e-metadata { color: var(--oro-claro); border-color: var(--borde-oro); }
+.e-por_ubicar, .e-ubicando, .e-por_metadata, .e-metadata, .e-por_ajustar, .e-ajustando { color: var(--oro-claro); border-color: var(--borde-oro); }
 .e-ubicado, .e-completado { color: var(--ok); border-color: rgba(61,220,132,.35); }
 .e-descartado { color: var(--texto-3); }
 .pulso .led { animation: pulso 1.2s ease-in-out infinite; }
