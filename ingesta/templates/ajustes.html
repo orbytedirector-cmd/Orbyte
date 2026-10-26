@@ -82,6 +82,15 @@
       </div>
       <div class="ayuda" id="probar-res" style="margin-top:.4rem"></div>
     </div>
+    <div class="campo">
+      <label for="sacd_extract">sacd_extract (para ISOs de SACD)</label>
+      <div class="ayuda">Extrae las pistas DSF de una ISO de SACD. Vacío = el que esté en el PATH (por ejemplo <span class="mono">/usr/local/bin/sacd_extract</span>).</div>
+      <div class="fila-in">
+        <input class="mono" type="text" id="sacd_extract" name="sacd_extract" value="{{ aj.sacd_extract or '' }}" placeholder="/usr/local/bin/sacd_extract">
+        <button type="button" class="btn" id="probar-sacd">Probar</button>
+      </div>
+      <div class="ayuda" id="probar-sacd-res" style="margin-top:.4rem"></div>
+    </div>
   </div>
   <div><button class="btn oro">Guardar</button></div>
 </form>
@@ -133,6 +142,12 @@ document.getElementById('probar-python').onclick = async () => {
   const opc = d.opcionales_faltan && d.opcionales_faltan.length ? ` <span class="med">(opcional, falta ${esc(d.opcionales_faltan.join(', '))})</span>` : '';
   out.innerHTML = d.ok ? `<span class="ok">✓ ${esc(d.python)}: tiene lo necesario</span>${opc}`
     : `<span class="mal">✗ ${esc(d.python)}: ${d.faltan && d.faltan.length ? 'faltan ' + esc(d.faltan.join(', ')) : esc(d.error || 'no responde')}</span>`;
+};
+document.getElementById('probar-sacd').onclick = async () => {
+  const out = document.getElementById('probar-sacd-res'); out.textContent = 'Probando…';
+  const d = await post('/api/probar_sacd', {ruta: document.getElementById('sacd_extract').value.trim()});
+  out.innerHTML = d.ok ? `<span class="ok">✓ ${esc(d.ruta)} · versión ${esc(d.version)}</span>`
+    : `<span class="mal">✗ ${esc(d.error)}</span>`;
 };
 </script>
 {% endblock %}

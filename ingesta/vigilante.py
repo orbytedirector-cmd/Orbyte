@@ -15,7 +15,7 @@ import threading
 import time
 import traceback
 
-from . import analisis, edicion, recursos
+from . import analisis, edicion, recursos, sacd
 from .almacen import PREVIOS
 
 log = logging.getLogger('ingesta')
@@ -37,6 +37,7 @@ class Vigilante(threading.Thread):
         self._tanda = []
         self.cliente_mb = edicion.Cliente(almacen.ruta)
         self.procesador = None
+        self.datos = os.path.dirname(almacen.ruta)
 
     def ya(self):
         """Fuerza un escaneo inmediato (botón «Revisar ahora» o cambio de ajustes)."""
@@ -77,6 +78,13 @@ class Vigilante(threading.Thread):
         unidades, sueltos = analisis.detectar_albumes(entrada)
         self.estado['sueltos'] = sueltos
         conocidos = self.almacen.por_ruta()
+        # ISO de SACD con «ambos» elegido: el multicanal es un segundo álbum de la misma carpeta
+        for u in list(unidades):
+            fila = conocidos.get(u['ruta'])
+            if fila and sacd.iso_de(u['ruta']):
+                c = (self.almacen.album(fila['id']) or {}).get('cambios') or {}
+                if c.get('sacd_area') == 'ambos':
+                    unidades.append(dict(u, ruta=u['ruta'] + sacd.SUFIJO_MC, rel=u['rel'] + ' (multicanal)'))
         vistos = set()
         ahora = time.time()
         for u in unidades:
@@ -98,6 +106,7 @@ class Vigilante(threading.Thread):
         for ruta, fila in conocidos.items():
             if ruta not in vistos and fila['estado'] in PREVIOS + ('por_ubicar',) and fila['estado'] != 'analizando':
                 self.almacen.borrar_album(fila['id'])
+        sacd.limpiar(self.datos)          # extracciones de ISOs que ya no están en la entrada
 
         # revisiones hechas con una versión anterior de la herramienta: se rehacen solas (sin avisos)
         for aid in self.almacen.revisiones_antiguas(analisis.VERSION_REPORTE):
@@ -122,7 +131,8 @@ class Vigilante(threading.Thread):
 
     def revisar(self, fila, aj):
         aid = fila['id']
-        if not os.path.isdir(fila['ruta']):
+        real, area_forzada = sacd.separar(fila['ruta'])
+        if not os.path.isdir(real):
             self.almacen.borrar_album(aid)
             return
         firma_antes = analisis.firma(fila['ruta'])
@@ -143,9 +153,19 @@ class Vigilante(threading.Thread):
             eleccion = json.loads(completo['eleccion']).get('mbid') if completo.get('eleccion') else None
             previo = completo.get('reporte') if isinstance(completo.get('reporte'), dict) else None
             cliente = self.cliente_mb if aj.get('musicbrainz', '1') == '1' else None
+            cambios = completo.get('cambios') or {}
+            prep = None
+            if sacd.iso_de(real):        # ISO de SACD: primero se extrae (en caché) el área que corresponde
+                area = area_forzada or {'ambos': 'estereo'}.get(cambios.get('sacd_area'), cambios.get('sacd_area'))
+                prep = sacd.preparar(real, area, aj, self.datos, progreso)
+                if not prep['carpeta']:
+                    raise RuntimeError(f'La ISO del SACD está dañada: {prep["integridad"][1]}')
+                unidad['ruta'] = prep['carpeta']
             rep = analisis.analizar_album(unidad, aj, progreso=progreso, trabajadores=trabajadores,
                                           cliente_mb=cliente, eleccion=eleccion, previo=previo,
-                                          cambios=completo.get('cambios') or {})
+                                          cambios=cambios)
+            if prep:
+                sacd.completar_reporte(rep, prep, cambios, area_forzada, real)
         except Exception as e:
             log.error('Error revisando %s:\n%s', fila['ruta'], traceback.format_exc())
             self.almacen.actualizar(aid, estado='error', progreso=None, analizado=time.time(),

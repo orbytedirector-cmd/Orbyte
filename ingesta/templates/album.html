@@ -136,7 +136,8 @@
             {% if p.pistas|length > 40 %}<span class="mono">… y {{ p.pistas|length - 40 }} más</span>{% endif %}
           </details>{% endif %}
           {% if nivel == 'decision' and editable %}<div class="dec-acciones">
-            {% for o in p.opciones or [] %}<button class="btn chico" data-anio="{{ o }}">Usar {{ o }}</button>{% endfor %}
+            {% if p.codigo == 'sacd_area' %}{% for o in p.opciones %}<button class="btn chico" data-sacd="{{ o.valor }}">{{ o.texto }}</button>{% endfor %}
+            {% else %}{% for o in p.opciones or [] %}<button class="btn chico" data-anio="{{ o }}">Usar {{ o }}</button>{% endfor %}{% endif %}
             {% if p.codigo == 'elegir_edicion' %}<a class="btn chico" href="#edicion">Ver ediciones ↓</a>{% endif %}
             {% if p.codigo == 'sin_caratula' %}<a class="btn chico" href="#caratula">Elegir carátula ↓</a>{% endif %}
             {% if p.codigo in A_TAGS %}<a class="btn chico" href="#tags" data-abrir="tags">Editar tags ↓</a>{% endif %}
@@ -369,6 +370,7 @@ document.querySelectorAll('[data-accion]').forEach(b => b.onclick = () => {
   b.disabled = true; accion(`/api/album/${AID}/${a}`);
 });
 document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); });
+document.querySelectorAll('[data-sacd]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {sacd_area: b.dataset.sacd}); });
 document.querySelectorAll('[data-aceptar]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {aceptar: b.dataset.aceptar}); });
 document.querySelectorAll('[data-anio]').forEach(b => b.onclick = () => {
   b.disabled = true;
