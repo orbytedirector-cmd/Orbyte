@@ -33,7 +33,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 7   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 8   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -627,6 +627,36 @@ def _norm_album(s):
     return _norm(s)
 
 
+def _emparejar_renombrados(refs, pistas_carpeta, problema, nombre_cue):
+    """Un cue que nombra un archivo que se renombró después («C4. Gimme! Gimme! Gimme! (A Man After Midnight).dsf»
+    quedó como «C4. Gimme! Gimme! Gimme!.dsf»): se empareja con el archivo de la carpeta que ningún otro FILE nombra,
+    si no hay dudas (mismo inicio de nombre, o es el único que sobra con la misma extensión)."""
+    usados = {r['archivo'] for r in refs if r['archivo']}
+    libres = [p for p in pistas_carpeta if p['archivo'] not in usados and not p['archivo'].lower().endswith('.cue')]
+    sin = [r for r in refs if not r['archivo']]
+
+    def ext(n):
+        return os.path.splitext(n)[1].lower()
+
+    def emparejar(r, p):
+        r['archivo'], r['nombre_distinto'] = p['archivo'], True
+        libres.remove(p)
+        problema('aviso', 'cue_renombrado', f'El cue {nombre_cue} nombra «{r["archivo_cue"]}», pero el archivo se '
+                                            f'llama «{p["archivo"].split("/")[-1]}»: se usa ese')
+
+    for r in list(sin):
+        rn = _norm(Path(r['archivo_cue']).stem)
+        cand = [p for p in libres if ext(p['archivo']) == ext(r['archivo_cue'])
+                and (lambda pn: pn and rn and (rn.startswith(pn) or pn.startswith(rn)))(_norm(Path(p['archivo']).stem))]
+        if len(cand) == 1:
+            emparejar(r, cand[0])
+            sin.remove(r)
+    if len(sin) == 1:
+        cand = [p for p in libres if ext(p['archivo']) == ext(sin[0]['archivo_cue'])]
+        if len(cand) == 1:
+            emparejar(sin[0], cand[0])
+
+
 def _es_dst(p):
     return (p.get('codec') or '').lower() == 'dst'
 
@@ -941,6 +971,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                                       'cuadros': int(round(cp['start'] * 75)),
                                       'archivo_cue': os.path.basename(cp['file'].replace('\\', '/'))}
                                      for cp in cpistas]})
+        _emparejar_renombrados(refs, [p for p in pistas if p['carpeta'] == carpeta_rel], problema,
+                               os.path.basename(cue))
         faltan = [r['archivo_cue'] for r in refs if not r['archivo']]
         if faltan:
             problema('error', 'cue_sin_audio',
