@@ -34,7 +34,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 9   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 10   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -465,9 +465,10 @@ def analizar_pista(ruta, base):
     sr = int(stream.get('sample_rate') or 0)
     bits = int(stream.get('bits_per_raw_sample') or stream.get('bits_per_sample') or 0)
     sample_fmt = stream.get('sample_fmt') or ''
-    es_float = sample_fmt.startswith(('flt', 'dbl')) and codec not in LOSSY_CODECS \
-        and not codec.startswith('dsd') or codec.startswith('pcm_f')
-    es_dsd = ext in ('.dsf', '.dff') or codec.startswith('dsd')
+    es_dsd = ext in ('.dsf', '.dff') or codec.startswith('dsd') or codec == 'dst'
+    # el decodificador de DST entrega coma flotante, pero el archivo es DSD: no es «audio en coma flotante»
+    es_float = (sample_fmt.startswith(('flt', 'dbl')) and codec not in LOSSY_CODECS
+                or codec.startswith('pcm_f')) and not es_dsd
     lossy = codec in LOSSY_CODECS
     canales = int(stream.get('channels') or 0)
     try:
