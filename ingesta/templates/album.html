@@ -498,10 +498,17 @@ if (modal) modal.onclick = e => { if (e.target === modal) modal.hidden = true; }
 
 // estado en vivo + registro
 if (VIVOS.includes(ESTADO)) {
-  setInterval(async () => {
-    const r = await fetch(`/api/album/${AID}/estado`); const d = await r.json();
-    if (!d.estado) { location.href = '/'; return; }
-    if (d.estado !== ESTADO) { location.reload(); return; }
+  // una sola consulta a la vez, y al cambiar de estado se deja de consultar: si la página nueva tarda,
+  // no se acumulan recargas (cada una dejaba un hilo ocupado en el servidor)
+  let ocupado = false;
+  const reloj = setInterval(async () => {
+    if (ocupado) return;
+    ocupado = true;
+    let d;
+    try { d = await (await fetch(`/api/album/${AID}/estado`)).json(); } catch (e) { ocupado = false; return; }
+    ocupado = false;
+    if (!d.estado) { clearInterval(reloj); location.href = '/'; return; }
+    if (d.estado !== ESTADO) { clearInterval(reloj); location.reload(); return; }
     const el = document.getElementById('progreso');
     if (el && d.progreso) el.textContent = d.progreso;
     const reg = document.getElementById('registro');

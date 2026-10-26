@@ -13,7 +13,7 @@ import os
 import re
 import sqlite3
 
-from . import analisis, procesar
+from . import analisis, dsd, procesar
 
 CALIDAD_RE = re.compile(r'\s*\[([^\]]+)\]\s*$')
 
@@ -34,8 +34,7 @@ def _audio(ruta):
 
 def _secundarios(ruta):
     try:
-        import mutagen
-        f = mutagen.File(ruta)
+        f = analisis.abrir_tags(ruta)
         t = f.tags if f is not None else None
         if t is None:
             return []
@@ -52,6 +51,8 @@ def _secundarios(ruta):
 
 def _quitar_secundarios(ruta):
     import mutagen
+    if ruta.lower().endswith('.dff'):
+        return
     f = mutagen.File(ruta)
     if f is None or f.tags is None:
         return
@@ -63,6 +64,12 @@ def _quitar_secundarios(ruta):
 
 
 def _duracion(ruta):
+    if ruta.lower().endswith(('.dsf', '.dff')):          # de la cabecera: mutagen recorre cada cuadro de un DST
+        try:
+            s = dsd.info(ruta).get('segundos')
+            return round(s, 2) if s else None
+        except Exception:
+            return None
     try:
         import mutagen
         f = mutagen.File(ruta)
@@ -234,7 +241,7 @@ def aplicar(ruta, cambios, aj, reg):
             procesar.escribir_tags(os.path.join(ruta, p['clave']), x, base_ta, {})
             if ta0.get('genero_secundario') and not ta.get('genero_secundario'):
                 _quitar_secundarios(os.path.join(ruta, p['clave']))
-            reg(f'  ✎ {p["clave"]}')
+            reg(f'  ✎ {p["clave"]}' + ('  (DFF: sin tags; solo se renombra)' if p['clave'].lower().endswith('.dff') else ''))
 
         # 2) nombres de archivo (cada renombre queda anotado en music.db al tiro)
         renombres = [p for p in prop['pistas'] if p['nuevo'] != p['clave']]

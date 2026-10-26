@@ -43,9 +43,14 @@ document.getElementById('ignorar').onclick = async () => {
   await post('/api/biblioteca/{{ o.id }}/ignorar', {si: {{ 'false' if ignorado else 'true' }}}); location.reload();
 };
 {% if a and a.estado in VIVOS %}
-setInterval(async () => {
-  const d = await (await fetch('/api/album/{{ a.id }}/estado')).json();
-  if (d.estado !== {{ a.estado|tojson }}) { location.reload(); return; }
+let ocupado = false;
+const reloj = setInterval(async () => {
+  if (ocupado) return;
+  ocupado = true;
+  let d;
+  try { d = await (await fetch('/api/album/{{ a.id }}/estado')).json(); } catch (e) { ocupado = false; return; }
+  ocupado = false;
+  if (d.estado !== {{ a.estado|tojson }}) { clearInterval(reloj); location.reload(); return; }
   const el = document.getElementById('progreso'); if (el && d.progreso) el.textContent = d.progreso;
   const reg = document.getElementById('registro'); if (reg && d.registro) reg.textContent = d.registro.join('\n');
 }, 1500);
