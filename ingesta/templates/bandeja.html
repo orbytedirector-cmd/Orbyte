@@ -21,10 +21,13 @@ const NOMBRES = {copiando: 'Esperando', en_cola: 'En cola', analizando: 'Revisan
                  revisado: 'Lista', requiere_revision: 'Requiere revisión', error: 'Con errores', descartado: 'Descartado',
                  por_ubicar: 'En cola para ubicar', ubicando: 'Ubicando', ubicado: 'Ubicado',
                  por_metadata: 'En cola: metadata', metadata: 'Metadata', completado: 'Completo',
-                 error_ubicar: 'Error al ubicar', error_metadata: 'Error en metadata'};
-const VIVOS = ['copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata'];
+                 error_ubicar: 'Error al ubicar', error_metadata: 'Error en metadata',
+                 por_ajustar: 'En cola: ajustar tags', ajustando: 'Ajustando tags'};
+const VIVOS = ['copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata',
+               'por_ajustar', 'ajustando'];
 const ACTIVOS = ['copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error',
-                 'por_ubicar', 'ubicando', 'ubicado', 'por_metadata', 'metadata', 'error_ubicar', 'error_metadata'];
+                 'por_ubicar', 'ubicando', 'ubicado', 'por_metadata', 'metadata', 'error_ubicar', 'error_metadata',
+                 'por_ajustar', 'ajustando'];
 const FILTROS = [['todos', 'Bandeja', ACTIVOS], ['requiere_revision', 'Requieren revisión', ['requiere_revision']],
                  ['revisado', 'Listas', ['revisado']], ['error', 'Con errores', ['error', 'error_ubicar', 'error_metadata']],
                  ['proceso', 'En proceso', VIVOS], ['completado', 'Completos', ['completado']],

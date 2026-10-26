@@ -7,6 +7,7 @@ Orbyte Ingesta — cola de proceso (etapas 2 y 3), un álbum a la vez.
 Va aparte del vigilante: mientras un álbum se ubica o corre su metadata, la revisión
 de los demás sigue.
 """
+import json
 import logging
 import os
 import shutil
@@ -14,6 +15,7 @@ import threading
 import time
 import traceback
 
+from . import ajustar as ajustar_mod
 from . import analisis, artistas, metadata, procesar, recursos, sacd
 from .almacen import PREVIOS
 
@@ -60,6 +62,10 @@ class Procesador(threading.Thread):
                     self._recuperar()
                     recuperado = True
                 trabajo = False
+                aid = self.almacen.siguiente('por_ajustar')      # ajustes de tags en la biblioteca: segundos
+                if aid:
+                    self.ajustar(aid)
+                    continue
                 aid = self.almacen.siguiente('por_metadata')     # primero terminar lo ya ubicado
                 if aid:
                     self.metadata(aid)
@@ -98,14 +104,20 @@ class Procesador(threading.Thread):
                                                 'vuelve a presionar «Ubicar»')
         for a in self.almacen.con_estado('metadata'):
             self.almacen.actualizar(a['id'], estado='por_metadata', progreso=None)
+        for a in self.almacen.con_estado('ajustando'):
+            # cada renombre ya quedó anotado en music.db: se relee todo con la metadata
+            self.almacen.registrar(a['id'], 'El servicio se reinició mientras se ajustaban los tags: '
+                                            'se corre la metadata para dejar la base al día; revisa los tags')
+            self.almacen.actualizar(a['id'], estado='por_metadata', progreso=None)
 
     # ── etapa 2 ──
     def ubicar(self, aid):
         a = self.almacen.album(aid)
         rep = a.get('reporte') or {}
         aj = self.almacen.ajustes()
+        if not self.almacen.cambiar_estado(aid, 'por_ubicar', 'ubicando', progreso='Ubicando…', registro=None):
+            return                                   # lo sacaste de la cola justo ahora
         self.actual = aid
-        self.almacen.actualizar(aid, estado='ubicando', progreso='Ubicando…', registro=None)
 
         def reg(m):
             self.almacen.registrar(aid, m)
@@ -166,6 +178,46 @@ class Procesador(threading.Thread):
             reg('ISO original borrada de la carpeta de entrada')
         except Exception as e:
             reg(f'No se pudo borrar la ISO de la entrada: {e}')
+
+    # ── ajustar tags de un álbum ya ubicado ──
+    def ajustar(self, aid):
+        a = self.almacen.album(aid)
+        rep = a.get('reporte') or {}
+        cam = dict(a.get('cambios') or {})
+        pedido = cam.pop('biblioteca', None) or {}
+        volver = pedido.get('volver') or 'completado'
+        aj = self.almacen.ajustes()
+        ruta = a['ubicado_en'] or a['ruta']
+        if not self.almacen.cambiar_estado(aid, 'por_ajustar', 'ajustando', progreso='Ajustando tags…',
+                                           registro=None, cambios=json.dumps(cam, ensure_ascii=False)):
+            return
+        self.actual = aid
+
+        def reg(m):
+            self.almacen.registrar(aid, m)
+            self.almacen.actualizar(aid, progreso=m.strip()[:120])
+
+        try:
+            reg(f'Ajuste en la biblioteca: {os.path.relpath(ruta, aj.get("biblioteca") or "/")}')
+            final = ajustar_mod.aplicar(ruta, pedido, aj, reg)
+        except Exception as e:
+            log.error('Ajuste %s:\n%s', aid, traceback.format_exc())
+            reg(f'ERROR: {e}' if isinstance(e, ajustar_mod.FalloAjuste) else f'ERROR: {type(e).__name__}: {e}')
+            # lo hecho hasta el error ya quedó anotado en music.db; la metadata relee el resto
+            self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
+                                    progreso=None)
+            self.almacen.avisar('error', f'No se pudieron ajustar los tags de {rep.get("artista")} — '
+                                         f'{rep.get("album")}', str(e).splitlines()[0], aid)
+            self.actual = None
+            return
+        campos = {'ubicado_en': final}
+        if not rep.get('origen_entrada'):            # una ISO conserva su ruta de la entrada
+            campos['ruta'] = final
+        self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
+                                progreso=None, **campos)
+        self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: tags ajustados',
+                            os.path.relpath(final, aj.get('biblioteca') or '/'), aid)
+        self.actual = None
 
     # ── etapa 3 ──
     def metadata(self, aid):

@@ -30,7 +30,8 @@ from .trabajador import Procesador
 from .vigilante import Vigilante
 from . import metadata as metadata_mod
 from . import procesar
-from .almacen import PREVIOS
+from .almacen import PREVIOS, EN_BIBLIOTECA
+from . import ajustar as ajustar_mod
 from . import recursos
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
@@ -228,7 +229,13 @@ def album(aid):
         flash('Ese álbum ya no está en la bandeja.')
         return redirect(url_for('bandeja'))
     aj = almacen.ajustes()
-    return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'),
+    lib = lib_error = None
+    if a['estado'] in EN_BIBLIOTECA:          # ya ubicado: el editor muestra lo que dicen hoy los archivos
+        try:
+            lib = ajustar_mod.leer(a['ubicado_en'] or a['ruta'])
+        except Exception as e:
+            lib_error = str(e)
+    return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
 
@@ -329,6 +336,11 @@ def api_album_estado(aid):
                    registro=registro[-400:])
 
 
+def _editable(a):
+    """Antes de ubicar (o tras un error al ubicar: el original sigue intacto en la entrada)."""
+    return a['estado'] in PREVIOS + ('error_ubicar',) and a['estado'] != 'analizando'
+
+
 def _requeue(aid, **campos):
     almacen.actualizar(aid, estado='en_cola', progreso=None, silencioso=1, **campos)
     vigilante.ya()
@@ -338,7 +350,7 @@ def _requeue(aid, **campos):
 def api_cambios(aid):
     """Guarda lo que decides en pantalla (tags, carátula, decisiones aceptadas, año) y vuelve a revisar."""
     a = almacen.album(aid)
-    if not a or a['estado'] not in PREVIOS or a['estado'] == 'analizando':
+    if not a or not _editable(a):
         return jsonify(ok=False, error='El álbum no se puede cambiar en este estado'), 409
     d = request.get_json(silent=True) or {}
     c = a.get('cambios') or {}
@@ -382,9 +394,16 @@ def api_autocorregir(aid):
     """Propuesta de tags ordenados (no guarda nada: la pantalla la muestra y tú decides)."""
     a = almacen.album(aid)
     rep = (a or {}).get('reporte')
-    if not rep or not rep.get('plan'):
+    if a and a['estado'] in EN_BIBLIOTECA:           # ya ubicado: se parte de lo que dicen hoy los archivos
+        try:
+            lib = ajustar_mod.leer(a['ubicado_en'] or a['ruta'])
+        except ajustar_mod.FalloAjuste as e:
+            return jsonify(ok=False, error=str(e)), 409
+        rep = dict(lib, edicion_mb=(rep or {}).get('edicion_mb'), cambios={})
+    elif not rep or not rep.get('plan'):
         return jsonify(ok=False, error='El álbum todavía no tiene revisión'), 409
-    rep = dict(rep, cambios=a.get('cambios') or rep.get('cambios') or {})
+    else:
+        rep = dict(rep, cambios=a.get('cambios') or rep.get('cambios') or {})
     try:
         bib = analisis.biblioteca(almacen.ajustes().get('db_orbyte'), almacen.ajustes().get('biblioteca') or '/mnt/musica')
     except Exception:
@@ -421,7 +440,7 @@ def api_metadata(aid):
 @app.route('/api/album/<int:aid>/descartar', methods=['POST'])
 def api_descartar(aid):
     a = almacen.album(aid)
-    if not a or a['estado'] not in PREVIOS or a['estado'] == 'analizando':
+    if not a or not _editable(a):
         return jsonify(ok=False), 409
     almacen.actualizar(aid, estado='descartado', progreso=None)
     return jsonify(ok=True)
@@ -468,8 +487,38 @@ def api_revisar(aid):
     a = almacen.album(aid)
     if not a:
         return jsonify(ok=False), 404
-    if a['estado'] in PREVIOS and a['estado'] != 'analizando':
+    if _editable(a):
         _requeue(aid)
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/sacar_de_cola', methods=['POST'])
+def api_sacar_de_cola(aid):
+    """«En cola para ubicar» → «Lista», para poder editarlo antes de que empiece a copiarse."""
+    if not almacen.cambiar_estado(aid, 'por_ubicar', 'revisado', progreso=None):
+        return jsonify(ok=False, error='Ya empezó a ubicarse: espera a que termine y ajústalo en la biblioteca'), 409
+    return jsonify(ok=True)
+
+
+@app.route('/api/album/<int:aid>/ajustar', methods=['POST'])
+def api_ajustar(aid):
+    """Tags de un álbum ya ubicado: se valida aquí y el procesador los escribe en la biblioteca."""
+    a = almacen.album(aid)
+    if not a or a['estado'] not in EN_BIBLIOTECA:
+        return jsonify(ok=False, error='Solo se ajustan álbumes ya ubicados y con la metadata terminada'), 409
+    d = request.get_json(silent=True) or {}
+    pedido = {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}}
+    try:
+        prop = ajustar_mod.propuesta(ajustar_mod.leer(a['ubicado_en'] or a['ruta']), pedido)
+    except ajustar_mod.FalloAjuste as e:
+        return jsonify(ok=False, error=str(e)), 400
+    if not prop['album_cambia'] and not any(p['cambio'] for p in prop['pistas']):
+        return jsonify(ok=False, error='No hay cambios que guardar'), 400
+    cam = dict(a.get('cambios') or {}, biblioteca=dict(pedido, volver=a['estado']))
+    if not almacen.cambiar_estado(aid, a['estado'], 'por_ajustar', progreso='En cola para ajustar tags',
+                                  cambios=json.dumps(cam, ensure_ascii=False)):
+        return jsonify(ok=False, error='El álbum cambió de estado: recarga la página'), 409
+    procesador.ya()
     return jsonify(ok=True)
 
 

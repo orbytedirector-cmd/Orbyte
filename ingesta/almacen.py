@@ -25,7 +25,8 @@ AJUSTES_DEFECTO = {
 
 PREVIOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error', 'descartado')
 POSTERIORES = ('por_ubicar', 'ubicando', 'ubicado', 'por_metadata', 'metadata', 'completado',
-               'error_ubicar', 'error_metadata')
+               'error_ubicar', 'error_metadata', 'por_ajustar', 'ajustando')
+EN_BIBLIOTECA = ('completado', 'error_metadata')      # ya ubicados y quietos: sus tags se pueden ajustar
 
 ESTADOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error')
 
@@ -135,6 +136,13 @@ class Almacen:
         sets = ', '.join(f'{k}=?' for k in campos)
         with _lock, self._con() as c:
             c.execute(f'UPDATE albumes SET {sets} WHERE id=?', (*campos.values(), aid))
+
+    def cambiar_estado(self, aid, de, a, **campos):
+        """Pasa de un estado a otro solo si el álbum sigue en `de` (para no pisarse con la pantalla)."""
+        sets = ', '.join(['estado=?'] + [f'{k}=?' for k in campos])
+        with _lock, self._con() as c:
+            return c.execute(f'UPDATE albumes SET {sets} WHERE id=? AND estado=?',
+                             (a, *campos.values(), aid, de)).rowcount == 1
 
     def borrar_album(self, aid):
         with _lock, self._con() as c:

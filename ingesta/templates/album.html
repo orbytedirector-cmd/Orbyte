@@ -4,10 +4,12 @@
                   'requiere_revision': 'Requiere revisión', 'error': 'Con errores', 'descartado': 'Descartado',
                   'por_ubicar': 'En cola para ubicar', 'ubicando': 'Ubicando', 'ubicado': 'Ubicado',
                   'por_metadata': 'En cola: metadata', 'metadata': 'Metadata', 'completado': 'Completo',
-                  'error_ubicar': 'Error al ubicar', 'error_metadata': 'Error en metadata'} %}
+                  'error_ubicar': 'Error al ubicar', 'error_metadata': 'Error en metadata',
+                  'por_ajustar': 'En cola: ajustar tags', 'ajustando': 'Ajustando tags'} %}
 {% set PREVIOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error', 'descartado') %}
-{% set VIVOS = ('copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata') %}
-{% set editable = a.estado in PREVIOS and a.estado != 'analizando' %}
+{% set VIVOS = ('copiando', 'en_cola', 'analizando', 'por_ubicar', 'ubicando', 'por_metadata', 'metadata',
+                'por_ajustar', 'ajustando') %}
+{% set editable = (a.estado in PREVIOS or a.estado == 'error_ubicar') and a.estado != 'analizando' %}
 {% set ICONO_DISCO %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>{% endset %}
 {% set ICONO_REVISAR %}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg>{% endset %}
 {% block contenido %}
@@ -51,7 +53,11 @@
     <div class="destino">
       <div class="rotulo">{{ 'Quedó en' if a.ubicado_en else 'Quedaría en' }}</div>
       {% set d = r.destino %}
+      {% if a.ubicado_en and a.ubicado_en != d.ruta %}
+      <div class="ruta"><span class="seg-alb">{{ a.ubicado_en }}</span></div>
+      {% else %}
       <div class="ruta"><span class="seg-raiz">{{ d.ruta[:d.ruta|length - (d.letra|length + d.artista|length + d.album|length + 2)] }}</span><span class="seg-letra">{{ d.letra }}/</span><span class="seg-art">{{ d.artista }}/</span><span class="seg-alb">{{ d.album }}</span></div>
+      {% endif %}
       <div class="nota">{% if d.artista_existe %}El artista ya está en la biblioteca: se usa su carpeta actual.{% else %}Artista nuevo en la biblioteca.{% endif %}
         {% if r.n_discos > 1 %} Los {{ r.n_discos }} discos quedan en una sola carpeta.{% endif %}</div>
     </div>
@@ -62,6 +68,8 @@
         <button class="btn" disabled title="Resuelve las decisiones pendientes">Ubicar en la biblioteca</button>
       {% elif a.estado == 'error_ubicar' %}
         <button class="btn oro" data-accion="ubicar">Reintentar</button>
+      {% elif a.estado == 'por_ubicar' %}
+        <button class="btn" data-accion="sacar_de_cola" title="Vuelve a «Lista» para editarlo antes de ubicarlo">Sacar de la cola</button>
       {% elif a.estado in ('error_metadata', 'completado') %}
         <button class="btn" data-accion="metadata">Correr la metadata de nuevo</button>
       {% endif %}
@@ -99,7 +107,7 @@
 {% endif %}
 
 {# ── registro en vivo ── #}
-{% if a.registro or a.estado in ('por_ubicar', 'ubicando', 'por_metadata', 'metadata') %}
+{% if a.registro or a.estado in ('por_ubicar', 'ubicando', 'por_metadata', 'metadata', 'por_ajustar', 'ajustando') %}
 <section class="seccion">
   <h2 class="rotulo">Registro</h2>
   <pre class="registro" id="registro">{{ a.registro or '' }}</pre>
@@ -254,6 +262,44 @@
 </section>
 {% endif %}
 
+{# ── editor de tags de un álbum ya ubicado ── #}
+{% if lib or lib_error %}
+<section class="seccion" id="tags">
+  <details id="det-tags">
+    <summary class="rotulo" style="cursor:pointer">Editar tags <span class="cuenta">en la biblioteca</span></summary>
+    {% if lib_error %}<div class="flash error" style="margin-top:.7rem">No se pudieron leer los archivos: {{ lib_error }}</div>
+    {% else %}
+    {% set ta = lib.tags_album %}
+    <div class="panel" style="margin-top:.7rem">
+      <div class="trio cuatro">
+        <div class="campo"><label>Artista del álbum</label><input type="text" id="t-artista" value="{{ ta.artista or '' }}" data-orig="{{ ta.artista or '' }}"></div>
+        <div class="campo"><label>Álbum</label><input type="text" id="t-album" value="{{ ta.album or '' }}" data-orig="{{ ta.album or '' }}"></div>
+        <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ ta.anio or '' }}" data-orig="{{ ta.anio or '' }}"></div>
+        <div class="campo"><label>Género</label><input type="text" id="t-genero" value="{{ ta.genero or '' }}" data-orig="{{ ta.genero or '' }}"></div>
+      </div>
+      <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
+        <input type="text" id="t-genero2" value="{{ (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
+      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
+      <div id="auto-panel" class="auto-panel" hidden></div>
+      <div class="tabla-wrap"><table class="tabla-tags">
+        <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
+        {% for x in lib.plan %}
+        <tr data-clave="{{ x.clave }}">
+          <td class="num">{{ x.disco }}</td>
+          <td style="width:70px"><input type="text" class="p-numero" inputmode="numeric" value="{{ x.numero or '' }}"></td>
+          <td><input type="text" class="p-titulo" value="{{ x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"><div class="s mono tenue">{{ x.clave }}</div></td>
+          <td><input type="text" class="p-artista" value="{{ x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+        <button class="btn oro" id="guardar-lib">Guardar en la biblioteca</button></div>
+    </div>
+    {% endif %}
+  </details>
+</section>
+{% endif %}
+
 {# ── pistas ── #}
 <section class="seccion">
   <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivo{{ 's' if r.n_archivos_audio != 1 }} de audio</span></h2>
@@ -365,10 +411,25 @@ async function accion(url, datos) {
   if (r && r.ok === false) { toast('No se pudo', r.error || ''); return false; }
   location.reload(); return true;
 }
-document.querySelectorAll('[data-accion]').forEach(b => b.onclick = () => {
+document.querySelectorAll('[data-accion]').forEach(b => b.onclick = async () => {
   const a = b.dataset.accion;
   if (a === 'descartar' && !confirm('¿Descartar este álbum? No se borra nada: queda fuera de la bandeja.')) return;
-  b.disabled = true; accion(`/api/album/${AID}/${a}`);
+  b.disabled = true;
+  if (a === 'ubicar' && ESTADO === 'revisado' && document.getElementById('autocorregir')) {
+    // Autocorregir sigue siendo solo con el botón, pero antes de ubicar se avisa si propone algo
+    const r = await post(`/api/album/${AID}/autocorregir`);
+    const n = r && r.ok ? r.grupos.reduce((s, g) => s + g.n, 0) : 0;
+    if (n && !confirm(`Autocorregir propone ${n} cambio${n === 1 ? '' : 's'} sin aplicar:\n` +
+                      r.grupos.map(g => `· ${g.texto} (${g.n})`).join('\n') +
+                      '\n\nAceptar = ubicar igual · Cancelar = revisarlos primero')) {
+      b.disabled = false;
+      document.getElementById('det-tags').open = true;
+      document.getElementById('autocorregir').click();
+      document.getElementById('tags').scrollIntoView({behavior: 'smooth'});
+      return;
+    }
+  }
+  accion(`/api/album/${AID}/${a}`);
 });
 document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); });
 document.querySelectorAll('[data-sacd]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {sacd_area: b.dataset.sacd}); });
@@ -400,6 +461,26 @@ if (gt) gt.onclick = () => {
     if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
   });
   gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
+};
+// editor de un álbum ya ubicado: se mandan solo los campos que cambiaron respecto de los archivos
+const gl = document.getElementById('guardar-lib');
+if (gl) gl.onclick = () => {
+  const tags = {};
+  for (const k of ['artista', 'album', 'genero', 'anio']) {
+    const e = document.getElementById('t-' + k); if (e.value.trim() && e.value.trim() !== e.dataset.orig) tags[k] = e.value.trim();
+  }
+  const g2 = document.getElementById('t-genero2'); if (g2.value.trim() !== g2.dataset.orig) tags.genero_secundario = g2.value.trim();
+  const pistas = {};
+  document.querySelectorAll('tr[data-clave]').forEach(tr => {
+    const o = {};
+    const t = tr.querySelector('.p-titulo'), ar = tr.querySelector('.p-artista'), n = tr.querySelector('.p-numero');
+    if (t.value.trim() && t.value.trim() !== t.dataset.orig) o.titulo = t.value.trim();
+    if (ar.value.trim() && ar.value.trim() !== ar.dataset.orig) o.artista = ar.value.trim();
+    if (n.value.trim() && n.value.trim() !== n.defaultValue) o.numero = n.value.trim();
+    if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
+  });
+  if (!Object.keys(tags).length && !Object.keys(pistas).length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
+  gl.disabled = true; accion(`/api/album/${AID}/ajustar`, {tags, pistas}).then(ok => { if (!ok) gl.disabled = false; });
 };
 // ✦ Autocorregir: llena el formulario con la propuesta (antes → después) y se puede desmarcar por grupo
 const CAMPO_TAG = {artista: 't-artista', album: 't-album', genero: 't-genero', genero_secundario: 't-genero2'};
@@ -435,7 +516,7 @@ if (ac) ac.onclick = async () => {
   panel.innerHTML = r.grupos.length ? `
     <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
     <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
-    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «Guardar y volver a revisar».</div>`
+    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «${gl ? 'Guardar en la biblioteca' : 'Guardar y volver a revisar'}».</div>`
     : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
   panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicarPropuesta);
   aplicarPropuesta();
