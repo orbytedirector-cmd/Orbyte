@@ -32,6 +32,8 @@ from . import metadata as metadata_mod
 from . import procesar
 from .almacen import PREVIOS, EN_BIBLIOTECA
 from . import ajustar as ajustar_mod
+from . import titulos as titulos_mod
+from concurrent.futures import ThreadPoolExecutor
 from . import recursos
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
@@ -503,23 +505,242 @@ def api_sacar_de_cola(aid):
 @app.route('/api/album/<int:aid>/ajustar', methods=['POST'])
 def api_ajustar(aid):
     """Tags de un álbum ya ubicado: se valida aquí y el procesador los escribe en la biblioteca."""
-    a = almacen.album(aid)
-    if not a or a['estado'] not in EN_BIBLIOTECA:
-        return jsonify(ok=False, error='Solo se ajustan álbumes ya ubicados y con la metadata terminada'), 409
     d = request.get_json(silent=True) or {}
-    pedido = {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}}
+    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}})
+    if error:
+        return jsonify(ok=False, error=error), codigo
+    procesador.ya()
+    return jsonify(ok=True)
+
+
+def _encolar_ajuste(a, pedido, lote=False):
+    """Valida el pedido y deja el álbum «En cola: ajustar tags». Devuelve (error, código) o (None, None)."""
+    if not a or a['estado'] not in EN_BIBLIOTECA:
+        return 'Solo se ajustan álbumes ya ubicados y con la metadata terminada (o con error de metadata)', 409
     try:
         prop = ajustar_mod.propuesta(ajustar_mod.leer(a['ubicado_en'] or a['ruta']), pedido)
     except ajustar_mod.FalloAjuste as e:
-        return jsonify(ok=False, error=str(e)), 400
+        return str(e), 400
     if not prop['album_cambia'] and not any(p['cambio'] for p in prop['pistas']):
-        return jsonify(ok=False, error='No hay cambios que guardar'), 400
-    cam = dict(a.get('cambios') or {}, biblioteca=dict(pedido, volver=a['estado']))
-    if not almacen.cambiar_estado(aid, a['estado'], 'por_ajustar', progreso='En cola para ajustar tags',
+        return 'No hay cambios que guardar', 400
+    cam = dict(a.get('cambios') or {}, biblioteca=dict(pedido, volver=a['estado'], lote=lote))
+    if not almacen.cambiar_estado(a['id'], a['estado'], 'por_ajustar', progreso='En cola para ajustar tags',
                                   cambios=json.dumps(cam, ensure_ascii=False)):
-        return jsonify(ok=False, error='El álbum cambió de estado: recarga la página'), 409
+        return 'El álbum cambió de estado: recarga la página', 409
+    return None, None
+
+
+# ─────────────────────────── recientes y revisión de títulos de la biblioteca ───────────────────────────
+
+VENTANAS = {24: '24 h', 72: '72 h', 168: '7 días', 720: '30 días'}
+
+
+def _titulos():
+    db = almacen.ajustes().get('db_orbyte')
+    return titulos_mod.detectar(db, almacen.titulos_ignorados()) if db and os.path.isfile(db) else \
+        {'albumes': [], 'total': 0, 'ignorados': 0, 'por_ruta': {}}
+
+
+@app.route('/recientes')
+def recientes_pagina():
+    try:
+        h = int(request.args.get('h') or 72)
+    except ValueError:
+        h = 72
+    h = h if h in VENTANAS else 72
+    filas = almacen.recientes(time.time() - h * 3600)
+    det = _titulos()
+    ign = almacen.titulos_ignorados()
+    for f in filas:
+        x = det['por_ruta'].get((f['ubicado_en'] or '').rstrip('/'))
+        f['reglas'] = x['reglas'] if x and x['id'] not in ign else {}
+        f['oid'] = x['id'] if x else None
+    return render_template('recientes.html', pagina='recientes', filas=filas, h=h, VENTANAS=VENTANAS,
+                           REGLAS=titulos_mod.REGLAS)
+
+
+@app.route('/biblioteca')
+def biblioteca_pagina():
+    return render_template('biblioteca.html', pagina='biblioteca', REGLAS=titulos_mod.REGLAS)
+
+
+@app.route('/api/biblioteca/titulos')
+def api_biblioteca_titulos():
+    db = almacen.ajustes().get('db_orbyte')
+    if not db or not os.path.isfile(db):
+        return jsonify(error='No se encontró music.db (Ajustes)'), 409
+    if request.args.get('ignorados'):
+        ign = almacen.titulos_ignorados()
+        todos = titulos_mod.detectar(db)['albumes']
+        lista = [a for a in todos if a['id'] in ign]
+    else:
+        d = _titulos()
+        lista = d['albumes']
+    proc = almacen.estados_en_biblioteca()
+    return jsonify(albumes=[dict({k: a[k] for k in ('id', 'artista', 'album', 'anio', 'ruta', 'n_pistas', 'reglas',
+                                                     'ejemplos')}, proceso=proc.get((a['ruta'] or '').rstrip('/')))
+                            for a in lista],
+                   ignorados=len(almacen.titulos_ignorados()), raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+
+
+def _album_orbyte(oid):
+    db = almacen.ajustes().get('db_orbyte')
+    if not db or not os.path.isfile(db):
+        return None
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        r = con.execute('SELECT al.id, al.name AS album, al.year AS anio, al.path AS ruta, al.cover_path, '
+                        'ar.name AS artista FROM albums al LEFT JOIN artists ar ON ar.id = al.artist_id '
+                        'WHERE al.id=?', (oid,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        con.close()
+
+
+def _propuesta_lib(ruta, fila=None):
+    lib = ajustar_mod.leer(ruta)
+    rep = dict(lib, edicion_mb=((fila or {}).get('reporte') or {}).get('edicion_mb'), cambios={})
+    aj = almacen.ajustes()
+    try:
+        bib = analisis.biblioteca(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+    except Exception:
+        bib = None
+    return autocorregir_mod.proponer(rep, bib)
+
+
+@app.route('/biblioteca/album/<int:oid>')
+def biblioteca_album(oid):
+    o = _album_orbyte(oid)
+    if not o or not o['ruta']:
+        flash('Ese álbum ya no está en Orbyte.')
+        return redirect(url_for('biblioteca_pagina'))
+    aid = almacen.fila_de_ruta(o['ruta'])
+    a = almacen.album(aid) if aid else None
+    if a and a.get('reporte') and not a.get('reporte', {}).get('fallo'):
+        return redirect(url_for('album', aid=aid))            # lo ubicó Ingesta: su ficha completa
+    lib = lib_error = None
+    if not a or a['estado'] in EN_BIBLIOTECA:
+        try:
+            lib = ajustar_mod.leer(o['ruta'])
+        except Exception as e:
+            lib_error = str(e)
+    x = _titulos()['por_ruta'].get(o['ruta'].rstrip('/'))
+    return render_template('biblioteca_album.html', pagina='biblioteca', o=o, a=a, lib=lib, lib_error=lib_error,
+                           reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
+                           ignorado=oid in almacen.titulos_ignorados())
+
+
+@app.route('/biblioteca/album/<int:oid>/caratula')
+def biblioteca_caratula(oid):
+    o = _album_orbyte(oid)
+    raiz = os.path.realpath(almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    cp = (o or {}).get('cover_path')
+    if not cp or not os.path.realpath(cp).startswith(raiz + os.sep) or not os.path.isfile(cp):
+        abort(404)
+    return send_file(_miniatura(cp) or cp, max_age=3600)
+
+
+@app.route('/api/biblioteca/<int:oid>/autocorregir', methods=['POST'])
+def api_biblioteca_autocorregir(oid):
+    o = _album_orbyte(oid)
+    if not o or not o['ruta']:
+        return jsonify(ok=False, error='Ese álbum ya no está en Orbyte'), 404
+    aid = almacen.fila_de_ruta(o['ruta'])
+    try:
+        return jsonify(ok=True, **_propuesta_lib(o['ruta'], almacen.album(aid) if aid else None))
+    except ajustar_mod.FalloAjuste as e:
+        return jsonify(ok=False, error=str(e)), 409
+
+
+@app.route('/api/biblioteca/<int:oid>/ajustar', methods=['POST'])
+def api_biblioteca_ajustar(oid):
+    o = _album_orbyte(oid)
+    if not o or not o['ruta']:
+        return jsonify(ok=False, error='Ese álbum ya no está en Orbyte'), 404
+    d = request.get_json(silent=True) or {}
+    aid = almacen.de_biblioteca(o['ruta'], o['artista'], o['album'], o['anio'])
+    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}})
+    if error:
+        return jsonify(ok=False, error=error), codigo
     procesador.ya()
     return jsonify(ok=True)
+
+
+@app.route('/api/biblioteca/<int:oid>/ignorar', methods=['POST'])
+def api_biblioteca_ignorar(oid):
+    o = _album_orbyte(oid)
+    if not o:
+        return jsonify(ok=False), 404
+    almacen.ignorar_titulos(oid, o['ruta'], bool((request.get_json(silent=True) or {}).get('si', True)))
+    return jsonify(ok=True)
+
+
+MAX_LOTE = 40
+
+
+@app.route('/api/biblioteca/lote/previa', methods=['POST'])
+def api_biblioteca_lote_previa():
+    """Autocorregir (solo títulos de pista) de varios álbumes: antes → después, sin guardar nada."""
+    ids = [int(i) for i in ((request.get_json(silent=True) or {}).get('ids') or []) if str(i).isdigit()][:MAX_LOTE]
+
+    def uno(oid):
+        o = _album_orbyte(oid)
+        if not o or not o['ruta']:
+            return {'id': oid, 'error': 'Ya no está en Orbyte'}
+        base = {'id': oid, 'artista': o['artista'], 'album': o['album'], 'anio': o['anio']}
+        try:
+            aid = almacen.fila_de_ruta(o['ruta'])
+            fila = almacen.album(aid) if aid else None
+            if fila and fila['estado'] not in EN_BIBLIOTECA:
+                return dict(base, error='Se está procesando en este momento')
+            prop = _propuesta_lib(o['ruta'], fila)
+        except Exception as e:
+            return dict(base, error=str(e))
+        pistas = [{'clave': k, 'antes': c['titulo']['antes'], 'despues': c['titulo']['despues']}
+                  for k, c in prop['pistas'].items() if 'titulo' in c and c['titulo']['grupo'] in ('titulos', 'mayusculas')]
+        al_dia = False
+        if not pistas:
+            # ¿los archivos ya están bien y es Orbyte el que tiene los títulos viejos? (falta releer la metadata)
+            lib = ajustar_mod.leer(o['ruta'])
+            al_dia = not titulos_mod.revisar_pistas([(x['titulo'], x['artista']) for x in lib['plan']],
+                                                    lib['tags_album']['artista'], lib['tags_album']['album'])[0]
+        return dict(base, fuente=prop['fuente'], pistas=sorted(pistas, key=lambda p: p['clave']), al_dia=al_dia)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        return jsonify(albumes=list(ex.map(uno, ids)))
+
+
+@app.route('/api/biblioteca/lote/aplicar', methods=['POST'])
+def api_biblioteca_lote_aplicar():
+    d = request.get_json(silent=True) or {}
+    pedido = d.get('albumes') or {}
+    encolados, errores = 0, []
+    for oid in [int(i) for i in d.get('releer') or [] if str(i).isdigit()][:MAX_LOTE]:
+        o = _album_orbyte(oid)
+        if not o or not o['ruta']:
+            continue
+        a = almacen.album(almacen.de_biblioteca(o['ruta'], o['artista'], o['album'], o['anio']))
+        if a['estado'] in EN_BIBLIOTECA and almacen.cambiar_estado(a['id'], a['estado'], 'por_metadata',
+                                                                    progreso='En cola para la metadata', registro=None):
+            encolados += 1
+        else:
+            errores.append(f'{o["artista"]} — {o["album"]}: se está procesando en este momento')
+    for oid, cambios in list(pedido.items())[:MAX_LOTE]:
+        o = _album_orbyte(int(oid)) if str(oid).isdigit() else None
+        if not o or not o['ruta'] or not isinstance(cambios, dict) or not cambios:
+            continue
+        aid = almacen.de_biblioteca(o['ruta'], o['artista'], o['album'], o['anio'])
+        error, _ = _encolar_ajuste(almacen.album(aid),
+                                   {'pistas': {k: {'titulo': str(v).strip()} for k, v in cambios.items()
+                                               if str(v).strip()}}, lote=True)
+        if error:
+            errores.append(f'{o["artista"]} — {o["album"]}: {error}')
+        else:
+            encolados += 1
+    if encolados:
+        procesador.ya()
+    return jsonify(ok=True, encolados=encolados, errores=errores)
 
 
 @app.route('/api/album/<int:aid>/edicion', methods=['POST'])

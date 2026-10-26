@@ -1,0 +1,35 @@
+{% extends 'base.html' %}
+{% block titulo %}Recientes{% endblock %}
+{% set NOMBRES = {'por_metadata': 'En cola: metadata', 'metadata': 'Metadata', 'completado': 'Completo',
+                  'error_metadata': 'Error en metadata', 'ubicado': 'Ubicado', 'por_ajustar': 'En cola: ajustar tags',
+                  'ajustando': 'Ajustando tags'} %}
+{% set VIVOS = ('por_metadata', 'metadata', 'por_ajustar', 'ajustando') %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Recientes</h1>
+  <div class="sub">Álbumes que Ingesta ubicó en la biblioteca. Toca uno para revisarlo y ajustar sus tags.</div>
+</div></div>
+<div class="filtros">
+  {% for k, n in VENTANAS.items() %}<a class="filtro {{ 'activo' if k == h }}" href="?h={{ k }}">{{ n }}{% if k == h %}<b>{{ filas|length }}</b>{% endif %}</a>{% endfor %}
+</div>
+{% set con_problemas = filas|selectattr('reglas')|list %}
+{% if con_problemas %}<div class="flash">{{ con_problemas|length }} de {{ filas|length }} con títulos sin normalizar (⚠).</div>{% endif %}
+<div class="lista">
+{% for f in filas %}
+  <a class="fila" href="{{ url_for('album', aid=f.id) }}">
+    <div class="portada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg><img loading="lazy" alt="" src="{{ url_for('caratula', aid=f.id) }}?mini=1" onerror="this.remove()"></div>
+    <div class="f-txt">
+      <div class="f-titulo"><span class="art">{{ f.artista or '?' }} — </span>{{ f.album or f.rel }}{% if f.anio %} <span class="art">({{ f.anio }})</span>{% endif %}</div>
+      <div class="f-dest"><span class="flecha">→</span> {{ f.ubicado_en }}</div>
+      {% if f.reglas %}<div class="cuentas"><span class="med">⚠ {% for r, n in f.reglas.items() %}{{ REGLAS[r] }} ({{ n }}){{ ' · ' if not loop.last }}{% endfor %}</span></div>{% endif %}
+    </div>
+    <div class="f-der"><div class="f-chips">
+      {% if f.calidad %}<span class="chip q-{{ f.calidad }}"><span class="led"></span>{{ f.calidad }}</span>{% endif %}
+      <span class="chip e-{{ f.estado }} {{ 'pulso' if f.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(f.estado, f.estado) }}</span></div>
+      <div class="cuentas"><span class="muy-tenue">{{ f.cuando|fecha }}{% if f.n_pistas %} · {{ f.n_pistas }} pistas{% endif %}</span></div></div>
+  </a>
+{% else %}
+  <div class="vacio"><p>Nada ubicado en este período.</p></div>
+{% endfor %}
+</div>
+{% endblock %}

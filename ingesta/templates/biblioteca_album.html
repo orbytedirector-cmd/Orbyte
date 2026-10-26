@@ -1,0 +1,54 @@
+{% extends 'base.html' %}
+{% block titulo %}{{ o.album }}{% endblock %}
+{% set NOMBRES = {'por_metadata': 'En cola: metadata', 'metadata': 'Metadata', 'completado': 'Completo',
+                  'error_metadata': 'Error en metadata', 'por_ajustar': 'En cola: ajustar tags',
+                  'ajustando': 'Ajustando tags'} %}
+{% set VIVOS = ('por_metadata', 'metadata', 'por_ajustar', 'ajustando') %}
+{% block contenido %}
+<a class="volver" href="{{ url_for('biblioteca_pagina') }}">← Biblioteca</a>
+{% if a and a.estado in VIVOS %}
+<div class="estado-vivo" style="margin-bottom:1rem"><span class="giro"></span>
+  <span id="progreso">{{ NOMBRES[a.estado] }}{% if a.progreso %} · {{ a.progreso }}{% endif %}</span></div>
+{% endif %}
+<div class="heroe">
+  <div class="portada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg><img alt="Carátula" src="{{ url_for('biblioteca_caratula', oid=o.id) }}" onerror="this.remove()"></div>
+  <div>
+    <div class="h-art">{{ o.artista }}</div>
+    <h1 class="h-alb">{{ o.album }}{% if o.anio %} <span class="anio">({{ o.anio }})</span>{% endif %}</h1>
+    <div class="h-chips">
+      {% if a %}<span class="chip e-{{ a.estado }} {{ 'pulso' if a.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(a.estado, a.estado) }}</span>{% endif %}
+      <span class="chip">ID {{ o.id }} en Orbyte</span>
+      {% if ignorado %}<span class="chip">Ignorado en la revisión</span>{% endif %}
+    </div>
+    <div class="destino"><div class="rotulo">Carpeta</div><div class="ruta"><span class="seg-alb">{{ o.ruta }}</span></div>
+      {% if reglas %}<div class="nota med">⚠ {% for r, n in reglas.items() %}{{ REGLAS[r] }} ({{ n }} pistas){{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}</div>
+    <div class="acciones">
+      <button class="btn" id="ignorar">{{ 'Dejar de ignorar' if ignorado else 'Ignorar en la revisión' }}</button>
+    </div>
+  </div>
+</div>
+
+{% if a and a.registro %}
+<section class="seccion">
+  <h2 class="rotulo">Registro</h2>
+  <pre class="registro" id="registro">{{ a.registro }}</pre>
+</section>
+{% endif %}
+
+{% if lib or lib_error %}{% set lib_api = '/api/biblioteca/%d' % o.id %}{% set lib_abierto = true %}{% include '_editor_biblioteca.html' %}{% endif %}
+{% endblock %}
+{% block js %}
+<script>
+document.getElementById('ignorar').onclick = async () => {
+  await post('/api/biblioteca/{{ o.id }}/ignorar', {si: {{ 'false' if ignorado else 'true' }}}); location.reload();
+};
+{% if a and a.estado in VIVOS %}
+setInterval(async () => {
+  const d = await (await fetch('/api/album/{{ a.id }}/estado')).json();
+  if (d.estado !== {{ a.estado|tojson }}) { location.reload(); return; }
+  const el = document.getElementById('progreso'); if (el && d.progreso) el.textContent = d.progreso;
+  const reg = document.getElementById('registro'); if (reg && d.registro) reg.textContent = d.registro.join('\n');
+}, 1500);
+{% endif %}
+</script>
+{% endblock %}
