@@ -34,7 +34,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 11   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 12   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -1003,28 +1003,45 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     info_cues = []
     imagenes_cue = {}           # archivo de audio (rel) → n.º de pistas del cue
     por_nombre = {}
+    por_norm = {}               # «01 XYZ - Follow The Night» = «01. XYZ - Follow the Night»
     for p in pistas:
         por_nombre.setdefault((p['carpeta'], p['archivo'].split('/')[-1].lower()), p)
         por_nombre.setdefault((p['carpeta'], Path(p['archivo']).stem.lower()), p)
+        por_norm.setdefault((p['carpeta'], os.path.splitext(p['archivo'])[1].lower(),
+                             _norm(Path(p['archivo']).stem)), p)
     for cue in cues:
         carpeta_rel = os.path.relpath(os.path.dirname(cue), ruta)
         carpeta_rel = '' if carpeta_rel == '.' else carpeta_rel
+        # el cue puede estar en una subcarpeta («Log/») y nombrar los archivos de la carpeta del álbum
+        carpetas_cue = [carpeta_rel]
+        while carpetas_cue[-1]:
+            carpetas_cue.append(os.path.dirname(carpetas_cue[-1]))
+
+        def buscar(fname, carpetas_cue=carpetas_cue):
+            base = os.path.basename(fname.replace('\\', '/'))
+            for c in carpetas_cue:
+                p = por_nombre.get((c, base.lower())) or por_nombre.get((c, Path(base).stem.lower()))
+                if p:
+                    return p
+            for c in carpetas_cue:
+                p = por_norm.get((c, os.path.splitext(base)[1].lower(), _norm(Path(base).stem)))
+                if p:
+                    return p
+            return None
         try:
             meta, cpistas = leer_cue(cue)
         except Exception as e:
             problema('aviso', 'cue_ilegible', f'No se pudo leer {os.path.relpath(cue, ruta)}: {e}')
             continue
-        def _dur_de(fname, carpeta_rel=carpeta_rel):
-            base = os.path.basename(fname.replace('\\', '/'))
-            p = por_nombre.get((carpeta_rel, base.lower())) or por_nombre.get((carpeta_rel, Path(base).stem.lower()))
-            return (p or {}).get('duracion')
+        def _dur_de(fname, buscar=buscar):
+            return (buscar(fname) or {}).get('duracion')
         for tipo, texto in reparar_cue(cpistas, _dur_de):
             problema(tipo, 'cue_archivo_corregido' if tipo == 'correccion' else 'cue_tiempos',
                      f'{os.path.basename(cue)}: {texto}')
         refs = []
         for fname in sorted({cp['file'] for cp in cpistas}):
             base = os.path.basename(fname.replace('\\', '/'))
-            p = por_nombre.get((carpeta_rel, base.lower())) or por_nombre.get((carpeta_rel, Path(base).stem.lower()))
+            p = buscar(fname)
             n = sum(1 for cp in cpistas if cp['file'] == fname)
             refs.append({'archivo_cue': base, 'archivo': p['archivo'] if p else None, 'pistas': n,
                          'nombre_distinto': bool(p and p['archivo'].split('/')[-1] != base)})
@@ -1037,9 +1054,19 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                                       'cuadros': int(round(cp['start'] * 75)),
                                       'archivo_cue': os.path.basename(cp['file'].replace('\\', '/'))}
                                      for cp in cpistas]})
-        _emparejar_renombrados(refs, [p for p in pistas if p['carpeta'] == carpeta_rel], problema,
+        hallados = [r['archivo'] for r in refs if r['archivo']]
+        carpeta_audio = os.path.dirname(hallados[0]) if hallados else carpeta_rel
+        _emparejar_renombrados(refs, [p for p in pistas if p['carpeta'] == carpeta_audio], problema,
                                os.path.basename(cue))
         faltan = [r['archivo_cue'] for r in refs if not r['archivo']]
+        por_pista = all(r['pistas'] == 1 for r in refs) and all(not cp['start'] for cp in cpistas)
+        if faltan and por_pista:
+            # un cue «una pista por archivo, todas en 00:00» no corta nada: si sus nombres no calzan, se ignora
+            problema('aviso', 'cue_ignorado', f'El cue {os.path.basename(cue)} nombra archivos que no están '
+                                              f'({len(faltan)} de {len(refs)}); como es de una pista por archivo, '
+                                              f'no hace falta y se ignora')
+            info_cues.pop()
+            continue
         if faltan:
             problema('error', 'cue_sin_audio',
                      f'El cue {os.path.basename(cue)} apunta a archivos que no están: {", ".join(faltan)}')
