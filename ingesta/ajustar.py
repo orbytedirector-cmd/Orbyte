@@ -143,8 +143,8 @@ def _renombrar(o, d):
     if os.path.exists(d) and o.lower() != d.lower():
         raise FalloAjuste(f'Ya existe {os.path.basename(d)}')
     tmp = f'{o}.ajustando'
-    os.rename(o, tmp)
-    os.rename(tmp, d)
+    procesar.renombrar(o, tmp)
+    procesar.renombrar(tmp, d)
 
 
 def propuesta(actual, cambios):
@@ -257,7 +257,7 @@ def aplicar(ruta, cambios, aj, reg):
         for p in renombres:                              # primero a un nombre temporal: así dos pistas pueden
             o = os.path.join(ruta, p['clave'])           # intercambiar números sin pisarse
             t = f'{o}.ajustando'
-            os.rename(o, t)
+            procesar.renombrar(o, t)
             with con:
                 con.execute('UPDATE tracks SET file_path=? WHERE file_path=?', (t, o))
         try:
@@ -265,7 +265,7 @@ def aplicar(ruta, cambios, aj, reg):
                 t, d = os.path.join(ruta, p['clave']) + '.ajustando', os.path.join(ruta, p['nuevo'])
                 if os.path.exists(d):
                     raise FalloAjuste(f'Ya existe {p["nuevo"]}')
-                os.rename(t, d)
+                procesar.renombrar(t, d)
                 with con:
                     con.execute('UPDATE tracks SET file_path=? WHERE file_path=?', (d, t))
                 reg(f'  ↻ {p["clave"]} → {p["nuevo"]}')
@@ -273,7 +273,7 @@ def aplicar(ruta, cambios, aj, reg):
             for p in renombres:                          # lo que quedó a medias vuelve a su nombre anterior
                 o = os.path.join(ruta, p['clave'])
                 if os.path.exists(o + '.ajustando') and not os.path.exists(o):
-                    os.rename(o + '.ajustando', o)
+                    procesar.renombrar(o + '.ajustando', o)
                     with con:
                         con.execute('UPDATE tracks SET file_path=? WHERE file_path=?', (o, o + '.ajustando'))
             raise

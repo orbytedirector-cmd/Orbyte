@@ -127,7 +127,7 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
         os.makedirs(os.path.dirname(destino), exist_ok=True)
         if os.path.exists(destino):
             raise FalloProceso(f'Apareció {destino} mientras se trabajaba')
-        os.rename(tmp, destino)
+        renombrar(tmp, destino, registro)
         registro(f'Ubicado en {destino}')
     except FalloProceso:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -142,6 +142,22 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
         borrar_de_entrada(origen, ajustes.get('carpeta_entrada'))
         registro('Original borrado de la carpeta de entrada')
     return destino
+
+
+def renombrar(origen, destino, registro=None, intentos=8):
+    """os.rename que reintenta si el disco de red lo niega por un momento: el cliente CIFS cierra los archivos
+    con retraso (closetimeo) y el servidor no deja renombrar una carpeta con archivos aún abiertos dentro
+    (también un antivirus revisando los archivos nuevos). Espera 1, 2, 3… segundos (≈ 35 s en total)."""
+    for i in range(intentos):
+        try:
+            os.rename(origen, destino)
+            return
+        except PermissionError as e:
+            if i == intentos - 1:
+                raise
+            if registro and i == 0:
+                registro(f'  el disco de red no deja mover la carpeta todavía ({e.strerror}); se reintenta')
+            time.sleep(i + 1)
 
 
 def _bytes_dsd(fuente, x):
