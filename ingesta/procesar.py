@@ -68,7 +68,7 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
         registro(f'Armando {len(plan)} pistas en una carpeta temporal')
         hechas = [0]
 
-        def una(x):
+        def una(x, de_nuevo=False):
             salida = os.path.join(tmp, x['destino'])
             fuente = os.path.join(origen, x['origen'])
             if x['accion'] == 'copiar':
@@ -81,6 +81,8 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
             escribir_tags(salida, x, rep['tags_album'], rep)
             if x.get('portada_disco'):
                 incrustar_portada(salida, os.path.join(origen, x['portada_disco']))
+            if de_nuevo:
+                return salida
             hechas[0] += 1
             nota = {'convertir': '  (convertida)',
                     'a_dsf': '  (DFF → DSF, mismo DSD)' if x['origen'].lower().endswith('.dff')
@@ -112,7 +114,7 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
             registro(f'  ⟳ {x["destino"]}: {p}; se copia de nuevo')
             if os.path.exists(os.path.join(tmp, x['destino'])):
                 os.remove(os.path.join(tmp, x['destino']))
-            una(x)
+            una(x, de_nuevo=True)
             p2 = revisar(x)
             if p2:
                 raise FalloProceso(f'La verificación falló dos veces:\n{x["destino"]}: {p2}')
@@ -437,8 +439,10 @@ def copiar_extras(rep, origen, tmp):
 
 # ─────────────────────────── verificación ───────────────────────────
 
-def md5_audio(ruta, filtros=None, bits=None):
+def md5_audio(ruta, filtros=None, bits=None, paquetes=False):
     cmd = ['ffmpeg', '-nostdin', '-v', 'error', '-i', ruta, '-map', '0:a:0']
+    if paquetes:
+        cmd += ['-c', 'copy']
     f = list(filtros or [])
     if bits:
         f.append(f'aformat=sample_fmts={"s16" if bits == 16 else "s32"}')
@@ -463,7 +467,11 @@ def verificar(fuente, salida, x, ganancia):
         return 'no se creó'
     ok, errores, _, segundos = analisis.decodificar(salida)
     if not ok:
-        return 'no decodifica: ' + '; '.join(errores[:2])
+        # el original ya traía esos errores (se leyó completo y lo aceptaste): la copia debe leerse igual de
+        # completa, y más abajo se compara que el audio sea idéntico
+        largo = x.get('duracion_origen') or 0
+        if not (x.get('errores_aceptados') and segundos is not None and largo and segundos >= largo - 0.5):
+            return 'no decodifica: ' + '; '.join(errores[:2])
     if x['accion'] in ('a_dsf', 'cortar_dsd'):           # DSD: lo exacto sale del conteo de muestras
         d = dsd.info(fuente)
         b0, b1 = _bytes_dsd(fuente, x)
@@ -500,6 +508,13 @@ def verificar(fuente, salida, x, ganancia):
             return str(e)
     if x.get('dsd'):
         return None
+    if x['accion'] == 'copiar' and x.get('errores_aceptados'):
+        # con errores de decodificación se comparan los paquetes tal cual (sin decodificar): la copia solo
+        # cambió los tags, los cuadros de audio deben ser los mismos bit a bit
+        a, b = md5_audio(fuente, paquetes=True), md5_audio(salida, paquetes=True)
+        if not a or not b:
+            return 'no se pudo comparar el audio'
+        return None if a == b else 'el audio no es idéntico al original'
     bits = None if x['accion'] == 'copiar' else _bits_salida(x)
     a = md5_audio(fuente, _filtros(x, 0) if x.get('corte') else None, bits)
     b = md5_audio(salida, None, bits)

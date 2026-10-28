@@ -34,7 +34,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 10   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 11   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -395,6 +395,9 @@ def leer_cue(ruta):
             try:
                 mm, ss, ff = (int(x) for x in l.split()[2].split(':'))
                 actual['start'] = mm * 60 + ss + ff / 75.0
+                # la pista empieza en el archivo vigente al llegar su INDEX 01: en los cue «una pista por archivo»
+                # el TRACK y su pausa (INDEX 00) quedan al final del archivo anterior y el FILE nuevo viene después
+                actual['file'] = archivo
             except (IndexError, ValueError):
                 pass
         elif up.startswith('TITLE '):
@@ -1598,6 +1601,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         base = {'origen': p['archivo'], 'codec': p['codec'], 'sr': p.get('sr'), 'bits': p.get('bits'),
                 'duracion_origen': p.get('duracion'), 'dsd': p.get('dsd'), 'lossy': p.get('lossy'),
                 'float': p.get('float'), 'mqa': p.get('mqa'), 'quitar_id3': bool(p.get('id3')),
+                'errores_aceptados': bool(p.get('error_completo')),
                 'portada_disco': None}
         if p.get('imagen_cue'):
             cue = next((c for c in info_cues for r in c['referencias'] if r['archivo'] == p['archivo']), None)
