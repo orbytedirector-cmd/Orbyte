@@ -149,7 +149,8 @@
             {% if p.codigo == 'elegir_edicion' %}<a class="btn chico" href="#edicion">Ver ediciones ↓</a>{% endif %}
             {% if p.codigo == 'sin_caratula' %}<a class="btn chico" href="#caratula">Elegir carátula ↓</a>{% endif %}
             {% if p.codigo in A_TAGS %}<a class="btn chico" href="#tags" data-abrir="tags">Editar tags ↓</a>{% endif %}
-            {% if p.codigo in ACEPTABLES %}<button class="btn chico" data-aceptar="{{ p.codigo }}">{{ ACEPTAR.get(p.codigo, 'Aceptar') }}</button>{% endif %}
+            {% if p.codigo == 'duplicado' %}<a class="btn chico" href="#duplicados">Reemplazar, descartar o conservar ambos ↓</a>
+            {% elif p.codigo in ACEPTABLES %}<button class="btn chico" data-aceptar="{{ p.codigo }}">{{ ACEPTAR.get(p.codigo, 'Aceptar') }}</button>{% endif %}
           </div>{% endif %}</li>
       {% endfor %}</ul>
     </div>
@@ -209,18 +210,32 @@
 {% endif %}
 
 {% if r.duplicados %}
-<section class="seccion">
+{% set dup_pend = editable and (r.problemas|selectattr('codigo', 'equalto', 'duplicado')|selectattr('nivel', 'equalto', 'decision')|list) %}
+{% set dup_acep = r.problemas|selectattr('codigo', 'equalto', 'duplicado')|selectattr('nivel', 'equalto', 'aviso')|first %}
+<section class="seccion" id="duplicados">
   <h2 class="rotulo">Ya en la biblioteca <span class="cuenta">{{ r.duplicados|length }}</span></h2>
   <div class="tabla-wrap"><table>
-    <tr><th>Álbum</th><th>Calidad</th><th class="oculto-movil">Pistas</th><th>Carpeta</th><th>Parecido</th></tr>
+    <tr>{% if dup_pend %}<th title="Marcadas = se reemplazan por la nueva">Reemplazar</th>{% endif %}<th>Álbum</th><th>Calidad</th><th class="oculto-movil">Pistas</th><th>Carpeta</th><th>Parecido</th></tr>
     {% for d in r.duplicados %}
-    <tr><td><div class="t">{{ d.album }}{% if d.anio %} <span class="tenue">({{ d.anio }})</span>{% endif %}</div><div class="s">{{ d.artista }}</div></td>
+    <tr>{% if dup_pend %}<td style="width:1%"><input type="checkbox" class="dup-sel" value="{{ d.ruta }}" {{ 'checked' if r.duplicados|length == 1 }}></td>{% endif %}<td><div class="t">{{ d.album }}{% if d.anio %} <span class="tenue">({{ d.anio }})</span>{% endif %}</div><div class="s">{{ d.artista }}</div></td>
       <td>{% if d.tag %}<span class="chip q-{{ d.tag }}"><span class="led"></span>{{ d.tag }}</span>{% endif %} <span class="s">{{ d.formato or '' }}</span></td>
       <td class="der oculto-movil">{{ d.pistas }}</td>
       <td><span class="nombre">{{ d.ruta }}</span></td>
       <td class="der">{{ (d.similitud * 100)|round|int }}%</td></tr>
     {% endfor %}
   </table></div>
+  {% if dup_pend %}
+  <div class="acciones">
+    <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas salen de la biblioteca (escuchas, favoritos y playlists pasan a la nueva)">Reemplazar las marcadas</button>
+    <button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar la nueva</button>
+    <button class="btn" data-dup="ambos">Conservar ambas</button>
+    <button class="btn" id="dup-ia" title="Mide el master de cada edición y pregunta a la IA cuál conviene por calidad y producción">✦ Sugerencia IA</button>
+  </div>
+  {% elif dup_acep and editable %}
+  <div class="acciones"><span class="tenue" style="font-size:.85rem">{{ dup_acep.texto }}</span>
+    <button class="btn chico" data-dup="deshacer">Cambiar</button></div>
+  {% endif %}
+  <div id="dup-ia-panel" class="auto-panel" style="margin-top:.8rem" hidden></div>
 </section>
 {% endif %}
 
@@ -406,6 +421,54 @@ document.querySelectorAll('[data-anio]').forEach(b => b.onclick = () => {
 });
 document.querySelectorAll('[data-abrir]').forEach(a => a.onclick = () => { const d = document.getElementById('det-tags'); if (d) d.open = true; });
 function val(id) { const e = document.getElementById(id); return e ? e.value.trim() : ''; }
+
+// «Ya está en la biblioteca»
+document.querySelectorAll('[data-dup]').forEach(b => b.onclick = async () => {
+  const accion = b.dataset.dup;
+  const rutas = [...document.querySelectorAll('.dup-sel:checked')].map(c => c.value);
+  if (accion === 'reemplazar' && !rutas.length) { toast('Marca qué edición se reemplaza', ''); return; }
+  if (accion === 'descartar' && !confirm('¿Descartar la nueva? Se borra de la carpeta de entrada y queda la que ya está en la biblioteca.')) return;
+  b.disabled = true;
+  const r = await post(`/api/album/${AID}/duplicado`, {accion, rutas});
+  if (r && r.ok === false) { toast('No se pudo', r.error || ''); b.disabled = false; return; }
+  if (r.ir) location.href = r.ir; else location.reload();
+});
+const iaPanel = document.getElementById('dup-ia-panel');
+function nombreRuta(ruta) { return ruta.split('/').pop(); }
+function pintarIA(d) {
+  if (!iaPanel) return;
+  if (d.estado === 'midiendo' || d.estado === 'consultando') {
+    const [i, n] = d.avance || [0, 0];
+    iaPanel.hidden = false;
+    iaPanel.innerHTML = `<div class="estado-vivo"><span class="giro"></span>${esc(d.texto || '')}${n ? ` · ${i}/${n} pistas` : ''}</div>`;
+    setTimeout(() => fetch(`/api/album/${AID}/duplicado/ia`).then(r => r.json()).then(pintarIA), 2000);
+    return;
+  }
+  if (d.estado === 'error') { iaPanel.hidden = false; iaPanel.innerHTML = `<div class="flash error">${esc(d.texto)}</div>`; return; }
+  const s = d.sugerencia;
+  if (!s) return;
+  const nueva = s.nueva, elim = new Set(s.eliminar || []);
+  let consejo;
+  if (elim.has(nueva)) consejo = 'Descartar la nueva y quedarte con la de la biblioteca';
+  else if (elim.size) consejo = 'Reemplazar ' + [...elim].map(r => `«${esc(nombreRuta(r))}»`).join(', ') + ' por la nueva';
+  else consejo = 'Conservar ambas';
+  const med = Object.entries(s.mediciones || {}).filter(([, m]) => m && m.lufs != null).map(([r, m]) =>
+    `<div class="s mono">${r === nueva ? 'NUEVA' : esc(nombreRuta(r))}: PLR ${m.plr} dB · LRA ${m.lra} LU · ${m.lufs} LUFS · pico ${m.pico} dBFS</div>`).join('');
+  iaPanel.hidden = false;
+  iaPanel.innerHTML = `<div class="rotulo" style="margin-bottom:.4rem">Sugerencia IA · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(s.fuente || '')} · confianza ${esc(s.confianza || '?')}</span></div>
+    <div class="t">${consejo}</div><div class="s" style="margin:.3rem 0 .5rem">${esc(s.razon || '')}</div>${med}`;
+  // si sugiere reemplazar, quedan marcadas justo las que sugiere sacar
+  if (elim.size && !elim.has(nueva)) document.querySelectorAll('.dup-sel').forEach(c => c.checked = elim.has(c.value));
+}
+const iaBtn = document.getElementById('dup-ia');
+if (iaBtn) iaBtn.onclick = async () => {
+  iaBtn.disabled = true;
+  const r = await post(`/api/album/${AID}/duplicado/ia`);
+  iaBtn.disabled = false;
+  if (r && r.ok === false) { toast('No se pudo', r.error || ''); return; }
+  pintarIA(r);
+};
+if (iaPanel) fetch(`/api/album/${AID}/duplicado/ia`).then(r => r.json()).then(d => { if (d.ok) pintarIA(d); });
 
 // editor de tags
 const gt = document.getElementById('guardar-tags');

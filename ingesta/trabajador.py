@@ -224,6 +224,53 @@ class Procesador(threading.Thread):
                                 aid)
         self.actual = None
 
+    # ── reemplazar la edición anterior (decisión «Reemplazar el existente») ──
+    def _reemplazar(self, aid, a, rep, aj, reg):
+        from . import ajustar as ajustar_mod, repetidos
+        db = aj.get('db_orbyte')
+        biblioteca = aj.get('biblioteca') or '/mnt/musica'
+        nueva = (a.get('ubicado_en') or '').rstrip('/')
+        reg('Reemplazo: la edición anterior sale de la biblioteca')
+        try:
+            if not nueva or not os.path.abspath(nueva).startswith(os.path.abspath(biblioteca) + os.sep):
+                raise RuntimeError('el álbum nuevo no está ubicado en la biblioteca: no se borra nada')
+            ids = _ids_de(db, list(rep['reemplazar']) + [nueva])
+            if not ids.get(nueva):
+                raise RuntimeError('el álbum nuevo no aparece en music.db')
+            viejas = [r for r in rep['reemplazar'] if ids.get(r)]
+            res = {'liberado': 0, 'movidas': 0}
+            if viejas:
+                grupo = {'ediciones': [{'ruta': r, 'albumes': ids[r]} for r in viejas + [nueva]]}
+                res = repetidos.eliminar(db, biblioteca, grupo, viejas, nueva, reg)
+                for r in viejas:                     # filas de Ingesta de las ediciones que salieron (si las ubicó ella)
+                    while True:
+                        otra = self.almacen.fila_de_ruta(r)
+                        if not otra or otra == aid:
+                            break
+                        self.almacen.borrar_album(otra)
+            final = (rep.get('destino') or {}).get('final')
+            if final and final.rstrip('/') != nueva and not os.path.exists(final):
+                import sqlite3
+                con = sqlite3.connect(db, timeout=60)
+                try:
+                    ajustar_mod.mover_carpeta(con, nueva, final)
+                finally:
+                    con.close()
+                reg(f'Carpeta: «{os.path.basename(nueva)}» → «{os.path.basename(final)}»')
+                campos = {'ubicado_en': final}
+                if not rep.get('origen_entrada'):
+                    campos['ruta'] = final
+                self.almacen.actualizar(aid, **campos)
+            cam = dict((self.almacen.album(aid) or {}).get('cambios') or {}, reemplazo_hecho=True)
+            self.almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
+            self.almacen.avisar('ok', f'{_nombre(a)}: reemplazó a la edición anterior',
+                                f'{res["liberado"] / 1e9:.2f} GB liberados · {res["movidas"]} referencias '
+                                f'(escuchas, favoritos, playlists) pasadas al nuevo', aid)
+        except Exception as e:
+            log.error('Reemplazo %s:\n%s', aid, traceback.format_exc())
+            reg(f'ERROR en el reemplazo: {type(e).__name__}: {e}')
+            self.almacen.avisar('error', f'{_nombre(a)}: no se pudo reemplazar la edición anterior', str(e), aid)
+
     # ── etapa 3 ──
     def metadata(self, aid):
         a = self.almacen.album(aid)
@@ -253,6 +300,12 @@ class Procesador(threading.Thread):
         self.almacen.actualizar(aid, estado='completado' if ok else 'error_metadata', progreso=None,
                                 resultado=resultado, terminado=time.time(),
                                 **({'cambios': json.dumps(cam, ensure_ascii=False)} if limpiar else {}))
+        if ok and rep.get('reemplazar') and not cam.get('reemplazo_hecho'):
+            self._reemplazar(aid, a, rep, aj, reg)
+        elif not ok and rep.get('reemplazar') and not cam.get('reemplazo_hecho'):
+            self.almacen.avisar('revision', f'{_nombre(a)}: no se reemplazó la edición anterior',
+                                'La metadata del nuevo quedó incompleta; la anterior sigue en la biblioteca. '
+                                'Cuando «Correr la metadata de nuevo» termine bien, se reemplaza.', aid)
         if ok and lote:
             pass
         elif ok:
@@ -263,6 +316,16 @@ class Procesador(threading.Thread):
             self.almacen.avisar('error', f'{_nombre(a)}: la metadata quedó incompleta',
                                 '; '.join(resultado.get('errores', [])[:2]), aid)
         self.actual = None
+
+
+def _ids_de(db, rutas):
+    import sqlite3
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    try:
+        return {r: [x[0] for x in con.execute('SELECT id FROM albums WHERE path=? OR path LIKE ?',
+                                             (r, r.replace('%', '_') + '/%'))] for r in rutas}
+    finally:
+        con.close()
 
 
 def _nombre(a):

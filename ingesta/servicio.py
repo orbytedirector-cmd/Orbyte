@@ -448,6 +448,146 @@ def api_descartar(aid):
     return jsonify(ok=True)
 
 
+# ─────────────────────── «Ya está en la biblioteca»: reemplazar, descartar o conservar ambos ───────────────────────
+
+@app.route('/api/album/<int:aid>/duplicado', methods=['POST'])
+def api_duplicado(aid):
+    a = almacen.album(aid)
+    rep = (a or {}).get('reporte') or {}
+    if not a or not _editable(a) or not rep.get('duplicados'):
+        return jsonify(ok=False, error='El álbum no se puede cambiar en este estado'), 409
+    d = request.get_json(silent=True) or {}
+    accion = d.get('accion')
+    c = dict(a.get('cambios') or {})
+    aceptadas = set(c.get('aceptadas') or [])
+    rutas_dup = {x['ruta'].rstrip('/') for x in rep['duplicados']}
+    if accion == 'reemplazar':
+        rutas = [r.rstrip('/') for r in d.get('rutas') or [] if r and r.rstrip('/') in rutas_dup]
+        if not rutas:
+            return jsonify(ok=False, error='Marca qué edición(es) de la biblioteca se reemplazan'), 400
+        c['reemplazar'] = rutas
+        c['aceptadas'] = sorted(aceptadas | {'duplicado'})
+    elif accion == 'ambos':
+        c.pop('reemplazar', None)
+        c['aceptadas'] = sorted(aceptadas | {'duplicado'})
+    elif accion == 'deshacer':
+        c.pop('reemplazar', None)
+        c['aceptadas'] = sorted(aceptadas - {'duplicado'})
+    elif accion == 'descartar':
+        aj = almacen.ajustes()
+        real, _ = sacd_mod.separar(a['ruta'])
+        hermanos = [x for x in almacen.albumes() if x['id'] != aid and sacd_mod.separar(x['ruta'])[0] == real
+                    and x['estado'] not in ('descartado',)]
+        if hermanos:
+            return jsonify(ok=False, error='La otra área de esta ISO sigue en la bandeja: descártala o ubícala primero'), 409
+        try:
+            procesar.borrar_de_entrada(real, aj.get('carpeta_entrada'))
+        except Exception as e:
+            return jsonify(ok=False, error=f'No se pudo borrar de la entrada: {e}'), 400
+        sacd_mod.limpiar(DATOS, entrada=real)
+        almacen.borrar_album(aid)
+        almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: descartado',
+                       'Se dejó la edición que ya estaba en la biblioteca y se borró la nueva de la entrada')
+        return jsonify(ok=True, ir='/')
+    else:
+        return jsonify(ok=False, error='Acción desconocida'), 400
+    _requeue(aid, cambios=c)
+    return jsonify(ok=True)
+
+
+_ia_dup = {}        # álbum → {'estado': 'midiendo'|'consultando'|'listo'|'error', 'texto', 'avance'}
+PREGUNTA_DUP = ('Estoy por agregar la edición marcada NUEVA y ya tengo las otras en mi biblioteca. Sobre todo por '
+                'calidad de sonido y producción (masterización o remasterización, fuente, prensaje, reputación de la '
+                'edición), dime cuál me conviene conservar: reemplazar las que tengo por la nueva, quedarme con la que '
+                'tengo y descartar la nueva, o conservar ambas. Que el formato sea el mismo no significa que la '
+                'calidad lo sea.')
+
+
+def _grupo_ingesta(a):
+    """La edición nueva (aún en la entrada) junto a las de la biblioteca, con la forma que usa repetidos."""
+    rep = a['reporte']
+    db = almacen.ajustes()['db_orbyte']
+    existentes = repetidos_mod.ediciones_de(db, [d['ruta'] for d in rep.get('duplicados') or []])
+    if existentes:
+        repetidos_mod.detalle(db, {'ediciones': existentes})
+    pistas = [p for d in rep.get('discos') or [] for p in d.get('pistas') or [] if p.get('legible')]
+    el = (rep.get('edicion_mb') or {}).get('elegida') or {}
+    ta = rep.get('tags_album') or {}
+    nueva = {'ruta': rep['carpeta'], 'nueva': True, 'nombre': rep.get('album'), 'calidad': (rep.get('calidad') or {}).get('tag'),
+             'formato': (rep.get('calidad') or {}).get('formato') or '', 'n': rep.get('n_pistas') or len(pistas),
+             'dur': rep.get('duracion') or 0, 'bytes': rep.get('tamano') or 0,
+             'canales': max([p.get('canales') or 0 for p in pistas] + [0]),
+             'pistas_lista': [{'t': x.get('titulo'), 'd': round(x.get('duracion_origen') or 0)} for x in rep.get('plan') or []],
+             'tags': {k: v for k, v in {'sello': el.get('sello') or ta.get('sello'), 'catalogo': el.get('catalogo') or ta.get('catalogo'),
+                                        'pais': el.get('pais') or ta.get('pais'), 'fecha_edicion': el.get('fecha'),
+                                        'barcode': el.get('barcode') or ta.get('barcode'), 'mbid': el.get('id')}.items() if v},
+             'archivos': [{'file_path': os.path.join(rep['carpeta'], p['archivo']), 'duration': p.get('duracion') or 0}
+                          for p in pistas]}
+    nueva['multicanal'] = repetidos_mod._multicanal(nueva)
+    eds = [nueva] + existentes
+    ref = max(eds, key=lambda e: e['n'])
+    for e in eds:
+        e['relacion'] = 'referencia' if e is ref else repetidos_mod._comparar(e.get('pistas_lista') or [],
+                                                                               ref.get('pistas_lista') or [])
+    return {'artista': rep.get('artista'), 'album': rep.get('album'), 'ediciones': eds}
+
+
+def _firma_dup(rep):
+    return '|'.join(sorted(d['ruta'] for d in rep.get('duplicados') or [])) + f':{rep.get("tamano")}'
+
+
+def _ia_trabajo(aid):
+    st = _ia_dup[aid]
+    try:
+        a = almacen.album(aid)
+        g = _grupo_ingesta(a)
+        aj = almacen.ajustes()
+        mediciones = {}
+        for e in g['ediciones']:
+            m = almacen.medicion(e['ruta'], e['bytes'])
+            if not m:
+                st.update(estado='midiendo', texto=f'Midiendo el master: {"la nueva" if e.get("nueva") else os.path.basename(e["ruta"])}',
+                          avance=[0, 0])
+                aviso = lambda i, n: st.update(avance=[i, n])
+                if e.get('nueva'):
+                    m = repetidos_mod.medir_archivos([x for x in e['archivos'] if os.path.isfile(x['file_path'])],
+                                                     aviso, recursos.nucleos(aj))
+                else:
+                    m = repetidos_mod.medir(aj['db_orbyte'], e, aviso, recursos.nucleos(aj))
+                almacen.guardar_medicion(e['ruta'], e['bytes'], m)
+            mediciones[e['ruta']] = m
+        st.update(estado='consultando', texto='Consultando a la IA…', avance=[0, 0])
+        r = repetidos_mod.sugerir(g, mediciones, PREGUNTA_DUP)
+        if r.get('error'):
+            st.update(estado='error', texto=r['error'])
+            return
+        r['nueva'] = g['ediciones'][0]['ruta']
+        r['mediciones'] = mediciones
+        almacen.guardar_sugerencia(f'ingesta:{aid}', _firma_dup(a['reporte']), r)
+        st.update(estado='listo', texto='')
+    except Exception as e:
+        log.error('IA duplicado %s:\n%s', aid, traceback.format_exc())
+        st.update(estado='error', texto=f'{type(e).__name__}: {e}')
+
+
+@app.route('/api/album/<int:aid>/duplicado/ia', methods=['GET', 'POST'])
+def api_duplicado_ia(aid):
+    a = almacen.album(aid)
+    rep = (a or {}).get('reporte') or {}
+    if not a or not rep.get('duplicados'):
+        return jsonify(ok=False, error='Este álbum no tiene ediciones en la biblioteca'), 404
+    st = _ia_dup.get(aid) or {}
+    if request.method == 'POST' and st.get('estado') not in ('midiendo', 'consultando'):
+        if not (os.environ.get('GEMINI_API_KEY') or os.environ.get('GROQ_API_KEY')):
+            return jsonify(ok=False, error='No hay GEMINI_API_KEY ni GROQ_API_KEY en el .env'), 409
+        st = _ia_dup[aid] = {'estado': 'midiendo', 'texto': 'Preparando…', 'avance': [0, 0]}
+        threading.Thread(target=_ia_trabajo, args=(aid,), daemon=True, name=f'ia-duplicado-{aid}').start()
+    sug = almacen.sugerencia(f'ingesta:{aid}', _firma_dup(rep))
+    if sug and sug.get('v') != repetidos_mod.VERSION_IA:
+        sug = None
+    return jsonify(ok=True, estado=st.get('estado'), texto=st.get('texto'), avance=st.get('avance'), sugerencia=sug)
+
+
 @app.route('/api/album/<int:aid>/restaurar', methods=['POST'])
 def api_restaurar(aid):
     a = almacen.album(aid)

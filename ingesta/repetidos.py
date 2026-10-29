@@ -72,9 +72,28 @@ def _multicanal(e):
     return f'Cuadrafónico {nombre}' if c == 4 else f'Multicanal {nombre}'
 
 
+def _calidad(e):
+    e['calidad'] = ('DSD' if e['dsd'] * 2 >= e['n'] else 'MQA' if e['mqa'] * 2 >= e['n']
+                    else 'Lossy' if e['lossy'] * 2 > e['n'] else 'HR' if e['sr'] > 48000 else 'CD')
+    e['formato'] = _formato(e)
+    e['multicanal'] = _multicanal(e)
+    return e
+
+
+def ediciones_de(db, rutas):
+    """Las ediciones de la biblioteca en esas carpetas, con los mismos datos que usa detectar()."""
+    quiero = {r.rstrip('/') for r in rutas}
+    return [_calidad(e) for e in _ediciones(db).values() if e['ruta'] in quiero and e['n']]
+
+
 def detectar(db, revisados=None):
     """Grupos de ediciones repetidas, de mayor a menor espacio liberable."""
     revisados = revisados or {}
+    ediciones = _ediciones(db)
+    return _agrupar(ediciones, revisados)
+
+
+def _ediciones(db):
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     con.row_factory = sqlite3.Row
     try:
@@ -125,7 +144,10 @@ def detectar(db, revisados=None):
         e['favoritos'] += favs.get(f['id'], 0)
         if not e['portada'] and f['cover_path']:
             e['portada'] = f['cover_path']
+    return ediciones
 
+
+def _agrupar(ediciones, revisados):
     grupos = {}
     for e in ediciones.values():
         if not e['n']:
@@ -140,10 +162,7 @@ def detectar(db, revisados=None):
         if revisados.get(clave) == firma:
             continue
         for e in eds:
-            e['calidad'] = ('DSD' if e['dsd'] * 2 >= e['n'] else 'MQA' if e['mqa'] * 2 >= e['n']
-                            else 'Lossy' if e['lossy'] * 2 > e['n'] else 'HR' if e['sr'] > 48000 else 'CD')
-            e['formato'] = _formato(e)
-            e['multicanal'] = _multicanal(e)
+            _calidad(e)
             e['anidada_en'] = next((o['ruta'] for o in eds if o is not e and e['ruta'].startswith(o['ruta'] + '/')),
                                    None)
             e['contiene'] = [o['ruta'] for o in eds if o is not e and o['ruta'].startswith(e['ruta'] + '/')]
@@ -245,9 +264,14 @@ def medir(db, edicion, progreso=None, trabajadores=1):
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     con.row_factory = sqlite3.Row
     try:
-        pistas = [p for p in _pistas(con, edicion['albumes']) if p['file_path'] and os.path.isfile(p['file_path'])]
+        pistas = [dict(p) for p in _pistas(con, edicion['albumes']) if p['file_path'] and os.path.isfile(p['file_path'])]
     finally:
         con.close()
+    return medir_archivos(pistas, progreso, trabajadores)
+
+
+def medir_archivos(pistas, progreso=None, trabajadores=1):
+    """pistas: [{'file_path', 'duration'}] → la medición del conjunto (sirve para material que aún no está en Orbyte)."""
     energia = dur_total = 0.0
     lras, picos, hechas = [], [], 0
     with ThreadPoolExecutor(max_workers=max(1, trabajadores)) as ex:
@@ -286,7 +310,7 @@ GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 
 
-def _prompt(grupo, mediciones):
+def _prompt(grupo, mediciones, pregunta=None):
     lineas = [f'Artista: {grupo["artista"]}', f'Álbum: {grupo["album"]}', '', 'Ediciones que tengo:']
     letras = {}
     for i, e in enumerate(grupo['ediciones']):
@@ -305,11 +329,13 @@ def _prompt(grupo, mediciones):
                           ('mbid', 'MusicBrainz release'), ('comment', 'comentario')):
             if t.get(k):
                 datos.append(f'{nombre} {t[k]}')
+        if e.get('nueva'):
+            datos.insert(0, 'NUEVA: la estoy por agregar, aún no está en la biblioteca')
         if m.get('lufs') is not None:
             datos.append(f'medición: {m["lufs"]} LUFS, LRA {m["lra"]} LU, pico real {m["pico"]} dBFS, PLR {m["plr"]} dB')
         lineas.append(f'{letra}) ' + '; '.join(datos))
-    lineas += ['', 'Soy audiófilo y quiero liberar espacio. Dime qué edición conviene conservar y cuáles se pueden '
-                   'eliminar. Considera la calidad técnica, la masterización (rango dinámico: PLR y LRA más altos '
+    lineas += ['', (pregunta or 'Soy audiófilo y quiero liberar espacio. Dime qué edición conviene conservar y '
+                               'cuáles se pueden eliminar.') + ' Considera la calidad técnica, la masterización (rango dinámico: PLR y LRA más altos '
                    'suelen indicar menos compresión), la reputación conocida de esas ediciones o prensajes '
                    '(por ejemplo japonesas, remasters, MFSL), si alguna es una mezcla multicanal o cuadrafónica distinta '
                    'y si alguna trae pistas que las otras no. No compares el volumen (LUFS) entre DSD y PCM: '
@@ -332,8 +358,8 @@ def _json_de(texto):
     return json.loads(m.group(0)) if m else None
 
 
-def sugerir(grupo, mediciones):
-    prompt, letras = _prompt(grupo, mediciones)
+def sugerir(grupo, mediciones, pregunta=None):
+    prompt, letras = _prompt(grupo, mediciones, pregunta)
     errores = []
     clave = os.environ.get('GEMINI_API_KEY')
     if clave:

@@ -215,6 +215,23 @@ def _carpeta_nueva(ruta, ta, ta0, aj):
     return os.path.join(padre, nombre)
 
 
+def mover_carpeta(con, ruta, nueva):
+    """Renombra la carpeta de un álbum y lleva sus rutas en music.db (pistas, álbum, carátula), conservando IDs."""
+    os.makedirs(os.path.dirname(nueva), exist_ok=True)
+    _renombrar(ruta, nueva)
+    n = len(ruta)
+    with con:
+        for tid, fp in con.execute('SELECT id, file_path FROM tracks WHERE file_path LIKE ?',
+                                   (ruta.replace('%', '_') + '/%',)).fetchall():
+            if fp.startswith(ruta + os.sep):
+                con.execute('UPDATE tracks SET file_path=? WHERE id=?', (nueva + fp[n:], tid))
+        for alid, ap, cp in con.execute('SELECT id, path, cover_path FROM albums WHERE path=? OR path LIKE ?',
+                                        (ruta, ruta.replace('%', '_') + '/%')).fetchall():
+            np_ = nueva + ap[n:] if ap == ruta or ap.startswith(ruta + os.sep) else ap
+            nc = nueva + cp[n:] if cp and cp.startswith(ruta + os.sep) else cp
+            con.execute('UPDATE albums SET path=?, cover_path=? WHERE id=?', (np_, nc, alid))
+
+
 def aplicar(ruta, cambios, aj, reg):
     """Aplica los cambios. Devuelve la ruta final de la carpeta."""
     db = aj.get('db_orbyte')
@@ -285,19 +302,7 @@ def aplicar(ruta, cambios, aj, reg):
             if nueva != ruta:
                 if os.path.exists(nueva) and nueva.lower() != ruta.lower():
                     raise FalloAjuste(f'Ya existe la carpeta {nueva}: los tags quedaron escritos, la carpeta no se movió')
-                os.makedirs(os.path.dirname(nueva), exist_ok=True)
-                _renombrar(ruta, nueva)
-                n = len(ruta)
-                with con:
-                    for tid, fp in con.execute('SELECT id, file_path FROM tracks WHERE file_path LIKE ?',
-                                               (ruta.replace('%', '_') + '/%',)).fetchall():
-                        if fp.startswith(ruta + os.sep):
-                            con.execute('UPDATE tracks SET file_path=? WHERE id=?', (nueva + fp[n:], tid))
-                    for alid, ap, cp in con.execute('SELECT id, path, cover_path FROM albums WHERE path=? OR path LIKE ?',
-                                                    (ruta, ruta.replace('%', '_') + '/%')).fetchall():
-                        np_ = nueva + ap[n:] if ap == ruta or ap.startswith(ruta + os.sep) else ap
-                        nc = nueva + cp[n:] if cp and cp.startswith(ruta + os.sep) else cp
-                        con.execute('UPDATE albums SET path=?, cover_path=? WHERE id=?', (np_, nc, alid))
+                mover_carpeta(con, ruta, nueva)
                 reg(f'Carpeta: {os.path.basename(ruta)} → {os.path.relpath(nueva, os.path.dirname(os.path.dirname(ruta)))}')
                 viejo_artista = os.path.dirname(ruta)
                 try:

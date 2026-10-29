@@ -34,7 +34,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 12   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 13   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -806,7 +806,7 @@ def buscar_duplicados(bib, artista, album):
         sal = _parecido(nal, g['n_album'])
         if sal < 0.86:
             continue
-        encontrados.append({'ruta': g['ruta'], 'album': g['album'], 'anio': g['anio'],
+        encontrados.append({'ruta': g['ruta'], 'album': g['album'], 'anio': g['anio'], 'ids': g['ids'],
                             'artista': g['artista'], 'formato': g['formato'], 'tag': g['tag'],
                             'pistas': g['pistas'], 'similitud': round(min(sa, sal), 2)})
     encontrados.sort(key=lambda d: -d['similitud'])
@@ -1562,8 +1562,16 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     destino = {'letra': letra, 'artista': carpeta_artista, 'album': nombre_album,
                'ruta': ruta_destino, 'artista_existe': bool(existente),
                'ruta_existe': os.path.exists(ruta_destino)}
+    reemplazar = [r.rstrip('/') for r in (cambios or {}).get('reemplazar') or []]
+    if destino['ruta_existe'] and ruta_destino.rstrip('/') in reemplazar:
+        # reemplaza a la edición que ya ocupa esa carpeta: se ubica con un nombre provisional y, cuando la
+        # anterior sale de la biblioteca, toma su nombre
+        destino['final'] = ruta_destino
+        destino['album'] = nombre_seguro(f'{nombre_album} (nuevo)')
+        destino['ruta'] = os.path.join(raiz_bib, letra, carpeta_artista, destino['album'])
+        destino['ruta_existe'] = os.path.exists(destino['ruta'])
     if destino['ruta_existe']:
-        problema('decision', 'destino_existe', f'Ya existe la carpeta de destino {ruta_destino}')
+        problema('decision', 'destino_existe', f'Ya existe la carpeta de destino {destino["ruta"]}')
 
     # nombres de archivo propuestos
     def nombre_pista(d, n, titulo, ext):
@@ -1605,10 +1613,19 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
 
     # ── decisiones que ya aceptaste ──
     aceptadas = set(cambios.get('aceptadas') or [])
+    rutas_dup = {d['ruta'].rstrip('/') for d in duplicados}
+    reemplazar = [r for r in reemplazar if r in rutas_dup]
     for x in problemas:
         if x['nivel'] == 'decision' and x['codigo'] in aceptadas and x['codigo'] in ACEPTABLES:
             x['nivel'] = 'aviso'
-            x['texto'] += ' — aceptado'
+            if x['codigo'] == 'duplicado' and reemplazar:
+                x['texto'] += (' — se reemplazará ' + ', '.join(f'«{os.path.basename(r)}»' for r in reemplazar) +
+                               ' cuando el nuevo termine su metadata (escuchas, favoritos y playlists pasan al nuevo)')
+                x['reemplazar'] = reemplazar
+            elif x['codigo'] == 'duplicado':
+                x['texto'] += ' — se conservan ambos'
+            else:
+                x['texto'] += ' — aceptado'
 
     # ── plan para la etapa 2 (qué archivo sale de dónde y con qué tags) ──
     ed_el = (ed_mb or {}).get('elegida') or {}
@@ -1697,7 +1714,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         'discos': discos, 'cues': info_cues, 'caratula': car, 'otros_archivos': otros, 'edicion': edicion,
         'edicion_mb': ed_mb, 'tags_album': tags_album, 'plan': plan, 'ganancia_db': ganancia,
         'cambios': cambios,
-        'destino': destino, 'duplicados': duplicados,
+        'destino': destino, 'duplicados': duplicados, 'reemplazar': reemplazar,
         'problemas': problemas, 'conteo_problemas': dict(niveles), 'estado': estado,
     }
 
