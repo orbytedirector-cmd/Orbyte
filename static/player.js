@@ -402,6 +402,8 @@ function updateProgress(overrideCurrentTime) {
     if (ct)   ct.textContent = formatTime(cur);
     if (tt)   tt.textContent = formatTime(dur);
     syncLyrics(cur);
+    // Para el registro de escuchas (static/escuchas.js): posición real, también al transmitir.
+    window._orbytePos = { t: Number(cur) || 0, dur: Number(dur) || 0, id: window._currentTrack && window._currentTrack.id };
 
     // Lo de acá abajo es seguimiento de salud del STREAM LOCAL — no aplica
     // (ni conviene, currentAudio puede estar trabado a propósito) mientras

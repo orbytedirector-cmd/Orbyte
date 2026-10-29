@@ -52,6 +52,7 @@
           {% if current_user.is_admin %}
           <a href="/admin/usuarios" class="header-user-link" title="Panel de administración">⚙ Admin</a>
           <a href="/admin/colaborativa" class="header-user-link" title="Playlist colaborativa (QR para invitados)">🎉 Colaborativa</a>
+          <a href="/admin/estadisticas" class="header-user-link" title="Estadísticas de uso de la plataforma">📊 Estadísticas</a>
           {% endif %}
           <a href="/amigos" class="header-user-link" title="Amigos">👥 Amigos</a>
           <a href="/notificaciones" class="header-user-link header-campana" title="Notificaciones" id="header-campana">🔔<span class="campana-badge" id="campana-badge" hidden></span></a>
@@ -433,7 +434,8 @@
 
   </div>
 
-  <script src="{{ url_for('static', filename='player.js') }}?v=20260801"></script>
+  <script src="{{ url_for('static', filename='player.js') }}?v=20261029"></script>
+  {% if current_user %}<script src="{{ url_for('static', filename='escuchas.js') }}?v=20261029"></script>{% endif %}
   {% if collab_guest %}
   <!-- Invitado de playlist colaborativa: sobrescribe playTrack/appendToQueue/
        etc. para que "reproducir/añadir" en cualquier página (album.html,
