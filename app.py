@@ -40,6 +40,7 @@ import lg_webos  # Ticket C-07 — control de la tele LG webOS (Modo TV)
 import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapper), módulo aislado
 import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), módulo aislado
 import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
+import estadisticas     # estadísticas de uso para el administrador (solo lectura)
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1424,6 +1425,8 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'admin_collab', 'admin_collab_crear', 'admin_collab_finalizar', 'admin_collab_qr',
     'admin_collab_permiso',
     'api_admin_collab_estado', 'api_admin_collab_pull',
+    'admin_estadisticas', 'admin_estadisticas_datos', 'admin_estadisticas_usuario',
+    'api_web_behavior_listen', 'api_web_behavior_session_start', 'api_web_behavior_session_end',
     'api_favorites_rebuild_cache', 'favorites_page',
     'audio_file', 'stream_dsd', 'api_heartbeat',
     # "Reproducir en…" — un invitado NUNCA debe poder redirigir el audio del
@@ -4565,6 +4568,106 @@ def api_v1_behavior_session_end():
         return jsonify({'ended': ended})
     finally:
         conn.close()
+
+# ── Web: las mismas escuchas y sesiones que envían las apps, con la sesión del navegador ──
+
+@app.route('/api/behavior/listen', methods=['POST'])
+@login_required
+def api_web_behavior_listen():
+    data = request.get_json(silent=True, force=True) or {}
+    client_event_id = (data.get('client_event_id') or '').strip()
+    track_id = data.get('track_id')
+    if not client_event_id or not track_id:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        logged = behavior_engine.log_listen(conn, session['user_id'], client_event_id, track_id,
+                                            data.get('duration_played_seconds'), data.get('completed'),
+                                            data.get('source') or 'web')
+        return jsonify({'logged': logged})
+    finally:
+        conn.close()
+
+
+@app.route('/api/behavior/session/start', methods=['POST'])
+@login_required
+def api_web_behavior_session_start():
+    data = request.get_json(silent=True, force=True) or {}
+    sid = (data.get('client_session_id') or '').strip()
+    if not sid:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        device = data.get('device') or _parse_device(request.headers.get('User-Agent', ''))
+        return jsonify({'started': behavior_engine.start_session(conn, session['user_id'], sid, device)})
+    finally:
+        conn.close()
+
+
+@app.route('/api/behavior/session/end', methods=['POST'])
+@login_required
+def api_web_behavior_session_end():
+    data = request.get_json(silent=True, force=True) or {}
+    sid = (data.get('client_session_id') or '').strip()
+    if not sid:
+        return jsonify({'error': 'missing_fields'}), 400
+    conn = get_db_connection()
+    try:
+        return jsonify({'ended': behavior_engine.end_session(conn, session['user_id'], sid)})
+    finally:
+        conn.close()
+
+
+# ── Estadísticas de uso (solo administrador): web y /api/v1 para las apps ──
+
+def _dias_param():
+    try:
+        d = int(request.args.get('dias', 30))
+    except ValueError:
+        d = 30
+    return d if d in (0, 7, 30, 90, 365) else 30
+
+
+def _estadisticas_json(user_id=None):
+    conn = get_db_connection()
+    try:
+        if user_id is None:
+            return jsonify(estadisticas.general(conn, _dias_param(), _lossy_sql('t')))
+        r = estadisticas.usuario(conn, user_id, _dias_param(), _lossy_sql('t'))
+        return (jsonify(r), 200) if r else (jsonify({'error': 'not_found'}), 404)
+    finally:
+        conn.close()
+
+
+@app.route('/admin/estadisticas')
+@admin_required
+def admin_estadisticas():
+    return render_template('admin_estadisticas.html')
+
+
+@app.route('/admin/estadisticas/datos')
+@admin_required
+def admin_estadisticas_datos():
+    return _estadisticas_json()
+
+
+@app.route('/admin/estadisticas/usuario/<int:user_id>')
+@admin_required
+def admin_estadisticas_usuario(user_id):
+    return _estadisticas_json(user_id)
+
+
+@app.route('/api/v1/admin/estadisticas')
+@api_admin_required
+def api_v1_admin_estadisticas():
+    return _estadisticas_json()
+
+
+@app.route('/api/v1/admin/estadisticas/usuario/<int:user_id>')
+@api_admin_required
+def api_v1_admin_estadisticas_usuario(user_id):
+    return _estadisticas_json(user_id)
+
 
 @app.route('/api/v1/ai/playlist/<int:request_id>/feedback', methods=['POST'])
 @api_login_required

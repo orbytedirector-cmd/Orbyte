@@ -1,0 +1,267 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="admin-wrap est">
+  <div class="est-cab">
+    <h1 class="admin-title" id="est-titulo">Estadísticas</h1>
+    <div class="est-periodos" id="est-periodos"></div>
+  </div>
+  <div id="est-cuerpo"><p class="est-cargando">Cargando…</p></div>
+</div>
+
+<style>
+.est-cab { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.est-periodos { display: flex; gap: .4rem; flex-wrap: wrap; }
+.est-chip { background: none; border: 1px solid var(--border-light); color: var(--text-secondary); border-radius: 999px;
+  padding: .35rem .85rem; font: inherit; font-size: .82rem; cursor: pointer; }
+.est-chip.on { border-color: var(--accent); color: var(--text-gold); background: var(--accent-dim); }
+.est-cargando { color: var(--text-secondary); }
+.est-kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .75rem; margin: 1rem 0 1.5rem; }
+.est-kpi { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: .9rem 1rem; }
+.est-kpi b { display: block; font-family: 'Orbitron', system-ui, sans-serif; font-size: 1.45rem; color: var(--text-primary); }
+.est-kpi span { font-size: .75rem; color: var(--text-secondary); }
+.est-kpi small { display: block; font-size: .7rem; color: var(--text-muted); margin-top: .15rem; }
+.est-sec { margin: 1.75rem 0 .75rem; }
+.est-sec h2 { font-size: 1.05rem; font-weight: 700; color: var(--text-gold); margin: 0 0 .2rem; }
+.est-sec p { font-size: .78rem; color: var(--text-secondary); margin: 0; }
+.est-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: .9rem; }
+.est-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 1rem; min-width: 0; }
+.est-card h3 { font-size: .85rem; font-weight: 700; margin: 0 0 .7rem; color: var(--text-primary); }
+.est-lista { list-style: none; margin: 0; padding: 0; }
+.est-lista li { display: grid; grid-template-columns: 1.4rem 1fr auto; gap: .5rem; align-items: center; padding: .32rem 0;
+  font-size: .82rem; border-bottom: 1px solid var(--border); }
+.est-lista li:last-child { border-bottom: 0; }
+.est-lista .n { color: var(--text-muted); font-size: .72rem; text-align: right; }
+.est-lista .t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.est-lista .s { display: block; color: var(--text-secondary); font-size: .72rem; overflow: hidden; text-overflow: ellipsis; }
+.est-lista .v { color: var(--text-gold); font-variant-numeric: tabular-nums; font-size: .78rem; text-align: right; white-space: nowrap; }
+.est-barra { height: 4px; background: var(--border-light); border-radius: 2px; margin-top: .25rem; overflow: hidden; }
+.est-barra i { display: block; height: 100%; background: var(--accent); }
+.est-tend { width: 100%; height: 150px; display: block; }
+.est-tend rect { fill: var(--accent); }
+.est-tend rect.vacio { fill: var(--border-light); }
+.est-tend text { fill: var(--text-muted); font-size: 10px; }
+.est-calor { display: grid; grid-template-columns: 2.2rem repeat(24, 1fr); gap: 2px; font-size: .62rem; color: var(--text-muted); }
+.est-calor div { aspect-ratio: 1; border-radius: 2px; }
+.est-calor .et { aspect-ratio: auto; display: flex; align-items: center; }
+.est-calor .h { aspect-ratio: auto; text-align: center; }
+.est-tabla td.num, .est-tabla th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.est-tabla tr.click { cursor: pointer; }
+.est-tabla tr.click:hover td { background: var(--accent-dim); }
+.est-tabla .sub { display: block; font-size: .72rem; color: var(--text-secondary); }
+.est-aviso { background: rgba(245,197,24,.08); border: 1px solid var(--border-gold); border-radius: 10px; padding: .6rem .9rem;
+  font-size: .82rem; margin: .5rem 0; color: var(--text-primary); }
+.est-reparto { display: flex; height: 22px; border-radius: 6px; overflow: hidden; margin: .4rem 0 .6rem; }
+.est-reparto i { display: block; height: 100%; }
+.est-ley { display: flex; flex-wrap: wrap; gap: .4rem .9rem; font-size: .75rem; color: var(--text-secondary); }
+.est-ley b { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: .3rem; vertical-align: middle; }
+.est-progreso { height: 10px; background: var(--border-light); border-radius: 5px; overflow: hidden; margin: .4rem 0; }
+.est-progreso i { display: block; height: 100%; background: var(--gold-gradient); }
+.est-volver { background: none; border: 1px solid var(--border-light); color: var(--text-secondary); border-radius: 8px;
+  padding: .35rem .8rem; font: inherit; font-size: .82rem; cursor: pointer; margin-bottom: .5rem; }
+.est-volver:hover { color: var(--accent); border-color: var(--accent); }
+.est-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
+.est-chips span { border: 1px solid var(--border-light); border-radius: 999px; padding: .2rem .6rem; font-size: .75rem; color: var(--text-secondary); }
+.est-chips span b { color: var(--text-gold); font-weight: 600; margin-left: .25rem; }
+@media (max-width: 640px) { .est-ocultar { display: none; } .est-kpi b { font-size: 1.2rem; } }
+</style>
+
+<script>
+(function () {
+  const PERIODOS = [[7, '7 días'], [30, '30 días'], [90, '90 días'], [365, '1 año'], [0, 'Todo']];
+  const COLOR_CAL = { DSD: 'var(--led-cyan, #22d3ee)', MQA: 'var(--led-blue, #3b82f6)', HR: 'var(--led-white, #e5e7eb)',
+                      CD: 'var(--led-yellow, #f5c518)', LOSSY: '#8A97A8', Desconocida: '#333' };
+  let dias = 30;
+  try { dias = parseInt(localStorage.getItem('orbyte_est_dias') || '30', 10); } catch (e) {}
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const n = x => (x ?? 0).toLocaleString('es-CL');
+  const hm = min => min >= 60 ? `${Math.floor(min / 60)} h ${min % 60} min` : `${min} min`;
+  const fecha = s => s ? new Date(s.replace(' ', 'T') + (s.includes('T') || s.endsWith('Z') ? '' : 'Z'))
+                        .toLocaleString('es-CL', { dateStyle: 'medium', timeStyle: 'short' }) : '—';
+  const cuerpo = document.getElementById('est-cuerpo');
+
+  function periodos() {
+    const el = document.getElementById('est-periodos');
+    el.innerHTML = PERIODOS.map(([d, t]) => `<button class="est-chip ${d === dias ? 'on' : ''}" data-d="${d}">${t}</button>`).join('');
+    el.querySelectorAll('button').forEach(b => b.onclick = () => {
+      dias = +b.dataset.d; try { localStorage.setItem('orbyte_est_dias', dias); } catch (e) {}
+      periodos(); cargar();
+    });
+  }
+
+  function kpi(valor, etiqueta, nota) {
+    return `<div class="est-kpi"><b>${valor}</b><span>${etiqueta}</span>${nota ? `<small>${nota}</small>` : ''}</div>`;
+  }
+  function seccion(titulo, expl) { return `<div class="est-sec"><h2>${titulo}</h2>${expl ? `<p>${expl}</p>` : ''}</div>`; }
+
+  function lista(titulo, filas, sub) {
+    if (!filas || !filas.length) return `<div class="est-card"><h3>${titulo}</h3><p class="est-cargando">Sin escuchas en el período.</p></div>`;
+    const max = Math.max(...filas.map(f => f.escuchas)) || 1;
+    return `<div class="est-card"><h3>${titulo}</h3><ul class="est-lista">${filas.map((f, i) => `
+      <li><span class="n">${i + 1}</span><span class="t">${esc(f.nombre)}${sub ? `<span class="s">${esc(sub(f) || '')}</span>` : ''}
+        <span class="est-barra"><i style="width:${Math.round(100 * f.escuchas / max)}%"></i></span></span>
+        <span class="v">${n(f.escuchas)}<span class="s">${hm(f.minutos)}</span></span></li>`).join('')}</ul></div>`;
+  }
+
+  function reparto(titulo, filas, colores) {
+    if (!filas || !filas.length) return `<div class="est-card"><h3>${titulo}</h3><p class="est-cargando">Sin datos.</p></div>`;
+    const paleta = ['#C8920A', '#F5C518', '#8A97A8', '#22d3ee', '#a78bfa', '#f472b6', '#34d399', '#fb923c', '#60a5fa', '#e5e7eb'];
+    const col = (f, i) => (colores && colores[f.nombre]) || paleta[i % paleta.length];
+    return `<div class="est-card"><h3>${titulo}</h3>
+      <div class="est-reparto">${filas.map((f, i) => `<i style="width:${f.pct}%;background:${col(f, i)}" title="${esc(f.nombre)} ${f.pct}%"></i>`).join('')}</div>
+      <div class="est-ley">${filas.map((f, i) => `<span><b style="background:${col(f, i)}"></b>${esc(f.nombre)} · ${f.pct}% · ${hm(f.minutos)}</span>`).join('')}</div></div>`;
+  }
+
+  function tendencia(datos) {
+    if (!datos || !datos.length) return '<p class="est-cargando">Sin datos.</p>';
+    const W = 1000, H = 150, base = 18, max = Math.max(...datos.map(d => d.minutos), 1);
+    const w = W / datos.length;
+    const barras = datos.map((d, i) => {
+      const h = d.minutos ? Math.max(2, (H - base - 6) * d.minutos / max) : 2;
+      return `<rect class="${d.minutos ? '' : 'vacio'}" x="${(i * w + w * .12).toFixed(1)}" y="${(H - base - h).toFixed(1)}"
+        width="${(w * .76).toFixed(1)}" height="${h.toFixed(1)}" rx="1.5"><title>${d.dia}: ${hm(d.minutos)} · ${d.escuchas} escuchas · ${d.usuarios} usuario(s) · ${d.conexiones} conexiones</title></rect>`;
+    }).join('');
+    const paso = Math.max(1, Math.ceil(datos.length / 8));
+    const etiquetas = datos.map((d, i) => i % paso ? '' :
+      `<text x="${(i * w + w / 2).toFixed(1)}" y="${H - 4}" text-anchor="middle">${d.dia.slice(5).split('-').reverse().join('/')}</text>`).join('');
+    return `<svg class="est-tend" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${barras}${etiquetas}</svg>`;
+  }
+
+  function calor(c) {
+    const max = Math.max(...c.valores.flat(), 1);
+    let h = '<div class="est-calor"><span></span>' + Array.from({ length: 24 }, (_, i) => `<span class="h">${i % 3 ? '' : i}</span>`).join('');
+    c.valores.forEach((fila, d) => {
+      h += `<span class="et">${c.dias[d]}</span>` + fila.map((v, hr) =>
+        `<div title="${c.dias[d]} ${hr}:00 · ${hm(v)}" style="background:${v ? `rgba(200,146,10,${(0.15 + 0.85 * v / max).toFixed(2)})` : 'var(--border)'}"></div>`).join('');
+    });
+    return h + '</div>';
+  }
+
+  function avisos(salud) {
+    return (salud || []).map(a => `<div class="est-aviso">⚠ ${esc(a.texto)}</div>`).join('');
+  }
+
+  function pintarGeneral(d) {
+    document.getElementById('est-titulo').textContent = 'Estadísticas';
+    const r = d.resumen, b = d.biblioteca, f = d.funciones;
+    cuerpo.innerHTML = avisos(d.salud) + `
+      <div class="est-kpis">
+        ${kpi(`${r.usuarios_activos}<small style="display:inline;font-size:.8rem;color:var(--text-secondary)"> / ${r.usuarios_total}</small>`, 'Usuarios activos', `${r.activos_dia_prom} por día en promedio`)}
+        ${kpi(n(r.conexiones), 'Conexiones', 'aperturas de la app o la web')}
+        ${kpi(r.horas.toLocaleString('es-CL'), 'Horas escuchadas', `${n(r.escuchas)} escuchas`)}
+        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha', 'pausa de más de 30 min = sesión nueva')}
+        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.pistas_por_sesion} pistas por sesión`)}
+        ${kpi(`${r.completadas_pct}%`, 'Pistas completas', `${r.saltadas_pct}% saltadas`)}
+        ${kpi(n(r.busquedas), 'Búsquedas')}
+        ${kpi(n(r.pedidos_ia), 'Pedidos a Orbitron')}
+      </div>
+      ${seccion('Actividad por día', 'Minutos escuchados (pasa el cursor por una barra para ver el detalle)')}
+      <div class="est-card">${tendencia(d.tendencia)}</div>
+      ${seccion('Usuarios', 'Toca un usuario para ver su detalle')}
+      <div class="admin-table-wrap"><table class="admin-table est-tabla">
+        <thead><tr><th>Usuario</th><th class="num">Escuchado</th><th class="num">Escuchas</th><th class="num est-ocultar">Sesión prom.</th>
+          <th class="num est-ocultar">Completas</th><th class="num">Conexiones</th><th class="est-ocultar">Más escuchado</th><th class="est-ocultar">Último acceso</th></tr></thead>
+        <tbody>${d.usuarios.map(u => `<tr class="click" data-u="${u.id}">
+          <td>${esc(u.nombre)}${u.admin ? ' <span class="prof-admin" style="font-size:.6rem">ADMIN</span>' : ''}<span class="sub">${esc(u.dispositivo || '—')}</span></td>
+          <td class="num">${hm(u.minutos)}</td><td class="num">${n(u.escuchas)}</td>
+          <td class="num est-ocultar">${u.sesion_prom_min} min</td><td class="num est-ocultar">${u.escuchas ? u.completadas_pct + '%' : '—'}</td>
+          <td class="num">${n(u.conexiones)}</td><td class="est-ocultar">${esc(u.top_artista || '—')}</td>
+          <td class="est-ocultar">${fecha(u.ultimo_acceso)}</td></tr>`).join('')}</tbody></table></div>
+      ${tops(d.top)}
+      ${seccion('Hábitos', 'Cuándo se escucha (minutos por día de la semana y hora) y desde qué equipos se conectan')}
+      <div class="est-grid"><div class="est-card"><h3>Día y hora</h3>${calor(d.habitos.calor)}</div>${dispositivos(d.habitos.dispositivos)}</div>
+      ${seccion('Tu biblioteca')}
+      <div class="est-grid">
+        <div class="est-card"><h3>Escuchado alguna vez</h3>
+          <div style="font-size:.82rem">${n(b.albumes_escuchados)} de ${n(b.albumes_total)} álbumes · ${b.albumes_pct}%</div>
+          <div class="est-progreso"><i style="width:${b.albumes_pct}%"></i></div>
+          <div style="font-size:.82rem">${n(b.pistas_escuchadas)} de ${n(b.pistas_total)} pistas · ${b.pistas_pct}%</div>
+          <div class="est-progreso"><i style="width:${b.pistas_pct}%"></i></div></div>
+        <div class="est-card"><h3>Agregados en los últimos ${b.recientes_dias} días</h3>
+          <div style="font-size:.82rem;margin-bottom:.5rem">${n(b.recientes_total)} álbumes · <span style="color:var(--text-gold)">${n(b.recientes_sin_escuchar)} sin escuchar todavía</span></div>
+          <ul class="est-lista">${b.recientes.filter(x => x.escuchas).map((x, i) => `<li><span class="n">${i + 1}</span><span class="t">${esc(x.nombre)}<span class="s">${esc(x.artista || '')}</span></span><span class="v">${n(x.escuchas)}</span></li>`).join('') || '<li><span></span><span class="t" style="color:var(--text-secondary)">Ninguno escuchado aún</span><span></span></li>'}</ul></div>
+      </div>
+      ${seccion('Funciones')}
+      <div class="est-grid">
+        ${busquedas(f.busquedas)}
+        <div class="est-card"><h3>Orbitron (playlists con IA)</h3><div class="est-chips">
+          <span>Pedidos<b>${n(f.ia.pedidos)}</b></span><span>Guardadas<b>${n(f.ia.guardadas)}</b></span>
+          <span>Calificación<b>${f.ia.rating_prom != null ? f.ia.rating_prom + ' ★' : '—'}</b></span>
+          <span>Calificadas<b>${n(f.ia.calificadas)}</b></span><span>Usó el respaldo<b>${f.ia.respaldo_pct}%</b></span></div>
+          <h3 style="margin-top:1rem">Social y colaborativa</h3><div class="est-chips">
+          <span>Sesiones colaborativas<b>${n(f.colaborativa.sesiones)}</b></span><span>Participantes<b>${n(f.colaborativa.participantes)}</b></span>
+          <span>Favoritos nuevos<b>${n(f.favoritos)}</b></span><span>Recomendaciones<b>${n(f.social.recomendaciones)}</b></span>
+          <span>Toques<b>${n(f.social.toques)}</b></span><span>Likes<b>${n(f.social.likes)}</b></span></div></div>
+      </div>`;
+    cuerpo.querySelectorAll('tr[data-u]').forEach(tr => tr.onclick = () => { location.hash = 'usuario/' + tr.dataset.u; });
+  }
+
+  function tops(t) {
+    return seccion('Lo más escuchado', 'Por número de escuchas (debajo, el tiempo)') + `
+      <div class="est-grid">${lista('Artistas', t.artistas)}${lista('Álbumes', t.albumes, f => f.artista)}${lista('Pistas', t.pistas, f => [f.artista, f.album].filter(Boolean).join(' · '))}</div>
+      <div class="est-grid" style="margin-top:.9rem">${reparto('Calidad', t.calidad, COLOR_CAL)}${reparto('Géneros', t.generos)}${reparto('Décadas', t.decadas)}</div>`;
+  }
+
+  function dispositivos(lista) {
+    return `<div class="est-card"><h3>Dispositivos</h3><ul class="est-lista">${(lista || []).map((x, i) =>
+      `<li><span class="n">${i + 1}</span><span class="t">${esc(x.nombre)}<span class="s">${x.usuarios} usuario(s) · abierta ${x.abierta_prom_min} min en promedio</span></span><span class="v">${n(x.conexiones)}</span></li>`).join('')
+      || '<li><span></span><span class="t" style="color:var(--text-secondary)">Sin conexiones</span><span></span></li>'}</ul></div>`;
+  }
+
+  function busquedas(b) {
+    const li = xs => xs.map((x, i) => `<li><span class="n">${i + 1}</span><span class="t">${esc(x.q)}</span><span class="v">${x.n}</span></li>`).join('');
+    return `<div class="est-card"><h3>Búsquedas · ${n(b.total)}</h3><ul class="est-lista">${li(b.top) || '<li><span></span><span class="t">—</span><span></span></li>'}</ul>
+      <h3 style="margin-top:1rem">Sin resultado <span style="font-weight:400;color:var(--text-secondary)">· material que buscaron y no está</span></h3>
+      <ul class="est-lista">${li(b.sin_resultado) || '<li><span></span><span class="t">—</span><span></span></li>'}</ul></div>`;
+  }
+
+  function pintarUsuario(d) {
+    const u = d.usuario, r = d.resumen;
+    document.getElementById('est-titulo').textContent = u.nombre;
+    cuerpo.innerHTML = `<button class="est-volver" id="est-volver">← Todos los usuarios</button>` + avisos(d.salud) + `
+      <p style="font-size:.82rem;color:var(--text-secondary);margin:.2rem 0 0">${esc(u.email || '')} · cuenta creada ${fecha(u.creado)} · último acceso ${fecha(u.ultimo_acceso)} (${esc(u.dispositivo || '—')})</p>
+      <div class="est-kpis">
+        ${kpi(r.horas.toLocaleString('es-CL'), 'Horas escuchadas', `${n(r.escuchas)} escuchas`)}
+        ${kpi(n(r.conexiones), 'Conexiones', `abierta ${r.abierta_prom_min} min en promedio`)}
+        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha')}
+        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.pistas_por_sesion} pistas por sesión`)}
+        ${kpi(`${r.completadas_pct}%`, 'Pistas completas', `${r.saltadas_pct}% saltadas`)}
+        ${kpi(n(d.funciones.busquedas.total), 'Búsquedas')}
+        ${kpi(n(d.funciones.ia.pedidos), 'Pedidos a Orbitron', d.funciones.ia.rating_prom != null ? `calificación ${d.funciones.ia.rating_prom} ★` : '')}
+        ${kpi(n(d.funciones.favoritos), 'Favoritos nuevos')}
+      </div>
+      ${seccion('Actividad por día')}<div class="est-card">${tendencia(d.tendencia)}</div>
+      ${tops(d.top)}
+      ${seccion('Hábitos')}
+      <div class="est-grid"><div class="est-card"><h3>Día y hora</h3>${calor(d.habitos.calor)}</div>${dispositivos(d.habitos.dispositivos)}${busquedas(d.funciones.busquedas)}</div>
+      ${seccion('Historial reciente', 'Las últimas escuchas del período')}
+      <div class="admin-table-wrap"><table class="admin-table est-tabla"><thead><tr><th>Cuándo</th><th>Pista</th><th class="est-ocultar">Álbum</th><th class="num">Escuchado</th></tr></thead>
+        <tbody>${d.historial.map(h => `<tr><td style="white-space:nowrap">${esc(h.fecha.slice(5, 16).replace('-', '/'))}</td>
+          <td>${esc(h.pista || '—')}<span class="sub">${esc(h.artista || '')}</span></td><td class="est-ocultar">${esc(h.album || '')}</td>
+          <td class="num">${Math.floor(h.segundos / 60)}:${String(h.segundos % 60).padStart(2, '0')}${h.duracion ? ` / ${Math.floor(h.duracion / 60)}:${String(h.duracion % 60).padStart(2, '0')}` : ''}${h.completa ? ' ✓' : ''}</td></tr>`).join('')
+          || '<tr><td colspan="4" class="admin-empty">Sin escuchas en el período</td></tr>'}</tbody></table></div>`;
+    document.getElementById('est-volver').onclick = () => { location.hash = ''; };
+  }
+
+  let pedido = 0;
+  async function cargar() {
+    const id = ++pedido;
+    const m = location.hash.match(/^#usuario\/(\d+)/);
+    cuerpo.innerHTML = '<p class="est-cargando">Cargando…</p>';
+    try {
+      const r = await fetch(m ? `/admin/estadisticas/usuario/${m[1]}?dias=${dias}` : `/admin/estadisticas/datos?dias=${dias}`,
+                            { credentials: 'same-origin', cache: 'no-store' });
+      const d = await r.json();
+      if (id !== pedido) return;
+      if (!r.ok) { cuerpo.innerHTML = `<div class="est-aviso">No se pudo cargar (${esc(d.error || r.status)})</div>`; return; }
+      m ? pintarUsuario(d) : pintarGeneral(d);
+      window.scrollTo(0, 0);
+    } catch (e) {
+      cuerpo.innerHTML = `<div class="est-aviso">No se pudo cargar: ${esc(e.message)}</div>`;
+    }
+  }
+  window.addEventListener('hashchange', cargar);
+  periodos();
+  cargar();
+})();
+</script>
+{% endblock %}
