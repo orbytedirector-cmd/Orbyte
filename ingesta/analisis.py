@@ -311,7 +311,7 @@ def decodificar(ruta):
     """Decodifica la pista completa: (ok, errores[], pico_dB, segundos_decodificados)."""
     cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'level+info',
            '-i', ruta, '-map', '0:a:0', '-af',
-           'astats=measure_perchannel=none:measure_overall=Peak_level', '-f', 'null', '-']
+           'astats=measure_perchannel=none:measure_overall=Peak_level+Number_of_samples', '-f', 'null', '-']
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, errors='replace')
     except subprocess.TimeoutExpired:
@@ -319,6 +319,7 @@ def decodificar(ruta):
     except Exception as e:
         return False, [str(e)], None, None
     errores, pico, segundos = [], None, None
+    muestras = tasa = None
     for linea in r.stderr.splitlines():
         # la carátula incrustada (mjpeg/png) se lee al abrir el archivo aunque solo se decodifique el audio:
         # un JPEG con metadatos raros («unable to decode APP fields») no es un problema del audio
@@ -331,12 +332,23 @@ def decodificar(ruta):
         t = re.search(r'\btime=(\d+):(\d+):(\d+(?:\.\d+)?)', linea)
         if t:
             segundos = int(t.group(1)) * 3600 + int(t.group(2)) * 60 + float(t.group(3))
+        # duración exacta = muestras decodificadas / frecuencia («time=» marca el inicio del último cuadro: hasta
+        # 0,1 s menos en un FLAC)
+        if tasa is None:
+            hz = re.search(r'Stream #0:\d+.*?: Audio: .*?(\d+) Hz', linea)
+            if hz:
+                tasa = int(hz.group(1))
+        n = re.search(r'Number of samples:\s*(\d+)', linea)
+        if n:
+            muestras = int(n.group(1))
         m = re.search(r'Peak level dB:\s*(-?[\d.]+|-?inf)', linea)
         if m:
             try:
                 pico = float(m.group(1))
             except ValueError:
                 pico = None
+    if muestras and tasa:
+        segundos = muestras / tasa
     ok = r.returncode == 0 and not errores
     if r.returncode != 0 and not errores:
         errores.append(f'ffmpeg terminó con código {r.returncode}')

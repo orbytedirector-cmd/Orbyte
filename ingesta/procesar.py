@@ -231,10 +231,35 @@ def convertir(fuente, salida, x, ganancia):
         cmd += ['-c:a', 'flac', '-sample_fmt', 's16']
     else:
         cmd += ['-c:a', 'flac', '-sample_fmt', 's32', '-bits_per_raw_sample', '24']
-    cmd += ['-compression_level', '8', salida]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    if r.returncode != 0 or not os.path.exists(salida):
-        raise FalloProceso(f'ffmpeg no pudo convertir {x["origen"]}: {r.stderr.strip()[-300:]}')
+    # el codificador FLAC de ffmpeg tiene un error conocido con cierto audio («put_bits buffer too small»): se
+    # reintenta con otro nivel de compresión y, si sigue, con el codificador oficial `flac`. La verificación
+    # posterior compara el audio con el original, así que el resultado es el mismo en los tres caminos.
+    errores = []
+    for nivel in ('8', '5'):
+        r = subprocess.run(cmd + ['-compression_level', nivel, salida], capture_output=True, text=True,
+                           errors='replace', timeout=3600)
+        if r.returncode == 0 and os.path.exists(salida):
+            return
+        errores.append(_ultima_linea(r.stderr))
+    if shutil.which('flac'):
+        wav = cmd[:cmd.index('-c:a')] + ['-c:a', 'pcm_s16le' if bits == 16 else 'pcm_s24le', '-f', 'wav', '-']
+        dec = subprocess.Popen(wav, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        enc = subprocess.run(['flac', '-8', '-s', '-f', '-o', salida, '-'], stdin=dec.stdout, capture_output=True,
+                             text=True, errors='replace', timeout=3600)
+        dec.stdout.close()
+        dec.wait(timeout=60)
+        if enc.returncode == 0 and dec.returncode == 0 and os.path.exists(salida):
+            return
+        errores.append('flac: ' + _ultima_linea(enc.stderr))
+    if os.path.exists(salida):
+        os.remove(salida)
+    raise FalloProceso(f'No se pudo convertir {x["origen"]}: ' + ' | '.join(errores) +
+                       ('' if shutil.which('flac') else ' (instala el codificador oficial: sudo apt install flac)'))
+
+
+def _ultima_linea(texto):
+    lineas = [l for l in (texto or '').splitlines() if l.strip() and 'repeated' not in l]
+    return (lineas[0] if lineas else '').strip()[:200]
 
 
 # ─────────────────────────── tags ───────────────────────────
