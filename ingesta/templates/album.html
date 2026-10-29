@@ -213,7 +213,27 @@
 {% set dup_pend = editable and (r.problemas|selectattr('codigo', 'equalto', 'duplicado')|selectattr('nivel', 'equalto', 'decision')|list) %}
 {% set dup_acep = r.problemas|selectattr('codigo', 'equalto', 'duplicado')|selectattr('nivel', 'equalto', 'aviso')|first %}
 <section class="seccion" id="duplicados">
-  <h2 class="rotulo">Ya en la biblioteca <span class="cuenta">{{ r.duplicados|length }}</span></h2>
+  <h2 class="rotulo">Comparar ediciones <span class="cuenta">la nueva y {{ r.duplicados|length }} en la biblioteca</span></h2>
+  {% if dup_filas %}
+  <div class="tabla-wrap"><table class="comparar">
+    <tr><th></th><th>Edición</th><th>Calidad</th><th class="der">Pistas</th><th class="der oculto-movil">Tamaño</th><th class="oculto-movil">Sello · catálogo · país</th><th class="oculto-movil">Master</th>{% if dup_pend %}<th title="Marcadas = salen de la biblioteca y quedan reemplazadas por A">Reemplazar</th>{% endif %}</tr>
+    {% for f in dup_filas %}
+    <tr class="{{ 'dup-nueva' if f.nueva }}" data-ruta="{{ f.ruta }}">
+      <td style="width:1%"><span class="letra {{ 'nueva' if f.nueva }}">{{ f.letra }}</span></td>
+      <td><div class="t">{{ f.nombre }}{% if f.anio %} <span class="tenue">({{ f.anio }})</span>{% endif %}</div>
+        <div class="s">{% if f.nueva %}<b class="oro">NUEVA · la que estás procesando</b>{% else %}En la biblioteca{% endif %}{% if f.relacion and f.relacion not in ('referencia', 'mismas pistas') %} · {{ f.relacion }}{% endif %}</div>
+        <div class="s mono muy-tenue" title="{{ f.ruta }}">{{ f.ruta.split('/')[-1] }}</div></td>
+      <td>{% if f.calidad %}<span class="chip q-{{ f.calidad }}"><span class="led"></span>{{ f.calidad }}</span>{% endif %}
+        <div class="s">{{ f.formato or '' }}{% if f.multicanal %} · {{ f.multicanal }}{% endif %}</div></td>
+      <td class="der">{{ f.n }}{% if f.dur %}<div class="s">{{ f.dur|duracion }}</div>{% endif %}</td>
+      <td class="der oculto-movil">{{ f.bytes|tamano if f.bytes else '—' }}</td>
+      <td class="oculto-movil"><span class="s">{{ f.edicion or '—' }}</span></td>
+      <td class="oculto-movil">{% if f.medicion %}<span class="s mono">PLR {{ f.medicion.plr }} dB · LRA {{ f.medicion.lra }} LU</span>{% else %}<span class="s muy-tenue">sin medir</span>{% endif %}</td>
+      {% if dup_pend %}<td style="width:1%">{% if not f.nueva %}<input type="checkbox" class="dup-sel" value="{{ f.ruta }}" {{ 'checked' if r.duplicados|length == 1 }}>{% endif %}</td>{% endif %}
+    </tr>
+    {% endfor %}
+  </table></div>
+  {% else %}
   <div class="tabla-wrap"><table>
     <tr>{% if dup_pend %}<th title="Marcadas = se reemplazan por la nueva">Reemplazar</th>{% endif %}<th>Álbum</th><th>Calidad</th><th class="oculto-movil">Pistas</th><th>Carpeta</th><th>Parecido</th></tr>
     {% for d in r.duplicados %}
@@ -224,11 +244,12 @@
       <td class="der">{{ (d.similitud * 100)|round|int }}%</td></tr>
     {% endfor %}
   </table></div>
+  {% endif %}
   {% if dup_pend %}
   <div class="acciones">
-    <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas salen de la biblioteca (escuchas, favoritos y playlists pasan a la nueva)">Reemplazar las marcadas</button>
-    <button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar la nueva</button>
-    <button class="btn" data-dup="ambos">Conservar ambas</button>
+    <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas salen de la biblioteca (escuchas, favoritos y playlists pasan a la nueva)">Reemplazar las marcadas por A</button>
+    <button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar A (la nueva)</button>
+    <button class="btn" data-dup="ambos">Conservar todas</button>
     <button class="btn" id="dup-ia" title="Mide el master de cada edición y pregunta a la IA cuál conviene por calidad y producción">✦ Sugerencia IA</button>
   </div>
   {% elif dup_acep and editable %}
@@ -435,28 +456,38 @@ document.querySelectorAll('[data-dup]').forEach(b => b.onclick = async () => {
 });
 const iaPanel = document.getElementById('dup-ia-panel');
 function nombreRuta(ruta) { return ruta.split('/').pop(); }
+let iaEstado = null;
+function letraDe(s, ruta) { return (s.letras || {})[ruta] || '?'; }
+function badge(l, nueva) { return `<span class="letra ${nueva ? 'nueva' : ''}">${esc(l)}</span>`; }
 function pintarIA(d) {
   if (!iaPanel) return;
   if (d.estado === 'midiendo' || d.estado === 'consultando') {
+    iaEstado = d.estado;
     const [i, n] = d.avance || [0, 0];
     iaPanel.hidden = false;
     iaPanel.innerHTML = `<div class="estado-vivo"><span class="giro"></span>${esc(d.texto || '')}${n ? ` · ${i}/${n} pistas` : ''}</div>`;
     setTimeout(() => fetch(`/api/album/${AID}/duplicado/ia`).then(r => r.json()).then(pintarIA), 2000);
     return;
   }
+  if (iaEstado && d.estado === 'listo') { location.reload(); return; }     // la tabla muestra las mediciones nuevas
   if (d.estado === 'error') { iaPanel.hidden = false; iaPanel.innerHTML = `<div class="flash error">${esc(d.texto)}</div>`; return; }
   const s = d.sugerencia;
   if (!s) return;
-  const nueva = s.nueva, elim = new Set(s.eliminar || []);
+  const nueva = s.nueva, elim = new Set(s.eliminar || []), cons = (s.conservar || []);
+  const L = r => badge(letraDe(s, r), r === nueva);
   let consejo;
-  if (elim.has(nueva)) consejo = 'Descartar la nueva y quedarte con la de la biblioteca';
-  else if (elim.size) consejo = 'Reemplazar ' + [...elim].map(r => `«${esc(nombreRuta(r))}»`).join(', ') + ' por la nueva';
-  else consejo = 'Conservar ambas';
-  const med = Object.entries(s.mediciones || {}).filter(([, m]) => m && m.lufs != null).map(([r, m]) =>
-    `<div class="s mono">${r === nueva ? 'NUEVA' : esc(nombreRuta(r))}: PLR ${m.plr} dB · LRA ${m.lra} LU · ${m.lufs} LUFS · pico ${m.pico} dBFS</div>`).join('');
+  if (elim.has(nueva)) consejo = `Descartar ${L(nueva)} (la nueva) y quedarte con ${cons.map(L).join(' ') || 'la de la biblioteca'}`;
+  else if (elim.size) consejo = `Reemplazar ${[...elim].map(L).join(' ')} por ${L(nueva)} (la nueva)` +
+                                (cons.filter(r => r !== nueva).length ? ` · conservar también ${cons.filter(r => r !== nueva).map(L).join(' ')}` : '');
+  else consejo = `Conservar todas`;
+  // «edición C» en el texto de la IA → la misma letra que en la tabla
+  const razon = esc(s.razon || '').replace(/edici[oó]n(es)? ([A-H])\b/g, (m, pl, l) => `edición${pl || ''} ${badge(l, l === 'A')}`)
+                                   .replace(/\b([A-H]) y ([A-H])\b/g, (m, x, y) => `${badge(x, x === 'A')} y ${badge(y, y === 'A')}`)
+                                   .replace(/\b(la|las|y) ([A-H])\b(?![a-záéíóúñ])/g, (m, w, l) => `${w} ${badge(l, l === 'A')}`);
   iaPanel.hidden = false;
   iaPanel.innerHTML = `<div class="rotulo" style="margin-bottom:.4rem">Sugerencia IA · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(s.fuente || '')} · confianza ${esc(s.confianza || '?')}</span></div>
-    <div class="t">${consejo}</div><div class="s" style="margin:.3rem 0 .5rem">${esc(s.razon || '')}</div>${med}`;
+    <div class="t ia-consejo">${consejo}</div><div class="s" style="margin:.4rem 0 0;line-height:1.7">${razon}</div>`;
+  document.querySelectorAll('tr[data-ruta]').forEach(tr => tr.classList.toggle('ia-sale', elim.has(tr.dataset.ruta)));
   // si sugiere reemplazar, quedan marcadas justo las que sugiere sacar
   if (elim.size && !elim.has(nueva)) document.querySelectorAll('.dup-sel').forEach(c => c.checked = elim.has(c.value));
 }
