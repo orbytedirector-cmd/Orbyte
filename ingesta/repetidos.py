@@ -305,7 +305,7 @@ def medir_archivos(pistas, progreso=None, trabajadores=1):
 
 # ─────────────────────────── sugerencia de la IA ───────────────────────────
 
-VERSION_IA = 2      # sube cuando cambia lo que ve la IA: las sugerencias anteriores dejan de mostrarse
+VERSION_IA = 3      # sube cuando cambia lo que ve la IA: las sugerencias anteriores dejan de mostrarse
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.6-flash')
 GROQ_MODEL = os.environ.get('GROQ_MODEL', 'openai/gpt-oss-120b')
 
@@ -314,7 +314,7 @@ def _prompt(grupo, mediciones, pregunta=None):
     lineas = [f'Artista: {grupo["artista"]}', f'Álbum: {grupo["album"]}', '', 'Ediciones que tengo:']
     letras = {}
     for i, e in enumerate(grupo['ediciones']):
-        letra = chr(65 + i)
+        letra = e.get('letra') or chr(65 + i)
         letras[letra] = e['ruta']
         m = mediciones.get(e['ruta']) or {}
         t = e.get('tags') or {}
@@ -341,6 +341,7 @@ def _prompt(grupo, mediciones, pregunta=None):
                    'y si alguna trae pistas que las otras no. No compares el volumen (LUFS) entre DSD y PCM: '
                    'el DSD suele ir 6 dB más bajo por convención; compara PLR y LRA. '
                    'Si dos valen la pena por motivos distintos, dilo.',
+               'Varias ediciones pueden llamarse igual: en la razón nómbralas siempre como «edición A», «edición B»…',
                'Responde SOLO con JSON: {"conservar": ["A"], "eliminar": ["B"], "recomendada": "A", '
                '"razon": "2 o 3 frases en español", "confianza": "alta|media|baja"}']
     return '\n'.join(lineas), letras

@@ -397,3 +397,15 @@ input.auto { border-color: var(--oro) !important; background: rgba(200,146,10,.1
   .trio, .trio.cuatro, .trio.dos { grid-template-columns: 1fr; }
   .oculto-movil { display: none; }
 }
+
+/* comparar ediciones (Ya está en la biblioteca) */
+.letra { display: inline-flex; align-items: center; justify-content: center; width: 1.7rem; height: 1.7rem;
+  border-radius: 50%; border: 1px solid var(--borde-2); font-weight: 700; font-size: .85rem; color: var(--texto);
+  vertical-align: middle; margin: 0 .1rem; }
+.letra.nueva { background: var(--oro); border-color: var(--oro); color: #000; }
+table.comparar tr.dup-nueva td { background: var(--oro-tenue); }
+table.comparar tr.dup-nueva td:first-child { box-shadow: inset 3px 0 0 var(--oro); }
+table.comparar tr.ia-sale td { opacity: .55; }
+table.comparar tr.ia-sale .t { text-decoration: line-through; }
+.oro { color: var(--oro-claro); }
+.ia-consejo { font-size: 1.05rem; line-height: 1.9; }

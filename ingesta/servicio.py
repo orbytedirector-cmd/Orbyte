@@ -237,7 +237,9 @@ def album(aid):
             lib = ajustar_mod.leer(a['ubicado_en'] or a['ruta'])
         except Exception as e:
             lib_error = str(e)
+    dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
+                           dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
 
@@ -507,13 +509,22 @@ def _grupo_ingesta(a):
     """La edición nueva (aún en la entrada) junto a las de la biblioteca, con la forma que usa repetidos."""
     rep = a['reporte']
     db = almacen.ajustes()['db_orbyte']
-    existentes = repetidos_mod.ediciones_de(db, [d['ruta'] for d in rep.get('duplicados') or []])
-    if existentes:
-        repetidos_mod.detalle(db, {'ediciones': existentes})
+    dups = rep.get('duplicados') or []
+    por_ruta = {e['ruta']: e for e in repetidos_mod.ediciones_de(db, [d['ruta'] for d in dups])}
+    if por_ruta:
+        repetidos_mod.detalle(db, {'ediciones': list(por_ruta.values())})
+    # letras fijas: A = la nueva; B, C… = las de la biblioteca en el orden en que se muestran en la ficha
+    existentes = []
+    for i, d in enumerate(dups):
+        e = por_ruta.get(d['ruta'].rstrip('/')) or {
+            'ruta': d['ruta'].rstrip('/'), 'nombre': d['album'], 'anio': d.get('anio'), 'calidad': d.get('tag'),
+            'formato': d.get('formato') or '', 'n': d.get('pistas') or 0, 'dur': 0, 'bytes': 0, 'albumes': d.get('ids') or []}
+        e['letra'] = chr(66 + i)
+        existentes.append(e)
     pistas = [p for d in rep.get('discos') or [] for p in d.get('pistas') or [] if p.get('legible')]
     el = (rep.get('edicion_mb') or {}).get('elegida') or {}
     ta = rep.get('tags_album') or {}
-    nueva = {'ruta': rep['carpeta'], 'nueva': True, 'nombre': rep.get('album'), 'calidad': (rep.get('calidad') or {}).get('tag'),
+    nueva = {'ruta': rep['carpeta'], 'nueva': True, 'letra': 'A', 'nombre': rep.get('album'), 'anio': rep.get('anio'), 'calidad': (rep.get('calidad') or {}).get('tag'),
              'formato': (rep.get('calidad') or {}).get('formato') or '', 'n': rep.get('n_pistas') or len(pistas),
              'dur': rep.get('duracion') or 0, 'bytes': rep.get('tamano') or 0,
              'canales': max([p.get('canales') or 0 for p in pistas] + [0]),
@@ -530,6 +541,27 @@ def _grupo_ingesta(a):
         e['relacion'] = 'referencia' if e is ref else repetidos_mod._comparar(e.get('pistas_lista') or [],
                                                                                ref.get('pistas_lista') or [])
     return {'artista': rep.get('artista'), 'album': rep.get('album'), 'ediciones': eds}
+
+
+def _comparativa_dup(a):
+    """Filas para la tabla «Comparar ediciones» de la ficha: misma letra que ve la IA."""
+    try:
+        g = _grupo_ingesta(a)
+    except Exception:
+        log.error('Comparativa %s:\n%s', a['id'], traceback.format_exc())
+        return []
+    filas = []
+    for e in g['ediciones']:
+        t = e.get('tags') or {}
+        m = almacen.medicion(e['ruta'], e['bytes']) if e.get('bytes') else None
+        filas.append({'letra': e['letra'], 'nueva': bool(e.get('nueva')), 'ruta': e['ruta'],
+                      'nombre': e.get('nombre'), 'anio': e.get('anio'), 'calidad': e.get('calidad'),
+                      'formato': e.get('formato'), 'multicanal': e.get('multicanal'), 'n': e.get('n'),
+                      'dur': e.get('dur'), 'bytes': e.get('bytes'), 'relacion': e.get('relacion'),
+                      'edicion': ' · '.join(str(x) for x in (t.get('sello'), t.get('catalogo'), t.get('pais'),
+                                                              t.get('fecha_edicion')) if x),
+                      'medicion': m if m and m.get('lufs') is not None else None})
+    return filas
 
 
 def _firma_dup(rep):
