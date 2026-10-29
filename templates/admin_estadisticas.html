@@ -122,7 +122,7 @@
     }).join('');
     const paso = Math.max(1, Math.ceil(datos.length / 8));
     const etiquetas = datos.map((d, i) => i % paso ? '' :
-      `<text x="${(i * w + w / 2).toFixed(1)}" y="${H - 4}" text-anchor="middle">${d.dia.slice(5).split('-').reverse().join('/')}</text>`).join('');
+      `<text x="${i ? (i * w + w / 2).toFixed(1) : 2}" y="${H - 4}" text-anchor="${i ? 'middle' : 'start'}">${d.dia.slice(5).split('-').reverse().join('/')}</text>`).join('');
     return `<svg class="est-tend" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${barras}${etiquetas}</svg>`;
   }
 
