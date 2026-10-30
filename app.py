@@ -41,6 +41,7 @@ import ai_playlist  # Ticket AI-01 — agente de IA (intent parser + filter mapp
 import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), módulo aislado
 import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
 import estadisticas     # estadísticas de uso para el administrador (solo lectura)
+import estadisticas_ia  # «Resumen IA» de esas estadísticas
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -1425,7 +1426,7 @@ _COLLAB_GUEST_BLOCKED_ENDPOINTS = {
     'admin_collab', 'admin_collab_crear', 'admin_collab_finalizar', 'admin_collab_qr',
     'admin_collab_permiso',
     'api_admin_collab_estado', 'api_admin_collab_pull',
-    'admin_estadisticas', 'admin_estadisticas_datos', 'admin_estadisticas_usuario',
+    'admin_estadisticas', 'admin_estadisticas_datos', 'admin_estadisticas_usuario', 'admin_estadisticas_resumen_ia',
     'api_web_behavior_listen', 'api_web_behavior_session_start', 'api_web_behavior_session_end',
     'api_favorites_rebuild_cache', 'favorites_page',
     'audio_file', 'stream_dsd', 'api_heartbeat',
@@ -4667,6 +4668,38 @@ def api_v1_admin_estadisticas():
 @api_admin_required
 def api_v1_admin_estadisticas_usuario(user_id):
     return _estadisticas_json(user_id)
+
+
+def _resumen_ia_json():
+    """?dias=&usuario=<id>&nuevo=1 — el resumen IA de la vista general o de un usuario."""
+    dias = _dias_param()
+    try:
+        uid = int(request.args.get('usuario') or 0)
+    except ValueError:
+        uid = 0
+    conn = get_db_connection()
+    try:
+        datos = (estadisticas.usuario(conn, uid, dias, _lossy_sql('t')) if uid
+                 else estadisticas.general(conn, dias, _lossy_sql('t')))
+    finally:
+        conn.close()
+    if not datos:
+        return jsonify({'error': 'not_found'}), 404
+    r = estadisticas_ia.resumir(datos, 'usuario' if uid else 'general', dias,
+                                ('usuario' if uid else 'general', uid, dias), nuevo=request.args.get('nuevo') == '1')
+    return jsonify(r), (502 if r.get('error') else 200)
+
+
+@app.route('/admin/estadisticas/resumen-ia')
+@admin_required
+def admin_estadisticas_resumen_ia():
+    return _resumen_ia_json()
+
+
+@app.route('/api/v1/admin/estadisticas/resumen-ia')
+@api_admin_required
+def api_v1_admin_estadisticas_resumen_ia():
+    return _resumen_ia_json()
 
 
 @app.route('/api/v1/ai/playlist/<int:request_id>/feedback', methods=['POST'])

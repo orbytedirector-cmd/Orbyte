@@ -7,14 +7,26 @@ app.py solo registra las rutas (web y /api/v1 para las apps) y le pasa la conexi
   general(conn, dias, lossy_sql)          toda la plataforma, con una fila por usuario
   usuario(conn, user_id, dias, lossy_sql) el detalle de un usuario
 
-dias = 0 → todo el historial. Las «sesiones de escucha» se arman con las escuchas: una pausa de
-más de 30 minutos entre dos escuchas corta la sesión (session_log mide cuánto estuvo abierta la app,
-no cuánto escuchó).
+dias = 0 → todo el historial.
+
+Sesión de escucha: desde que empieza la primera pista hasta que pasan 10 minutos sin reproducir
+(cerrar la app corta la música, así que queda cubierto por la misma regla). Cada escucha llega al
+terminar la pista con los segundos escuchados: empezó en created_at − segundos.
+  duración  = reloj, desde el inicio de la primera pista hasta el fin de la última (pausas cortas incluidas)
+  escuchado = suma de los segundos escuchados
+
+Conexión: un uso real de la app con la sesión iniciada (session_log solo se registra con login).
+Si sale y vuelve antes de 10 minutos es la misma conexión; cuenta solo si estuvo abierta al menos
+2 minutos o hubo alguna interacción (reproducir, buscar, Orbitron, favoritos). Lo demás (abrirla por
+error, volver un segundo desde la multitarea) queda solo como «apertura».
 """
+from bisect import bisect_left
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 
-PAUSA_SESION_MIN = 30
+PAUSA_SESION_MIN = 10
+VUELTA_MIN = 10
+CONEXION_MIN_SEG = 120
 TOP = 10
 DIAS_SEMANA = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
 
@@ -76,17 +88,21 @@ def _decada(e):
 
 
 def _sesiones(eventos):
-    """[(user_id, inicio, fin, segundos, pistas)] — corte por pausas de más de 30 min."""
+    """[{user_id, inicio, fin, seg (escuchado), pistas}] — de la primera pista hasta 10 min sin reproducir."""
+    tramos = []
+    for e in eventos:
+        fin = _ts(e['created_at'])
+        seg = max(0, e['seg'] or 0)
+        tramos.append((e['user_id'], fin - timedelta(seconds=seg), fin, seg))
+    tramos.sort()
     out, actual = [], None
-    for e in eventos:          # vienen ordenados por usuario y fecha
-        t = datetime.strptime(e['created_at'][:19], '%Y-%m-%d %H:%M:%S')
-        if actual and actual['user_id'] == e['user_id'] and \
-                t - actual['fin'] <= timedelta(minutes=PAUSA_SESION_MIN) + timedelta(seconds=e['seg'] or 0):
-            actual['fin'] = t
-            actual['seg'] += e['seg'] or 0
+    for uid, ini, fin, seg in tramos:
+        if actual and actual['user_id'] == uid and ini - actual['fin'] <= timedelta(minutes=PAUSA_SESION_MIN):
+            actual['fin'] = max(actual['fin'], fin)
+            actual['seg'] += seg
             actual['pistas'] += 1
         else:
-            actual = {'user_id': e['user_id'], 'inicio': t, 'fin': t, 'seg': e['seg'] or 0, 'pistas': 1}
+            actual = {'user_id': uid, 'inicio': ini, 'fin': fin, 'seg': seg, 'pistas': 1}
             out.append(actual)
     return out
 
@@ -99,7 +115,9 @@ def _resumen(eventos):
     return {
         'escuchas': len(eventos), 'minutos': round(seg / 60), 'horas': round(seg / 3600, 1),
         'sesiones_escucha': len(ses),
-        'sesion_prom_min': round(sum(s['seg'] for s in ses) / len(ses) / 60, 1) if ses else 0,
+        'sesion_prom_min': round(sum((s['fin'] - s['inicio']).total_seconds() for s in ses) / len(ses) / 60, 1)
+        if ses else 0,
+        'sesion_escuchada_min': round(sum(s['seg'] for s in ses) / len(ses) / 60, 1) if ses else 0,
         'pistas_por_sesion': round(sum(s['pistas'] for s in ses) / len(ses), 1) if ses else 0,
         'completadas_pct': round(100 * completas / len(eventos)) if eventos else 0,
         'saltadas_pct': round(100 * (len(eventos) - completas) / len(eventos)) if eventos else 0,
@@ -172,12 +190,68 @@ def _tendencia(eventos, conexiones, dias):
     return out
 
 
+def _interacciones(conn, desde, uid=None):
+    """{user_id: [instantes ordenados]} de lo que demuestra uso: escuchas, búsquedas, Orbitron, favoritos."""
+    fuentes = [('listening_events', 'created_at'), ('search_history', 'created_at'),
+               ('ai_playlist_requests', 'created_at'), ('user_item_favorites', 'added_at')]
+    out = defaultdict(list)
+    for tabla, col in fuentes:
+        if not _tabla(conn, tabla):
+            continue
+        try:
+            for r in conn.execute(f'SELECT user_id, {col} FROM {tabla} WHERE {col} >= ? '
+                                  f'{"AND user_id = ?" if uid else ""}', (desde, uid) if uid else (desde,)):
+                if r[1]:
+                    out[r[0]].append(_ts(r[1]))
+        except Exception:
+            continue
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def _hay_interaccion(instantes, ini, fin):
+    # una escucha se registra al terminar la pista: puede llegar unos minutos después de dejar la app
+    i = bisect_left(instantes, ini)
+    return i < len(instantes) and instantes[i] <= fin + timedelta(minutes=VUELTA_MIN)
+
+
 def _conexiones(conn, desde, uid=None):
-    return [dict(r) for r in conn.execute(
-        f'''SELECT user_id, device, started_at, ended_at, datetime(started_at, 'localtime') AS local,
-                   (julianday(ended_at) - julianday(started_at)) * 86400 AS seg
-              FROM session_log WHERE started_at >= ? {'AND user_id = ?' if uid else ''}''',
-        (desde, uid) if uid else (desde,))]
+    """(conexiones, aperturas): aperturas = cada vez que la app pasó a primer plano (lo que llega de
+    session_log); conexiones = aperturas unidas (vuelta antes de 10 min) que fueron un uso real."""
+    filas = [dict(r) for r in conn.execute(
+        f'''SELECT user_id, device, started_at, ended_at, datetime(started_at, 'localtime') AS local
+              FROM session_log WHERE started_at >= ? {'AND user_id = ?' if uid else ''}
+             ORDER BY user_id, device, started_at''', (desde, uid) if uid else (desde,))]
+    inter = _interacciones(conn, desde, uid)
+    unidas, actual = [], None
+    for f in filas:
+        ini = _ts(f['started_at'])
+        fin = _ts(f['ended_at']) if f['ended_at'] else ini
+        if fin < ini:
+            fin = ini
+        if actual and actual['user_id'] == f['user_id'] and actual['device'] == f['device'] \
+                and ini - actual['fin'] <= timedelta(minutes=VUELTA_MIN):
+            actual['fin'] = max(actual['fin'], fin)
+            actual['aperturas'] += 1
+            actual['sin_cierre'] = actual['sin_cierre'] or not f['ended_at']
+        else:
+            actual = {'user_id': f['user_id'], 'device': f['device'], 'local': f['local'], 'inicio': ini,
+                      'fin': fin, 'aperturas': 1, 'sin_cierre': not f['ended_at']}
+            unidas.append(actual)
+    conexiones = []
+    for c in unidas:
+        instantes = inter.get(c['user_id'], [])
+        if c['sin_cierre']:
+            # la app se cerró sin avisar (iOS la mata en segundo plano): hasta la última interacción de la hora
+            i = bisect_left(instantes, c['inicio'])
+            while i < len(instantes) and instantes[i] <= c['inicio'] + timedelta(hours=1):
+                c['fin'] = max(c['fin'], instantes[i])
+                i += 1
+        c['seg'] = (c['fin'] - c['inicio']).total_seconds()
+        if c['seg'] >= CONEXION_MIN_SEG or _hay_interaccion(instantes, c['inicio'], c['fin']):
+            conexiones.append(c)
+    return conexiones, len(filas)
 
 
 def _dispositivos(conexiones):
@@ -259,8 +333,9 @@ def _salud(conn, desde, usuarios):
                          'WHERE user_id=? AND created_at >= ?', (u['id'], desde)).fetchone()
         if r[0] >= 10 and (r[1] or 0) / r[0] >= 0.25:
             avisos.append({'nivel': 'aviso', 'texto': f'{u["nombre"]}: {round(100 * r[1] / r[0])} % de sus escuchas llegan '
-                                                     f'con 0 segundos (saltos inmediatos o un reproductor que no informa '
-                                                     f'el tiempo): sus minutos están subestimados.'})
+                                                     f'con 0 segundos: sus minutos y pistas completas están subestimados. '
+                                                     f'La app Android anterior al 30-10-2026 registraba mal el tiempo '
+                                                     f'escuchado (corregido en la versión nueva).'})
     return avisos
 
 
@@ -272,7 +347,7 @@ def _usuarios(conn):
 def general(conn, dias, lossy_sql):
     desde = _desde(dias)
     eventos = _escuchas(conn, desde, lossy_sql)
-    conexiones = _conexiones(conn, desde)
+    conexiones, aperturas = _conexiones(conn, desde)
     usuarios = _usuarios(conn)
     activos = {e['user_id'] for e in eventos} | {c['user_id'] for c in conexiones}
 
@@ -309,7 +384,10 @@ def general(conn, dias, lossy_sql):
     resumen = dict(_resumen(eventos), usuarios_total=len(usuarios), usuarios_activos=len(activos),
                    activos_dia_prom=round(sum(len(v) for v in dias_activos.values()) / len(dias_activos), 1)
                    if dias_activos else 0,
-                   conexiones=len(conexiones), busquedas=busq and sum(busq.values()) or 0,
+                   conexiones=len(conexiones), aperturas=aperturas,
+                   abierta_prom_min=round(sum(c['seg'] for c in conexiones) / len(conexiones) / 60, 1)
+                   if conexiones else 0,
+                   busquedas=busq and sum(busq.values()) or 0,
                    pedidos_ia=sum(ia.values()))
     return {
         'periodo': {'dias': dias, 'desde': desde[:10] if dias else None},
@@ -370,7 +448,7 @@ def usuario(conn, user_id, dias, lossy_sql):
         return None
     desde = _desde(dias)
     eventos = _escuchas(conn, desde, lossy_sql, user_id)
-    conexiones = _conexiones(conn, desde, user_id)
+    conexiones, aperturas = _conexiones(conn, desde, user_id)
     historial = [{'fecha': e['local'], 'pista': e['title'], 'artista': e['artista'], 'album': e['album'],
                   'segundos': e['seg'], 'duracion': round(e['duration'] or 0), 'completa': bool(e['completed']),
                   'track_id': e['track_id'], 'album_id': e['album_id']} for e in reversed(eventos[-60:])]
@@ -378,7 +456,7 @@ def usuario(conn, user_id, dias, lossy_sql):
         'periodo': {'dias': dias, 'desde': desde[:10] if dias else None},
         'usuario': {'id': u['id'], 'nombre': u['nombre'], 'email': u['email'], 'admin': bool(u['is_admin']),
                     'creado': u['created_at'], 'ultimo_acceso': u['last_seen'], 'dispositivo': u['last_device']},
-        'resumen': dict(_resumen(eventos), conexiones=len(conexiones),
+        'resumen': dict(_resumen(eventos), conexiones=len(conexiones), aperturas=aperturas,
                         abierta_prom_min=round(sum(c['seg'] or 0 for c in conexiones) / len(conexiones) / 60, 1)
                         if conexiones else 0),
         'tendencia': _tendencia(eventos, conexiones, dias),

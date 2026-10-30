@@ -3,8 +3,9 @@
 <div class="admin-wrap est">
   <div class="est-cab">
     <h1 class="admin-title" id="est-titulo">Estadísticas</h1>
-    <div class="est-periodos" id="est-periodos"></div>
+    <div class="est-acciones"><button class="est-ia-btn" id="est-ia-btn">✦ Resumen IA</button><div class="est-periodos" id="est-periodos"></div></div>
   </div>
+  <div id="est-ia"></div>
   <div id="est-cuerpo"><p class="est-cargando">Cargando…</p></div>
 </div>
 
@@ -62,6 +63,19 @@
 .est-chips { display: flex; flex-wrap: wrap; gap: .35rem; }
 .est-chips span { border: 1px solid var(--border-light); border-radius: 999px; padding: .2rem .6rem; font-size: .75rem; color: var(--text-secondary); }
 .est-chips span b { color: var(--text-gold); font-weight: 600; margin-left: .25rem; }
+.est-acciones { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+.est-ia-btn { background: var(--accent-dim); border: 1px solid var(--accent); color: var(--text-gold); border-radius: 999px;
+  padding: .35rem .95rem; font: inherit; font-size: .82rem; font-weight: 600; cursor: pointer; }
+.est-ia-btn:disabled { opacity: .5; cursor: default; }
+.est-ia { background: var(--bg-card); border: 1px solid var(--border-gold); border-radius: 12px; padding: 1rem 1.1rem; margin: 1rem 0; }
+.est-ia h3 { font-size: .9rem; color: var(--text-gold); margin: .9rem 0 .35rem; }
+.est-ia p { font-size: .9rem; line-height: 1.5; margin: 0; color: var(--text-primary); }
+.est-ia ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; line-height: 1.5; }
+.est-ia li { margin: .2rem 0; }
+.est-ia .pie { display: flex; justify-content: space-between; gap: .5rem; flex-wrap: wrap; margin-top: .9rem;
+  font-size: .72rem; color: var(--text-muted); align-items: center; }
+.est-ia .pie button { background: none; border: 1px solid var(--border-light); color: var(--text-secondary); border-radius: 8px;
+  padding: .25rem .7rem; font: inherit; font-size: .75rem; cursor: pointer; }
 @media (max-width: 640px) { .est-ocultar { display: none; } .est-kpi b { font-size: 1.2rem; } }
 </style>
 
@@ -146,10 +160,10 @@
     cuerpo.innerHTML = avisos(d.salud) + `
       <div class="est-kpis">
         ${kpi(`${r.usuarios_activos}<small style="display:inline;font-size:.8rem;color:var(--text-secondary)"> / ${r.usuarios_total}</small>`, 'Usuarios activos', `${r.activos_dia_prom} por día en promedio`)}
-        ${kpi(n(r.conexiones), 'Conexiones', 'aperturas de la app o la web')}
+        ${kpi(n(r.conexiones), 'Conexiones', `usos reales · de ${n(r.aperturas)} aperturas · ${r.abierta_prom_min} min prom.`)}
         ${kpi(r.horas.toLocaleString('es-CL'), 'Horas escuchadas', `${n(r.escuchas)} escuchas`)}
-        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha', 'pausa de más de 30 min = sesión nueva')}
-        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.pistas_por_sesion} pistas por sesión`)}
+        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha', 'hasta 10 min sin reproducir')}
+        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.sesion_escuchada_min ?? r.sesion_prom_min} min escuchados · ${r.pistas_por_sesion} pistas`)}
         ${kpi(`${r.completadas_pct}%`, 'Pistas completas', `${r.saltadas_pct}% saltadas`)}
         ${kpi(n(r.busquedas), 'Búsquedas')}
         ${kpi(n(r.pedidos_ia), 'Pedidos a Orbitron')}
@@ -221,9 +235,9 @@
       <p style="font-size:.82rem;color:var(--text-secondary);margin:.2rem 0 0">${esc(u.email || '')} · cuenta creada ${fecha(u.creado)} · último acceso ${fecha(u.ultimo_acceso)} (${esc(u.dispositivo || '—')})</p>
       <div class="est-kpis">
         ${kpi(r.horas.toLocaleString('es-CL'), 'Horas escuchadas', `${n(r.escuchas)} escuchas`)}
-        ${kpi(n(r.conexiones), 'Conexiones', `abierta ${r.abierta_prom_min} min en promedio`)}
-        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha')}
-        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.pistas_por_sesion} pistas por sesión`)}
+        ${kpi(n(r.conexiones), 'Conexiones', `de ${n(r.aperturas)} aperturas · ${r.abierta_prom_min} min prom.`)}
+        ${kpi(n(r.sesiones_escucha), 'Sesiones de escucha', 'hasta 10 min sin reproducir')}
+        ${kpi(`${r.sesion_prom_min} min`, 'Sesión promedio', `${r.sesion_escuchada_min ?? r.sesion_prom_min} min escuchados · ${r.pistas_por_sesion} pistas`)}
         ${kpi(`${r.completadas_pct}%`, 'Pistas completas', `${r.saltadas_pct}% saltadas`)}
         ${kpi(n(d.funciones.busquedas.total), 'Búsquedas')}
         ${kpi(n(d.funciones.ia.pedidos), 'Pedidos a Orbitron', d.funciones.ia.rating_prom != null ? `calificación ${d.funciones.ia.rating_prom} ★` : '')}
@@ -242,9 +256,42 @@
     document.getElementById('est-volver').onclick = () => { location.hash = ''; };
   }
 
+  // ── Resumen IA ──
+  const iaBox = document.getElementById('est-ia');
+  const iaBtn = document.getElementById('est-ia-btn');
+  let iaPedido = 0;
+  const usuarioActual = () => { const m = location.hash.match(/^#usuario\/(\d+)/); return m ? +m[1] : 0; };
+  async function resumenIA(nuevo) {
+    const id = ++iaPedido, u = usuarioActual();
+    iaBtn.disabled = true;
+    iaBox.innerHTML = '<div class="est-ia"><p class="est-cargando">La IA está leyendo las estadísticas… (puede tardar unos segundos)</p></div>';
+    iaBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    try {
+      const r = await fetch(`/admin/estadisticas/resumen-ia?dias=${dias}${u ? '&usuario=' + u : ''}${nuevo ? '&nuevo=1' : ''}`,
+                            { credentials: 'same-origin', cache: 'no-store' });
+      const d = await r.json();
+      if (id !== iaPedido) return;
+      if (!r.ok || d.error) { iaBox.innerHTML = `<div class="est-aviso">No se pudo generar el resumen: ${esc(d.error || r.status)}</div>`; return; }
+      const li = xs => (xs || []).map(x => `<li>${esc(x)}</li>`).join('');
+      iaBox.innerHTML = `<div class="est-ia"><p>${esc(d.resumen)}</p>
+        ${d.hallazgos && d.hallazgos.length ? `<h3>Comportamientos</h3><ul>${li(d.hallazgos)}</ul>` : ''}
+        ${d.sugerencias && d.sugerencias.length ? `<h3>Sugerencias</h3><ul>${li(d.sugerencias)}</ul>` : ''}
+        ${d.datos && d.datos.length ? `<h3>Sobre los datos</h3><ul>${li(d.datos)}</ul>` : ''}
+        <div class="pie"><span>${esc(d.fuente)} · ${esc(d.generado)}${d.en_cache ? ' · guardado' : ''} · puede equivocarse</span>
+          <button id="est-ia-otra">↻ Regenerar</button></div></div>`;
+      document.getElementById('est-ia-otra').onclick = () => resumenIA(true);
+    } catch (e) {
+      if (id === iaPedido) iaBox.innerHTML = `<div class="est-aviso">No se pudo generar el resumen: ${esc(e.message)}</div>`;
+    } finally {
+      if (id === iaPedido) iaBtn.disabled = false;
+    }
+  }
+  iaBtn.onclick = () => resumenIA(false);
+
   let pedido = 0;
   async function cargar() {
     const id = ++pedido;
+    iaPedido++; iaBox.innerHTML = ''; iaBtn.disabled = false;
     const m = location.hash.match(/^#usuario\/(\d+)/);
     cuerpo.innerHTML = '<p class="est-cargando">Cargando…</p>';
     try {
