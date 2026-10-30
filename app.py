@@ -9681,9 +9681,25 @@ def api_output_toggle():
 
 # ── Files / MPD ───────────────────────────────────────────────────────────────
 
+def _ruta_en_biblioteca(filepath):
+    """Seguridad (30-10-2026): ruta pedida por URL -> ruta absoluta SOLO si queda dentro de
+    MUSIC_ROOT. Antes /cover, /audio y /stream-dsd unían la ruta tal cual y con «../»
+    se podía leer cualquier archivo del servidor (.env, base de datos, llaves). Se
+    compara la ruta normalizada (no realpath): un enlace simbólico dentro de la
+    biblioteca sigue funcionando. Devuelve None si sale de la biblioteca."""
+    raiz = os.path.normpath(MUSIC_ROOT)
+    ruta = os.path.normpath(os.path.join(raiz, str(filepath).replace('\\', '/').lstrip('/')))
+    if ruta != raiz and not ruta.startswith(raiz + os.sep):
+        app.logger.warning(f"[seguridad] ruta fuera de la biblioteca bloqueada: {request.path} desde {request.remote_addr}")
+        return None
+    return ruta
+
+
 @app.route('/audio/<path:filepath>')
 def audio_file(filepath):
-    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
+    absolute_path = _ruta_en_biblioteca(filepath)
+    if absolute_path is None:
+        return "File not found", 404
 
     # Try exact path
     if os.path.isfile(absolute_path):
@@ -11808,8 +11824,10 @@ def _send_cover(path):
 
 @app.route('/cover/<path:filepath>')
 def cover_file(filepath):
+    absolute_path = _ruta_en_biblioteca(filepath)
+    if absolute_path is None:
+        return "Cover not found", 404
     # Try exact path first
-    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
     if os.path.isfile(absolute_path):
         return _send_cover(absolute_path)
 
@@ -12055,8 +12073,8 @@ def stream_dsd(filepath):
     iOS Safari can buffer/seek/resume it in the background the same way it
     already does for every non-DSD track. See _DSD_CACHE_DIR comment above.
     """
-    absolute_path = os.path.join(MUSIC_ROOT, filepath.lstrip('/'))
-    if not os.path.isfile(absolute_path):
+    absolute_path = _ruta_en_biblioteca(filepath)
+    if absolute_path is None or not os.path.isfile(absolute_path):
         app.logger.warning(f"stream-dsd 404: {absolute_path}")
         return "File not found", 404
 
