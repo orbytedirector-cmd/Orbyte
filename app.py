@@ -10661,7 +10661,10 @@ def _cast_reproducir(target_id, track_id, base, user_id):
                 return {'status': 'error', 'code': 'superseded',
                         'message': 'Se reemplazó por un pedido más nuevo'}, 409
         try:
-            return _cast_reproducir_sin_lock(target_id, track_id, base, user_id)
+            r = _cast_reproducir_sin_lock(target_id, track_id, base, user_id)
+            if r[1] == 200:
+                _cast_ultimo_inicio[target_id] = time.time()   # sesión activa del equipo (Desktop por DAC)
+            return r
         finally:
             _cast_ultimo_envio[target_id] = time.monotonic()
 
@@ -10837,6 +10840,10 @@ def api_v1_cast_transport():
     action = data.get('action')
     if action not in ('Play', 'Pause', 'Stop'):
         return jsonify({'status': 'error', 'message': 'Acción inválida'}), 400
+    ses = _desk_activa(target_id)
+    if ses:
+        _desk_ordenar(ses, {'accion': {'Play': 'play', 'Pause': 'pause', 'Stop': 'stop'}[action]})
+        return jsonify({'status': 'ok', 'desktop': True})
     conn = get_db_connection()
     try:
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
@@ -10889,6 +10896,8 @@ def api_v1_cast_transport():
                 _cast_active_target = None
         else:
             _cast_active_target = {'id': target['id'], 'name': target['name'], 'control_url': target['control_url']}
+            if action == 'Play':
+                _cast_ultimo_inicio[target['id']] = time.time()
         return jsonify({'status': 'ok'})
     return jsonify({'status': 'error', 'message': 'El equipo no responde' if status is None else f'HTTP {status}'}), 502
 
@@ -10901,6 +10910,13 @@ def api_v1_cast_seek():
     seconds = data.get('seconds')
     if target_id is None or seconds is None:
         return jsonify({'status': 'error', 'message': 'Faltan parámetros'}), 400
+    ses = _desk_activa(target_id)
+    if ses:
+        try:
+            _desk_ordenar(ses, {'accion': 'seek', 'segundos': max(0.0, float(seconds))})
+        except (TypeError, ValueError):
+            return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+        return jsonify({'status': 'ok', 'desktop': True})
     conn = get_db_connection()
     try:
         target = conn.execute('SELECT * FROM cast_targets WHERE id=?', (target_id,)).fetchone()
@@ -11025,6 +11041,9 @@ def api_v1_cast_status():
             return jsonify({'status': 'ok', 'target': None, 'state': None,
                             'position_s': None, 'duration_s': None, 'track': None})
         target_id = _cast_active_target['id']
+    ses = _desk_activa(target_id)
+    if ses:   # lo que suena en el equipo viene de un Desktop por su DAC
+        return jsonify(_desk_status(target_id, ses))
 
     conn = get_db_connection()
     try:
@@ -11403,6 +11422,9 @@ def api_v1_cast_queue():
         index = int(data.get('index', 0))
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    ses = _desk_activa(target_id)
+    if ses and ids:
+        return jsonify(_desk_cola_desde_mini(ses, ids, index, data))
     if not ids:
         with _cast_colas_lock:
             _cast_colas.pop(target_id, None)
@@ -11470,6 +11492,10 @@ def api_v1_cast_queue_step():
         delta = 1 if int(data.get('delta', 1)) >= 0 else -1
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    ses = _desk_activa(target_id)
+    if ses:
+        _desk_ordenar(ses, {'accion': 'paso', 'delta': delta})
+        return jsonify({'status': 'ok', 'desktop': True, 'queue': _desk_cola_publica(ses)})
     with _cast_colas_lock:
         cola = _cast_colas.get(target_id)
         if not cola or not cola['ids']:
@@ -11494,6 +11520,15 @@ def api_v1_cast_queue_mode():
         target_id = int(data.get('target_id'))
     except (TypeError, ValueError):
         return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    ses = _desk_activa(target_id)
+    if ses:
+        orden = {'accion': 'modo'}
+        if data.get('repeat') in ('off', 'all', 'one'):
+            orden['repeat'] = ses['repeat'] = data['repeat']
+        if 'shuffle' in data:
+            orden['shuffle'] = ses['shuffle'] = bool(data['shuffle'])
+        _desk_ordenar(ses, orden)
+        return jsonify({'status': 'ok', 'desktop': True, 'queue': _desk_cola_publica(ses)})
     with _cast_colas_lock:
         cola = _cast_colas.get(target_id)
         if not cola:
@@ -11507,6 +11542,223 @@ def api_v1_cast_queue_mode():
             cola['pos'] = 0 if cola['shuffle'] else actual_idx
         cola['version'] += 1
         return jsonify({'status': 'ok', 'queue': _cast_cola_publica(cola)})
+
+
+# ── Desktop por DAC como sesión del equipo (pedido de Niko, 30-10-2026) ────────
+# El Onkyo también suena con Desktop reproduciendo en el servidor por el iFi Zen
+# DAC (bit-perfect, sin streaming). Desktop vincula su salida de audio a un
+# equipo de /cast/targets (Configuración → Audio) y, mientras suena por esa
+# salida, informa su estado aquí y recibe órdenes por espera larga (mismo
+# patrón que /tvapp/orden). Para el mini del dashboard esa reproducción es la
+# sesión del equipo: /cast/status la muestra y transport/seek/queue/step/mode
+# se convierten en órdenes para ese Desktop. El volumen sigue siendo el del
+# equipo. Sesión activa = la que suena; si suenan las dos, la que empezó
+# después; si no suena ninguna, la última que sonó. Solo RAM.
+_DESK_LATIDO_S = 20
+_desk_sesiones = {}          # cliente_id -> dict
+_desk_lock = threading.Lock()
+_cast_ultimo_inicio = {}     # target_id -> time.time() del último streaming que empezó
+
+
+def _desk_vigente(ses):
+    return time.time() - ses.get('latido', 0) <= _DESK_LATIDO_S
+
+
+def _desk_activa(target_id):
+    try:
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        return None
+    with _desk_lock:
+        candidatas = [x for x in _desk_sesiones.values()
+                      if x.get('target_id') == target_id and x['inicio'] > 0 and _desk_vigente(x)]
+    if not candidatas:
+        return None
+    ses = max(candidatas, key=lambda x: (x['playing'], x['inicio']))
+    return ses if ses['inicio'] >= _cast_ultimo_inicio.get(target_id, 0) else None
+
+
+def _desk_ordenar(ses, orden):
+    with ses['cond']:
+        ses['ordenes'].append(orden)
+        ses['cond'].notify_all()
+    app.logger.info(f"[desktop dac] orden -> {ses.get('nombre')}: {orden.get('accion')}")
+
+
+def _desk_cola_publica(ses):
+    return {'ids': ses['cola'], 'index': ses['indice'], 'shuffle': ses['shuffle'], 'repeat': ses['repeat'],
+            'active': True, 'stop_after': False, 'version': ses['version']}
+
+
+def _desk_pistas(conn, ids):
+    """Pistas con la misma forma que /api/v1/albums/<id>/tracks (lo que Desktop ya sabe reproducir)."""
+    if not ids:
+        return []
+    filas = {}
+    unicos = list(dict.fromkeys(ids))
+    for i in range(0, len(unicos), 500):
+        parte = unicos[i:i + 500]
+        for r in conn.execute(f'''SELECT t.*, al.name AS album_name, al.cover_path AS album_cover,
+                                         al.artist_id AS al_artist_id, ar.name AS artist_name
+                                    FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+                                    LEFT JOIN artists ar ON ar.id = al.artist_id
+                                   WHERE t.id IN ({','.join('?' * len(parte))})''', parte):
+            d = dict(r)
+            fmt, led = _fmt_format(d)
+            portada = d.get('album_cover') or d.get('cover_path')
+            filas[d['id']] = {
+                'id': d['id'], 'title': d.get('title'), 'track_number': d.get('track_number'),
+                'disc_number': d.get('disc_number'), 'duration': d.get('duration'),
+                'duration_fmt': _fmt_seconds(d.get('duration')), 'format_display': fmt, 'format_color': led,
+                'artist_id': d.get('al_artist_id'), 'artist_name': d.get('artist_name') or d.get('artist'),
+                'artist': d.get('artist') or d.get('artist_name'), 'album_id': d.get('album_id'),
+                'album_name': d.get('album_name'),
+                'cover_url': cover_url_filter(clean_db_path(portada)) if portada else '',
+                'stream_url': f'/api/v1/stream/{d["id"]}', 'is_dsd': d.get('is_dsd'), 'dsd_rate': d.get('dsd_rate'),
+                'sample_rate_real': d.get('sample_rate_real'), 'bit_depth': d.get('bit_depth'),
+                'container_ext': _container_ext(d),
+            }
+    return [filas[i] for i in ids if i in filas]
+
+
+def _desk_status(target_id, ses):
+    pos = ses.get('position_s') or 0
+    if ses['playing']:
+        pos += time.time() - ses['latido']
+    if ses.get('duration_s'):
+        pos = min(pos, ses['duration_s'])
+    conn = get_db_connection()
+    try:
+        p = _desk_pistas(conn, [ses['track_id']]) if ses.get('track_id') else []
+        fila = conn.execute('SELECT name FROM cast_targets WHERE id=?', (target_id,)).fetchone()
+    finally:
+        conn.close()
+    track = p[0] if p else None
+    estado = 'PLAYING' if ses['playing'] else ('PAUSED_PLAYBACK' if track else 'STOPPED')
+    return {'status': 'ok', 'target': {'id': target_id, 'name': fila['name'] if fila else None},
+            'state': estado, 'pcm_profile': None, 'position_s': round(pos, 1),
+            'duration_s': ses.get('duration_s') or (track or {}).get('duration'), 'track': track,
+            'queue': _desk_cola_publica(ses), 'origen': 'desktop',
+            'desktop': {'nombre': ses.get('nombre'), 'salida': ses.get('salida')}}
+
+
+def _desk_cola_desde_mini(ses, ids, index, data):
+    """El mini manda una lista (reproducir) o la actualiza (play: false): pasa a la cola de Desktop."""
+    conn = get_db_connection()
+    try:
+        pistas = _desk_pistas(conn, ids)
+    finally:
+        conn.close()
+    if not pistas:
+        return {'status': 'error', 'message': 'Pistas no encontradas'}
+    if index < 0 or index >= len(pistas):
+        index = random.randrange(len(pistas)) if data.get('shuffle') else 0
+    orden = {'accion': 'cola', 'pistas': pistas, 'indice': index, 'play': data.get('play', True) is not False,
+             'solo': bool(data.get('stop_after'))}
+    if data.get('repeat') in ('off', 'all', 'one'):
+        orden['repeat'] = ses['repeat'] = data['repeat']
+    if 'shuffle' in data:
+        orden['shuffle'] = ses['shuffle'] = bool(data['shuffle'])
+    _desk_ordenar(ses, orden)
+    # se responde con la lista nueva: el mini la reconoce como suya mientras Desktop la aplica
+    ses['cola'], ses['indice'] = [p['id'] for p in pistas], index
+    ses['version'] += 1
+    return {'status': 'ok', 'desktop': True, 'queue': _desk_cola_publica(ses)}
+
+
+@app.route('/api/v1/desk/estado', methods=['POST'])
+@api_login_required
+def api_v1_desk_estado():
+    """Desktop informa lo que suena por una salida vinculada a un equipo.
+    Body: {cliente_id, nombre, salida, target_id (null = no está sonando por una salida vinculada),
+           track_id, position_s, duration_s, playing, cola: [ids], indice, shuffle, repeat}"""
+    d = request.get_json(silent=True) or {}
+    cid = str(d.get('cliente_id') or '').strip()[:64]
+    if not cid:
+        return jsonify({'status': 'error', 'message': 'Falta cliente_id'}), 400
+    try:
+        target_id = int(d['target_id']) if d.get('target_id') is not None else None
+        track_id = int(d['track_id']) if d.get('track_id') else None
+        cola = [int(x) for x in (d.get('cola') or [])][:5000]
+        indice = int(d.get('indice', -1))
+        posicion = float(d.get('position_s') or 0)
+        duracion = float(d.get('duration_s') or 0) or None
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    ahora = time.time()
+    with _desk_lock:
+        ses = _desk_sesiones.get(cid)
+        if target_id is None:
+            if ses:
+                ses['target_id'] = None
+            return jsonify({'status': 'ok'})
+        if not ses:
+            ses = {'cliente_id': cid, 'cond': threading.Condition(), 'ordenes': [], 'inicio': 0.0,
+                   'version': 0, 'playing': False, 'track_id': None, 'cola': [], 'target_id': None}
+            _desk_sesiones[cid] = ses
+        playing = bool(d.get('playing'))
+        # empezó a sonar (o cambió de pista sonando): pasa a ser la sesión más reciente del equipo
+        if playing and (not ses['playing'] or ses['track_id'] != track_id or ses['target_id'] != target_id):
+            ses['inicio'] = ahora
+        if cola != ses['cola']:
+            ses['version'] += 1
+        ses.update({
+            'user_id': g.api_user['id'], 'nombre': str(d.get('nombre') or 'Desktop')[:80],
+            'salida': str(d.get('salida') or '')[:120], 'target_id': target_id, 'track_id': track_id,
+            'position_s': posicion, 'duration_s': duracion, 'playing': playing, 'cola': cola, 'indice': indice,
+            'shuffle': bool(d.get('shuffle')),
+            'repeat': d.get('repeat') if d.get('repeat') in ('off', 'all', 'one') else 'off',
+            'latido': ahora,
+        })
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/v1/desk/ordenes')
+@api_login_required
+def api_v1_desk_ordenes():
+    """Espera larga (≤25 s): órdenes del mini para este Desktop. -> {ordenes: [...]}"""
+    cid = str(request.args.get('cliente_id') or '').strip()[:64]
+    try:
+        espera = max(0.0, min(25.0, float(request.args.get('espera', 20))))
+    except ValueError:
+        espera = 20.0
+    with _desk_lock:
+        ses = _desk_sesiones.get(cid)
+    if not ses or ses.get('user_id') != g.api_user['id']:
+        time.sleep(min(espera, 5))
+        return jsonify({'status': 'ok', 'ordenes': []})
+    with ses['cond']:
+        if not ses['ordenes']:
+            ses['cond'].wait(espera)
+        ordenes, ses['ordenes'] = ses['ordenes'], []
+    return jsonify({'status': 'ok', 'ordenes': ordenes})
+
+
+@app.route('/api/v1/desk/salir', methods=['POST'])
+@api_login_required
+def api_v1_desk_salir():
+    """Desktop se cierra: su sesión deja de existir para el equipo."""
+    cid = str((request.get_json(silent=True) or {}).get('cliente_id') or '').strip()[:64]
+    with _desk_lock:
+        ses = _desk_sesiones.get(cid)
+        if ses and ses.get('user_id') == g.api_user['id']:
+            _desk_sesiones.pop(cid, None)
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/v1/desk/cola')
+@api_login_required
+def api_v1_desk_cola():
+    """?target_id= -> pistas de la cola del Desktop activo en ese equipo (el mini la muestra como suya)."""
+    ses = _desk_activa(request.args.get('target_id', type=int))
+    if not ses:
+        return jsonify({'status': 'ok', 'pistas': [], 'queue': None})
+    conn = get_db_connection()
+    try:
+        pistas = _desk_pistas(conn, ses['cola'])
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok', 'pistas': pistas, 'queue': _desk_cola_publica(ses)})
 
 
 def parse_range_header(rh, file_size):
