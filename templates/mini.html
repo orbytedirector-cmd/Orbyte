@@ -69,6 +69,8 @@
   .titulo { font-size: 22px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .artista { font-size: 15px; color: var(--text2); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .badges { display: flex; gap: 8px; justify-content: center; margin-top: 8px; flex-wrap: wrap; }
+  .origen { text-align: center; font-size: 12px; color: var(--gold2); margin-top: 6px; min-height: 0; }
+  .origen:empty { display: none; }
   .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; letter-spacing: .04em;
     padding: 3px 9px; border-radius: 999px; background: var(--card2); border: 1px solid var(--border2); color: var(--text2); }
   .led { width: 9px; height: 9px; border-radius: 50%; }
@@ -175,6 +177,7 @@
       <div class="titulo" id="titulo">Nada sonando</div>
       <div class="artista" id="artista">Busca algo o pídeselo a Orbitron</div>
       <div class="badges" id="badges"></div>
+      <div class="origen" id="origen"></div>
     </div>
     <div class="progreso">
       <div class="barra" id="barra"><div class="barra-fondo"><div class="barra-relleno" id="relleno"></div></div></div>
@@ -381,6 +384,22 @@ function aplicarCola(q) {
   if (cambio) { guardar(); renderCola(); pintarModos(); }
   return true;
 }
+// La cola de Desktop (sesión activa por el DAC) reemplaza la de esta página; una vez por versión
+let colaDesktopVersion = null, adoptando = false;
+async function adoptarColaDesktop(q) {
+  if (adoptando || colaDesktopVersion === q.version) return;
+  adoptando = true;
+  try {
+    const r = await api("/api/v1/desk/cola?target_id=" + st.destino);
+    if (r.queue) {
+      colaDesktopVersion = r.queue.version;
+      st.cola = r.pistas || [];
+      st.idx = r.queue.index; st.shuffle = r.queue.shuffle; st.repeat = r.queue.repeat;
+      guardar(); renderCola(); pintarModos();
+    }
+  } catch (e) { /* se reintenta en el próximo sondeo */ }
+  finally { adoptando = false; }
+}
 function reproducirTodo() { if (st.cola.length) reproducirIndice(st.shuffle ? -1 : 0); }
 
 async function playPausa() {
@@ -499,6 +518,10 @@ async function sondear() {
   try {
     const s = await api("/api/v1/cast/status?target_id=" + st.destino, { timeout: 10000 });
     $("dot").className = "dot on";
+    // Desktop reproduciendo por el DAC del equipo: es la sesión activa (su cola pasa a ser la de aquí)
+    const desk = s.origen === "desktop" ? s.desktop || {} : null;
+    $("origen").textContent = desk ? "Desde " + [desk.nombre, desk.salida].filter(Boolean).join(" · ") : "";
+    if (desk && s.queue && !aplicarCola(s.queue)) adoptarColaDesktop(s.queue);
     if (pedidoEn < ultimoComando + 1500 || enviando) return;   // transitorio tras un comando
     // Ticket D-18: el avance lo hace el servidor; aca solo se refleja su posicion
     if (s.queue) aplicarCola(s.queue);
