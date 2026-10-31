@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Recuperar contraseña — Orbyte</title>
+
+  <!-- PWA — mismas etiquetas que base.html: "Agregar a inicio" desde /login
+       (la primera pantalla que ve alguien sin sesión) debe tomar el ícono y
+       nombre reales de Orbyte, no un genérico. -->
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#0a0a0a">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Orbyte">
+  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+  <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/favicon-16.png">
+
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body class="auth-body">
+  <div class="auth-wrap">
+    <div class="auth-card">
+      <img src="/static/logo-full.png" alt="Orbyte" class="auth-logo">
+      <h1 style="color:var(--text-primary); font-size:1.2rem; margin-bottom:0.5rem;">Recuperar contraseña</h1>
+      {% if enviado %}
+      <div class="auth-notice auth-notice-ok">✓ Listo. Le avisamos al administrador: te enviará una contraseña temporal a tu correo. Al entrar con ella te pediremos cambiarla.</div>
+      {% else %}
+      {% if error %}
+      <div class="auth-notice auth-notice-error">{{ error }}</div>
+      {% endif %}
+      <p class="auth-hint">Escribe el correo de tu cuenta. El administrador recibirá el aviso y te mandará una contraseña temporal a ese correo.</p>
+      <form method="POST" class="auth-form">
+        <label class="auth-label" for="rec-email">Correo</label>
+        <input type="email" id="rec-email" name="email" class="auth-input" required autocomplete="email" autofocus>
+        <button type="submit" class="track-btn primary auth-submit">Pedir contraseña temporal</button>
+      </form>
+      {% endif %}
+      <div class="auth-footer"><a href="/login">Volver a iniciar sesión</a></div>
+    </div>
+  </div>
+</body>
+</html>

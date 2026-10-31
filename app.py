@@ -42,6 +42,7 @@ import ai_playlist_pagination  # Ticket AI-27 — paginación ("Expandir"), mód
 import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección), módulo aislado
 import estadisticas     # estadísticas de uso para el administrador (solo lectura)
 import estadisticas_ia  # «Resumen IA» de esas estadísticas
+import login_seguro as _ls  # límite de intentos, recuperar contraseña, versión de sesión
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -737,6 +738,9 @@ def clean_db_path(path):
         return path
     return path.strip("'\"")
 
+_LS_MIGRADO = False
+
+
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -1041,6 +1045,10 @@ def get_db_connection():
         conn.commit()
     except Exception:
         pass
+    global _LS_MIGRADO
+    if not _LS_MIGRADO:   # login seguro (31-10-2026): token_version, debe_cambiar_clave, recuperar_clave
+        _ls.migrar(conn)
+        _LS_MIGRADO = True
     # Ticket C-10 etapa 2: playlists compartidas con amigos. permiso 'ver' |
     # 'editar' por persona; playlist_tracks.added_by = quién agregó la pista
     # (para mostrar su avatar en una playlist compartida).
@@ -1444,7 +1452,7 @@ def _require_login():
     # 'cover': mismo criterio que 'cast_cover' (ya exento arriba) — una
     # carátula de álbum no es información sensible, y el cliente nativo no
     # maneja cookies de sesión persistentes entre lanzamientos de la app.
-    if ep in ('login', 'signup', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
+    if ep in ('login', 'signup', 'recuperar_clave_web', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
               'tv_pantalla', 'tv_estado', 'tv_qr',
               'api_v1_tvapp_hola', 'api_v1_tvapp_orden', 'api_v1_tvapp_respuesta',
               'descargas_orbyte_ipa') or request.path.startswith('/static/'):
@@ -1481,6 +1489,12 @@ def _require_login():
         if request.path.startswith('/api/'):
             return jsonify({'error': 'account_not_approved'}), 403
         return redirect(url_for('login', pending='1'))
+    # Login seguro: contraseña cambiada/restablecida o «cerrar sesión en todos sus dispositivos»
+    if int(session.get('tv') or 0) != _version_sesion(session['user_id']):
+        session.clear()
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'not_authenticated'}), 401
+        return redirect(url_for('login'))
 
 # ── Auth: rutas de signup / login / logout / heartbeat / admin ───────────────
 
@@ -1533,12 +1547,32 @@ def _change_user_password(user_id, current_password, new_password):
             return 'wrong_current_password'
         if len(new_password) < 8:
             return 'weak_password'
-        conn.execute('UPDATE users SET password_hash=? WHERE id=?',
+        conn.execute('UPDATE users SET password_hash=?, debe_cambiar_clave=0 WHERE id=?',
                      (generate_password_hash(new_password), user_id))
         conn.commit()
+        # Login seguro: las demás sesiones abiertas (otros equipos) se cierran.
+        _ls.cerrar_sesiones(conn, user_id)
         return None
     finally:
         conn.close()
+
+
+def _version_sesion(user_id):
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT token_version FROM users WHERE id=?', (user_id,)).fetchone()
+        return int(row['token_version'] or 0) if row else 0
+    finally:
+        conn.close()
+
+
+def _ip_cliente():
+    """IP para el límite de intentos. X-Forwarded-For solo se cree si viene de un proxy local
+    (Tailscale Funnel); si no, cualquiera lo inventaría para saltarse el límite."""
+    ip = request.remote_addr or ''
+    if ip in ('127.0.0.1', '::1'):
+        ip = (request.headers.get('X-Forwarded-For') or ip).split(',')[0].strip()
+    return ip
 
 @app.route('/account', methods=['GET', 'POST'])
 @login_required
@@ -1558,12 +1592,15 @@ def account():
             elif err == 'weak_password':
                 error = 'La nueva contraseña debe tener al menos 8 caracteres.'
             else:
-                success = 'Contraseña actualizada correctamente.'
+                success = 'Contraseña actualizada correctamente. Se cerró la sesión en tus otros equipos.'
+                session['tv'] = _version_sesion(session['user_id'])
+                session.pop('debe_cambiar_clave', None)
     # current_user (inyectado por el context processor) solo trae email/
     # is_admin — para "Miembro desde"/"Última conexión" hace falta el
     # registro completo, que get_current_user() ya sabe traer.
     account_details = get_current_user()
-    return render_template('account.html', error=error, success=success, account_details=account_details)
+    return render_template('account.html', error=error, success=success, account_details=account_details,
+                           debe_cambiar=bool(session.get('debe_cambiar_clave')))
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -1574,13 +1611,22 @@ def login():
         email    = (request.form.get('email') or '').strip().lower()
         password = request.form.get('password') or ''
         next_url = request.form.get('next') or ''
+        ip = _ip_cliente()
+        espera = _ls.bloqueado(email, ip)
         conn = get_db_connection()
         try:
-            row = conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
+            row = None if espera else conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
             user = dict(row) if row else None
+            mala = not espera and (not user or not check_password_hash(user['password_hash'], password))
+            if mala:
+                espera = _ls.registrar_fallo(conn, email, ip, _utcnow_iso())
+                if espera:
+                    app.logger.warning(f"[seguridad] login bloqueado {espera}s: {email} desde {ip}")
         finally:
             conn.close()
-        if not user or not check_password_hash(user['password_hash'], password):
+        if espera:
+            error = _ls.texto_espera(espera)
+        elif mala:
             error = 'Correo o contraseña incorrectos.'
         elif not user['is_approved']:
             error = 'Tu cuenta aún no ha sido aprobada por el administrador.'
@@ -1594,7 +1640,12 @@ def login():
             session['user_email']  = user['email']
             session['is_admin']    = bool(user['is_admin'])
             session['is_approved'] = True
+            session['tv']          = int(user.get('token_version') or 0)
+            _ls.registrar_exito(email, ip)
             _touch_user_activity(user['id'])
+            if user.get('debe_cambiar_clave'):
+                session['debe_cambiar_clave'] = True
+                return redirect(url_for('account', cambiar=1))
             if not next_url.startswith('/'):
                 next_url = url_for('home')
             return redirect(next_url)
@@ -1616,6 +1667,31 @@ def logout():
 # manda como 'Authorization: Bearer <token>' en cada request a /api/v1/*.
 _api_token_signer = URLSafeTimedSerializer(app.secret_key, salt='api-auth-v1')
 _API_TOKEN_MAX_AGE = 60 * 60 * 24 * 30  # 30 días
+
+
+def _api_token_emitir(user_id, version):
+    """Login seguro (31-10-2026): el token lleva la versión de sesión del usuario.
+    Cambiar/restablecer la contraseña o «Cerrar sesión en todos sus dispositivos»
+    sube users.token_version y los tokens anteriores dejan de valer."""
+    return _api_token_signer.dumps({'u': int(user_id), 'v': int(version or 0)})
+
+
+def _api_token_loads(token):
+    """-> user_id, o BadSignature/SignatureExpired. Acepta los tokens anteriores
+    (solo el id) como versión 0."""
+    data = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+    if isinstance(data, dict):
+        uid, ver = data.get('u'), int(data.get('v') or 0)
+    else:
+        uid, ver = data, 0
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT token_version FROM users WHERE id=?', (uid,)).fetchone()
+    finally:
+        conn.close()
+    if not row or int(row['token_version'] or 0) != ver:
+        raise BadSignature('sesión cerrada (contraseña cambiada o sesiones cerradas)')
+    return uid
 
 # Ticket B-01 (pedido por Niko): presencia de las APPS (iOS/Android/Desktop).
 # Antes, para un cliente con token Bearer la actividad solo se registraba en
@@ -1716,7 +1792,7 @@ def _alexa_user_id_de_token(token):
         user, error = _alexa_usuario_por_clave(token)
         return user['id'] if user else None
     try:
-        return _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+        return _api_token_loads(token)
     except (BadSignature, SignatureExpired):
         _alexa_avisar_rechazo('su clave venció; genera una que no vence con ./clave_alexa.sh generar')
         return None
@@ -1740,7 +1816,7 @@ def api_login_required(view):
         elif auth.startswith('Bearer '):
             token = auth[len('Bearer '):]
             try:
-                user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+                user_id = _api_token_loads(token)
             except (BadSignature, SignatureExpired):
                 return jsonify({'error': 'invalid_token'}), 401
             conn = get_db_connection()
@@ -1758,6 +1834,8 @@ def api_login_required(view):
                 user = dict(row) if row else None
             finally:
                 conn.close()
+            if user and int(user.get('token_version') or 0) != int(session.get('tv') or 0):
+                user = None   # login seguro: esta sesión web se cerró desde otro lado
         elif session.get('is_collab_guest') and request.endpoint in _COLLAB_GUEST_API_READ:
             # Ticket C-03: el invitado de la playlist colaborativa (cookie, sin
             # cuenta) puede LEER la biblioteca con estos mismos endpoints, para
@@ -1828,18 +1906,29 @@ def api_v1_login():
     data = request.get_json(silent=True) or {}
     email    = (data.get('email') or '').strip().lower()
     password = data.get('password') or ''
+    ip = _ip_cliente()
+    espera = _ls.bloqueado(email, ip)
+    if espera:
+        return jsonify({'error': 'too_many_attempts', 'message': _ls.texto_espera(espera),
+                        'retry_after': espera}), 429
     conn = get_db_connection()
     try:
         row = conn.execute('SELECT * FROM users WHERE email=?', (email,)).fetchone()
         user = dict(row) if row else None
+        if not user or not check_password_hash(user['password_hash'], password):
+            espera = _ls.registrar_fallo(conn, email, ip, _utcnow_iso())
+            if espera:
+                app.logger.warning(f"[seguridad] login bloqueado {espera}s: {email} desde {ip}")
+                return jsonify({'error': 'too_many_attempts', 'message': _ls.texto_espera(espera),
+                                'retry_after': espera}), 429
+            return jsonify({'error': 'invalid_credentials'}), 401
     finally:
         conn.close()
-    if not user or not check_password_hash(user['password_hash'], password):
-        return jsonify({'error': 'invalid_credentials'}), 401
     if not user['is_approved']:
         return jsonify({'error': 'account_not_approved'}), 403
+    _ls.registrar_exito(email, ip)
     _touch_user_activity(user['id'])
-    token = _api_token_signer.dumps(user['id'])
+    token = _api_token_emitir(user['id'], user.get('token_version'))
     return jsonify({
         'token': token,
         'user': {
@@ -1849,7 +1938,10 @@ def api_v1_login():
             # Depuración C-05: el nickname desde el login, para que las apps
             # no muestren el correo hasta la próxima consulta de /auth/me.
             'nickname': user.get('nickname'),
-        }
+            'must_change_password': bool(user.get('debe_cambiar_clave')),
+        },
+        # Login seguro: entró con una contraseña temporal del admin -> pedirle cambiarla.
+        'must_change_password': bool(user.get('debe_cambiar_clave')),
     })
 
 @app.route('/api/v1/auth/signup', methods=['POST'])
@@ -1905,7 +1997,8 @@ def api_v1_change_password():
         return jsonify({'error': 'wrong_current_password'}), 401
     if err == 'weak_password':
         return jsonify({'error': 'weak_password'}), 400
-    return jsonify({'status': 'ok'})
+    return jsonify({'status': 'ok',
+                    'token': _api_token_emitir(g.api_user['id'], _version_sesion(g.api_user['id']))})
 
 @app.route('/api/v1/avatars')
 @api_login_required
@@ -2065,6 +2158,7 @@ def api_v1_me():
         # del email cuando está seteado. g.api_user viene de SELECT *,
         # así que la columna ya está ahí una vez migrada.
         'nickname':     user['nickname'],
+        'must_change_password': bool(user.get('debe_cambiar_clave')),
     })
 
 # Ticket 26 — apartado de Configuración. DEFAULT_USER_SETTINGS es la
@@ -2337,10 +2431,21 @@ def api_v1_admin_users():
     shaped = [_shape(u) for u in users]
     pending = [u for u in shaped if not u['is_approved']]
     approved = [u for u in shaped if u['is_approved']]
+    conn = get_db_connection()
+    try:
+        solicitudes = _ls.solicitudes_pendientes(conn)
+    finally:
+        conn.close()
+    pide = {r['user_id'] for r in solicitudes}
+    for u in shaped:
+        u['password_request'] = u['id'] in pide
     return jsonify({
         'pending': pending,
         'approved': approved,
         'online_count': sum(1 for u in shaped if u['online']),
+        # Login seguro: «¿Olvidaste tu contraseña?» pendientes de atender
+        'password_requests': [{'id': r['id'], 'user_id': r['user_id'], 'email': r['email'],
+                               'nickname': r['nickname'], 'created_at': r['creada_at']} for r in solicitudes],
     })
 
 @app.route('/api/v1/admin/users/status')
@@ -2406,6 +2511,138 @@ def api_v1_admin_reject(user_id):
     if row:
         _send_account_rejected_email(row['email'])
     return jsonify({'status': 'ok'})
+
+# ── Login seguro (31-10-2026): recuperar contraseña y cerrar sesiones ─────────
+
+def _pedir_recuperacion(email):
+    """Común a la web y a las apps. Siempre responde lo mismo (no revela si el correo existe)."""
+    ip = _ip_cliente()
+    if not _ls.solicitud_permitida(ip):
+        return False
+    conn = get_db_connection()
+    try:
+        user, nueva = _ls.crear_solicitud(conn, email, ip, _utcnow_iso())
+        if user and nueva:
+            nombre = user.get('nickname') or user['email']
+            admins = [r['id'] for r in conn.execute('SELECT id FROM users WHERE is_admin=1')]
+            for aid in admins:
+                try:
+                    _notificar(conn, aid, 'recuperar_clave',
+                               f'{nombre} pidió recuperar su contraseña. Entra a Administración → Usuarios '
+                               f'para enviarle una contraseña temporal.', actor_id=user['id'],
+                               datos={'user_id': user['id']})
+                except Exception as e:
+                    app.logger.warning(f"[recuperar] no se pudo notificar al admin {aid}: {e}")
+            conn.commit()
+    finally:
+        conn.close()
+    if user and nueva:
+        app.logger.info(f"[recuperar] solicitud de {user['email']} desde {ip}")
+        _send_email(ADMIN_EMAIL, f'Orbyte: {user["email"]} pidió recuperar su contraseña', _email_wrapper(
+            'Solicitud de contraseña', f'''
+            <p><strong style="color:#EFEFEF;">{user['email']}</strong> pidió recuperar su contraseña.</p>
+            <p>Desde Administración → Usuarios puedes enviarle una contraseña temporal a su correo.</p>'''))
+    return True
+
+
+@app.route('/recuperar', methods=['GET', 'POST'])
+def recuperar_clave_web():
+    enviado, error = False, None
+    if request.method == 'POST':
+        if _pedir_recuperacion(request.form.get('email') or ''):
+            enviado = True
+        else:
+            error = 'Demasiadas solicitudes desde este equipo. Vuelve a probar en una hora.'
+    return render_template('recuperar.html', enviado=enviado, error=error)
+
+
+@app.route('/api/v1/auth/forgot-password', methods=['POST'])
+def api_v1_forgot_password():
+    """{email} -> siempre {status: ok} (no revela si la cuenta existe). El admin recibe el aviso."""
+    data = request.get_json(silent=True) or {}
+    if not _pedir_recuperacion(data.get('email') or ''):
+        return jsonify({'error': 'too_many_attempts',
+                        'message': 'Demasiadas solicitudes desde este equipo. Vuelve a probar en una hora.'}), 429
+    return jsonify({'status': 'ok', 'message': 'Listo. Le avisamos al administrador: te enviará una contraseña '
+                                               'temporal a tu correo.'})
+
+
+def _send_clave_temporal_email(to_addr, clave):
+    login_url = url_for('login', _external=True)
+    return _send_email(to_addr, 'Tu contraseña temporal de Orbyte', _email_wrapper('Contraseña temporal', f'''
+        <p>El administrador restableció la contraseña de tu cuenta
+        <strong style="color:#EFEFEF;">{to_addr}</strong>.</p>
+        <p>Tu contraseña temporal es:</p>
+        <p style="text-align:center;font-size:22px;font-weight:700;letter-spacing:2px;color:#F5C518;
+           font-family:Consolas,Menlo,monospace;margin:18px 0;">{clave}</p>
+        <p>Úsala para entrar (en la app o en la web) y cámbiala apenas ingreses: te lo vamos a pedir.</p>
+        <p>Por seguridad, se cerró tu sesión en todos tus equipos.</p>
+        <p style="text-align:center;margin:28px 0 8px;">
+          <a href="{login_url}" style="background:#C8920A;color:#000000;text-decoration:none;
+             padding:12px 28px;border-radius:8px;font-weight:700;display:inline-block;
+             font-family:Arial,Helvetica,sans-serif;">Iniciar sesión</a>
+        </p>'''))
+
+
+@app.route('/api/v1/admin/users/<int:user_id>/reset-password', methods=['POST'])
+@api_admin_required
+def api_v1_admin_reset_password(user_id):
+    """Genera una contraseña temporal, la manda al correo del usuario, cierra sus sesiones
+    y le pedirá cambiarla al entrar. Si el correo no sale, la devuelve para compartirla a mano."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute('SELECT email FROM users WHERE id=?', (user_id,)).fetchone()
+        if not row:
+            return jsonify({'error': 'not_found'}), 404
+        if row['email'] == ADMIN_EMAIL:
+            return jsonify({'error': 'cannot_modify_admin',
+                            'message': 'La cuenta del administrador se cambia desde Mi cuenta.'}), 400
+        clave = _ls.clave_temporal()
+        conn.execute('UPDATE users SET password_hash=?, debe_cambiar_clave=1 WHERE id=?',
+                     (generate_password_hash(clave), user_id))
+        conn.commit()
+        _ls.cerrar_sesiones(conn, user_id)
+        _ls.resolver_solicitudes(conn, user_id, g.api_user['id'], 'resuelta', _utcnow_iso())
+    finally:
+        conn.close()
+    _ls.registrar_exito(row['email'], '')
+    enviado = _send_clave_temporal_email(row['email'], clave)
+    app.logger.info(f"[recuperar] contraseña temporal para {row['email']} (correo {'enviado' if enviado else 'NO enviado'})")
+    out = {'status': 'ok', 'email': row['email'], 'email_enviado': enviado}
+    if not enviado:
+        out['clave_temporal'] = clave   # el admin la comparte por otro medio
+    return jsonify(out)
+
+
+@app.route('/api/v1/admin/users/<int:user_id>/logout-all', methods=['POST'])
+@api_admin_required
+def api_v1_admin_logout_all(user_id):
+    """«Cerrar sesión en todos sus dispositivos» (p. ej. si le roban el teléfono)."""
+    conn = get_db_connection()
+    try:
+        if not conn.execute('SELECT 1 FROM users WHERE id=?', (user_id,)).fetchone():
+            return jsonify({'error': 'not_found'}), 404
+        _ls.cerrar_sesiones(conn, user_id)
+    finally:
+        conn.close()
+    app.logger.info(f"[seguridad] sesiones cerradas para el usuario {user_id} por el admin {g.api_user['id']}")
+    if user_id == g.api_user['id'] and session.get('user_id') == user_id:
+        session['tv'] = _version_sesion(user_id)   # el admin no se saca a sí mismo de la web
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/api/v1/admin/password-requests/<int:req_id>/dismiss', methods=['POST'])
+@api_admin_required
+def api_v1_admin_dismiss_password_request(req_id):
+    conn = get_db_connection()
+    try:
+        conn.execute("UPDATE recuperar_clave SET estado='descartada', resuelta_at=?, resuelta_por=? "
+                     "WHERE id=? AND estado='pendiente'", (_utcnow_iso(), g.api_user['id'], req_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({'status': 'ok'})
+
 
 @app.route('/api/v1/admin/users/<int:user_id>/revoke', methods=['POST'])
 @api_admin_required
@@ -3583,7 +3820,7 @@ def api_v1_stream(track_id):
         app.logger.warning(f"[api/v1/stream] track={track_id}: sin token (ni header ni query)")
         return jsonify({'error': 'not_authenticated'}), 401
     try:
-        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+        user_id = _api_token_loads(token)
     except (BadSignature, SignatureExpired) as e:
         app.logger.warning(f"[api/v1/stream] track={track_id}: token inválido ({e.__class__.__name__})")
         return jsonify({'error': 'invalid_token'}), 401
@@ -3658,7 +3895,7 @@ def api_v1_stream_pcm(track_id):
         app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: sin token (ni header ni query)")
         return jsonify({'error': 'not_authenticated'}), 401
     try:
-        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+        user_id = _api_token_loads(token)
     except (BadSignature, SignatureExpired) as e:
         app.logger.warning(f"[api/v1/stream-pcm] track={track_id}: token inválido ({e.__class__.__name__})")
         return jsonify({'error': 'invalid_token'}), 401
@@ -3783,7 +4020,7 @@ def _hls_auth():
     if not token:
         return None, None, (jsonify({'error': 'not_authenticated'}), 401)
     try:
-        user_id = _api_token_signer.loads(token, max_age=_API_TOKEN_MAX_AGE)
+        user_id = _api_token_loads(token)
     except (BadSignature, SignatureExpired):
         return None, None, (jsonify({'error': 'invalid_token'}), 401)
     conn = get_db_connection()
@@ -4753,8 +4990,9 @@ def admin_users():
             u['online'] = bool(u['last_seen'] and u['last_seen'] >= cutoff)
         pending  = [u for u in users if not u['is_approved']]
         approved = [u for u in users if u['is_approved']]
+        solicitudes = _ls.solicitudes_pendientes(conn)
         response = app.make_response(render_template(
-            'admin_users.html', pending=pending, approved=approved,
+            'admin_users.html', pending=pending, approved=approved, solicitudes=solicitudes,
             online_count=sum(1 for u in users if u['online']),
             admin_email=ADMIN_EMAIL
         ))

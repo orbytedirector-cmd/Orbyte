@@ -9,6 +9,9 @@
         Miembro desde {{ account_details.created_at or '—' }} · Última conexión {{ account_details.last_seen or '—' }}
       </p>
 
+      {% if debe_cambiar and not success %}
+      <div class="auth-notice auth-notice-warn">Entraste con una contraseña temporal que te envió el administrador. Cámbiala ahora por una tuya: escribe la temporal como «Contraseña actual».</div>
+      {% endif %}
       {% if success %}
       <div class="auth-notice auth-notice-ok">✓ {{ success }}</div>
       {% endif %}
@@ -20,7 +23,7 @@
         Cambiar contraseña
       </button>
 
-      <form method="POST" class="auth-form" id="password-form" {% if not error and not success %}hidden{% endif %} style="margin-top:1rem;">
+      <form method="POST" class="auth-form" id="password-form" {% if not error and not success and not debe_cambiar %}hidden{% endif %} style="margin-top:1rem;">
         <label class="auth-label" for="current_password">Contraseña actual</label>
         <input type="password" id="current_password" name="current_password" class="auth-input"
                required autocomplete="current-password">
