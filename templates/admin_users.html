@@ -44,6 +44,28 @@
   </div>
   {% endif %}
 
+  {% if solicitudes %}
+  <h2 class="admin-section-title">Piden recuperar su contraseña</h2>
+  <div class="admin-table-wrap">
+    <table class="admin-table">
+      <thead><tr><th>Correo</th><th>Pedido</th><th>Acciones</th></tr></thead>
+      <tbody>
+        {% for r in solicitudes %}
+        <tr>
+          <td>{{ r.nickname or r.email }}{% if r.nickname %} <span class="auth-hint">{{ r.email }}</span>{% endif %}</td>
+          <td>{{ r.creada_at }}</td>
+          <td class="admin-actions">
+            <button class="track-btn primary admin-btn-sm" type="button" data-reset-clave="{{ r.user_id }}" data-email="{{ r.email }}">Enviar contraseña temporal</button>
+            <button class="track-btn ghost admin-btn-sm" type="button" data-descartar="{{ r.id }}">Descartar</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <div id="seg-res" class="auth-notice auth-notice-ok" style="display:none"></div>
+
   <h2 class="admin-section-title">Usuarios</h2>
   <div class="admin-table-wrap">
     <table class="admin-table">
@@ -59,6 +81,10 @@
           <td data-lastseen="{{ u.id }}">{{ u.last_seen or '—' }}</td>
           <td data-lastdevice="{{ u.id }}">{{ u.last_device or '—' }}</td>
           <td class="admin-actions">
+            {% if not u.is_admin %}
+            <button class="track-btn ghost admin-btn-sm" type="button" data-reset-clave="{{ u.id }}" data-email="{{ u.email }}">Restablecer contraseña</button>
+            {% endif %}
+            <button class="track-btn ghost admin-btn-sm" type="button" data-logout-all="{{ u.id }}" data-email="{{ u.email }}">Cerrar sesión en todos sus dispositivos</button>
             {% if not u.is_admin %}
             <form method="POST" action="/admin/usuarios/{{ u.id }}/revoke" class="admin-inline-form"
                   onsubmit="return confirm('¿Revocar el acceso de {{ u.email }}?');">
@@ -107,6 +133,47 @@
     window._adminStatusInterval = setInterval(_refreshAdminStatus, 15000);
     document.addEventListener('visibilitychange', _refreshAdminStatus);
   })();
+</script>
+
+<script>
+// Login seguro: contraseña temporal, cerrar sesiones y descartar pedidos (API con la cookie de sesión).
+(function () {
+  var res = document.getElementById('seg-res');
+  function aviso(txt, ok) {
+    res.textContent = txt; res.style.display = 'block';
+    res.className = 'auth-notice ' + (ok ? 'auth-notice-ok' : 'auth-notice-error');
+    res.scrollIntoView({behavior: 'smooth', block: 'center'});
+  }
+  function post(url) {
+    return fetch(url, {method: 'POST', credentials: 'same-origin', headers: {'Content-Type': 'application/json'}, body: '{}'})
+      .then(function (r) { return r.json(); });
+  }
+  document.querySelectorAll('[data-reset-clave]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!confirm('¿Generar una contraseña temporal para ' + b.dataset.email + ' y enviársela a su correo?\nSe cerrará su sesión en todos sus equipos.')) return;
+      b.disabled = true;
+      post('/api/v1/admin/users/' + b.dataset.resetClave + '/reset-password').then(function (d) {
+        if (d.status !== 'ok') { aviso(d.message || 'No se pudo restablecer.', false); b.disabled = false; return; }
+        if (d.email_enviado) aviso('✓ Contraseña temporal enviada a ' + d.email + '. Al entrar se le pedirá cambiarla.', true);
+        else aviso('No se pudo enviar el correo. Compártele esta contraseña temporal por otro medio: ' + d.clave_temporal, false);
+        setTimeout(function () { if (d.email_enviado) location.reload(); }, 2500);
+      });
+    });
+  });
+  document.querySelectorAll('[data-logout-all]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      if (!confirm('¿Cerrar la sesión de ' + b.dataset.email + ' en todos sus dispositivos?\nTendrá que volver a iniciar sesión.')) return;
+      post('/api/v1/admin/users/' + b.dataset.logoutAll + '/logout-all').then(function (d) {
+        aviso(d.status === 'ok' ? '✓ Sesiones cerradas para ' + b.dataset.email + '.' : (d.message || 'No se pudo.'), d.status === 'ok');
+      });
+    });
+  });
+  document.querySelectorAll('[data-descartar]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      post('/api/v1/admin/password-requests/' + b.dataset.descartar + '/dismiss').then(function () { location.reload(); });
+    });
+  });
+})();
 </script>
 
 <!-- Ticket C-10: aviso del sistema para todos los usuarios (centro de notificaciones). -->

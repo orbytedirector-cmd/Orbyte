@@ -336,6 +336,17 @@ def _salud(conn, desde, usuarios):
                                                      f'con 0 segundos: sus minutos y pistas completas están subestimados. '
                                                      f'La app Android anterior al 30-10-2026 registraba mal el tiempo '
                                                      f'escuchado (corregido en la versión nueva).'})
+    if len(usuarios) > 1:   # vista general: intentos de login fallidos (login seguro, 31-10-2026)
+        try:
+            import login_seguro
+            total, bloqueos, top = login_seguro.fallos_periodo(conn, desde)
+        except Exception:
+            total, bloqueos, top = 0, 0, []
+        if bloqueos or total >= 20:
+            quien = ', '.join(f'{e or "?"} desde {ip or "?"} ({n})' for e, ip, n in top)
+            avisos.append({'nivel': 'aviso',
+                           'texto': f'{total} intentos de inicio de sesión fallidos en el período'
+                                    f'{f", {bloqueos} con bloqueo temporal" if bloqueos else ""}. Más repetidos: {quien}.'})
     return avisos
 
 
