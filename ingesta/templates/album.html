@@ -271,12 +271,12 @@
       <div class="trio cuatro">
         <div class="campo"><label>Artista del álbum</label><input type="text" id="t-artista" value="{{ ta.artista or '' }}"></div>
         <div class="campo"><label>Álbum</label><input type="text" id="t-album" value="{{ ta.album or '' }}"></div>
-        <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ (cam.tags or {}).anio or '' }}" placeholder="{{ ta.anio or '' }}"></div>
+        <div class="campo"><label>Año</label><input type="text" id="t-anio" inputmode="numeric" maxlength="4" value="{{ (cam.tags or {}).anio or ta.anio or '' }}" data-orig="{{ ta.anio or '' }}" data-tuyo="{{ (cam.tags or {}).anio or '' }}"></div>
         <div class="campo"><label>Género</label><input type="text" id="t-genero" value="{{ ta.genero or '' }}"></div>
       </div>
       <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
         <input type="text" id="t-genero2" value="{{ (cam.tags or {}).genero_secundario or (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
-      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">El año vacío = el de la edición identificada (o de los tags). Lo que escribas aquí manda sobre los tags de los archivos.</p>
+      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">El año y el género vienen propuestos (edición identificada, tags, tu biblioteca, MusicBrainz o Last.fm): cámbialos si hace falta. Año vacío = el propuesto. Lo que escribas aquí manda sobre los tags de los archivos.</p>
       <div id="auto-panel" class="auto-panel" hidden></div>
       <div class="tabla-wrap"><table class="tabla-tags">
         <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
@@ -509,7 +509,9 @@ if (gt) gt.onclick = () => {
   for (const k of ['artista', 'album', 'genero']) { const v = val('t-' + k); if (v && v !== (ta[k] || '')) tags[k] = v; }
   const g2 = val('t-genero2'), g2i = document.getElementById('t-genero2');
   if (g2 && g2 !== g2i.dataset.orig) tags.genero_secundario = g2;
-  const anio = val('t-anio'); if (anio) tags.anio = anio;
+  // El año viene escrito con el propuesto: solo se guarda como tuyo si lo cambiaste (o ya lo habías fijado).
+  const ai = document.getElementById('t-anio'), anio = val('t-anio');
+  if (anio && (anio !== ai.dataset.orig || ai.dataset.tuyo)) tags.anio = anio;
   const pistas = {};
   document.querySelectorAll('tr[data-clave]').forEach(tr => {
     const o = {};

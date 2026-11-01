@@ -24,6 +24,7 @@ from pathlib import Path
 from . import dsd
 from . import sacd
 from . import edicion as edicion_mod
+from . import genero_auto
 
 try:
     import mutagen
@@ -34,7 +35,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 13   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 14   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -837,6 +838,37 @@ def carpeta_artista_existente(bib, artista):
 
 # ─────────────────────────── análisis del álbum ───────────────────────────
 
+VARIOS = 'Various Artists'
+_ALIAS_VARIOS = {'various artists', 'various', 'va', 'v a', 'varios artistas', 'varios', 'artistas varios',
+                 'verschiedene interpreten', 'artistes divers', 'divers'}
+_SEP_ARTISTAS = re.compile(r'\s*(?:;|\s/\s|\x00)\s*')
+_FEAT = re.compile(r'\s+(?:feat\.?|ft\.?|featuring)\s+.*$', re.I)
+
+
+def varios_artistas(artista_album, artistas_pistas):
+    """(True, motivo) si el álbum es de varios artistas (1-11-2026, pedido de Niko):
+    - el «artista del álbum» trae más de uno («Beethoven; Staatskapelle Dresden, Blomstedt») o ya dice VA;
+    - sin «artista del álbum», las pistas tienen más de un artista (los «feat.» no cuentan: un invitado
+      no vuelve recopilatorio un disco). Separadores: «;» y « / » (la coma y «&» no: «Earth, Wind & Fire»)."""
+    if artista_album:
+        if _norm(artista_album) in _ALIAS_VARIOS:
+            return True, 'el artista del álbum ya lo indica'
+        partes = [x for x in _SEP_ARTISTAS.split(artista_album) if x.strip()]
+        if len(partes) > 1:
+            return True, f'el artista del álbum trae varios: «{artista_album}»'
+        return False, None
+    nombres = {}
+    for a in artistas_pistas:
+        for parte in _SEP_ARTISTAS.split(a or ''):
+            parte = _FEAT.sub('', parte).strip()
+            if parte:
+                nombres.setdefault(_norm(parte), parte)
+    if len(nombres) > 1:
+        lista = list(nombres.values())
+        return True, f'{len(lista)} artistas en las pistas: ' + ' · '.join(lista[:3]) + ('…' if len(lista) > 3 else '')
+    return False, None
+
+
 def _mayoria(valores):
     c = Counter(v for v in valores if v not in (None, ''))
     return c.most_common(1)[0][0] if c else None
@@ -1548,6 +1580,41 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             problema('aviso', 'db_orbyte', f'No se pudo leer la base de Orbyte para buscar duplicados: {e}')
     else:
         problema('aviso', 'db_orbyte', 'No se encontró music.db: no se revisaron duplicados')
+    # Various Artists automático (1-11-2026): se decide acá, DESPUÉS de identificar la edición en
+    # MusicBrainz (que busca con el artista real) y antes del destino. Cada pista conserva su artista.
+    es_varios = False
+    if not ov.get('artista') and origen.get('artista') in ('tags', 'cue'):
+        es_varios, motivo_varios = varios_artistas(artista_album, list(artistas))
+        if es_varios:
+            artista_real = artista
+            problemas[:] = [x for x in problemas if x['codigo'] not in ('varios_artistas', 'sin_artista',
+                                                                        'artista_inferido', 'artista_cue')]
+            if artista != VARIOS:
+                problema('correccion', 'various_artists',
+                         f'Varios artistas ({motivo_varios}): el artista del álbum será «{VARIOS}»; '
+                         f'cada pista conserva su artista')
+            artista, origen['artista'] = VARIOS, 'varios'
+    elif ov.get('artista') and _norm(ov['artista']) in _ALIAS_VARIOS:
+        es_varios = True
+    # Género automático (1-11-2026): solo si no vino en los tags ni lo escribiste tú.
+    if not genero:
+        el_g = ((ed_mb or {}).get('elegida') or {})
+        try:
+            g1, g2, fuente_g = genero_auto.proponer(
+                db, cliente_mb, artista_real if es_varios and not ov.get('artista') else artista, album,
+                grupo_id=el_g.get('grupo_id') or edicion.get('mb_grupo'), varios=es_varios)
+        except Exception as e:  # noqa: BLE001 - nunca frena la revisión
+            g1, g2, fuente_g = None, [], None
+            problema('aviso', 'genero_error', f'No se pudo buscar el género: {e}')
+        if g1:
+            genero = g1
+            if not genero_sec:
+                genero_sec = g2
+            extra = f' (secundarios: {", ".join(genero_sec)})' if genero_sec else ''
+            problema('aviso', 'genero_auto', f'Género propuesto desde {fuente_g}: {genero}{extra} — revísalo en «Editar tags»')
+        else:
+            problema('aviso', 'sin_genero', 'Sin género: no lo traen los tags ni se encontró en tu biblioteca, '
+                                            'MusicBrainz o Last.fm')
     # el artista se graba como ya está en la biblioteca (o con el nombre oficial de MusicBrainz si es nuevo),
     # así el indexador no crea «Vilma Palma E Vampiros» y «VILMA PALMA E VAMPIROS» como dos artistas
     if not ov.get('artista'):
