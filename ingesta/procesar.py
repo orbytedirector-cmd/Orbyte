@@ -239,6 +239,7 @@ def convertir(fuente, salida, x, ganancia):
         r = subprocess.run(cmd + ['-compression_level', nivel, salida], capture_output=True, text=True,
                            errors='replace', timeout=3600)
         if r.returncode == 0 and os.path.exists(salida):
+            x['_codificador'] = f'ffmpeg nivel {nivel}' + (f' (antes: {errores[0]})' if errores else '')
             return
         errores.append(_ultima_linea(r.stderr))
     if shutil.which('flac'):
@@ -249,6 +250,7 @@ def convertir(fuente, salida, x, ganancia):
         dec.stdout.close()
         dec.wait(timeout=60)
         if enc.returncode == 0 and dec.returncode == 0 and os.path.exists(salida):
+            x['_codificador'] = 'flac oficial (ffmpeg falló: ' + ' | '.join(errores) + ')'
             return
         errores.append('flac: ' + _ultima_linea(enc.stderr))
     if os.path.exists(salida):
@@ -494,6 +496,66 @@ def md5_audio(ruta, filtros=None, bits=None, paquetes=False):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def _pcm(ruta, filtros, bits):
+    """Proceso ffmpeg que entrega el audio crudo (para comparar muestra por muestra)."""
+    f = list(filtros or []) + [f'aformat=sample_fmts={"s16" if bits == 16 else "s32"}']
+    fmt = 's16le' if bits == 16 else 's32le'
+    return subprocess.Popen(['ffmpeg', '-nostdin', '-v', 'error', '-i', ruta, '-map', '0:a:0', '-af', ','.join(f),
+                             '-f', fmt, '-'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def detalle_diferencia(fuente, filtros, salida, bits, x):
+    """Cuando el audio no calza: dónde y cómo difiere, para el registro (diagnóstico, 1-11-2026)."""
+    bits = bits or (16 if (x.get('bits') or 16) <= 16 else 24)
+    try:
+        sr, canales = x.get('sr') or 44100, 2
+        try:
+            st = next(s for s in analisis.ffprobe(salida).get('streams', []) if s.get('codec_type') == 'audio')
+            canales = int(st.get('channels') or 2)
+            sr = int(st.get('sample_rate') or sr)
+        except Exception:  # noqa: BLE001
+            pass
+        cuadro = canales * (2 if bits == 16 else 4)
+        a, b = _pcm(fuente, filtros, bits), _pcm(salida, None, bits)
+        largo_a = largo_b = 0
+        primera, distintas = None, 0
+        resto_a = resto_b = b''
+        try:
+            while True:
+                ca, cb = a.stdout.read(1 << 20), b.stdout.read(1 << 20)
+                if not ca and not cb:
+                    break
+                largo_a += len(ca)
+                largo_b += len(cb)
+                ca, cb = resto_a + ca, resto_b + cb
+                n = min(len(ca), len(cb)) // cuadro * cuadro
+                if ca[:n] != cb[:n]:
+                    for k in range(0, n, cuadro):
+                        if ca[k:k + cuadro] != cb[k:k + cuadro]:
+                            if primera is None:
+                                primera = (largo_a - len(ca) + k) // cuadro
+                            distintas += 1
+                resto_a, resto_b = ca[n:], cb[n:]
+        finally:
+            err_a = a.communicate()[1].decode('utf-8', 'replace').strip().splitlines()
+            err_b = b.communicate()[1].decode('utf-8', 'replace').strip().splitlines()
+        partes = [f'original {largo_a // cuadro} muestras, copia {largo_b // cuadro}']
+        if primera is not None:
+            partes.append(f'primera diferencia en {primera / sr:.3f} s, {distintas} muestras distintas')
+        if err_a:
+            partes.append('el original da errores al leerlo: ' + ' | '.join(err_a[:2]))
+        if err_b:
+            partes.append('la copia da errores al leerla: ' + ' | '.join(err_b[:2]))
+        if x.get('_codificador'):
+            partes.append('codificador: ' + x['_codificador'])
+        if x.get('corte'):
+            ini, fin = x['corte']
+            partes.append(f'corte del cue {ini:.3f}–{"fin" if fin is None else f"{fin:.3f}"} s')
+        return ' · '.join(partes)
+    except Exception as e:  # noqa: BLE001 - el diagnóstico nunca reemplaza el error original
+        return f'no se pudo detallar: {type(e).__name__}: {e}'
+
+
 def _md5_flac(ruta):
     try:
         m = FLAC(ruta).info.md5_signature
@@ -557,11 +619,14 @@ def verificar(fuente, salida, x, ganancia):
             return 'no se pudo comparar el audio'
         return None if a == b else 'el audio no es idéntico al original'
     bits = None if x['accion'] == 'copiar' else _bits_salida(x)
-    a = md5_audio(fuente, _filtros(x, 0) if x.get('corte') else None, bits)
+    filtros = _filtros(x, 0) if x.get('corte') else None
+    a = md5_audio(fuente, filtros, bits)
     b = md5_audio(salida, None, bits)
     if not a or not b:
         return 'no se pudo comparar el audio'
-    return None if a == b else 'el audio no es idéntico al original'
+    if a == b:
+        return None
+    return 'el audio no es idéntico al original (' + detalle_diferencia(fuente, filtros, salida, bits, x) + ')'
 
 
 # ─────────────────────────── búsqueda de carátulas en línea ───────────────────────────
