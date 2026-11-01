@@ -125,6 +125,25 @@ def leer(ruta):
     return {'ruta': ruta, 'tags_album': ta, 'plan': plan, 'n_discos': len(discos)}
 
 
+def cabecera(rep, ruta):
+    """Campos para dejar la revisión guardada al día con los tags de la carpeta (artista, álbum, año).
+
+    Devuelve {'artista', 'album', 'anio', 'reporte'} listos para Almacen.actualizar, o {} si no hay nada que leer.
+    """
+    ta = leer(ruta).get('tags_album') or {}
+    campos, rep = {}, dict(rep or {})
+    for k in ('artista', 'album', 'anio'):
+        if ta.get(k):
+            rep[k] = campos[k] = ta[k]
+    if not campos:
+        return {}
+    rep['tags_album'] = dict(rep.get('tags_album') or {}, **{k: v for k, v in ta.items() if v})
+    if isinstance(rep.get('destino'), dict):
+        rep['destino'] = dict(rep['destino'], ruta=ruta)
+    campos['reporte'] = rep
+    return campos
+
+
 def nombre_pista(disco, numero, titulo, ext, n_discos):
     """Mismo criterio que al ubicar: «07 - Título.flac» o «2-07 - Título.flac» si hay varios discos."""
     try:
