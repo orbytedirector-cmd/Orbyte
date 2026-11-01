@@ -4729,6 +4729,122 @@ def api_v1_ai_playlist_expand(request_id):
     finally:
         conn.close()
 
+# ── Últimos reproducidos (pedido de Niko, 1-11-2026) ─────────────────────────
+# Historial de los últimos 7 días (incluido hoy) del usuario, en cualquier equipo
+# menos Alexa. Por día y artista; dentro de un día cada pista una sola vez, con su
+# escucha más reciente de ese día. Portadas = álbumes de las pistas de ese día.
+_VARIOS_ARTISTAS = {'various artists', 'various', 'va', 'v.a.', 'varios artistas', 'varios'}
+_DIAS_SEMANA = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+_DIAS_CORTOS = ['lun', 'mar', 'mié', 'jue', 'vie', 'sáb', 'dom']
+_MESES_CORTOS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic']
+
+
+def _bandera_url(nacionalidad):
+    iso = COUNTRY_ISO.get(nacionalidad or '')
+    return f'https://flagcdn.com/w40/{iso}.png' if iso else None
+
+
+def historial_usuario(conn, user_id, dias=7):
+    filas = conn.execute(
+        """SELECT le.track_id, datetime(le.created_at, 'localtime') AS local, t.*,
+                  al.name AS h_album, al.cover_path AS h_cover, al.year AS h_album_year,
+                  al.artist_id AS h_album_artist_id, ar.name AS h_album_artist, ar.nationality AS h_nat
+             FROM listening_events le
+             JOIN tracks t ON t.id = le.track_id
+             LEFT JOIN albums al ON al.id = t.album_id
+             LEFT JOIN artists ar ON ar.id = al.artist_id
+            WHERE le.user_id = ?
+              AND le.created_at >= datetime('now', 'localtime', 'start of day', ?, 'utc')
+              AND LOWER(COALESCE(le.source, '')) NOT LIKE 'alexa%'
+            ORDER BY le.created_at DESC, le.id DESC""",
+        (user_id, f'-{max(0, int(dias) - 1)} days')).fetchall()
+    hoy = datetime.now().date()
+    por_nombre = {}
+
+    def artista_por_nombre(nombre):
+        k = (nombre or '').strip().lower()
+        if k not in por_nombre:
+            r = conn.execute('SELECT id, name, nationality FROM artists WHERE LOWER(name)=? LIMIT 1', (k,)).fetchone()
+            por_nombre[k] = dict(r) if r else None
+        return por_nombre[k]
+
+    dias_out, por_dia = [], {}
+    for r in filas:
+        d = dict(r)
+        fecha = (d['local'] or '')[:10]
+        if not fecha:
+            continue
+        # artista: el del álbum; en recopilatorios (Various Artists), el de la pista
+        nombre_alb = (d.get('h_album_artist') or '').strip()
+        if nombre_alb and nombre_alb.lower() not in _VARIOS_ARTISTAS:
+            aid, nombre, nat = d.get('h_album_artist_id'), nombre_alb, d.get('h_nat')
+        else:
+            nombre = (d.get('artist') or nombre_alb or 'Artista desconocido').strip()
+            fila_a = artista_por_nombre(nombre)
+            aid, nat = (fila_a['id'], fila_a['nationality']) if fila_a else (None, None)
+            if fila_a:
+                nombre = fila_a['name']
+        akey = f'a{aid}' if aid else 'n:' + nombre.lower()
+
+        dia = por_dia.get(fecha)
+        if dia is None:
+            f = datetime.strptime(fecha, '%Y-%m-%d').date()
+            delta = (hoy - f).days
+            etiqueta = 'Hoy' if delta == 0 else ('Ayer' if delta == 1 else _DIAS_SEMANA[f.weekday()])
+            dia = {'fecha': fecha, 'etiqueta': etiqueta,
+                   'fecha_corta': f'{_DIAS_CORTOS[f.weekday()]} {f.day} {_MESES_CORTOS[f.month - 1]}',
+                   'artistas': [], '_idx': {}}
+            por_dia[fecha] = dia
+            dias_out.append(dia)
+        art = dia['_idx'].get(akey)
+        if art is None:
+            art = {'key': f'{fecha}-{akey}', 'artist_id': aid, 'nombre': nombre, 'nacionalidad': nat,
+                   'bandera_url': _bandera_url(nat), 'ultima': d['local'][11:16],
+                   'albumes': [], 'pistas': [], '_vistas': set(), '_albs': set()}
+            dia['_idx'][akey] = art
+            dia['artistas'].append(art)
+        if d['track_id'] in art['_vistas']:
+            continue                      # ya está con su escucha más reciente de ese día
+        art['_vistas'].add(d['track_id'])
+        cover = cover_url_filter(clean_db_path(d.get('h_cover')))
+        if d.get('album_id') and d['album_id'] not in art['_albs']:
+            art['_albs'].add(d['album_id'])
+            art['albumes'].append({'id': d['album_id'], 'nombre': d.get('h_album'), 'cover_url': cover})
+        fmt, led = _fmt_format(d)
+        art['pistas'].append({
+            'id': d['id'], 'title': d.get('title'), 'track_number': d.get('track_number'),
+            'disc_number': d.get('disc_number'), 'duration': d.get('duration'),
+            'duration_fmt': _fmt_seconds(d.get('duration')), 'format_display': fmt, 'format_color': led,
+            'artist_id': aid, 'artist_name': d.get('artist') or nombre, 'album_id': d.get('album_id'),
+            'album_name': d.get('h_album'), 'album_year': d.get('h_album_year'), 'cover_url': cover,
+            'stream_url': f'/api/v1/stream/{d["id"]}', 'is_dsd': d.get('is_dsd'), 'dsd_rate': d.get('dsd_rate'),
+            'sample_rate_real': d.get('sample_rate_real'), 'bit_depth': d.get('bit_depth'),
+            'container_ext': _container_ext(d), 'escuchada': d['local'][11:16],
+        })
+    for dia in dias_out:
+        dia.pop('_idx', None)
+        for art in dia['artistas']:
+            art.pop('_vistas', None)
+            art.pop('_albs', None)
+            art['n_pistas'] = len(art['pistas'])
+        dia['n_artistas'] = len(dia['artistas'])
+        dia['n_pistas'] = sum(a['n_pistas'] for a in dia['artistas'])
+    return dias_out
+
+
+@app.route('/api/v1/historial')
+@api_login_required
+def api_v1_historial():
+    """Últimos reproducidos (7 días): {dias: [{fecha, etiqueta, fecha_corta, n_artistas, n_pistas,
+    artistas: [{key, artist_id, nombre, nacionalidad, bandera_url, ultima, n_pistas,
+    albumes: [{id, nombre, cover_url}], pistas: [pista como en el resto de la API + escuchada]}]}]}"""
+    conn = get_db_connection()
+    try:
+        return jsonify({'dias': historial_usuario(conn, g.api_user['id'])})
+    finally:
+        conn.close()
+
+
 @app.route('/api/v1/behavior/listen', methods=['POST'])
 @api_login_required
 def api_v1_behavior_listen():
