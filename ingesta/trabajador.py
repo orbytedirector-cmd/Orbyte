@@ -213,6 +213,12 @@ class Procesador(threading.Thread):
             self.actual = None
             return
         campos = {'ubicado_en': final}
+        # La cabecera (artista — álbum (año)) y Recientes muestran lo que quedó en los archivos,
+        # no lo de la revisión original (antes seguía diciendo, p. ej., «Various Artists»).
+        try:
+            campos.update(ajustar_mod.cabecera(rep, final))
+        except Exception:  # noqa: BLE001 - la cabecera nunca frena el ajuste
+            log.warning('Ajuste %s: no se pudo releer la carpeta para la cabecera', aid)
         cam_fin = dict((self.almacen.album(aid) or {}).get('cambios') or {}, richmeta_completo=True)
         campos['cambios'] = json.dumps(cam_fin, ensure_ascii=False)
         if not rep.get('origen_entrada'):            # una ISO conserva su ruta de la entrada
