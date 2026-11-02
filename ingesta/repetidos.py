@@ -349,7 +349,10 @@ def _prompt(grupo, mediciones, pregunta=None):
 
 def _post(url, cuerpo, cabeceras, timeout=60):
     req = urllib.request.Request(url, data=json.dumps(cuerpo).encode(), method='POST',
-                                 headers=dict({'Content-Type': 'application/json'}, **cabeceras))
+                                 # sin User-Agent propio, el firewall de Groq responde 403 («error code: 1010») a
+                                 # «Python-urllib»
+                                 headers=dict({'Content-Type': 'application/json', 'User-Agent': 'OrbyteIngesta/1.0'},
+                                              **cabeceras))
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read().decode())
 
