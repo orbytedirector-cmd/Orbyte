@@ -791,7 +791,7 @@ def biblioteca_album(oid):
         return redirect(url_for('biblioteca_pagina'))
     aid = almacen.fila_de_ruta(o['ruta'])
     a = almacen.album(aid) if aid else None
-    if a and a.get('reporte') and not a.get('reporte', {}).get('fallo'):
+    if a and a.get('reporte') and not a['reporte'].get('fallo') and 'discos' in a['reporte']:
         return redirect(url_for('album', aid=aid))            # lo ubicó Ingesta: su ficha completa
     lib = lib_error = None
     if not a or a['estado'] in EN_BIBLIOTECA:
