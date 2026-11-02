@@ -40,6 +40,7 @@ from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
 from . import sacd as sacd_mod
+from . import portada as portada_mod
 import threading
 import traceback
 
@@ -239,8 +240,9 @@ def album(aid):
             lib_error = str(e)
     dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
     actuales = ajustar_mod.pistas_actuales(a.get('reporte'), lib) if lib else {}
+    portada = _portada_vista(a['ubicado_en'] or a['ruta']) if lib else None
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
-                           actuales=actuales,
+                           actuales=actuales, portada=portada,
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
@@ -800,9 +802,161 @@ def biblioteca_album(oid):
         except Exception as e:
             lib_error = str(e)
     x = _titulos()['por_ruta'].get(o['ruta'].rstrip('/'))
+    portada = _portada_vista(o['ruta'], o.get('cover_path'))
+    fmt = portada_mod.formatos(o['ruta'], lib['plan']) if lib else {}
     return render_template('biblioteca_album.html', pagina='biblioteca', o=o, a=a, lib=lib, lib_error=lib_error,
+                           portada=portada, fmt=fmt,
                            reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
                            ignorado=oid in almacen.titulos_ignorados())
+
+
+# ─────────────────────────── carátula de un álbum ya en la biblioteca ───────────────────────────
+# <k>: «b» = álbum de Orbyte (ficha de Biblioteca, id de music.db) · «a» = fila de Ingesta ya ubicada (ficha de Bandeja)
+
+SUBIDAS = os.path.join(DATOS, 'subidas')
+MAX_SUBIDA = 40 * 1024 * 1024
+
+
+def _portada_vista(ruta, cover_path=None):
+    try:
+        return portada_mod.estado(ruta, cover_path)
+    except Exception as e:
+        log.warning('Carátula de %s: %s', ruta, e)
+        return None
+
+
+def _lib_portada(k, i):
+    """(ruta del álbum, cover_path, fila de Ingesta o None, álbum de Orbyte o None); ruta None si no corresponde."""
+    if k == 'b':
+        o = _album_orbyte(i)
+        if not o or not o['ruta'] or not os.path.isdir(o['ruta']):
+            return None, None, None, None
+        aid = almacen.fila_de_ruta(o['ruta'])
+        return o['ruta'].rstrip('/'), o.get('cover_path'), (almacen.album(aid) if aid else None), o
+    if k == 'a':
+        a = almacen.album(i)
+        if not a or a['estado'] not in EN_BIBLIOTECA and a['estado'] not in ('por_ajustar', 'ajustando') \
+                or not (a['ubicado_en'] or a['ruta']):
+            return None, None, None, None
+        return (a['ubicado_en'] or a['ruta']).rstrip('/'), None, a, None
+    return None, None, None, None
+
+
+@app.route('/portada/<k>/<int:i>/img')
+def portada_img(k, i):
+    """?actual=1 · ?r=<imagen de la carpeta> · ?incrustada=<pista> ; &mini=1 = miniatura."""
+    ruta, cover_path, _fila, _o = _lib_portada(k, i)
+    if not ruta:
+        abort(404)
+    base = os.path.realpath(ruta)
+    if request.args.get('actual'):
+        full = os.path.join(base, 'Cover.jpg')
+        if not os.path.isfile(full) and cover_path:
+            full = os.path.realpath(cover_path)
+    elif request.args.get('incrustada'):
+        pista = os.path.realpath(os.path.join(base, request.args['incrustada']))
+        if not pista.startswith(base + os.sep) or not os.path.isfile(pista):
+            abort(404)
+        full = _cache('incrustada-lib', pista, 'jpg')
+        if not os.path.exists(full):
+            datos = portada_mod.imagen_de_pista(pista)
+            if not datos:
+                abort(404)
+            with open(full, 'wb') as f:
+                f.write(datos)
+    else:
+        full = os.path.realpath(os.path.join(base, request.args.get('r') or ''))
+        if os.path.splitext(full)[1].lower() not in analisis.IMAGEN_EXT:
+            abort(404)
+    if not full.startswith(base + os.sep) and not request.args.get('incrustada') or not os.path.isfile(full):
+        abort(404)
+    if request.args.get('mini'):
+        full = _miniatura(full) or full
+    return send_file(full, max_age=60)
+
+
+@app.route('/portada/subida/<nombre>')
+def portada_subida(nombre):
+    full = os.path.join(SUBIDAS, os.path.basename(nombre))
+    if not os.path.isfile(full):
+        abort(404)
+    return send_file(full, mimetype='image/jpeg', max_age=60)
+
+
+@app.route('/api/portada/<k>/<int:i>/buscar')
+def api_portada_buscar(k, i):
+    ruta, _cp, fila, _o = _lib_portada(k, i)
+    if not ruta:
+        return jsonify(resultados=[])
+    ediciones = (((fila or {}).get('reporte') or {}).get('edicion_mb') or {}).get('candidatas') or []
+    return jsonify(resultados=procesar.buscar_caratulas(request.args.get('artista') or '',
+                                                         request.args.get('album') or '', ediciones))
+
+
+@app.route('/api/portada/<k>/<int:i>/subir', methods=['POST'])
+def api_portada_subir(k, i):
+    """Guarda la imagen subida (convertida a JPEG) hasta que se elija «Usar esta carátula»."""
+    if not _lib_portada(k, i)[0]:
+        return jsonify(ok=False, error='El álbum no está en la biblioteca'), 404
+    if (request.content_length or 0) > MAX_SUBIDA:
+        return jsonify(ok=False, error='La imagen pesa más de 40 MB'), 413
+    f = request.files.get('imagen')
+    if not f:
+        return jsonify(ok=False, error='No llegó ninguna imagen'), 400
+    try:
+        jpg, tam = portada_mod.a_jpeg(f.read(MAX_SUBIDA + 1))
+    except portada_mod.FalloPortada as e:
+        return jsonify(ok=False, error=str(e)), 400
+    os.makedirs(SUBIDAS, exist_ok=True)
+    ahora = time.time()
+    for viejo in os.listdir(SUBIDAS):                      # las que nunca se usaron, fuera al día
+        try:
+            if ahora - os.path.getmtime(os.path.join(SUBIDAS, viejo)) > 86400:
+                os.remove(os.path.join(SUBIDAS, viejo))
+        except OSError:
+            pass
+    nombre = secrets.token_hex(12) + '.jpg'
+    with open(os.path.join(SUBIDAS, nombre), 'wb') as out:
+        out.write(jpg)
+    return jsonify(ok=True, subida=nombre, ancho=tam[0], alto=tam[1], tamano=len(jpg),
+                   url=url_for('portada_subida', nombre=nombre))
+
+
+@app.route('/api/portada/<k>/<int:i>', methods=['POST'])
+def api_portada_usar(k, i):
+    """Deja el álbum «En cola: ajustar» con la carátula elegida; el procesador la escribe e incrusta."""
+    ruta, _cp, fila, o = _lib_portada(k, i)
+    if not ruta:
+        return jsonify(ok=False, error='El álbum no está en la biblioteca'), 404
+    d = request.get_json(silent=True) or {}
+    tipo = d.get('tipo')
+    if tipo == 'archivo':
+        pedido = {'tipo': 'archivo', 'archivo': str(d.get('archivo') or '')}
+    elif tipo == 'incrustada':
+        pedido = {'tipo': 'incrustada', 'pista': str(d.get('pista') or '')}
+    elif tipo == 'url':
+        url = str(d.get('url') or '')
+        host = (re.match(r'https?://([^/:]+)', url) or [None, ''])[1]
+        if not any(host == h or host.endswith('.' + h) for h in procesar.HOSTS_PORTADA):
+            return jsonify(ok=False, error=f'No se descargan imágenes desde {host or "ese sitio"}'), 400
+        pedido = {'tipo': 'url', 'url': url, 'fuente': str(d.get('fuente') or 'en línea')[:40]}
+    elif tipo == 'subida':
+        nombre = os.path.basename(str(d.get('subida') or ''))
+        if not nombre or not os.path.isfile(os.path.join(SUBIDAS, nombre)):
+            return jsonify(ok=False, error='No se encontró la imagen subida (vuelve a subirla)'), 400
+        pedido = {'tipo': 'subida', 'subida': nombre}
+    else:
+        return jsonify(ok=False, error='No se indicó qué imagen usar'), 400
+    if k == 'b' and not fila:
+        fila = almacen.album(almacen.de_biblioteca(ruta, o['artista'], o['album'], o['anio']))
+    if not fila or fila['estado'] not in EN_BIBLIOTECA:
+        return jsonify(ok=False, error='El álbum se está procesando: espera a que termine'), 409
+    cam = dict(fila.get('cambios') or {}, biblioteca={'caratula': pedido, 'volver': fila['estado'], 'lote': False})
+    if not almacen.cambiar_estado(fila['id'], fila['estado'], 'por_ajustar', progreso='En cola para cambiar la carátula',
+                                  cambios=json.dumps(cam, ensure_ascii=False)):
+        return jsonify(ok=False, error='El álbum cambió de estado: recarga la página'), 409
+    procesador.ya()
+    return jsonify(ok=True)
 
 
 @app.route('/biblioteca/album/<int:oid>/caratula')
