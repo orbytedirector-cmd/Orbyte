@@ -310,12 +310,21 @@
     <table>
       <tr><th>#</th><th>Título</th><th>Formato</th><th class="der">Duración</th><th class="der oculto-movil">Pico</th><th>Decodifica</th><th class="oculto-movil">Nombre final</th></tr>
       {% for p in disco.pistas %}
+      {% set act = (actuales or {}).get(p.archivo) if not p.imagen_cue else none %}
       <tr>
-        <td class="num">{{ p.numero or '—' }}</td>
+        <td class="num">{{ (act.numero if act else p.numero) or '—' }}</td>
+        {% if act %}
+        <td><div class="t">{{ act.titulo or act.clave.split('/')[-1] }}</div>
+          {% set art_act = act.artista or act.artista_album %}
+          {% if art_act and art_act != (lib.tags_album.artista if lib else r.artista) %}<div class="s">{{ art_act }}</div>{% endif %}
+          <div class="s mono" title="Archivo de origen">origen: {{ p.archivo }}</div>
+          {% for n in p.notas or [] %}<div class="s med">{{ n }}</div>{% endfor %}</td>
+        {% else %}
         <td><div class="t">{{ p.titulo or p.tags.titulo or p.archivo.split('/')[-1] }}</div>
           {% if p.tags.artista and p.tags.artista != r.artista %}<div class="s">{{ p.tags.artista }}</div>{% endif %}
           <div class="s mono">{{ p.archivo }}</div>
           {% for n in p.notas or [] %}<div class="s med">{{ n }}</div>{% endfor %}</td>
+        {% endif %}
         <td>{% if p.legible %}<span class="chip q-{{ p.clase }}"><span class="led"></span>{{ p.formato }}</span>
             {% if p.mqa %}<div class="s">MQA{% if p.mqa_sr_original %} · original {{ (p.mqa_sr_original|int / 1000) }} kHz{% endif %}</div>{% endif %}
             {% if p.canales > 2 %}<div class="s med">{{ p.canales }} canales</div>{% endif %}
@@ -328,15 +337,16 @@
             {% elif p.decodifica %}<span class="ok">✓</span>{% elif p.error_completo %}<span class="med">⚠ errores, pero completo</span>
             {% for e in p.errores or [] %}<div class="s med mono err">{{ e }}</div>{% endfor %}{% elif p.legible %}<span class="mal">✗ dañado</span>
             {% for e in p.errores or [] %}<div class="s mal mono err">{{ e }}</div>{% endfor %}{% endif %}</td>
-        <td class="oculto-movil">{% if p.imagen_cue %}<span class="s">imagen de {{ p.imagen_cue }} pistas (cue) ↓</span>{% else %}<span class="nombre">{{ p.nombre_destino or '' }}</span>{% endif %}</td>
+        <td class="oculto-movil">{% if p.imagen_cue %}<span class="s">imagen de {{ p.imagen_cue }} pistas (cue) ↓</span>{% else %}<span class="nombre">{{ act.clave if act else (p.nombre_destino or '') }}</span>{% endif %}</td>
       </tr>
       {% if p.imagen_cue %}
         {% for cue in r.cues %}{% for ref in cue.referencias if ref.archivo == p.archivo %}
           {% for cp in cue.pistas if cp.archivo_cue == ref.archivo_cue %}
-          <tr><td class="num">{{ cp.num }}</td>
-            <td><div class="t">{{ cp.titulo }}</div>{% if cp.interprete and cp.interprete != r.artista %}<div class="s">{{ cp.interprete }}</div>{% endif %}</td>
+          {% set act = (actuales or {}).get(cue.archivo ~ '#' ~ cp.num) %}
+          <tr><td class="num">{{ act.numero if act and act.numero else cp.num }}</td>
+            <td><div class="t">{{ act.titulo if act and act.titulo else cp.titulo }}</div>{% set inter = (act.artista if act else cp.interprete) %}{% if inter and inter != (lib.tags_album.artista if lib else r.artista) %}<div class="s">{{ inter }}</div>{% endif %}</td>
             <td><span class="s">desde {{ cp.inicio|duracion }}</span></td><td></td><td class="oculto-movil"></td><td></td>
-            <td class="oculto-movil"><span class="nombre">{{ cp.nombre_destino }}</span></td></tr>
+            <td class="oculto-movil"><span class="nombre">{{ act.clave if act else cp.nombre_destino }}</span></td></tr>
           {% endfor %}
         {% endfor %}{% endfor %}
       {% endif %}

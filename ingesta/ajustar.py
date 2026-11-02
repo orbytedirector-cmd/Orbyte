@@ -125,6 +125,48 @@ def leer(ruta):
     return {'ruta': ruta, 'tags_album': ta, 'plan': plan, 'n_discos': len(discos)}
 
 
+def pistas_actuales(rep, lib):
+    """Empareja cada pista de la revisión con su archivo de hoy en la biblioteca, para que la tabla de pistas
+    muestre cómo quedaron guardadas (título, número, nombre) tras ubicar o ajustar los tags.
+
+    Va por orden del álbum (disco, número) y lo confirma por duración; si el orden no calza (se renumeraron
+    pistas), empareja por la duración más parecida. Devuelve {clave de la revisión: pista de `lib['plan']`}.
+    """
+    if not rep or not lib or not lib.get('plan'):
+        return {}
+    filas = []                                   # (clave, duración) en el mismo orden que la tabla
+    for d in rep.get('discos') or []:
+        for p in d.get('pistas') or []:
+            if not p.get('legible'):
+                continue
+            if p.get('imagen_cue'):
+                for cue in rep.get('cues') or []:
+                    for ref in cue.get('referencias') or []:
+                        if ref.get('archivo') != p.get('archivo'):
+                            continue
+                        for cp in cue.get('pistas') or []:
+                            if cp.get('archivo_cue') == ref.get('archivo_cue'):
+                                filas.append((f"{cue['archivo']}#{cp['num']}", None))
+            else:
+                filas.append((p['archivo'], p.get('duracion')))
+    plan = lib['plan']
+
+    def parecida(d1, d2):
+        return d1 is None or d2 is None or abs(d1 - d2) <= 2
+
+    if len(filas) == len(plan) and all(parecida(d, x.get('duracion_origen')) for (_, d), x in zip(filas, plan)):
+        return {k: x for (k, _), x in zip(filas, plan)}
+    libres, out = list(plan), {}
+    for k, d in filas:
+        if d is None or not libres:
+            continue
+        x = min(libres, key=lambda x: abs((x.get('duracion_origen') or 1e9) - d))
+        if parecida(d, x.get('duracion_origen')):
+            out[k] = x
+            libres.remove(x)
+    return out
+
+
 def cabecera(rep, ruta):
     """Campos para dejar la revisión guardada al día con los tags de la carpeta (artista, álbum, año).
 
