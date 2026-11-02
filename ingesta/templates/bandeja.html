@@ -105,7 +105,7 @@ function pintar() {
     return `<a class="fila" href="/album/${a.id}">
       <div class="portada">${ICONO_DISCO}${portada}</div>
       <div class="f-txt"><div class="f-titulo">${art}${titulo}</div>${dest}
-        <div class="f-origen">📁 ${esc(a.rel)}</div></div>
+        <div class="f-origen">${a.origen === 'reproceso' ? '↻ Reproceso de la biblioteca · ' : '📁 '}${esc(a.rel)}</div></div>
       <div class="f-der"><div class="f-chips">${chips.join('')}</div>${extra}</div></a>`;
   }).join('');
 }

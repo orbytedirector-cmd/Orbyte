@@ -104,7 +104,8 @@ class Vigilante(threading.Thread):
                 self.almacen.actualizar(fila['id'], estado='en_cola')
         # lo que ya no está en la entrada sale de la bandeja
         for ruta, fila in conocidos.items():
-            if ruta not in vistos and fila['estado'] in PREVIOS + ('por_ubicar',) and fila['estado'] != 'analizando':
+            if ruta not in vistos and fila['estado'] in PREVIOS + ('por_ubicar',) and fila['estado'] != 'analizando' \
+                    and fila.get('origen') != 'reproceso':          # «Reprocesar»: su origen es la biblioteca
                 self.almacen.borrar_album(fila['id'])
         sacd.limpiar(self.datos)          # extracciones de ISOs que ya no están en la entrada
 
@@ -122,7 +123,7 @@ class Vigilante(threading.Thread):
 
         # modo desatendido: también lo que ya estaba «Lista» antes de encenderlo
         if aj.get('desatendido') == '1' and (not self.procesador or self.procesador.biblioteca_lista()):
-            listos = self.almacen.con_estado('revisado')
+            listos = [f for f in self.almacen.con_estado('revisado') if f.get('origen') != 'reproceso']
             for fila in listos:
                 self.almacen.actualizar(fila['id'], estado='por_ubicar', progreso='En cola para ubicar')
                 self.almacen.registrar(fila['id'], 'Modo desatendido: pasa solo a ubicarse')
@@ -188,7 +189,8 @@ class Vigilante(threading.Thread):
             calidad=rep['calidad']['tag'], destino=rep['destino']['ruta'], n_pistas=rep['n_pistas'],
             conteo=rep['conteo_problemas'], reporte=rep, firma=firma_antes, silencioso=0,
             version_reporte=rep.get('version'))
-        desatendido = aj.get('desatendido') == '1' and rep['estado'] == 'revisado'
+        # un reproceso siempre espera tu visto bueno: reemplaza a lo que ya está en la biblioteca
+        desatendido = aj.get('desatendido') == '1' and rep['estado'] == 'revisado' and completo.get('origen') != 'reproceso'
         if desatendido:
             self.almacen.actualizar(aid, estado='por_ubicar')
             self.almacen.registrar(aid, 'Modo desatendido: pasa solo a ubicarse')

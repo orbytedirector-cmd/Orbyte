@@ -43,6 +43,7 @@
     <h1 class="h-alb">{{ r.album }}{% if r.anio %} <span class="anio">({{ r.anio }})</span>{% endif %}</h1>
     <div class="h-chips">
       <span class="chip e-{{ a.estado }} {{ 'pulso' if a.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(a.estado, a.estado) }}</span>
+      {% if a.origen == 'reproceso' %}<span class="chip" title="Origen: {{ a.ruta }}">↻ Reproceso de la biblioteca</span>{% endif %}
       {% if c.tag %}<span class="chip q-{{ c.tag }}"><span class="led"></span>{{ c.tag }}</span>{% endif %}
       {% if c.formato %}<span class="chip">{{ c.formato }}</span>{% endif %}
       <span class="chip">{{ r.n_pistas }} pistas{% if r.n_discos > 1 %} · {{ r.n_discos }} discos{% endif %}</span>
@@ -73,18 +74,23 @@
       {% elif a.estado in ('error_metadata', 'completado') %}
         <button class="btn" data-accion="metadata">Correr la metadata de nuevo</button>
       {% endif %}
+      {% if lib and a.estado in ('error_metadata', 'completado') %}
+        <button class="btn" id="reprocesar" data-api="/api/reprocesar/a/{{ a.id }}" title="Vuelve a revisar la carpeta desde la biblioteca como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar</button>
+      {% endif %}
       {% if a.estado == 'completado' and a.resultado and a.resultado.album_id %}
         <a class="btn oro" target="_blank" rel="noopener" href="http://{{ request.host.split(':')[0] }}:5001/album/{{ a.resultado.album_id }}">Abrir en Orbyte</a>
       {% endif %}
       {% if editable and a.estado != 'descartado' %}
         <button class="btn" data-accion="revisar">{{ ICONO_REVISAR }}Volver a revisar</button>
-        <button class="btn" data-accion="descartar" title="No se ubica; los archivos quedan donde están">Descartar</button>
+        {% if a.origen == 'reproceso' %}<button class="btn" data-accion="descartar" title="Se cancela el reproceso; el álbum queda en la biblioteca tal como estaba">Cancelar reproceso</button>
+        {% else %}<button class="btn" data-accion="descartar" title="No se ubica; los archivos quedan donde están">Descartar</button>{% endif %}
       {% elif a.estado == 'descartado' %}
         <button class="btn" data-accion="restaurar">Volver a la bandeja</button>
       {% endif %}
       <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s{% if a.estado in PREVIOS %} · los archivos aún no se han tocado{% endif %}</span>
     </div>
-    {% if a.estado == 'revisado' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: se corrige, se copia y verifica en la biblioteca{% if aj_borrar %}, se borra de la entrada{% endif %}{% if aj_metadata %} y se corren los 5 scripts de metadata{% endif %}.</p>{% endif %}
+    {% if a.estado == 'revisado' and a.origen == 'reproceso' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: la versión nueva se arma y verifica aparte; cuando su metadata termina bien reemplaza a la anterior (escuchas, favoritos y playlists pasan a la nueva) y recién ahí se borra la carpeta anterior con sus audios y su .cue.</p>
+    {% elif a.estado == 'revisado' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: se corrige, se copia y verifica en la biblioteca{% if aj_borrar %}, se borra de la entrada{% endif %}{% if aj_metadata %} y se corren los 5 scripts de metadata{% endif %}.</p>{% endif %}
   </div>
 </div>
 
@@ -248,7 +254,8 @@
   {% if dup_pend %}
   <div class="acciones">
     <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas salen de la biblioteca (escuchas, favoritos y playlists pasan a la nueva)">Reemplazar las marcadas por A</button>
-    <button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar A (la nueva)</button>
+    {% if a.origen == 'reproceso' %}<button class="btn" data-dup="descartar" title="Se cancela el reproceso; el álbum queda en la biblioteca tal como estaba">Cancelar reproceso</button>
+    {% else %}<button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar A (la nueva)</button>{% endif %}
     <button class="btn" data-dup="ambos">Conservar todas</button>
     <button class="btn" id="dup-ia" title="Mide el master de cada edición y pregunta a la IA cuál conviene por calidad y producción">✦ Sugerencia IA</button>
   </div>
@@ -423,11 +430,21 @@ const VIVOS = {{ VIVOS|list|tojson }};
 async function accion(url, datos) {
   const r = await post(url, datos || {});
   if (r && r.ok === false) { toast('No se pudo', r.error || ''); return false; }
-  location.reload(); return true;
+  if (r && r.ir) location.href = r.ir; else location.reload();
+  return true;
 }
+const REPROCESAR_TXT = '¿Reprocesar este álbum desde la biblioteca?\n\nLa carpeta se revisa como un álbum nuevo (cortes por cue, tags, edición, carátula) sin moverla. Al ubicarla, la versión nueva se arma y verifica aparte y, cuando su metadata termina bien, reemplaza a la actual: escuchas, favoritos y playlists pasan a la nueva y se borra la carpeta anterior. Puedes cancelar en cualquier momento antes de ubicar.';
+const rp = document.getElementById('reprocesar');
+if (rp) rp.onclick = async () => {
+  if (!confirm(REPROCESAR_TXT)) return;
+  rp.disabled = true;
+  const r = await post(rp.dataset.api);
+  if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); rp.disabled = false; return; }
+  location.href = r.ir;
+};
 document.querySelectorAll('[data-accion]').forEach(b => b.onclick = async () => {
   const a = b.dataset.accion;
-  if (a === 'descartar' && !confirm('¿Descartar este álbum? No se borra nada: queda fuera de la bandeja.')) return;
+  if (a === 'descartar' && !confirm({{ ('¿Cancelar el reproceso? El álbum queda en la biblioteca tal como estaba.' if a.origen == 'reproceso' else '¿Descartar este álbum? No se borra nada: queda fuera de la bandeja.')|tojson }})) return;
   b.disabled = true;
   if (a === 'ubicar' && ESTADO === 'revisado' && document.getElementById('autocorregir')) {
     // Autocorregir sigue siendo solo con el botón, pero antes de ubicar se avisa si propone algo
@@ -461,7 +478,7 @@ document.querySelectorAll('[data-dup]').forEach(b => b.onclick = async () => {
   const accion = b.dataset.dup;
   const rutas = [...document.querySelectorAll('.dup-sel:checked')].map(c => c.value);
   if (accion === 'reemplazar' && !rutas.length) { toast('Marca qué edición se reemplaza', ''); return; }
-  if (accion === 'descartar' && !confirm('¿Descartar la nueva? Se borra de la carpeta de entrada y queda la que ya está en la biblioteca.')) return;
+  if (accion === 'descartar' && !confirm({{ ('¿Cancelar el reproceso? El álbum queda en la biblioteca tal como estaba.' if a.origen == 'reproceso' else '¿Descartar la nueva? Se borra de la carpeta de entrada y queda la que ya está en la biblioteca.')|tojson }})) return;
   b.disabled = true;
   const r = await post(`/api/album/${AID}/duplicado`, {accion, rutas});
   if (r && r.ok === false) { toast('No se pudo', r.error || ''); b.disabled = false; return; }
