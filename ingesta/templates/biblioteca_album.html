@@ -11,7 +11,7 @@
   <span id="progreso">{{ NOMBRES[a.estado] }}{% if a.progreso %} · {{ a.progreso }}{% endif %}</span></div>
 {% endif %}
 <div class="heroe">
-  <div class="portada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg><img alt="Carátula" src="{{ url_for('biblioteca_caratula', oid=o.id) }}" onerror="this.remove()"></div>
+  <div class="portada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg><img alt="Carátula" src="{{ url_for('biblioteca_caratula', oid=o.id) }}{% if portada and portada.actual %}?v={{ portada.actual.mtime }}{% endif %}" onerror="this.remove()"></div>
   <div>
     <div class="h-art">{{ o.artista }}</div>
     <h1 class="h-alb">{{ o.album }}{% if o.anio %} <span class="anio">({{ o.anio }})</span>{% endif %}</h1>
@@ -36,6 +36,8 @@
 {% endif %}
 
 {% if lib or lib_error %}{% set lib_api = '/api/biblioteca/%d' % o.id %}{% set lib_abierto = true %}{% include '_editor_biblioteca.html' %}{% endif %}
+{% if lib %}{% include '_pistas_biblioteca.html' %}{% endif %}
+{% if portada %}<section class="seccion">{% with pk='b', pid=o.id, artista_q=o.artista, album_q=o.album, ocupado=(a and a.estado in VIVOS) %}{% include '_portada_biblioteca.html' %}{% endwith %}</section>{% endif %}
 {% endblock %}
 {% block js %}
 <script>

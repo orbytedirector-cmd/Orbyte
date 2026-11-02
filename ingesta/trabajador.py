@@ -16,6 +16,7 @@ import time
 import traceback
 
 from . import ajustar as ajustar_mod
+from . import portada as portada_mod
 from . import analisis, artistas, metadata, procesar, recursos, sacd
 from .almacen import PREVIOS
 
@@ -200,34 +201,41 @@ class Procesador(threading.Thread):
             self.almacen.registrar(aid, m)
             self.almacen.actualizar(aid, progreso=m.strip()[:120])
 
+        hay_tags = bool(pedido.get('tags') or pedido.get('pistas'))
+        metadata = hay_tags and aj.get('metadata', '1') == '1'     # cambiar solo la carátula no relee la metadata
         try:
             reg(f'Ajuste en la biblioteca: {os.path.relpath(ruta, aj.get("biblioteca") or "/")}')
-            final = ajustar_mod.aplicar(ruta, pedido, aj, reg)
+            final = ajustar_mod.aplicar(ruta, pedido, aj, reg) if hay_tags else ruta
+            if pedido.get('caratula'):
+                portada_mod.aplicar(final, pedido['caratula'], aj, reg,
+                                    os.path.join(os.path.dirname(self.almacen.ruta), 'subidas'))
         except Exception as e:
             log.error('Ajuste %s:\n%s', aid, traceback.format_exc())
-            reg(f'ERROR: {e}' if isinstance(e, ajustar_mod.FalloAjuste) else f'ERROR: {type(e).__name__}: {e}')
+            reg(f'ERROR: {e}' if isinstance(e, (ajustar_mod.FalloAjuste, portada_mod.FalloPortada))
+                else f'ERROR: {type(e).__name__}: {e}')
             # lo hecho hasta el error ya quedó anotado en music.db; la metadata relee el resto
-            self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
-                                    progreso=None)
-            self.almacen.avisar('error', f'No se pudieron ajustar los tags de {nombre}', str(e).splitlines()[0], aid)
+            self.almacen.actualizar(aid, estado='por_metadata' if metadata else volver, progreso=None)
+            que = 'ajustar los tags' if hay_tags else 'cambiar la carátula'
+            self.almacen.avisar('error', f'No se pudo {que} de {nombre}', str(e).splitlines()[0], aid)
             self.actual = None
             return
         campos = {'ubicado_en': final}
         # La cabecera (artista — álbum (año)) y Recientes muestran lo que quedó en los archivos,
         # no lo de la revisión original (antes seguía diciendo, p. ej., «Various Artists»).
         try:
-            campos.update(ajustar_mod.cabecera(rep, final))
+            if hay_tags:
+                campos.update(ajustar_mod.cabecera(rep, final))
         except Exception:  # noqa: BLE001 - la cabecera nunca frena el ajuste
             log.warning('Ajuste %s: no se pudo releer la carpeta para la cabecera', aid)
         cam_fin = dict((self.almacen.album(aid) or {}).get('cambios') or {}, richmeta_completo=True)
         campos['cambios'] = json.dumps(cam_fin, ensure_ascii=False)
         if not rep.get('origen_entrada'):            # una ISO conserva su ruta de la entrada
             campos['ruta'] = final
-        self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else volver,
-                                progreso=None, **campos)
+        self.almacen.actualizar(aid, estado='por_metadata' if metadata else volver, progreso=None, **campos)
         if not pedido.get('lote'):
-            self.almacen.avisar('ok', f'{nombre}: tags ajustados', os.path.relpath(final, aj.get('biblioteca') or '/'),
-                                aid)
+            hecho = ' y carátula cambiada' if pedido.get('caratula') else ''
+            hecho = ('tags ajustados' + hecho) if hay_tags else 'carátula cambiada'
+            self.almacen.avisar('ok', f'{nombre}: {hecho}', os.path.relpath(final, aj.get('biblioteca') or '/'), aid)
         self.actual = None
 
     # ── reemplazar la edición anterior (decisión «Reemplazar el existente») ──

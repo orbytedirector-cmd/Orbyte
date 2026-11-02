@@ -409,3 +409,17 @@ table.comparar tr.ia-sale td { opacity: .55; }
 table.comparar tr.ia-sale .t { text-decoration: line-through; }
 .oro { color: var(--oro-claro); }
 .ia-consejo { font-size: 1.05rem; line-height: 1.9; }
+
+/* carátula de un álbum ya en la biblioteca */
+.portada-lib { display: grid; grid-template-columns: 200px 1fr; gap: 1.1rem; align-items: start; }
+.portada-lib .pl-actual { margin: 0; font-size: .74rem; color: var(--texto-2); text-align: center; word-break: break-all; }
+.portada-lib .pl-actual img, .portada-lib .pl-vacia { width: 200px; height: 200px; object-fit: cover; border-radius: 8px; border: 1px solid var(--borde); display: block; margin-bottom: .35rem; }
+.portada-lib .pl-vacia { display: flex; align-items: center; justify-content: center; color: var(--texto-3); background: rgba(255,255,255,.03); }
+.portada-lib .miniaturas figure[data-sel] { cursor: pointer; }
+.portada-lib .miniaturas figure[data-sel]:hover img { border-color: var(--borde-oro); }
+#portada-lib.soltar { outline: 2px dashed var(--oro); outline-offset: 4px; }
+label.btn[aria-disabled] { opacity: .5; pointer-events: none; }
+@media (max-width: 760px) { .portada-lib { grid-template-columns: 1fr; } .portada-lib .pl-actual img, .portada-lib .pl-vacia { margin: 0 auto .35rem; } }
+
+/* pistas leídas de la biblioteca */
+.pl-pistas td.num { width: 2.2rem; }

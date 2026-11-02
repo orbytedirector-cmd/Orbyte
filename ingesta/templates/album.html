@@ -37,7 +37,7 @@
   <span id="progreso">{{ NOMBRES[a.estado] }}{% if a.progreso %} · {{ a.progreso }}{% endif %}{% if a.estado in ('en_cola', 'analizando') %} — se está actualizando la revisión con tus cambios{% endif %}</span></div>
 {% endif %}
 <div class="heroe">
-  <div class="portada">{{ ICONO_DISCO }}{% if r.caratula.tipo == 'url' and r.caratula.miniatura %}<img alt="Carátula" src="{{ r.caratula.miniatura }}" onerror="this.remove()">{% elif r.caratula.tipo != 'ninguna' %}<img alt="Carátula" src="{{ url_for('caratula', aid=a.id) }}?v={{ a.analizado|int }}" onerror="this.remove()">{% endif %}</div>
+  <div class="portada">{{ ICONO_DISCO }}{% if r.caratula.tipo == 'url' and r.caratula.miniatura %}<img alt="Carátula" src="{{ r.caratula.miniatura }}" onerror="this.remove()">{% elif r.caratula.tipo != 'ninguna' %}<img alt="Carátula" src="{{ url_for('caratula', aid=a.id) }}?v={{ a.analizado|int }}{% if portada and portada.actual %}-{{ portada.actual.mtime }}{% endif %}" onerror="this.remove()">{% endif %}</div>
   <div>
     <div class="h-art">{{ r.artista }}</div>
     <h1 class="h-alb">{{ r.album }}{% if r.anio %} <span class="anio">({{ r.anio }})</span>{% endif %}</h1>
@@ -358,6 +358,8 @@
 
 {# ── carátula y archivos ── #}
 <section class="seccion dos-col" id="caratula">
+  {% if lib and portada %}{% with pk='a', pid=a.id, artista_q=(lib.tags_album.artista or r.artista), album_q=(lib.tags_album.album or r.album), ocupado=(a.estado in VIVOS) %}{% include '_portada_biblioteca.html' %}{% endwith %}
+  {% else %}
   <div class="panel">
     <h2 class="rotulo" style="margin-bottom:.6rem">Carátula</h2>
     {% set car = r.caratula %}
@@ -385,6 +387,7 @@
     {% if editable %}<div class="acciones"><button class="btn" id="buscar-portada">Buscar en línea</button>
       {% if car.eleccion %}<button class="btn" id="portada-propuesta">Volver a la propuesta</button>{% endif %}</div>{% endif %}
   </div>
+  {% endif %}
   <div class="panel">
     <h2 class="rotulo" style="margin-bottom:.6rem">Carpeta de origen</h2>
     <dl>

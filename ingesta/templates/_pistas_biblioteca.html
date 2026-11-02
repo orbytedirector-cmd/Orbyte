@@ -1,0 +1,22 @@
+{# Pistas de un álbum de la biblioteca, leídas de los archivos de hoy. Variables: lib (ajustar.leer), fmt (portada.formatos) #}
+<section class="seccion">
+  <h2 class="rotulo">Pistas <span class="cuenta">{{ lib.plan|length }} archivo{{ 's' if lib.plan|length != 1 }} de audio · como están guardadas</span></h2>
+  <div class="tabla-wrap">
+  {% for disco, filas in lib.plan|groupby('disco') %}
+    {% if lib.n_discos > 1 %}<div class="disco-tit">DISCO {{ disco }}</div>{% endif %}
+    <table class="pl-pistas">
+      <tr><th>#</th><th>Título</th><th>Formato</th><th class="der">Duración</th><th class="oculto-movil">Archivo</th></tr>
+      {% for x in filas %}{% set f = fmt.get(x.clave) or (none, none) %}
+      <tr>
+        <td class="num">{{ x.numero or '—' }}</td>
+        <td><div class="t">{{ x.titulo or x.clave.split('/')[-1] }}</div>
+          {% if x.artista and x.artista != lib.tags_album.artista %}<div class="s">{{ x.artista }}</div>{% endif %}</td>
+        <td>{% if f[0] %}<span class="chip {{ 'q-' ~ f[1] if f[1] }}"><span class="led"></span>{{ f[0] }}</span>{% endif %}</td>
+        <td class="der">{{ x.duracion_origen|duracion if x.duracion_origen else '—' }}</td>
+        <td class="oculto-movil"><span class="nombre">{{ x.clave }}</span></td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% endfor %}
+  </div>
+</section>

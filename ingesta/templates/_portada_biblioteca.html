@@ -1,0 +1,133 @@
+{# Carátula de un álbum que ya está en la biblioteca.
+   Variables: portada (portada.estado), pk ('b' = álbum de Orbyte · 'a' = fila de Ingesta), pid, artista_q, album_q, ocupado #}
+{% set img = '/portada/%s/%d/img' % (pk, pid) %}
+{% set api = '/api/portada/%s/%d' % (pk, pid) %}
+<div class="panel" id="portada-lib">
+  <h2 class="rotulo" style="margin-bottom:.6rem">Carátula</h2>
+  <div class="portada-lib">
+    <figure class="pl-actual">
+      {% if portada.actual %}<img src="{{ img }}?actual=1&mini=1&v={{ portada.actual.mtime }}" alt="Carátula actual"
+        data-grande="{{ img }}?actual=1&v={{ portada.actual.mtime }}">
+      <figcaption><span class="mono">{{ portada.actual.archivo }}</span><br>
+        <span class="tenue">{% if portada.actual.ancho %}{{ portada.actual.ancho }}×{{ portada.actual.alto }} px · {% endif %}{{ portada.actual.tamano|tamano }}</span></figcaption>
+      {% else %}<div class="pl-vacia">Sin Cover.jpg</div><figcaption class="med">Este álbum no tiene carátula</figcaption>{% endif %}
+    </figure>
+    <div class="pl-opciones">
+      {% if portada.incrustada or portada.candidatas %}
+      <div class="s tenue" style="font-size:.78rem">Otras imágenes del álbum · toca una para verla en grande</div>
+      <div class="miniaturas elegibles">
+        {% if portada.incrustada %}<figure data-sel="{{ {'tipo': 'incrustada', 'pista': portada.incrustada}|tojson|forceescape }}"
+            data-grande="{{ img }}?incrustada={{ portada.incrustada|urlencode }}" data-nombre="Incrustada en {{ portada.incrustada.split('/')[-1] }}">
+          <img loading="lazy" src="{{ img }}?incrustada={{ portada.incrustada|urlencode }}&mini=1" alt="" onerror="this.parentNode.remove()">
+          <figcaption>incrustada</figcaption></figure>{% endif %}
+        {% for c in portada.candidatas %}<figure title="{{ c.archivo }}" data-sel="{{ {'tipo': 'archivo', 'archivo': c.archivo}|tojson|forceescape }}"
+            data-grande="{{ img }}?r={{ c.archivo|urlencode }}" data-nombre="{{ c.archivo }}{% if c.ancho %} · {{ c.ancho }}×{{ c.alto }} px{% endif %} · {{ c.tamano|tamano }}">
+          <img loading="lazy" src="{{ img }}?r={{ c.archivo|urlencode }}&mini=1" alt="" onerror="this.parentNode.remove()">
+          <figcaption>{{ c.archivo.split('/')[-1] }}{% if c.ancho %}<br><span class="muy-tenue">{{ c.ancho }}×{{ c.alto }}</span>{% endif %}</figcaption></figure>{% endfor %}
+      </div>
+      {% else %}<div class="s tenue" style="font-size:.78rem">No hay otras imágenes en la carpeta del álbum.</div>{% endif %}
+      <div class="acciones">
+        <button class="btn" id="pl-buscar" {{ 'disabled' if ocupado }}>Buscar en línea</button>
+        <label class="btn" id="pl-subir-btn" {{ 'aria-disabled=true' if ocupado }}>Subir imagen<input type="file" id="pl-subir" accept="image/*" hidden {{ 'disabled' if ocupado }}></label>
+      </div>
+      <p class="s tenue" style="font-size:.76rem;margin:.5rem 0 0">También puedes arrastrar una imagen aquí. Al aplicarla reemplaza Cover.jpg y se incrusta en todas las pistas (el audio no se toca).</p>
+    </div>
+  </div>
+</div>
+
+<div class="modal-fondo" id="pl-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pl-tit" style="width:min(820px,100%)">
+    <div class="modal-cab"><div class="rotulo" id="pl-tit">Buscar carátula en línea</div>
+      <div class="fila-in" style="display:flex;gap:.5rem;margin-top:.6rem">
+        <input type="text" id="pl-artista" value="{{ artista_q or '' }}" aria-label="Artista">
+        <input type="text" id="pl-album" value="{{ album_q or '' }}" aria-label="Álbum">
+        <button class="btn" id="pl-buscar-ya">Buscar</button></div></div>
+    <div class="carpetas" id="pl-res" style="padding:.8rem"><div class="nada">Buscando…</div></div>
+    <div class="modal-pie"><span class="tenue" style="font-size:.8rem">Cover Art Archive, iTunes y Deezer</span>
+      <button class="btn" id="pl-cerrar">Cerrar</button></div>
+  </div>
+</div>
+
+<div class="modal-fondo" id="pl-previa" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pl-prev-tit" style="width:min(640px,100%)">
+    <div class="modal-cab"><div class="rotulo" id="pl-prev-tit">¿Usar esta carátula?</div></div>
+    <div style="padding:1rem;text-align:center">
+      <img id="pl-prev-img" alt="" style="max-width:100%;max-height:60vh;border-radius:8px;border:1px solid var(--borde)">
+      <div class="s tenue" id="pl-prev-info" style="margin-top:.5rem"></div>
+    </div>
+    <div class="modal-pie"><span class="tenue" style="font-size:.8rem">Reemplaza Cover.jpg y se incrusta en todas las pistas</span>
+      <span><button class="btn" id="pl-prev-no">Cancelar</button>
+        <button class="btn oro" id="pl-prev-si" {{ 'disabled' if ocupado }}>Usar esta carátula</button></span></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  const API = {{ api|tojson }}, OCUPADO = {{ 'true' if ocupado else 'false' }};
+  const $ = id => document.getElementById(id);
+  const previa = $('pl-previa'), modal = $('pl-modal');
+  let elegida = null;
+  function mostrar(sel, grande, info) {
+    elegida = sel;
+    $('pl-prev-img').src = grande;
+    $('pl-prev-info').textContent = info || '';
+    $('pl-prev-si').disabled = OCUPADO || !sel;
+    previa.hidden = false;
+  }
+  $('pl-prev-no').onclick = () => { previa.hidden = true; elegida = null; };
+  previa.onclick = e => { if (e.target === previa) $('pl-prev-no').onclick(); };
+  $('pl-prev-si').onclick = async () => {
+    if (!elegida) return;
+    $('pl-prev-si').disabled = true; $('pl-prev-si').textContent = 'Enviando…';
+    const r = await post(API, elegida);
+    if (!r || r.ok === false) {
+      toast('No se pudo', (r && r.error) || ''); $('pl-prev-si').disabled = false; $('pl-prev-si').textContent = 'Usar esta carátula';
+      return;
+    }
+    location.href = location.href.split('#')[0];
+  };
+  document.querySelectorAll('#portada-lib figure[data-sel]').forEach(f =>
+    f.onclick = () => mostrar(JSON.parse(f.dataset.sel), f.dataset.grande, f.dataset.nombre));
+  const act = document.querySelector('#portada-lib .pl-actual img');
+  if (act) { act.style.cursor = 'zoom-in'; act.onclick = () => mostrar(null, act.dataset.grande, 'Carátula actual'); }
+
+  // buscar en línea
+  async function buscar() {
+    const res = $('pl-res');
+    res.innerHTML = '<div class="nada">Buscando…</div>';
+    const q = new URLSearchParams({artista: $('pl-artista').value, album: $('pl-album').value});
+    let d;
+    try { d = await (await fetch(`${API}/buscar?` + q)).json(); } catch (e) { d = {resultados: []}; }
+    if (!d.resultados.length) { res.innerHTML = '<div class="nada">Sin resultados (¿el servidor tiene internet?)</div>'; return; }
+    res.innerHTML = '<div class="miniaturas grandes">' + d.resultados.map((x, i) =>
+      `<figure data-i="${i}" title="${esc(x.titulo)}"><img loading="lazy" src="${esc(x.miniatura)}" alt="" onerror="this.parentNode.remove()"><figcaption>${esc(x.fuente)}<br><span class="muy-tenue">${esc(x.titulo)}</span></figcaption></figure>`).join('') + '</div>';
+    res.querySelectorAll('figure').forEach(f => f.onclick = () => {
+      const x = d.resultados[+f.dataset.i];
+      modal.hidden = true;
+      mostrar({tipo: 'url', url: x.url, fuente: x.fuente}, x.url, `${x.fuente} · ${x.titulo}`);
+    });
+  }
+  $('pl-buscar').onclick = () => { modal.hidden = false; buscar(); };
+  $('pl-buscar-ya').onclick = buscar;
+  $('pl-cerrar').onclick = () => modal.hidden = true;
+  modal.onclick = e => { if (e.target === modal) modal.hidden = true; };
+
+  // subir (botón o arrastrar)
+  async function subir(archivo) {
+    if (OCUPADO || !archivo) return;
+    if (!archivo.type.startsWith('image/')) { toast('No es una imagen', archivo.name); return; }
+    const fd = new FormData(); fd.append('imagen', archivo);
+    toast('Subiendo…', archivo.name);
+    let r;
+    try { r = await (await fetch(`${API}/subir`, {method: 'POST', headers: {'X-CSRF': CSRF}, body: fd})).json(); }
+    catch (e) { r = {ok: false, error: 'No se pudo subir'}; }
+    if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+    mostrar({tipo: 'subida', subida: r.subida}, r.url, `${archivo.name} · ${r.ancho}×${r.alto} px (se guarda como JPG)`);
+  }
+  $('pl-subir').onchange = e => { subir(e.target.files[0]); e.target.value = ''; };
+  const zona = $('portada-lib');
+  zona.addEventListener('dragover', e => { if (!OCUPADO) { e.preventDefault(); zona.classList.add('soltar'); } });
+  zona.addEventListener('dragleave', () => zona.classList.remove('soltar'));
+  zona.addEventListener('drop', e => { e.preventDefault(); zona.classList.remove('soltar'); subir(e.dataTransfer.files[0]); });
+})();
+</script>
