@@ -238,7 +238,9 @@ def album(aid):
         except Exception as e:
             lib_error = str(e)
     dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
+    actuales = ajustar_mod.pistas_actuales(a.get('reporte'), lib) if lib else {}
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
+                           actuales=actuales,
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
