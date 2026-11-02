@@ -172,8 +172,10 @@ def cabecera(rep, ruta):
 
     Devuelve {'artista', 'album', 'anio', 'reporte'} listos para Almacen.actualizar, o {} si no hay nada que leer.
     """
+    if not rep or rep.get('fallo') or 'discos' not in rep:
+        return {}                     # sin revisión de Ingesta (álbum de la Biblioteca): no se inventa una
     ta = leer(ruta).get('tags_album') or {}
-    campos, rep = {}, dict(rep or {})
+    campos, rep = {}, dict(rep)
     for k in ('artista', 'album', 'anio'):
         if ta.get(k):
             rep[k] = campos[k] = ta[k]
