@@ -2,8 +2,8 @@
 {% block titulo %}{{ o.album }}{% endblock %}
 {% set NOMBRES = {'por_metadata': 'En cola: metadata', 'metadata': 'Metadata', 'completado': 'Completo',
                   'error_metadata': 'Error en metadata', 'por_ajustar': 'En cola: ajustar tags',
-                  'ajustando': 'Ajustando tags'} %}
-{% set VIVOS = ('por_metadata', 'metadata', 'por_ajustar', 'ajustando') %}
+                  'ajustando': 'Ajustando tags', 'en_cola': 'En cola para revisar', 'analizando': 'Revisando'} %}
+{% set VIVOS = ('por_metadata', 'metadata', 'por_ajustar', 'ajustando', 'en_cola', 'analizando') %}
 {% block contenido %}
 <a class="volver" href="{{ url_for('biblioteca_pagina') }}">← Biblioteca</a>
 {% if a and a.estado in VIVOS %}
@@ -24,6 +24,7 @@
       {% if reglas %}<div class="nota med">⚠ {% for r, n in reglas.items() %}{{ REGLAS[r] }} ({{ n }} pistas){{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}</div>
     <div class="acciones">
       <button class="btn" id="ignorar">{{ 'Dejar de ignorar' if ignorado else 'Ignorar en la revisión' }}</button>
+      {% if lib and not (a and a.estado in VIVOS) %}<button class="btn" id="reprocesar" data-api="/api/reprocesar/b/{{ o.id }}" title="Vuelve a revisar la carpeta como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar</button>{% endif %}
     </div>
   </div>
 </div>
@@ -41,6 +42,14 @@
 {% endblock %}
 {% block js %}
 <script>
+const rp = document.getElementById('reprocesar');
+if (rp) rp.onclick = async () => {
+  if (!confirm('¿Reprocesar este álbum desde la biblioteca?\n\nLa carpeta se revisa como un álbum nuevo (cortes por cue, tags, edición, carátula) sin moverla. Al ubicarla, la versión nueva se arma y verifica aparte y, cuando su metadata termina bien, reemplaza a la actual: escuchas, favoritos y playlists pasan a la nueva y se borra la carpeta anterior. Puedes cancelar en cualquier momento antes de ubicar.')) return;
+  rp.disabled = true;
+  const r = await post(rp.dataset.api);
+  if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); rp.disabled = false; return; }
+  location.href = r.ir;
+};
 document.getElementById('ignorar').onclick = async () => {
   await post('/api/biblioteca/{{ o.id }}/ignorar', {si: {{ 'false' if ignorado else 'true' }}}); location.reload();
 };

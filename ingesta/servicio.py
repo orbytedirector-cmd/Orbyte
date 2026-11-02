@@ -450,6 +450,9 @@ def api_descartar(aid):
     a = almacen.album(aid)
     if not a or not _editable(a):
         return jsonify(ok=False), 409
+    if a.get('origen') == 'reproceso':          # cancelar: vuelve a como estaba en la biblioteca (nada se tocó)
+        almacen.cancelar_reproceso(aid)
+        return jsonify(ok=True, ir=_ficha_de_ruta(a['ruta']))
     almacen.actualizar(aid, estado='descartado', progreso=None)
     return jsonify(ok=True)
 
@@ -479,6 +482,9 @@ def api_duplicado(aid):
     elif accion == 'deshacer':
         c.pop('reemplazar', None)
         c['aceptadas'] = sorted(aceptadas - {'duplicado'})
+    elif accion == 'descartar' and a.get('origen') == 'reproceso':
+        almacen.cancelar_reproceso(aid)
+        return jsonify(ok=True, ir=_ficha_de_ruta(a['ruta']))
     elif accion == 'descartar':
         aj = almacen.ajustes()
         real, _ = sacd_mod.separar(a['ruta'])
@@ -793,6 +799,8 @@ def biblioteca_album(oid):
         return redirect(url_for('biblioteca_pagina'))
     aid = almacen.fila_de_ruta(o['ruta'])
     a = almacen.album(aid) if aid else None
+    if a and a.get('origen') == 'reproceso' and a['estado'] not in EN_BIBLIOTECA:
+        return redirect(url_for('album', aid=aid))            # se está reprocesando: su ficha de Bandeja
     if a and a.get('reporte') and not a['reporte'].get('fallo') and 'discos' in a['reporte']:
         return redirect(url_for('album', aid=aid))            # lo ubicó Ingesta: su ficha completa
     lib = lib_error = None
@@ -808,6 +816,46 @@ def biblioteca_album(oid):
                            portada=portada, fmt=fmt,
                            reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
                            ignorado=oid in almacen.titulos_ignorados())
+
+
+# ─────────────────────────── reprocesar un álbum de la biblioteca ───────────────────────────
+
+def _ficha_de_ruta(ruta):
+    """Ficha de Biblioteca del álbum de Orbyte con esa carpeta (o la Bandeja si ya no está)."""
+    db = almacen.ajustes().get('db_orbyte')
+    try:
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+        try:
+            r = con.execute('SELECT id FROM albums WHERE path=? OR path=?', (ruta.rstrip('/'), ruta.rstrip('/') + '/')).fetchone()
+        finally:
+            con.close()
+        if r:
+            return url_for('biblioteca_album', oid=r[0])
+    except Exception:
+        pass
+    return '/'
+
+
+@app.route('/api/reprocesar/<k>/<int:i>', methods=['POST'])
+def api_reprocesar(k, i):
+    """La carpeta del álbum en la biblioteca pasa por la revisión completa como si fuera nueva, sin moverla. Al
+    ubicarla, la versión nueva reemplaza a esta cuando su metadata termina bien (escuchas, favoritos y playlists
+    pasan a la nueva) y recién ahí se borra la carpeta anterior con sus audios y su .cue."""
+    ruta, _cp, fila, _o = _lib_portada(k, i)
+    if not ruta:
+        return jsonify(ok=False, error='El álbum no está en la biblioteca'), 404
+    aj = almacen.ajustes()
+    bib = os.path.realpath(aj.get('biblioteca') or '/mnt/musica')
+    if not os.path.realpath(ruta).startswith(bib + os.sep):
+        return jsonify(ok=False, error='La carpeta está fuera de la biblioteca'), 400
+    if fila and fila['estado'] not in EN_BIBLIOTECA:
+        return jsonify(ok=False, error='El álbum se está procesando: espera a que termine'), 409
+    if fila and fila['ruta'].rstrip('/') != ruta and fila['estado'] in EN_BIBLIOTECA:
+        fila = None                                   # (vino de una ISO: su fila sigue apuntando a la entrada)
+    aid = almacen.iniciar_reproceso(ruta, os.path.relpath(ruta, bib), analisis.firma(ruta))
+    almacen.registrar(aid, 'Reproceso: la carpeta de la biblioteca se revisa como un álbum nuevo (no se mueve nada)')
+    vigilante.ya()
+    return jsonify(ok=True, ir=url_for('album', aid=aid))
 
 
 # ─────────────────────────── carátula de un álbum ya en la biblioteca ───────────────────────────

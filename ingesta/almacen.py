@@ -73,7 +73,7 @@ class Almacen:
             for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
                               ('silencioso', 'INTEGER'), ('ubicado_en', 'TEXT'), ('terminado', 'REAL'),
                               ('resultado', 'TEXT'), ('version_reporte', 'INTEGER'), ('ubicado', 'REAL'),
-                              ('origen', 'TEXT')):
+                              ('origen', 'TEXT'), ('reproceso', 'TEXT')):
                 if col not in columnas:
                     c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
 
@@ -100,7 +100,7 @@ class Almacen:
         with self._con() as c:
             return [dict(r) for r in c.execute(
                 'SELECT id, ruta, rel, estado, progreso, detectado, analizado, artista, album, anio, '
-                'calidad, destino, n_pistas, conteo, ubicado_en, terminado FROM albumes '
+                'calidad, destino, n_pistas, conteo, ubicado_en, terminado, origen FROM albumes '
                 "WHERE COALESCE(origen, '') != 'biblioteca' ORDER BY detectado DESC, rel")]
 
     def recientes(self, desde):
@@ -125,6 +125,47 @@ class Almacen:
                             "origen) VALUES(?, ?, '[]', ?, 'completado', ?, ?, ?, ?, 'biblioteca')",
                             (ruta, os.path.basename(ruta), time.time(), ruta, artista, album, anio))
             return cur.lastrowid
+
+    # ── reprocesar un álbum que ya está en la biblioteca (sin pasar por la carpeta de entrada) ──
+    CAMPOS_REPROCESO = ('estado', 'origen', 'reporte', 'cambios', 'ubicado_en', 'ubicado', 'terminado', 'resultado',
+                        'artista', 'album', 'anio', 'calidad', 'destino', 'n_pistas', 'conteo', 'version_reporte',
+                        'registro', 'rel', 'firma', 'eleccion')
+
+    def iniciar_reproceso(self, ruta, rel, firma):
+        """La carpeta de la biblioteca vuelve a la Bandeja como un álbum nuevo cuyo origen es ella misma. Se guarda
+        cómo estaba la fila (si la había) para poder cancelar. Devuelve el id."""
+        ruta = ruta.rstrip('/')
+        ahora = time.time()
+        cambios = json.dumps({'reproceso_de': ruta, 'reemplazar': [ruta], 'aceptadas': ['duplicado']})
+        with _lock, self._con() as c:
+            r = c.execute('SELECT * FROM albumes WHERE ruta=?', (ruta,)).fetchone()
+            if r:
+                antes = json.dumps({k: r[k] for k in self.CAMPOS_REPROCESO if k in r.keys()}, ensure_ascii=False)
+                c.execute("UPDATE albumes SET estado='en_cola', origen='reproceso', reproceso=?, reporte=NULL, "
+                          'cambios=?, ubicado_en=NULL, ubicado=NULL, terminado=NULL, resultado=NULL, '
+                          'version_reporte=NULL, registro=NULL, eleccion=NULL, rel=?, firma=?, firma_desde=?, '
+                          "detectado=?, progreso='En cola para revisar', silencioso=0 WHERE id=?",
+                          (antes, cambios, rel, json.dumps(firma), ahora, ahora, r['id']))
+                return r['id']
+            cur = c.execute("INSERT INTO albumes(ruta, rel, firma, firma_desde, detectado, estado, origen, reproceso, "
+                            "cambios, progreso) VALUES(?, ?, ?, ?, ?, 'en_cola', 'reproceso', 'null', ?, "
+                            "'En cola para revisar')", (ruta, rel, json.dumps(firma), ahora, ahora, cambios))
+            return cur.lastrowid
+
+    def cancelar_reproceso(self, aid):
+        """Deja la fila como estaba antes de «Reprocesar» (o la borra si no existía). La carpeta nunca se tocó."""
+        with _lock, self._con() as c:
+            r = c.execute("SELECT reproceso FROM albumes WHERE id=? AND origen='reproceso'", (aid,)).fetchone()
+            if not r:
+                return False
+            antes = json.loads(r[0]) if r[0] else None
+            if not antes:
+                c.execute('DELETE FROM albumes WHERE id=?', (aid,))
+                c.execute('UPDATE avisos SET album_id=NULL WHERE album_id=?', (aid,))
+                return True
+            sets = ', '.join(f'{k}=?' for k in antes)
+            c.execute(f'UPDATE albumes SET {sets}, reproceso=NULL, progreso=NULL WHERE id=?', (*antes.values(), aid))
+            return True
 
     def fila_de_ruta(self, ruta):
         ruta = (ruta or '').rstrip('/')
@@ -165,7 +206,7 @@ class Almacen:
     def por_ruta(self):
         with self._con() as c:
             return {r['ruta']: dict(r) for r in c.execute(
-                'SELECT id, ruta, firma, firma_desde, estado FROM albumes')}
+                'SELECT id, ruta, firma, firma_desde, estado, origen FROM albumes')}
 
     def nuevo_album(self, ruta, rel, firma):
         ahora = time.time()
@@ -285,7 +326,8 @@ class Almacen:
     def con_estado(self, *estados):
         with self._con() as c:
             return [dict(r) for r in c.execute(
-                f'SELECT id, ruta, rel, estado FROM albumes WHERE estado IN ({",".join("?" * len(estados))})', estados)]
+                f'SELECT id, ruta, rel, estado, origen FROM albumes WHERE estado IN ({",".join("?" * len(estados))})',
+                estados)]
 
     def siguiente_en_cola(self):
         with self._con() as c:

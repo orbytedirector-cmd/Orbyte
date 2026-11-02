@@ -472,6 +472,13 @@ def copiar_extras(rep, origen, tmp):
             rel = os.path.relpath(os.path.join(raiz, a), origen)
             if rel in usados or a.startswith('.'):
                 continue
+            if rep.get('reproceso_de'):
+                # reproceso de un álbum de la biblioteca: los informes de RichMeta se rehacen, y lo que ya estaba
+                # en «Extras/» no queda en «Extras/Extras/»
+                if a.lower().startswith('richmetapro_'):
+                    continue
+                if rel.split(os.sep)[0] == 'Extras':
+                    rel = os.path.join(*rel.split(os.sep)[1:])
             if ext in EXTRAS_EXT or ext in analisis.IMAGEN_EXT:
                 dst = os.path.join(tmp, 'Extras', rel)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)

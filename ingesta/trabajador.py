@@ -129,7 +129,10 @@ class Procesador(threading.Thread):
                 raise procesar.FalloProceso('La carpeta cambió desde la revisión: se vuelve a revisar')
             reg(f'Etapa 2: {rep.get("artista")} — {rep.get("album")}')
             trab = recursos.nucleos(aj)
-            destino = procesar.ubicar(rep, aj, reg, borrar_origen=aj.get('borrar_origen', '1') == '1',
+            # un reproceso no borra su origen: es la versión de la biblioteca, y sale recién con el reemplazo
+            # (después de la metadata), junto con sus audios y su .cue
+            destino = procesar.ubicar(rep, aj, reg, borrar_origen=aj.get('borrar_origen', '1') == '1'
+                                      and a.get('origen') != 'reproceso',
                                       trabajadores=trab)
         except procesar.FalloProceso as e:
             cambio = 'cambió desde la revisión' in str(e)
