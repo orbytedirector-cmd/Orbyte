@@ -937,7 +937,7 @@ def _tidal_get(ep: str, **params) -> Optional[dict]:
         if r.status_code == 404:
             return None
         if r.status_code == 401 and intento == 0:
-            _tidal["token"] = _tidal_token()          # tidal-dl-ng pudo renovarla entre medio
+            _tidal_renovar()                          # la sesión de Tidal dura poco: tidal-dl-ng la renueva
             continue
         if r.status_code in (401, 403):
             _tidal["off"] = True
@@ -947,6 +947,26 @@ def _tidal_get(ep: str, **params) -> Optional[dict]:
             log.debug("Tidal %s HTTP %s", ep, r.status_code)
         return None
     return None
+
+
+def _tidal_renovar():
+    """Renueva la sesión con «tidal-dl-ng login» (con un token aún renovable no pide nada y guarda el nuevo) y la
+    vuelve a leer. Es lo mismo que hace la pestaña Buscar de la ingesta."""
+    import shutil
+    exe = shutil.which("tidal-dl-ng") or os.path.join(os.path.expanduser("~"), ".local", "bin", "tidal-dl-ng")
+    antes = _tidal["token"]
+    if os.path.isfile(exe):
+        env = dict(os.environ)
+        env["PATH"] = os.path.join(os.path.expanduser("~"), ".local", "bin") + os.pathsep + env.get("PATH", "")
+        try:
+            subprocess.run([exe, "login"], stdin=subprocess.DEVNULL, capture_output=True, timeout=45, env=env)
+        except subprocess.TimeoutExpired:
+            pass                                     # pidió iniciar sesión de nuevo (código en pantalla)
+        except Exception as e:
+            log.debug("tidal-dl-ng login: %s", e)
+    _tidal["token"] = _tidal_token()
+    if _tidal["token"] and _tidal["token"] != antes:
+        log.info("  · Tidal: sesión renovada")
 
 
 def buscar_letras_tidal(title: str, artist: str, album: str = "", duration_s: Optional[float] = None,
@@ -1013,7 +1033,7 @@ def _lrc_get(url: str, params: Optional[dict] = None, intentos: int = 2):
             time.sleep(3)
     _lrc_salud["fallos"] += 1
     log.warning("LRCLib no respondió (%s): %s %s", ultimo, url.rsplit("/api", 1)[-1], params or "")
-    if _lrc_salud["fallos"] >= 2:
+    if _lrc_salud["fallos"] >= 2 and not _lrc_salud["off"]:
         _lrc_salud["off"] = True
         log.warning("LRCLib no está respondiendo: se deja de consultar en esta corrida; las letras se buscan en Tidal")
     return None
