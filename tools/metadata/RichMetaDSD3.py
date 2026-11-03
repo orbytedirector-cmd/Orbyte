@@ -353,6 +353,12 @@ def leer_tags_completo(path: str) -> Optional[dict]:
                 if plain_val and plain_val[0].strip():
                     result["has_plain_lrc"] = True
                     result["plain_lrc_text"] = plain_val[0]
+                # tidal-dl-ng: LYRICS = la sincronizada (con marcas de tiempo) y UNSYNCEDLYRICS = la plana
+                unsync_val = flac.get("unsyncedlyrics", [])
+                if unsync_val is not None and "unsyncedlyrics" in (flac.tags or {}):
+                    result["tidal_dl_ng"] = True
+                    if unsync_val and unsync_val[0].strip():
+                        result["unsynced_text"] = unsync_val[0]
             except Exception as e:
                 log.debug("FLAC read error [%s]: %s", path, e)
         elif ext.endswith((".dsf", ".dff")):
@@ -416,7 +422,33 @@ def leer_tags_completo(path: str) -> Optional[dict]:
     except Exception as e:
         log.debug("leer_tags_completo [%s]: %s", path, e)
         return None
+    # Letra sincronizada guardada en la etiqueta de la plana (así la incrusta tidal-dl-ng en FLAC): ya está
+    # sincronizada, no hay que buscarla; se ordena al escribir (SYNCEDLYRICS = sincronizada, LYRICS = plana).
+    texto = result.get("plain_lrc_text")
+    if not result["has_synced_lrc"] and es_lrc(texto):
+        plana = (result.get("unsynced_text") or "").strip() or quitar_marcas(texto)
+        result["lrc_incrustada"] = {"synced": texto, "plain": plana or None, "score": 1.0, "lrclib_id": None,
+                                    "candidates_found": None,
+                                    "fuente": "Tidal" if result.get("tidal_dl_ng") else "archivo",
+                                    "incrustada": True}
+        result["plain_lrc_text"] = plana or None
     return result
+
+
+_RE_MARCA = re.compile(r"^\s*(\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\])+")
+
+
+def es_lrc(texto) -> bool:
+    """¿El texto es una letra sincronizada (líneas «[mm:ss.cc] …»)? Basta con que la mayoría de las líneas tenga marca."""
+    if not texto or not isinstance(texto, str):
+        return False
+    lineas = [l for l in texto.splitlines() if l.strip()]
+    con = sum(1 for l in lineas if _RE_MARCA.match(l))
+    return con >= 2 and con >= 0.6 * len(lineas)
+
+
+def quitar_marcas(texto) -> str:
+    return "\n".join(_RE_MARCA.sub("", l).strip() for l in (texto or "").splitlines()).strip()
 
 # ============================================================
 # API FETCHERS
@@ -1025,6 +1057,8 @@ def buscar_letras_tidal(title: str, artist: str, album: str = "", duration_s: Op
 
 
 def _fuente_lrc(lrc: dict) -> str:
+    if lrc.get("incrustada"):
+        return "incrustada " + ("por Tidal" if lrc.get("fuente") == "Tidal" else "en el archivo")
     if lrc.get("fuente") == "Tidal":
         return f"Tidal id={lrc.get('tidal_id')} score={lrc.get('score', 0):.2f}"
     return f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score', 0):.2f}"
@@ -2214,7 +2248,10 @@ def render_track_html(r: dict) -> str:
         html += _kv("Score match", f"{lrc_res.get('score',0):.3f}")
     if lrc_res.get("track_name_match"): html += _kv("Match encontrado", lrc_res["track_name_match"])
     if lrc_res.get("album_match"): html += _kv("Álbum match", lrc_res["album_match"])
-    if lrc_res.get("fuente") == "Tidal":
+    if lrc_res.get("incrustada"):
+        html += _kv("Fuente", "Incrustada " + ("por Tidal" if lrc_res.get("fuente") == "Tidal" else "en el archivo")
+                    + " (no se buscó)")
+    elif lrc_res.get("fuente") == "Tidal":
         html += _kv("Fuente", "Tidal (respaldo)")
         html += _kv("Tidal ID", str(lrc_res.get("tidal_id")))
         html += _kv("Score match", f"{lrc_res.get('score',0):.3f}")
@@ -2296,6 +2333,7 @@ def procesar(path: str, audit_log: list) -> dict:
 
     log.info("🎵 %s — %s", artist or "?", title or "?")
     if existing["has_synced_lrc"]: log.info("  ✓ Ya tiene letras sincronizadas")
+    elif existing.get("lrc_incrustada"): log.info("  ✓ Ya tiene letra sincronizada (en la etiqueta LYRICS)")
     elif existing["has_plain_lrc"]: log.info("  ✓ Ya tiene letras planas")
 
     # MusicBrainz primero; huella + AcoustID solo como respaldo (faltan artista/título
@@ -2359,11 +2397,17 @@ def procesar(path: str, audit_log: list) -> dict:
 
     # Lyrics logic
     lrc_result = {"synced":None,"plain":None,"lrclib_id":None,"score":0.0,"candidates_found":0}
-    if not existing["has_synced_lrc"]:
+    if existing.get("lrc_incrustada"):
+        lrc_result = existing["lrc_incrustada"]
+        log.info("  · %s — Letra sincronizada ya incrustada%s: no se busca en LRCLib (se ordena en SYNCEDLYRICS)",
+                 title, " por Tidal" if lrc_result.get("fuente") == "Tidal" else " en el archivo")
+    elif not existing["has_synced_lrc"]:
         _lrc_raw = buscar_lrclib(title=title, artist=artist,
                                   album=album or (mb_details.get("album") if mb_details else ""),
                                   duration_s=duration)
-        if not _lrc_raw.get("synced"):
+        if not _lrc_raw.get("synced") and existing.get("tidal_dl_ng"):
+            log.info("  · %s — Tidal (respaldo): se omite, la letra ya vino de Tidal sin sincronizar", title)
+        elif not _lrc_raw.get("synced"):
             log.info("  · %s — Tidal (respaldo): buscando letra%s…", title,
                      " (LRCLib no responde)" if _lrc_salud["off"] else " (LRCLib sin letra sincronizada)")
             _tid = buscar_letras_tidal(title=title, artist=artist,
