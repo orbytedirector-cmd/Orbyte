@@ -85,7 +85,7 @@ app.config.update(
 
 vigilante = Vigilante(almacen)
 procesador = Procesador(almacen)
-descargador = tienda_mod.Descargador(almacen, vigilante)
+descargador = tienda_mod.Descargador(almacen, vigilante, DATOS)
 vigilante.procesador = procesador
 
 
@@ -1126,6 +1126,7 @@ def api_descargas():
     lista = almacen.descargas()
     for d in lista:
         d['carpetas'] = json.loads(d['carpetas']) if d.get('carpetas') else []
+        d['pendientes'] = json.loads(d['pendientes']) if d.get('pendientes') else []
         d['bandeja'] = None
         for c in d['carpetas']:
             aid = almacen.fila_de_ruta(c)
@@ -1149,11 +1150,52 @@ def api_descarga_accion(did, accion):
     elif accion == 'reintentar' and d['estado'] in ('error', 'cancelada'):
         almacen.actualizar_descarga(did, estado='en_cola', error=None, progreso=None, ts=time.time())
         descargador.ya()
-    elif accion == 'quitar' and d['estado'] != 'descargando':
+    elif accion == 'quitar' and d['estado'] not in ('descargando', 'decision'):
         almacen.borrar_descarga(did)
+    elif accion == 'convertir' and d['estado'] == 'decision':
+        formato = (request.get_json(silent=True) or {}).get('formato')
+        if formato not in ('flac', 'mp3'):
+            return jsonify(ok=False, error='Formato no válido'), 400
+        almacen.actualizar_descarga(did, estado='convirtiendo', progreso='Convirtiendo…')
+        threading.Thread(target=_convertir_descarga, args=(did, formato), daemon=True, name='convertir').start()
+    elif accion == 'descartar' and d['estado'] == 'decision':
+        for c in json.loads(d.get('carpetas') or '[]'):
+            real = os.path.realpath(c)
+            base = os.path.realpath(tienda_mod.carpeta_destino(d['servicio']))
+            if real.startswith(base + os.sep) and os.path.isdir(real):
+                shutil.rmtree(real)
+        almacen.actualizar_descarga(did, estado='cancelada', pendientes=None, progreso=None,
+                                    error='Descartado: había pistas sin versión sin pérdida')
+        vigilante.pausa_rutas = vigilante.pausa_rutas - {c.rstrip('/') for c in json.loads(d.get('carpetas') or '[]')}
     else:
         return jsonify(ok=False, error='No se puede en este estado'), 409
     return jsonify(ok=True)
+
+
+def _convertir_descarga(did, formato):
+    from . import rescate
+    d = almacen.descarga(did)
+    pend = json.loads(d.get('pendientes') or '[]')
+    lineas = (d.get('registro') or '').splitlines()
+    errores = []
+    for p in pend:
+        try:
+            nuevo = rescate.convertir(p['ruta'], formato)
+            lineas.append(f'  ✓ {os.path.basename(nuevo)}: convertida a {"FLAC" if formato == "flac" else "MP3 320"} '
+                          f'desde {(p.get("codec") or "?").upper()}')
+        except Exception as e:  # noqa: BLE001
+            errores.append(p['archivo'])
+            lineas.append(f'  ✗ {p["archivo"]}: no se pudo convertir ({e})')
+    if errores:
+        almacen.actualizar_descarga(did, estado='decision', progreso=f'No se pudieron convertir {len(errores)} pista(s)',
+                                    registro='\n'.join(lineas[-120:]))
+        return
+    carpetas = {c.rstrip('/') for c in json.loads(d.get('carpetas') or '[]')}
+    almacen.actualizar_descarga(did, estado='terminada', pendientes=None, fin=time.time(),
+                                progreso=f'{len(pend)} pista(s) convertidas a {"FLAC" if formato == "flac" else "MP3 320"} (Lossy)',
+                                registro='\n'.join(lineas[-120:]))
+    vigilante.pausa_rutas = vigilante.pausa_rutas - carpetas
+    vigilante.ya()
 
 
 # ─────────────────────────── reprocesar un álbum de la biblioteca ───────────────────────────
