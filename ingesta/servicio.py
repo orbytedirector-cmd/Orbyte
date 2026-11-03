@@ -478,6 +478,38 @@ def _en_music_db(ruta):
         return True                  # ante la duda, no se ofrece borrar
 
 
+@app.route('/api/album/<int:aid>/descartar_borrar', methods=['POST'])
+def api_descartar_borrar(aid):
+    """Antes de ubicar: se borra la carpeta de la entrada (p. ej. una descarga en AAC) y el álbum sale de la bandeja."""
+    a = almacen.album(aid)
+    if not a or not (_editable(a) or a['estado'] == 'descartado') or a.get('origen') == 'reproceso':
+        return jsonify(ok=False, error='Solo para álbumes que aún no se ubican'), 409
+    if a['estado'] == 'analizando' or procesador.actual == aid:
+        return jsonify(ok=False, error='Se está revisando: espera a que termine'), 409
+    ruta = (a.get('ruta') or '').rstrip('/')
+    if ruta.endswith(sacd_mod.SUFIJO_MC):
+        return jsonify(ok=False, error='Es la parte multicanal de un ISO: descarta la estéreo para borrar el ISO'), 409
+    entrada = os.path.realpath((almacen.ajustes().get('carpeta_entrada') or '').strip() or '/nonexistent')
+    real = os.path.realpath(ruta) if ruta else ''
+    if not real or not real.startswith(entrada + os.sep):
+        return jsonify(ok=False, error='La carpeta no está dentro de la carpeta de entrada'), 409
+    if os.path.isdir(real):
+        shutil.rmtree(real)
+    elif os.path.isfile(real):
+        os.remove(real)
+    padre = os.path.dirname(real)                    # la carpeta que la contenía, solo si quedó vacía
+    while padre.startswith(entrada + os.sep):
+        try:
+            os.rmdir(padre)
+        except OSError:
+            break
+        padre = os.path.dirname(padre)
+    almacen.borrar_album(aid)
+    almacen.avisar('ok', f'Borrado de la entrada: {a.get("artista") or a.get("rel")} — {a.get("album") or ""}'.rstrip(' —'),
+                   os.path.relpath(real, entrada))
+    return jsonify(ok=True)
+
+
 @app.route('/api/album/<int:aid>/descartar_ubicado', methods=['POST'])
 def api_descartar_ubicado(aid):
     """Álbum ubicado cuya metadata falló antes de entrar a Orbyte: se borra su carpeta de la biblioteca y se descarta."""

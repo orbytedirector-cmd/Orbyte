@@ -86,9 +86,11 @@
       {% if editable and a.estado != 'descartado' %}
         <button class="btn" data-accion="revisar">{{ ICONO_REVISAR }}Volver a revisar</button>
         {% if a.origen == 'reproceso' %}<button class="btn" data-accion="descartar" title="Se cancela el reproceso; el álbum queda en la biblioteca tal como estaba">Cancelar reproceso</button>
-        {% else %}<button class="btn" data-accion="descartar" title="No se ubica; los archivos quedan donde están">Descartar</button>{% endif %}
+        {% else %}<button class="btn" data-accion="descartar" title="No se ubica; los archivos quedan donde están">Descartar</button>
+        <button class="btn" id="descartar-borrar" title="Se borra su carpeta de la entrada y sale de la bandeja">Descartar y borrar de la entrada</button>{% endif %}
       {% elif a.estado == 'descartado' %}
         <button class="btn" data-accion="restaurar">Volver a la bandeja</button>
+        {% if a.origen != 'reproceso' %}<button class="btn" id="descartar-borrar" title="Se borra su carpeta de la entrada">Borrar de la entrada</button>{% endif %}
       {% endif %}
       <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s{% if a.estado in PREVIOS %} · los archivos aún no se han tocado{% endif %}</span>
     </div>
@@ -428,6 +430,17 @@
 {% endblock %}
 {% block js %}
 <script>
+(function () {
+  const b = document.getElementById('descartar-borrar');
+  if (!b) return;
+  b.addEventListener('click', async () => {
+    if (!confirm({{ ('Se borra de la entrada ' ~ (a.rel or a.ruta or '') ~ ' con todos sus archivos y el álbum sale de la bandeja. ¿Seguir?')|tojson }})) return;
+    b.disabled = true;
+    const r = await post('/api/album/{{ a.id }}/descartar_borrar', {});
+    if (r && r.ok) location.href = '/';
+    else { b.disabled = false; toast('No se pudo', (r && r.error) || ''); }
+  });
+})();
 (function () {
   const b = document.getElementById('descartar-ubicado');
   if (!b) return;
