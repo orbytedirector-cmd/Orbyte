@@ -246,7 +246,7 @@ def album(aid):
     dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
     actuales = ajustar_mod.pistas_actuales(a.get('reporte'), lib) if lib else {}
     portada = _portada_vista(a['ubicado_en'] or a['ruta']) if lib else None
-    sin_indexar = a['estado'] == 'error_metadata' and not _en_music_db(a.get('ubicado_en'))
+    sin_indexar = a['estado'] == 'error_metadata'          # «Borrar de la biblioteca y descartar»
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
                            actuales=actuales, portada=portada, sin_indexar=sin_indexar,
                            dup_filas=dup_filas,
@@ -519,7 +519,20 @@ def api_descartar_ubicado(aid):
     ruta = (a.get('ubicado_en') or '').rstrip('/')
     raiz = os.path.realpath(almacen.ajustes().get('biblioteca') or '/mnt/musica')
     if _en_music_db(ruta):
-        return jsonify(ok=False, error='Orbyte ya tiene este álbum: elimínalo desde la Biblioteca'), 409
+        # Orbyte alcanzó a indexarlo (en parte): la eliminación segura lo quita de la base y del disco, y su fila
+        # de la Bandeja sale sola al terminar
+        con = sqlite3.connect(f'file:{almacen.ajustes()["db_orbyte"]}?mode=ro', uri=True, timeout=20)
+        try:
+            r = con.execute('SELECT id FROM albums WHERE path=? OR path=?', (ruta, ruta + '/')).fetchone()
+        finally:
+            con.close()
+        e, _db = _edicion_de_oid(r[0]) if r else (None, None)
+        if not e:
+            return jsonify(ok=False, error='No se encontró el álbum en Orbyte'), 409
+        ok, res = _eliminar_seguro(e)
+        if not ok:
+            return jsonify(ok=False, error=res), 409
+        return jsonify(ok=True, en_curso=True)
     if ruta and os.path.isdir(ruta):
         real = os.path.realpath(ruta)
         if not real.startswith(raiz + os.sep) or real.count(os.sep) - raiz.count(os.sep) < 3:
@@ -941,15 +954,23 @@ def api_biblioteca_album_eliminar(oid):
     d = request.get_json(silent=True) or {}
     if d.get('confirmacion') != 'ELIMINAR':
         return jsonify(ok=False, error='Falta la confirmación'), 400
-    if procesador.actual:
-        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
-    if not procesador.biblioteca_lista():
-        return jsonify(ok=False, error='La biblioteca no está montada'), 409
     destino = d.get('destino') or None
     if destino and destino not in {o['ruta'] for o in opciones}:
         return jsonify(ok=False, error='Esa edición ya no está: recarga la página'), 409
+    ok, res = _eliminar_seguro(e, destino, todas)
+    return jsonify(ok=True, uid=res) if ok else (jsonify(ok=False, error=res), 409)
+
+
+def _eliminar_seguro(e, destino=None, todas=None):
+    """La eliminación segura de Repetidos (en segundo plano). (True, uid) o (False, motivo)."""
+    if procesador.actual:
+        return False, 'Hay un álbum procesándose: espera a que termine'
+    if not procesador.biblioteca_lista():
+        return False, 'La biblioteca no está montada'
     if not _unificando.acquire(blocking=False):
-        return jsonify(ok=False, error='Hay otra operación sobre la base en curso'), 409
+        return False, 'Hay otra operación sobre la base en curso'
+    if todas is None:
+        todas = {}
     aj = almacen.ajustes()
     titulo = f'{e["artista"]} — {e["nombre"]}'
     grupo = {'ediciones': [e] + ([todas[destino]] if destino else [])}
@@ -978,7 +999,7 @@ def api_biblioteca_album_eliminar(oid):
             _unificando.release()
 
     threading.Thread(target=trabajo, daemon=True, name='eliminar-biblioteca').start()
-    return jsonify(ok=True, uid=uid)
+    return True, uid
 
 
 def _album_orbyte(oid):
