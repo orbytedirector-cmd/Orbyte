@@ -2406,7 +2406,9 @@ def procesar(path: str, audit_log: list) -> dict:
                                   album=album or (mb_details.get("album") if mb_details else ""),
                                   duration_s=duration)
         if not _lrc_raw.get("synced") and existing.get("tidal_dl_ng"):
-            log.info("  · %s — Tidal (respaldo): se omite, la letra ya vino de Tidal sin sincronizar", title)
+            log.info("  · %s — Tidal (respaldo): se omite, %s", title,
+                     "la letra ya vino de Tidal sin sincronizar" if existing.get("has_plain_lrc")
+                     else "la pista vino de Tidal sin letra (Tidal no la tiene)")
         elif not _lrc_raw.get("synced"):
             log.info("  · %s — Tidal (respaldo): buscando letra%s…", title,
                      " (LRCLib no responde)" if _lrc_salud["off"] else " (LRCLib sin letra sincronizada)")
