@@ -470,3 +470,8 @@ label.btn[aria-disabled] { opacity: .5; pointer-events: none; }
 .d-txt { flex: 1 1 360px; min-width: 0; display: flex; flex-direction: column; gap: .35rem; }
 .d-barra { height: 6px; background: #222; border-radius: 3px; overflow: hidden; max-width: 520px; }
 .d-barra > div { height: 6px; background: var(--oro); transition: width .6s; }
+
+/* campos de búsqueda sueltos (sin estilo propio): fondo oscuro y texto visible */
+input[type=search].campo-buscar, .campo > input[type=search] { width: 100%; box-sizing: border-box; background: var(--card);
+  color: var(--texto); border: 1px solid var(--borde-2); border-radius: 10px; padding: .6rem .85rem; font: inherit; }
+input[type=search].campo-buscar:focus, .campo > input[type=search]:focus { outline: 2px solid var(--borde-oro); border-color: var(--oro); }

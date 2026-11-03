@@ -6,7 +6,8 @@
   <div class="sub">Álbumes de Orbyte cuyos títulos de pista no están normalizados (la regla tiene que cumplirla la mayoría de las pistas). Ábrelos uno a uno, o marca varios y aplica ✦ Autocorregir solo a los títulos, con vista previa. Cada pista conserva su ID.</div>
 </div></div>
 <div class="filtros" id="filtros"></div>
-<div class="campo" style="max-width:420px;margin-bottom:1rem"><input type="search" id="buscar" placeholder="Buscar artista o álbum…"></div>
+<div class="campo" style="max-width:420px;margin-bottom:1rem"><input type="search" id="buscar" class="campo-buscar" placeholder="Buscar artista o álbum en toda la biblioteca…" aria-label="Buscar artista o álbum"></div>
+<div id="toda"></div>
 <div id="estado"><div class="estado-vivo"><span class="giro"></span>Revisando music.db…</div></div>
 <div id="lista"></div>
 <div id="previa"></div>
@@ -122,7 +123,31 @@ async function verPrevia() {
   };
 }
 setInterval(() => { if (datos && !verIgnorados && datos.albumes.some(a => a.proceso) && !document.querySelector('#previa .panel')) cargar(); }, 8000);
-document.getElementById('buscar').oninput = () => { limite = 150; pintar(); };
+// la búsqueda también recorre TODA la biblioteca (no solo los álbumes con títulos por normalizar)
+let reloj = null, ultimaQ = '';
+async function buscarToda() {
+  const q = document.getElementById('buscar').value.trim();
+  const caja = document.getElementById('toda');
+  if (q === ultimaQ) return;
+  ultimaQ = q;
+  if (q.length < 2) { caja.innerHTML = ''; return; }
+  const r = await (await fetch('/api/biblioteca/buscar?' + new URLSearchParams({q}))).json();
+  if (q !== ultimaQ) return;
+  if (r.error) { caja.innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  caja.innerHTML = `<h2 class="rotulo" style="margin:.4rem 0 .6rem">En toda la biblioteca · ${r.albumes.length}${r.mas ? '+' : ''}</h2>` +
+    (r.albumes.length ? `<div class="tabla-wrap" style="margin-bottom:1.4rem"><table>
+      <tr><th>Álbum</th><th>Calidad</th><th class="oculto-movil">Carpeta</th></tr>
+      ${r.albumes.map(a => `<tr><td><a href="/biblioteca/album/${a.id}"><div class="t">${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
+        <div class="s">${esc(a.artista)} · ${a.n_pistas} pistas</div></a></td>
+        <td>${a.tag ? `<span class="chip q-${esc(a.tag)}"><span class="led"></span>${esc(a.tag)}</span>` : ''} <span class="s tenue">${esc(a.formato || '')}</span></td>
+        <td class="oculto-movil"><span class="s mono muy-tenue">${esc(rel(a.ruta))}</span></td></tr>`).join('')}
+    </table></div>` : '<div class="sub" style="margin-bottom:1.4rem">Nada en la biblioteca con ese texto.</div>') +
+    '<h2 class="rotulo" style="margin:0 0 .6rem">Con títulos por normalizar</h2>';
+}
+document.getElementById('buscar').oninput = () => {
+  limite = 150; pintar();
+  clearTimeout(reloj); reloj = setTimeout(buscarToda, 300);
+};
 cargar();
 </script>
 {% endblock %}
