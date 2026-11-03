@@ -8,6 +8,7 @@ Orbyte y solo responde a la red de la casa / Tailscale.
 Arranque:  ./ingesta/start.sh   (o  python -m ingesta  desde la raíz del repo)
 Variables: INGESTA_PORT (5005) · INGESTA_DATOS (<repo>/ingesta_datos) · ORBYTE_DB (<repo>/music.db)
 """
+import difflib
 import hashlib
 import ipaddress
 import json
@@ -785,6 +786,125 @@ def api_biblioteca_buscar():
     return jsonify(mas=len(hallados) > 200, albumes=[
         {'id': g['ids'][0], 'artista': g['artista'], 'album': g['album'], 'anio': g.get('anio'), 'ruta': g['ruta'],
          'n_pistas': g['pistas'], 'tag': g.get('tag'), 'formato': g.get('formato')} for g in hallados[:200]])
+
+
+def _edicion_de_oid(oid):
+    """(edición tal como la ve Repetidos, db) del álbum de Orbyte `oid` — la carpeta entera si es de varios discos."""
+    o = _album_orbyte(oid)
+    if not o or not o['ruta']:
+        return None, None
+    db = almacen.ajustes().get('db_orbyte')
+    ruta = repetidos_mod._base_edicion(o['ruta'])
+    eds = repetidos_mod.ediciones_de(db, [ruta])
+    return (eds[0] if eds else None), db
+
+
+def _limpio(nombre):
+    n = repetidos_mod._nombre_limpio(nombre)
+    n = re.sub(r'\s*\((?:live|en vivo|en directo|remastered|mono|stereo)[^)]*\)', '', n, flags=re.I)
+    return analisis._norm(n)
+
+
+@app.route('/api/biblioteca/album/<int:oid>/info')
+def api_biblioteca_album_info(oid):
+    """Datos técnicos de un álbum de la biblioteca para el modal «Más información»."""
+    e, db = _edicion_de_oid(oid)
+    if not e:
+        return jsonify(error='El álbum ya no está en Orbyte'), 404
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in con.execute('PRAGMA table_info(tracks)')}
+        extra = [c for c in ('sample_rate', 'bit_depth', 'bitrate', 'codec', 'file_size', 'channels', 'is_dsd', 'dsd_rate')
+                 if c in cols]
+        m = ','.join('?' * len(e['albumes']))
+        pistas = [dict(p) for p in con.execute(
+            f'SELECT title, track_number, disc_number, duration, file_path{"".join(", " + c for c in extra)} FROM tracks '
+            f'WHERE album_id IN ({m}) ORDER BY disc_number, CAST(track_number AS INTEGER)', e['albumes'])]
+    finally:
+        con.close()
+    for p in pistas:
+        p['archivo'] = os.path.basename(p.pop('file_path') or '')
+    tags = repetidos_mod._tags_edicion(os.path.join(e['ruta'], pistas[0]['archivo'])) if pistas else {}
+    otros = []
+    try:
+        for n in sorted(os.listdir(e['ruta'])):
+            if os.path.splitext(n)[1].lower() in analisis.IMAGEN_EXT | {'.pdf', '.cue', '.log', '.txt', '.nfo'} \
+                    or os.path.isdir(os.path.join(e['ruta'], n)):
+                otros.append(n + ('/' if os.path.isdir(os.path.join(e['ruta'], n)) else ''))
+    except OSError:
+        pass
+    return jsonify(id=oid, artista=e['artista'], album=e['nombre'], anio=e['anio'], ruta=e['ruta'],
+                   formato=e['formato'], calidad=e['calidad'], multicanal=e.get('multicanal'), n=e['n'], dur=e['dur'],
+                   bytes=e['bytes'], sr=e['sr'], bits=e['bits'], bitrate=e['bitrate'], codecs=e['codecs'],
+                   escuchas=e['escuchas'], playlists=e['playlists'], favoritos=e['favoritos'],
+                   medicion=almacen.medicion(e['ruta'], e['bytes']), tags=tags, pistas=pistas, otros=otros[:40],
+                   raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+
+
+@app.route('/api/biblioteca/album/<int:oid>/eliminar', methods=['GET', 'POST'])
+def api_biblioteca_album_eliminar(oid):
+    """GET: qué se borra y a qué edición pueden pasar sus escuchas, favoritos y playlists.
+    POST {destino: ruta|null, confirmacion: 'ELIMINAR'}: la misma eliminación segura de Repetidos."""
+    e, db = _edicion_de_oid(oid)
+    if not e:
+        return jsonify(ok=False, error='El álbum ya no está en Orbyte'), 404
+    todas = repetidos_mod._ediciones(db)
+    yo = _limpio(e['nombre'])
+    candidatos = []
+    for x in todas.values():
+        if x['ruta'] == e['ruta'] or x['artist_id'] != e['artist_id'] or not x['n']:
+            continue
+        sim = difflib.SequenceMatcher(None, yo, _limpio(x['nombre'])).ratio()
+        candidatos.append((sim, repetidos_mod._calidad(x)))
+    candidatos.sort(key=lambda c: -c[0])
+    opciones = [{'ruta': x['ruta'], 'album': x['nombre'], 'anio': x['anio'], 'formato': x['formato'],
+                 'calidad': x['calidad'], 'n': x['n'], 'similitud': round(sim, 2)} for sim, x in candidatos[:8]]
+    if request.method == 'GET':
+        return jsonify(ok=True, ruta=e['ruta'], album=e['nombre'], artista=e['artista'], n=e['n'], bytes=e['bytes'],
+                       formato=e['formato'], escuchas=e['escuchas'], playlists=e['playlists'], favoritos=e['favoritos'],
+                       opciones=opciones, sugerida=opciones[0]['ruta'] if opciones and opciones[0]['similitud'] >= 0.6 else None)
+    d = request.get_json(silent=True) or {}
+    if d.get('confirmacion') != 'ELIMINAR':
+        return jsonify(ok=False, error='Falta la confirmación'), 400
+    if procesador.actual:
+        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    destino = d.get('destino') or None
+    if destino and destino not in {o['ruta'] for o in opciones}:
+        return jsonify(ok=False, error='Esa edición ya no está: recarga la página'), 409
+    if not _unificando.acquire(blocking=False):
+        return jsonify(ok=False, error='Hay otra operación sobre la base en curso'), 409
+    aj = almacen.ajustes()
+    titulo = f'{e["artista"]} — {e["nombre"]}'
+    grupo = {'ediciones': [e] + ([todas[destino]] if destino else [])}
+    uid = almacen.nueva_unificacion('repetidos', e['ruta'], titulo)
+
+    def trabajo():
+        try:
+            res = repetidos_mod.eliminar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', grupo, [e['ruta']],
+                                         destino, lambda m: almacen.unificacion_log(uid, m), sin_destino=not destino)
+            while True:                              # sus filas de Ingesta (si las ubicó ella) también salen
+                fila = almacen.fila_de_ruta(e['ruta'])
+                if not fila:
+                    break
+                almacen.borrar_album(fila)
+            almacen.cerrar_unificacion(uid, 'ok', res)
+            almacen.avisar('ok', f'Eliminado: {titulo}', f'{res["liberado"] / 1e9:.2f} GB liberados · '
+                           + (f'{res["movidas"]} referencias pasadas a «{os.path.basename(destino)}»' if destino
+                              else 'su historial no pasó a otra edición'))
+        except Exception as ex:
+            log.error('Eliminar %s:\n%s', titulo, traceback.format_exc())
+            almacen.unificacion_log(uid, f'ERROR: {type(ex).__name__}: {ex}')
+            almacen.cerrar_unificacion(uid, 'error', {'error': str(ex)})
+            almacen.avisar('error', f'No se pudo eliminar: {titulo}', str(ex))
+        finally:
+            _cache_repetidos['clave'] = None
+            _unificando.release()
+
+    threading.Thread(target=trabajo, daemon=True, name='eliminar-biblioteca').start()
+    return jsonify(ok=True, uid=uid)
 
 
 def _album_orbyte(oid):

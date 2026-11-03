@@ -475,3 +475,10 @@ label.btn[aria-disabled] { opacity: .5; pointer-events: none; }
 input[type=search].campo-buscar, .campo > input[type=search] { width: 100%; box-sizing: border-box; background: var(--card);
   color: var(--texto); border: 1px solid var(--borde-2); border-radius: 10px; padding: .6rem .85rem; font: inherit; }
 input[type=search].campo-buscar:focus, .campo > input[type=search]:focus { outline: 2px solid var(--borde-oro); border-color: var(--oro); }
+
+/* Biblioteca: «Más información» y «Eliminar…» */
+.b-datos { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .55rem .9rem; }
+.b-opciones { display: flex; flex-direction: column; gap: .45rem; }
+.b-opcion { display: flex; gap: .6rem; align-items: flex-start; padding: .55rem .7rem; border: 1px solid var(--borde-2); border-radius: 10px; cursor: pointer; }
+.b-opcion:has(input:checked) { border-color: var(--oro); background: var(--oro-tenue); }
+.b-opcion input { margin-top: .25rem; }
