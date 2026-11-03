@@ -2391,6 +2391,13 @@ def procesar(path: str, audit_log: list) -> dict:
     lastfm_tags  = obtener_generos_lastfm(artist)
     mb_genres    = obtener_generos_mb(mb_recording)
     genre_primary, genre_secondary = consenso_generos(lastfm_tags, mb_genres)
+    if not genre_primary and not genre_secondary:
+        # Ni Last.fm ni MusicBrainz: se respeta el género que ya tiene el archivo (p. ej. el que pusiste en
+        # «Editar tags»), para que quede también en Orbyte y no solo en el tag
+        propio = (std.get("genre") or "").split(";")[0].split("/")[0].strip()
+        if propio and not _tag_empty(propio):
+            genre_primary = propio
+            log.info("  · Género: sin datos en Last.fm ni MusicBrainz — se conserva el del archivo: %s", propio)
     genres_final = ([genre_primary] + genre_secondary) if genre_primary else genre_secondary
 
     ab_features = obtener_ab_features(mbid)
