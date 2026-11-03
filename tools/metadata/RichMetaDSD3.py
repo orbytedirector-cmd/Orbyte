@@ -882,6 +882,27 @@ def _score_candidate(cand: dict, title: str, artist: str, album: str,
     return round(max(score, 0.0), 3)
 
 
+LRC_TIMEOUT = 25          # LRCLib a veces tarda bastante en responder: con 10 s se daba por «sin letra»
+
+
+def _lrc_get(url: str, params: Optional[dict] = None, intentos: int = 2):
+    """GET a LRCLib con un reintento si no responde (timeout, conexión o 5xx). Devuelve la respuesta o None;
+    si falla del todo lo deja en el log como advertencia (antes quedaba como «sin letras disponibles»)."""
+    ultimo = None
+    for i in range(intentos):
+        try:
+            r = requests.get(url, params=params, headers=HEADERS_LRC, timeout=LRC_TIMEOUT)
+            if r.status_code < 500:
+                return r
+            ultimo = f"HTTP {r.status_code}"
+        except requests.RequestException as e:
+            ultimo = type(e).__name__
+        if i + 1 < intentos:
+            time.sleep(3)
+    log.warning("LRCLib no respondió (%s): %s %s", ultimo, url.rsplit("/api", 1)[-1], params or "")
+    return None
+
+
 def buscar_lrclib(title: str, artist: str, album: str = "",
                   duration_s: Optional[float] = None) -> dict:
     """
@@ -930,8 +951,9 @@ def buscar_lrclib(title: str, artist: str, album: str = "",
             params["duration"] = int(duration_s)
         try:
             log.debug("LRCLib GET /get (exact) -> %s", params)
-            r = requests.get(f"{LRCLIB_BASE}/get", params=params,
-                             headers=HEADERS_LRC, timeout=10)
+            r = _lrc_get(f"{LRCLIB_BASE}/get", params)
+            if r is None:
+                return None
             if r.status_code == 200:
                 return r.json()
             if r.status_code == 404:
@@ -950,8 +972,9 @@ def buscar_lrclib(title: str, artist: str, album: str = "",
         _lrc_wait()
         try:
             log.debug("LRCLib GET /search -> %s", params)
-            r = requests.get(f"{LRCLIB_BASE}/search", params=params,
-                             headers=HEADERS_LRC, timeout=10)
+            r = _lrc_get(f"{LRCLIB_BASE}/search", params)
+            if r is None:
+                return []
             if r.status_code == 429:
                 log.error("LRCLib 429 en /search — esperando 10s")
                 time.sleep(10)
@@ -968,11 +991,10 @@ def buscar_lrclib(title: str, artist: str, album: str = "",
         """GET /api/get/<id> — obtiene letra completa por ID."""
         _lrc_wait()
         try:
-            r = requests.get(f"{LRCLIB_BASE}/get/{lrclib_id}",
-                             headers=HEADERS_LRC, timeout=8)
-            if r.status_code == 200:
+            r = _lrc_get(f"{LRCLIB_BASE}/get/{lrclib_id}")
+            if r is not None and r.status_code == 200:
                 return r.json()
-            log.debug("LRCLib /get/%s HTTP %s", lrclib_id, r.status_code)
+            log.debug("LRCLib /get/%s HTTP %s", lrclib_id, r.status_code if r is not None else '—')
         except Exception as e:
             log.debug("LRCLib /get/%s error: %s", lrclib_id, e)
         return None
