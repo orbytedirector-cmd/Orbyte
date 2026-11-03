@@ -988,21 +988,34 @@ def _fuente_lrc(lrc: dict) -> str:
 LRC_TIMEOUT = 25          # LRCLib a veces tarda bastante en responder: con 10 s se daba por «sin letra»
 
 
+_lrc_salud = {"fallos": 0, "off": False}     # fallas seguidas de LRCLib en esta corrida
+
+
 def _lrc_get(url: str, params: Optional[dict] = None, intentos: int = 2):
-    """GET a LRCLib con un reintento si no responde (timeout, conexión o 5xx). Devuelve la respuesta o None;
-    si falla del todo lo deja en el log como advertencia (antes quedaba como «sin letras disponibles»)."""
+    """GET a LRCLib. Si no responde (timeout, conexión o 5xx) reintenta una vez; tras la primera falla las
+    consultas siguientes van sin reintento y con menos espera, y tras 2 fallas seguidas LRCLib se deja de
+    consultar en esta corrida (las letras se buscan en Tidal). Devuelve la respuesta o None."""
+    if _lrc_salud["off"]:
+        return None
+    degradado = _lrc_salud["fallos"] > 0
+    intentos, espera = (1, 12) if degradado else (intentos, LRC_TIMEOUT)
     ultimo = None
     for i in range(intentos):
         try:
-            r = requests.get(url, params=params, headers=HEADERS_LRC, timeout=LRC_TIMEOUT)
+            r = requests.get(url, params=params, headers=HEADERS_LRC, timeout=espera)
             if r.status_code < 500:
+                _lrc_salud["fallos"] = 0
                 return r
             ultimo = f"HTTP {r.status_code}"
         except requests.RequestException as e:
             ultimo = type(e).__name__
         if i + 1 < intentos:
             time.sleep(3)
+    _lrc_salud["fallos"] += 1
     log.warning("LRCLib no respondió (%s): %s %s", ultimo, url.rsplit("/api", 1)[-1], params or "")
+    if _lrc_salud["fallos"] >= 2:
+        _lrc_salud["off"] = True
+        log.warning("LRCLib no está respondiendo: se deja de consultar en esta corrida; las letras se buscan en Tidal")
     return None
 
 
@@ -1137,7 +1150,8 @@ def buscar_lrclib(title: str, artist: str, album: str = "",
             return {**empty, "candidates_found": total_candidates}
 
         # Obtener letra completa
-        full = _fetch_full(best_id) if best_id else None
+        ya_trae = best_cand.get("syncedLyrics") or best_cand.get("plainLyrics")
+        full = _fetch_full(best_id) if best_id and not ya_trae else None
         synced = (full or best_cand).get("syncedLyrics") or None
         plain  = (full or best_cand).get("plainLyrics")  or None
         log.debug("LRCLib ✓ id=%s score=%.3f synced=%s plain=%s match=%r album=%r",
@@ -2303,6 +2317,8 @@ def procesar(path: str, audit_log: list) -> dict:
                                   album=album or (mb_details.get("album") if mb_details else ""),
                                   duration_s=duration)
         if not _lrc_raw.get("synced"):
+            log.info("  · Tidal (respaldo): buscando letra%s…",
+                     " — LRCLib no responde" if _lrc_salud["off"] else " — LRCLib sin letra sincronizada")
             _tid = buscar_letras_tidal(title=title, artist=artist,
                                        album=album or (mb_details.get("album") if mb_details else ""),
                                        duration_s=duration, isrc=(mb_details or {}).get("isrc"))
@@ -2310,6 +2326,9 @@ def procesar(path: str, audit_log: list) -> dict:
                 log.info("  · Letra desde Tidal (respaldo): %s (Score: %.2f)",
                          "sincronizada" if _tid.get("synced") else "plana", _tid.get("score", 0))
                 _lrc_raw = dict(_tid, candidates_lrclib=_lrc_raw.get("candidates_found", 0))
+            else:
+                log.info("  · Tidal (respaldo): %s", "sin sesión" if _tidal["off"] else
+                         ("sin letra para esta pista" if _tid.get("candidates_found") else "pista no encontrada"))
         # Si ya tenemos letras planas, solo aceptamos el resultado si trae sinc.
         # Esto evita sobreescribir plain con otro plain sin ganar nada.
         if existing["has_plain_lrc"] and not _lrc_raw.get("synced"):
