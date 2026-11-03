@@ -1878,9 +1878,11 @@ def _write_mp3(path, existing, mb_details, genres, genre_primary, genre_secondar
     elif lrc.get("synced"):
         _note(touched, "lyrics_synced", "skipped_exists", "SYLT ya presente")
 
-    if lrc.get("plain") and not has_uslt:
+    if lrc.get("plain") and (not has_uslt or (lrc.get("synced") and not has_sylt)):
+        # con una sincronizada nueva, la plana pasa a ser la de la misma fuente (mismo texto que la sincronizada)
+        id3.delall("USLT")
         id3.add(USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=lrc["plain"]))
-        _note(touched, "lyrics_plain", "wrote", _fuente_lrc(lrc))
+        _note(touched, "lyrics_plain", "updated" if has_uslt else "wrote", _fuente_lrc(lrc))
     elif lrc.get("plain"):
         _note(touched, "lyrics_plain", "skipped_exists", "USLT ya presente")
 
@@ -1974,10 +1976,10 @@ def _write_dsf(path, existing, mb_details, genres, genre_primary, genre_secondar
     elif lrc.get("synced"):
         _note(touched, "lyrics_synced", "skipped_exists", "SYLT ya presente")
 
-    if lrc.get("plain") and not has_uslt:
+    if lrc.get("plain") and (not has_uslt or (lrc.get("synced") and not has_sylt)):
+        id3.delall("USLT")
         id3.add(USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=lrc["plain"]))
-        _note(touched, "lyrics_plain", "wrote",
-              _fuente_lrc(lrc))
+        _note(touched, "lyrics_plain", "updated" if has_uslt else "wrote", _fuente_lrc(lrc))
     elif lrc.get("plain"):
         _note(touched, "lyrics_plain", "skipped_exists", "USLT ya presente")
 
@@ -2031,15 +2033,15 @@ def _write_flac(path, existing, mb_details, genres, genre_primary, genre_seconda
     has_sync  = existing.get("has_synced_lrc", False)
     has_plain = existing.get("has_plain_lrc",  False)
 
-    if lrc.get("plain") and not has_plain:
+    if lrc.get("plain") and (not has_plain or (lrc.get("synced") and not has_sync)):
         audio["lyrics"] = [lrc["plain"]]
-        _note(touched,"lyrics_plain","wrote",f"LRCLib score={lrc.get('score',0):.2f}")
+        _note(touched, "lyrics_plain", "updated" if has_plain else "wrote", _fuente_lrc(lrc))
     elif lrc.get("plain"):
         _note(touched,"lyrics_plain","skipped_exists","ya existía")
 
     if lrc.get("synced") and not has_sync:
         audio["syncedlyrics"] = [lrc["synced"]]
-        _note(touched,"lyrics_synced","wrote",f"LRCLib score={lrc.get('score',0):.2f}")
+        _note(touched, "lyrics_synced", "wrote", _fuente_lrc(lrc))
     elif lrc.get("synced"):
         _note(touched,"lyrics_synced","skipped_exists","ya existía")
 
@@ -2349,6 +2351,9 @@ def procesar(path: str, audit_log: list) -> dict:
             else:
                 log.info("  · Tidal (respaldo): %s", "sin sesión" if _tidal["off"] else
                          ("sin letra para esta pista" if _tid.get("candidates_found") else "pista no encontrada"))
+        if _lrc_raw.get("synced") and not _lrc_raw.get("plain"):
+            _lrc_raw["plain"] = "\n".join(re.sub(r"^(\[\d+:\d+(?:[.:]\d+)?\])+\s*", "", l)
+                                          for l in _lrc_raw["synced"].splitlines()).strip() or None
         # Si ya tenemos letras planas, solo aceptamos el resultado si trae sinc.
         # Esto evita sobreescribir plain con otro plain sin ganar nada.
         if existing["has_plain_lrc"] and not _lrc_raw.get("synced"):
