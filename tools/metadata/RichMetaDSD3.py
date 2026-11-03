@@ -2364,17 +2364,17 @@ def procesar(path: str, audit_log: list) -> dict:
                                   album=album or (mb_details.get("album") if mb_details else ""),
                                   duration_s=duration)
         if not _lrc_raw.get("synced"):
-            log.info("  · Tidal (respaldo): buscando letra%s…",
-                     " — LRCLib no responde" if _lrc_salud["off"] else " — LRCLib sin letra sincronizada")
+            log.info("  · %s — Tidal (respaldo): buscando letra%s…", title,
+                     " (LRCLib no responde)" if _lrc_salud["off"] else " (LRCLib sin letra sincronizada)")
             _tid = buscar_letras_tidal(title=title, artist=artist,
                                        album=album or (mb_details.get("album") if mb_details else ""),
                                        duration_s=duration, isrc=(mb_details or {}).get("isrc"))
             if _tid.get("synced") or (_tid.get("plain") and not _lrc_raw.get("plain")):
-                log.info("  · Letra desde Tidal (respaldo): %s (Score: %.2f)",
+                log.info("  · %s — Letra desde Tidal (respaldo): %s (Score: %.2f)", title,
                          "sincronizada" if _tid.get("synced") else "plana", _tid.get("score", 0))
                 _lrc_raw = dict(_tid, candidates_lrclib=_lrc_raw.get("candidates_found", 0))
             else:
-                log.info("  · Tidal (respaldo): %s", "sin sesión" if _tidal["off"] else
+                log.info("  · %s — Tidal (respaldo): %s", title, "sin sesión" if _tidal["off"] else
                          ("sin letra para esta pista" if _tid.get("candidates_found") else "pista no encontrada"))
         if _lrc_raw.get("synced") and not _lrc_raw.get("plain"):
             _lrc_raw["plain"] = "\n".join(re.sub(r"^(\[\d+:\d+(?:[.:]\d+)?\])+\s*", "", l)
@@ -2382,11 +2382,13 @@ def procesar(path: str, audit_log: list) -> dict:
         # Si ya tenemos letras planas, solo aceptamos el resultado si trae sinc.
         # Esto evita sobreescribir plain con otro plain sin ganar nada.
         if existing["has_plain_lrc"] and not _lrc_raw.get("synced"):
-            log.info("  · LRC: Tiene letras planas — resultado sin sincronizar descartado (se conserva existente)")
+            log.info("  · %s — sin letra sincronizada en ningún lado: se conserva la plana que ya tenía", title)
         else:
             lrc_result = _lrc_raw
             lrc_status = "synced" if lrc_result.get("synced") else ("plain" if lrc_result.get("plain") else "none")
-            log.info("  · LRC Status: %s (Score: %.2f)", lrc_status, lrc_result.get("score",0))
+            log.info("  · %s — Letra: %s%s (Score: %.2f)", title, lrc_status,
+                     " · Tidal" if lrc_result.get("fuente") == "Tidal" else (" · LRCLib" if lrc_status != "none" else ""),
+                     lrc_result.get("score",0))
     else:
         log.info("  · LRC: Archivo ya posee letras sincronizadas.")
 
