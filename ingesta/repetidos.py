@@ -427,12 +427,14 @@ def _mapa(pistas_viejas, pistas_nuevas):
     return mapa
 
 
-def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro):
-    """Borra del disco y de Orbyte las ediciones `rutas_borrar`; lo usado pasa a `ruta_destino`. IRRECUPERABLE."""
+def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_destino=False):
+    """Borra del disco y de Orbyte las ediciones `rutas_borrar`; lo usado pasa a `ruta_destino`. IRRECUPERABLE.
+    Con sin_destino=True (eliminar un álbum suelto desde la Biblioteca, «a ninguna»), su historial se pierde."""
     biblioteca = os.path.abspath(biblioteca)
     eds = {e['ruta']: e for e in grupo['ediciones']}
-    if not rutas_borrar or any(r not in eds for r in rutas_borrar) or ruta_destino not in eds \
-            or ruta_destino in rutas_borrar:
+    if not rutas_borrar or any(r not in eds for r in rutas_borrar):
+        raise ValueError('Selección inválida')
+    if not sin_destino and (ruta_destino not in eds or ruta_destino in rutas_borrar):
         raise ValueError('Selección inválida: debe quedar al menos una edición')
     for r in rutas_borrar:
         if not os.path.abspath(r).startswith(biblioteca + os.sep):
@@ -441,8 +443,8 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro):
     con = sqlite3.connect(db, timeout=60)
     con.row_factory = sqlite3.Row
     tablas = _tablas(con)
-    destino = eds[ruta_destino]
-    pistas_destino = _pistas(con, destino['albumes'])
+    destino = eds[ruta_destino] if not sin_destino else None
+    pistas_destino = _pistas(con, destino['albumes']) if destino else []
     album_de_pista = {p['id']: p['album_id'] for p in pistas_destino}
     resumen = {'liberado': 0, 'ediciones': 0, 'archivos': 0, 'movidas': 0, 'quitadas': 0, 'avisos': []}
     try:
@@ -462,7 +464,8 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro):
                     pids = [p['id'] for p in pistas if p['album_id'] == aid]
                     sub = {k: v for k, v in mapa.items() if k in pids}
                     dest = Counter(album_de_pista[v] for v in sub.values()).most_common(1)
-                    mov, qui = borrar_album_db(con, tablas, a, pids, sub, dest[0][0] if dest else destino['albumes'][0])
+                    mov, qui = borrar_album_db(con, tablas, a, pids, sub,
+                                               dest[0][0] if dest else (destino['albumes'][0] if destino else None))
                     resumen['movidas'] += mov
                     resumen['quitadas'] += qui
             # 2) disco: sus archivos de audio y luego sus carpetas

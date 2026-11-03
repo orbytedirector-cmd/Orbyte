@@ -11,6 +11,15 @@
 <div id="estado"><div class="estado-vivo"><span class="giro"></span>Revisando music.db…</div></div>
 <div id="lista"></div>
 <div id="previa"></div>
+
+<div class="modal-fondo" id="b-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="b-tit" style="width:min(860px,100%)">
+    <div class="modal-cab"><b id="b-tit"></b><span class="mono" id="b-sub"></span></div>
+    <div class="modal-cuerpo" id="b-cuerpo"></div>
+    <div class="modal-pie"><span class="tenue t-nota" id="b-nota"></span>
+      <span style="display:flex;gap:.5rem"><button class="btn" id="b-cerrar">Cerrar</button><button class="btn oro peligro" id="b-ok" hidden>Eliminar definitivamente</button></span></div>
+  </div>
+</div>
 {% endblock %}
 {% block js %}
 <script>
@@ -136,14 +145,109 @@ async function buscarToda() {
   if (r.error) { caja.innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
   caja.innerHTML = `<h2 class="rotulo" style="margin:.4rem 0 .6rem">En toda la biblioteca · ${r.albumes.length}${r.mas ? '+' : ''}</h2>` +
     (r.albumes.length ? `<div class="tabla-wrap" style="margin-bottom:1.4rem"><table>
-      <tr><th>Álbum</th><th>Calidad</th><th class="oculto-movil">Carpeta</th></tr>
+      <tr><th>Álbum</th><th>Calidad</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
       ${r.albumes.map(a => `<tr><td><a href="/biblioteca/album/${a.id}"><div class="t">${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
         <div class="s">${esc(a.artista)} · ${a.n_pistas} pistas</div></a></td>
         <td>${a.tag ? `<span class="chip q-${esc(a.tag)}"><span class="led"></span>${esc(a.tag)}</span>` : ''} <span class="s tenue">${esc(a.formato || '')}</span></td>
-        <td class="oculto-movil"><span class="s mono muy-tenue">${esc(rel(a.ruta))}</span></td></tr>`).join('')}
+        <td class="oculto-movil"><span class="s mono muy-tenue">${esc(rel(a.ruta))}</span></td>
+        <td><div style="display:flex;gap:.35rem;flex-wrap:nowrap"><button class="btn chico" data-info="${a.id}">Más información</button>
+          <button class="btn chico peligro" data-borrar="${a.id}">Eliminar…</button></div></td></tr>`).join('')}
     </table></div>` : '<div class="sub" style="margin-bottom:1.4rem">Nada en la biblioteca con ese texto.</div>') +
     '<h2 class="rotulo" style="margin:0 0 .6rem">Con títulos por normalizar</h2>';
 }
+// ── «Más información» y «Eliminar…» (la eliminación segura de Repetidos) ──
+const bm = document.getElementById('b-modal');
+const fmtDur = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60;
+  return h ? `${h} h ${m} min` : `${m}:${String(x).padStart(2, '0')}`; };
+const fmtTam = b => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round((b || 0) / 1e6)} MB`;
+const fmtSr = sr => sr ? `${(sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '—';
+function abrirModal(titulo, sub) {
+  document.getElementById('b-tit').textContent = titulo;
+  document.getElementById('b-sub').textContent = sub || '';
+  document.getElementById('b-nota').textContent = '';
+  document.getElementById('b-ok').hidden = true;
+  document.getElementById('b-cuerpo').innerHTML = '<div class="estado-vivo"><span class="giro"></span>Cargando…</div>';
+  bm.hidden = false;
+}
+document.getElementById('b-cerrar').onclick = () => { bm.hidden = true; };
+bm.onclick = e => { if (e.target === bm) bm.hidden = true; };
+const dato = (k, v) => v || v === 0 ? `<div><div class="s tenue">${esc(k)}</div><div>${esc(v)}</div></div>` : '';
+async function verInfo(id) {
+  abrirModal('Más información');
+  const r = await (await fetch(`/api/biblioteca/album/${id}/info`)).json();
+  if (r.error) { document.getElementById('b-cuerpo').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  document.getElementById('b-tit').textContent = `${r.artista} — ${r.album}${r.anio ? ` (${r.anio})` : ''}`;
+  document.getElementById('b-sub').textContent = r.ruta;
+  const m = r.medicion, t = r.tags || {};
+  const tags = Object.entries(t).filter(([k, v]) => v && typeof v !== 'object').slice(0, 14);
+  document.getElementById('b-cuerpo').innerHTML = `
+    <div class="f-chips" style="justify-content:flex-start"><span class="chip q-${esc(r.calidad)}"><span class="led"></span>${esc(r.calidad)}</span>
+      <span class="chip">${esc(r.formato)}</span>${r.multicanal ? `<span class="chip">${esc(r.multicanal)}</span>` : ''}</div>
+    <div class="b-datos">${dato('Pistas', r.n)}${dato('Duración', fmtDur(r.dur))}${dato('Tamaño', fmtTam(r.bytes))}
+      ${dato('Frecuencia', fmtSr(r.sr))}${dato('Bits', r.bits || '—')}${dato('Bitrate máx.', r.bitrate ? Math.round(r.bitrate / 1000) + ' kbps' : '—')}
+      ${dato('Códec', (r.codecs || '').toUpperCase())}${dato('Escuchas', r.escuchas)}${dato('En playlists', r.playlists)}${dato('Favoritos', r.favoritos)}</div>
+    ${m && !m.error ? `<div class="panel"><div class="rotulo" style="margin-bottom:.3rem">Master medido</div>
+      <span class="mono">${m.lufs} LUFS · LRA ${m.lra ?? '—'} · pico ${m.pico ?? '—'} dBTP · PLR ${m.plr ?? '—'}</span></div>`
+      : '<div class="s tenue">Master sin medir (se mide en Repetidos)</div>'}
+    ${tags.length ? `<div class="panel"><div class="rotulo" style="margin-bottom:.4rem">Edición (tags del primer archivo)</div>
+      <div class="b-datos">${tags.map(([k, v]) => dato(k, String(v))).join('')}</div></div>` : ''}
+    ${r.otros.length ? `<div class="s"><span class="tenue">Otros archivos:</span> <span class="mono">${r.otros.map(esc).join(' · ')}</span></div>` : ''}
+    <div class="tabla-wrap"><table><tr><th>#</th><th>Título</th><th class="der">Duración</th><th>Formato</th><th class="der oculto-movil">Tamaño</th><th class="oculto-movil">Archivo</th></tr>
+      ${r.pistas.map(p => `<tr><td class="num">${p.disc_number > 1 ? p.disc_number + '-' : ''}${esc(p.track_number ?? '')}</td><td>${esc(p.title || '')}</td>
+        <td class="der">${fmtDur(p.duration)}</td>
+        <td><span class="s">${p.is_dsd ? 'DSD' + (p.dsd_rate || '') : `${esc((p.codec || '').toUpperCase())} ${p.bit_depth || ''}${p.bit_depth ? '/' : ''}${p.sample_rate ? p.sample_rate / 1000 : ''}`}${p.channels > 2 ? ' · ' + p.channels + ' can.' : ''}</span></td>
+        <td class="der oculto-movil">${p.file_size ? fmtTam(p.file_size) : ''}</td><td class="oculto-movil"><span class="s mono muy-tenue">${esc(p.archivo)}</span></td></tr>`).join('')}
+    </table></div>`;
+}
+async function verBorrar(id) {
+  abrirModal('Eliminar de la biblioteca');
+  const r = await (await fetch(`/api/biblioteca/album/${id}/eliminar`)).json();
+  const cuerpo = document.getElementById('b-cuerpo');
+  if (!r.ok) { cuerpo.innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
+  document.getElementById('b-tit').textContent = `Eliminar: ${r.artista} — ${r.album}`;
+  document.getElementById('b-sub').textContent = r.ruta;
+  const uso = r.escuchas + r.playlists + r.favoritos;
+  cuerpo.innerHTML = `
+    <div class="flash error">Se borra del disco y de Orbyte: ${r.n} pistas · ${esc(r.formato)} · ${fmtTam(r.bytes)}. No se puede deshacer
+      (antes se respalda music.db).</div>
+    <div><b>¿A qué edición pasan sus ${r.escuchas} escuchas, ${r.playlists} pistas en playlists y ${r.favoritos} favoritos?</b>
+      <div class="s tenue">Las pistas se emparejan por número y título; las que no tengan equivalente pierden su historial.</div></div>
+    <div class="b-opciones">
+      ${r.opciones.map(o => `<label class="b-opcion"><input type="radio" name="b-dest" value="${esc(o.ruta)}" ${o.ruta === r.sugerida ? 'checked' : ''}>
+        <span><b>${esc(o.album)}</b>${o.anio ? ` <span class="tenue">(${esc(o.anio)})</span>` : ''}
+        <span class="chip q-${esc(o.calidad)}"><span class="led"></span>${esc(o.calidad)}</span> <span class="s tenue">${esc(o.formato)} · ${o.n} pistas</span>
+        <span class="s mono muy-tenue" style="display:block">${esc(rel(o.ruta))}</span></span></label>`).join('')}
+      <label class="b-opcion"><input type="radio" name="b-dest" value="" ${r.sugerida ? '' : 'checked'}>
+        <span><b>A ninguna</b> <span class="s ${uso ? 'mal' : 'tenue'}">${uso ? 'su historial se pierde' : 'no tiene historial'}</span></span></label>
+    </div>
+    <div class="campo"><label for="b-conf">Escribe <b class="mono">ELIMINAR</b> para confirmar</label>
+      <input type="text" id="b-conf" class="campo-buscar" autocomplete="off"></div>`;
+  const ok = document.getElementById('b-ok');
+  ok.hidden = false; ok.disabled = true;
+  document.getElementById('b-conf').oninput = e => { ok.disabled = e.target.value.trim() !== 'ELIMINAR'; };
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const dest = (cuerpo.querySelector('input[name=b-dest]:checked') || {}).value || null;
+    const x = await post(`/api/biblioteca/album/${id}/eliminar`, {destino: dest, confirmacion: 'ELIMINAR'});
+    if (!x || !x.ok) { toast('No se pudo', (x && x.error) || ''); ok.disabled = false; return; }
+    ok.hidden = true;
+    cuerpo.innerHTML = '<div class="estado-vivo"><span class="giro"></span><span id="b-prog">Eliminando…</span></div><pre class="registro" id="b-reg"></pre>';
+    const reloj = setInterval(async () => {
+      const u = await (await fetch(`/api/artistas/unificacion/${x.uid}`)).json();
+      document.getElementById('b-reg').textContent = u.registro || '';
+      if (u.estado && u.estado !== 'en_curso') {
+        clearInterval(reloj);
+        document.getElementById('b-prog').textContent = u.estado === 'ok' ? 'Listo: eliminado.' : 'Hubo un error (mira el registro).';
+        document.querySelector('#b-cuerpo .giro').remove();
+        ultimaQ = ''; buscarToda();
+      }
+    }, 1500);
+  };
+}
+document.getElementById('toda').addEventListener('click', e => {
+  const i = e.target.closest('[data-info]'); if (i) { verInfo(i.dataset.info); return; }
+  const b = e.target.closest('[data-borrar]'); if (b) verBorrar(b.dataset.borrar);
+});
 document.getElementById('buscar').oninput = () => {
   limite = 150; pintar();
   clearTimeout(reloj); reloj = setTimeout(buscarToda, 300);
