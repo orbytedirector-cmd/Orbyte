@@ -2,7 +2,12 @@
 """
 Diagnóstico: qué calidad le entrega Tidal a la sesión de tidal-dl-ng, comparada con lo que permite tu cuenta.
 
-  python3 tidal_calidad.py URL_O_ID_DEL_ALBUM [RUTA/token.json]
+  python3 tidal_calidad.py URL_O_ID_DEL_ALBUM [RUTA/token.json]     sesión de tidal-dl-ng
+  python3 tidal_calidad.py URL_O_ID_DEL_ALBUM --login-pkce           inicia sesión PKCE (navegador) y prueba
+  python3 tidal_calidad.py URL_O_ID_DEL_ALBUM --pkce                 prueba con la sesión PKCE ya guardada
+
+La sesión PKCE se guarda aparte, en ~/.config/orbyte/tidal_pkce.json (solo tu usuario puede leerla):
+no toca la de tidal-dl-ng ni cambia cómo descarga.
 
 Muestra (sin imprimir tokens):
   · cómo está iniciada la sesión (código de dispositivo o PKCE)
@@ -18,6 +23,9 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
+
+PKCE = Path(os.path.expanduser('~/.config/orbyte/tidal_pkce.json'))
 
 
 def token_por_defecto():
@@ -45,31 +53,57 @@ def main():
         print('No reconozco el álbum: pasa la URL de Tidal o el número del álbum')
         return 2
     album = m.group(1)
-    ruta = sys.argv[2] if len(sys.argv) > 2 else token_por_defecto()
+    extra = sys.argv[2:]
     try:
         import tidalapi
     except ImportError:
         print('Este Python no tiene tidalapi: usa el de tidal-dl-ng (primera línea de ~/.local/bin/tidal-dl-ng)')
         return 2
-    print(f'tidalapi {getattr(tidalapi, "__version__", "?")} · token: {ruta}')
-    with open(ruta, encoding='utf-8') as f:
-        d = json.load(f)
-    exp = d.get('expiry_time')
-    exp = datetime.datetime.fromtimestamp(exp) if isinstance(exp, (int, float)) else None
+    print(f'tidalapi {getattr(tidalapi, "__version__", "?")}')
     s = None
-    for pkce in (False, True):
-        s2 = tidalapi.Session()
+    if '--login-pkce' in extra:
+        s = tidalapi.Session()
+        print('Abre el enlace de abajo en el navegador (computador o celular) e inicia sesión con tu cuenta de Tidal.')
+        print('Terminarás en una página de error «Oops»: es lo esperado. Copia la dirección completa de esa página')
+        print('(empieza con https://tidal.com/android/login/auth?code=…) y pégala aquí.')
+        print()
         try:
-            ok = s2.load_oauth_session(d.get('token_type') or 'Bearer', d['access_token'], d.get('refresh_token'),
-                                       exp, is_pkce=pkce)
-            if not ok and d.get('refresh_token') and s2.token_refresh(d['refresh_token']):
-                ok = s2.load_oauth_session(s2.token_type, s2.access_token, d.get('refresh_token'), None, is_pkce=pkce)
+            s.login_pkce()
         except Exception as e:  # noqa: BLE001
-            print(f'  sesión {"PKCE" if pkce else "dispositivo"}: {type(e).__name__}: {e}')
-            ok = False
-        if ok:
-            s = s2
-            break
+            print(f'No se pudo iniciar sesión: {type(e).__name__}: {e}')
+            return 1
+        PKCE.parent.mkdir(parents=True, exist_ok=True)
+        PKCE.touch(mode=0o600, exist_ok=True)
+        os.chmod(PKCE, 0o600)
+        s.save_session_to_file(PKCE)
+        print(f'Sesión PKCE guardada en {PKCE}')
+    elif '--pkce' in extra:
+        s = tidalapi.Session()
+        if not PKCE.is_file() or not s.load_session_from_file(PKCE):
+            print(f'No hay una sesión PKCE válida en {PKCE}: corre con --login-pkce')
+            return 1
+        s.save_session_to_file(PKCE)                    # por si se renovó el token
+    else:
+        ruta = extra[0] if extra else token_por_defecto()
+        print(f'token: {ruta}')
+        with open(ruta, encoding='utf-8') as f:
+            d = json.load(f)
+        exp = d.get('expiry_time')
+        exp = datetime.datetime.fromtimestamp(exp) if isinstance(exp, (int, float)) else None
+        for pkce in (False, True):
+            s2 = tidalapi.Session()
+            try:
+                ok = s2.load_oauth_session(d.get('token_type') or 'Bearer', d['access_token'], d.get('refresh_token'),
+                                           exp, is_pkce=pkce)
+                if not ok and d.get('refresh_token') and s2.token_refresh(d['refresh_token']):
+                    ok = s2.load_oauth_session(s2.token_type, s2.access_token, d.get('refresh_token'), None,
+                                               is_pkce=pkce)
+            except Exception as e:  # noqa: BLE001
+                print(f'  sesión {"PKCE" if pkce else "dispositivo"}: {type(e).__name__}: {e}')
+                ok = False
+            if ok:
+                s = s2
+                break
     if not s:
         print('Tidal no aceptó la sesión: inicia sesión de nuevo con «tidal-dl-ng login»')
         return 1
