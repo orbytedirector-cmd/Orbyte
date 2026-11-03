@@ -882,6 +882,109 @@ def _score_candidate(cand: dict, title: str, artist: str, album: str,
     return round(max(score, 0.0), 3)
 
 
+# ── Respaldo de letras: Tidal (la sesión de tidal-dl-ng) ─────────────────────────────────────────────
+# Si LRCLib no trae letra sincronizada (no la tiene o no responde), se busca la pista en Tidal, que licencia
+# letras sincronizadas. Solo lectura con tu propia sesión; si no hay sesión, se salta sin error.
+TIDAL_API = "https://api.tidal.com/v1/"
+_tidal = {"token": None, "pais": None, "off": False, "ultimo": 0.0}
+_tidal_lock = threading.Lock()
+
+
+def _tidal_token() -> Optional[str]:
+    for n in ("tidal_dl_ng-dev", "tidal_dl_ng"):
+        p = os.path.join(os.path.expanduser("~"), ".config", n, "token.json")
+        if os.path.isfile(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    t = json.load(f)
+                return t.get("access_token") or (t.get("session") or {}).get("access_token")
+            except Exception:
+                return None
+    return None
+
+
+def _tidal_get(ep: str, **params) -> Optional[dict]:
+    """GET a la API de Tidal con tu sesión. None si no hay sesión, si no existe (404) o si falla."""
+    with _tidal_lock:
+        if _tidal["off"]:
+            return None
+        if not _tidal["token"]:
+            _tidal["token"] = _tidal_token()
+            if not _tidal["token"]:
+                _tidal["off"] = True
+                log.debug("Tidal: sin sesión de tidal-dl-ng — no se usa como respaldo de letras")
+                return None
+        espera = 0.5 - (time.time() - _tidal["ultimo"])
+        if espera > 0:
+            time.sleep(espera)
+        _tidal["ultimo"] = time.time()
+    if ep != "sessions":
+        if not _tidal["pais"]:
+            ses = _tidal_get("sessions")
+            if _tidal["off"]:
+                return None
+            _tidal["pais"] = (ses or {}).get("countryCode") or "US"
+        params.setdefault("countryCode", _tidal["pais"])
+    for intento in range(2):
+        try:
+            r = requests.get(TIDAL_API + ep, params=params, timeout=20,
+                             headers={"Authorization": f"Bearer {_tidal['token']}", "User-Agent": "RichMetaPro/7.2"})
+        except requests.RequestException as e:
+            log.debug("Tidal %s: %s", ep, e)
+            return None
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 404:
+            return None
+        if r.status_code == 401 and intento == 0:
+            _tidal["token"] = _tidal_token()          # tidal-dl-ng pudo renovarla entre medio
+            continue
+        if r.status_code in (401, 403):
+            _tidal["off"] = True
+            log.warning("Tidal rechazó la sesión (HTTP %s): sin respaldo de letras en esta corrida "
+                        "(renuévala con «tidal-dl-ng login»)", r.status_code)
+        else:
+            log.debug("Tidal %s HTTP %s", ep, r.status_code)
+        return None
+    return None
+
+
+def buscar_letras_tidal(title: str, artist: str, album: str = "", duration_s: Optional[float] = None,
+                        isrc: Optional[str] = None) -> dict:
+    """La pista en Tidal (por ISRC si coincide; si no, por título/artista/duración con el mismo puntaje que
+    LRCLib) y su letra: «subtitles» = sincronizada (LRC), «lyrics» = plana."""
+    vacio = {"synced": None, "plain": None, "lrclib_id": None, "score": 0.0, "candidates_found": 0}
+    d = _tidal_get("search", query=f"{artist} {title}", types="TRACKS", limit=10)
+    items = ((d or {}).get("tracks") or {}).get("items") or []
+    if not items:
+        return vacio
+    mejor, puntaje = None, 0.0
+    for t in items:
+        if isrc and (t.get("isrc") or "").upper() == isrc.upper():
+            mejor, puntaje = t, 1.0
+            break
+        cand = {"trackName": t.get("title") or "", "artistName": (t.get("artist") or {}).get("name") or "",
+                "albumName": (t.get("album") or {}).get("title") or "", "duration": t.get("duration")}
+        s = _score_candidate(cand, title, artist, album, duration_s)
+        if s > puntaje:
+            mejor, puntaje = t, s
+    if not mejor or puntaje < (CONFIDENCE_MIN if duration_s else 0.50):
+        return {**vacio, "candidates_found": len(items)}
+    letra = _tidal_get(f"tracks/{mejor['id']}/lyrics")
+    if not letra:
+        return {**vacio, "candidates_found": len(items)}
+    return {"synced": letra.get("subtitles") or None, "plain": letra.get("lyrics") or None,
+            "lrclib_id": None, "tidal_id": mejor["id"], "score": puntaje, "candidates_found": len(items),
+            "track_name_match": mejor.get("title"), "album_match": (mejor.get("album") or {}).get("title"),
+            "fuente": "Tidal"}
+
+
+def _fuente_lrc(lrc: dict) -> str:
+    if lrc.get("fuente") == "Tidal":
+        return f"Tidal id={lrc.get('tidal_id')} score={lrc.get('score', 0):.2f}"
+    return f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score', 0):.2f}"
+
+
 LRC_TIMEOUT = 25          # LRCLib a veces tarda bastante en responder: con 10 s se daba por «sin letra»
 
 
@@ -1737,13 +1840,13 @@ def _write_mp3(path, existing, mb_details, genres, genre_primary, genre_secondar
         sylt_data = _lrc_to_sylt(lrc["synced"])
         if sylt_data:
             id3.add(SYLT(encoding=Encoding.UTF8, lang="eng", format=2, type=1, desc="", text=sylt_data))
-            _note(touched, "lyrics_synced", "wrote", f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score',0):.2f}")
+            _note(touched, "lyrics_synced", "wrote", _fuente_lrc(lrc))
     elif lrc.get("synced"):
         _note(touched, "lyrics_synced", "skipped_exists", "SYLT ya presente")
 
     if lrc.get("plain") and not has_uslt:
         id3.add(USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=lrc["plain"]))
-        _note(touched, "lyrics_plain", "wrote", f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score',0):.2f}")
+        _note(touched, "lyrics_plain", "wrote", _fuente_lrc(lrc))
     elif lrc.get("plain"):
         _note(touched, "lyrics_plain", "skipped_exists", "USLT ya presente")
 
@@ -1833,14 +1936,14 @@ def _write_dsf(path, existing, mb_details, genres, genre_primary, genre_secondar
             id3.add(SYLT(encoding=Encoding.UTF8, lang="eng",
                          format=2, type=1, desc="", text=sylt_data))
             _note(touched, "lyrics_synced", "wrote",
-                  f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score',0):.2f}")
+                  _fuente_lrc(lrc))
     elif lrc.get("synced"):
         _note(touched, "lyrics_synced", "skipped_exists", "SYLT ya presente")
 
     if lrc.get("plain") and not has_uslt:
         id3.add(USLT(encoding=Encoding.UTF8, lang="eng", desc="", text=lrc["plain"]))
         _note(touched, "lyrics_plain", "wrote",
-              f"LRCLib id={lrc.get('lrclib_id')} score={lrc.get('score',0):.2f}")
+              _fuente_lrc(lrc))
     elif lrc.get("plain"):
         _note(touched, "lyrics_plain", "skipped_exists", "USLT ya presente")
 
@@ -2050,7 +2153,12 @@ def render_track_html(r: dict) -> str:
         html += _kv("Score match", f"{lrc_res.get('score',0):.3f}")
     if lrc_res.get("track_name_match"): html += _kv("Match encontrado", lrc_res["track_name_match"])
     if lrc_res.get("album_match"): html += _kv("Álbum match", lrc_res["album_match"])
-    if lrc_res.get("candidates_found") is not None: html += _kv("Candidatos LRCLib", str(lrc_res["candidates_found"]))
+    if lrc_res.get("fuente") == "Tidal":
+        html += _kv("Fuente", "Tidal (respaldo)")
+        html += _kv("Tidal ID", str(lrc_res.get("tidal_id")))
+        html += _kv("Score match", f"{lrc_res.get('score',0):.3f}")
+        html += _kv("Candidatos LRCLib", str(lrc_res.get("candidates_lrclib", 0)))
+    elif lrc_res.get("candidates_found") is not None: html += _kv("Candidatos LRCLib", str(lrc_res["candidates_found"]))
 
     if sync_lrc:
         html += '<details open><summary>▶ Letras sincronizadas (LRC)</summary>'
@@ -2194,6 +2302,14 @@ def procesar(path: str, audit_log: list) -> dict:
         _lrc_raw = buscar_lrclib(title=title, artist=artist,
                                   album=album or (mb_details.get("album") if mb_details else ""),
                                   duration_s=duration)
+        if not _lrc_raw.get("synced"):
+            _tid = buscar_letras_tidal(title=title, artist=artist,
+                                       album=album or (mb_details.get("album") if mb_details else ""),
+                                       duration_s=duration, isrc=(mb_details or {}).get("isrc"))
+            if _tid.get("synced") or (_tid.get("plain") and not _lrc_raw.get("plain")):
+                log.info("  · Letra desde Tidal (respaldo): %s (Score: %.2f)",
+                         "sincronizada" if _tid.get("synced") else "plana", _tid.get("score", 0))
+                _lrc_raw = dict(_tid, candidates_lrclib=_lrc_raw.get("candidates_found", 0))
         # Si ya tenemos letras planas, solo aceptamos el resultado si trae sinc.
         # Esto evita sobreescribir plain con otro plain sin ganar nada.
         if existing["has_plain_lrc"] and not _lrc_raw.get("synced"):
