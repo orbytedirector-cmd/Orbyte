@@ -2,7 +2,7 @@
 Orbyte Ingesta — etapa 3: los 5 scripts de metadata para un álbum ya ubicado, y la validación final.
 
   1. index_libraryV3.py --incremental --album RUTA      (lo agrega a music.db)
-  2. RichMetaDSD3.py RUTA --mode pending                 (ánimo, género, letras…)
+  2. RichMetaDSD3.py RUTA --mode resume                  (ánimo, género, letras…)
   3. import_richmetapro.py --album RUTA                  (lo lleva a track_meta / album_meta)
   4. RichMetaRelations3.py --album ID --all              (nacionalidad, similares)
   5. lastfm_fetch2.py --scope album:ID                   (popularidad y estrellas)
@@ -147,7 +147,9 @@ def correr(ruta, aj, reg, richmeta_completo=False):
     reg(f'   álbum ID {aid} en Orbyte')
     corregir_album(db, ruta, aid, reg)
     # tras cambiar los tags (títulos, artista) RichMeta rehace todas las pistas: letras y ánimo dependen de ellos
-    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'pending'], reg, aj,
+    # «resume» = pistas sin procesar + las que aún no tienen letra sincronizada: en un álbum nuevo es lo mismo que
+    # «pending», y al correr la metadata de nuevo vuelve a buscar las letras que faltaron (con «pending» se saltaban)
+    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'resume'], reg, aj,
             LIMITE_S['richmeta'])
     _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, LIMITE_S['import'])
     _correr('relations', ['RichMetaRelations3.py', '--album', str(aid), '--all', '--db', db], reg, aj,
