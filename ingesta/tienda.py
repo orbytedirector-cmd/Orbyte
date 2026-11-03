@@ -247,18 +247,32 @@ class Tidal:
             raise FalloTienda('Tidal: token.json no trae una sesión válida; inicia sesión con «tidal-dl-ng login»')
 
     def _refrescar(self):
-        """tidal-dl-ng renueva la sesión al iniciar sesión con un token aún renovable (y la guarda)."""
-        antes = self.token
+        """Token vigente con la lógica de tidal-dl-ng (tools/metadata/tidal_sesion.py): el de token.json puede
+        estar vencido aunque tidal-dl-ng diga que la sesión está bien (renueva solo en memoria)."""
         exe = herramienta('tidal-dl-ng')
+        py = 'python3'
         if exe:
             try:
-                subprocess.run([exe, 'login'], stdin=subprocess.DEVNULL, capture_output=True, timeout=45,
-                               env=_entorno())
-            except subprocess.TimeoutExpired:
-                pass                                # pidió iniciar sesión de nuevo (código en pantalla)
-        self._leer_token()
-        if self.token == antes:
-            raise FalloTienda('La sesión de Tidal expiró: en el servidor ejecuta «tidal-dl-ng login»')
+                with open(exe, encoding='utf-8', errors='replace') as f:
+                    linea = f.readline().strip()
+                if linea.startswith('#!'):
+                    partes = linea[2:].split()
+                    py = partes[1] if partes and os.path.basename(partes[0]) == 'env' and len(partes) > 1 else partes[0]
+            except (OSError, IndexError):
+                pass
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'metadata',
+                              'tidal_sesion.py')
+        try:
+            r = subprocess.run([py, script, os.path.join(self.dir, 'token.json')], stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=45, env=_entorno())
+            d = json.loads((r.stdout or '{}').strip().splitlines()[-1] or '{}')
+        except Exception as e:  # noqa: BLE001
+            raise FalloTienda(f'Tidal: no se pudo renovar la sesión ({type(e).__name__})') from e
+        if not d.get('access_token'):
+            raise FalloTienda('La sesión de Tidal expiró: en el servidor ejecuta «tidal-dl-ng login» '
+                              f'({d.get("error") or "sin respuesta"})')
+        self.token = d['access_token']
+        self.pais = d.get('country_code') or self.pais
 
     def _get(self, ep, reintento=True, **params):
         if ep != 'sessions':

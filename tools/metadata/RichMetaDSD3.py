@@ -949,24 +949,49 @@ def _tidal_get(ep: str, **params) -> Optional[dict]:
     return None
 
 
+def _python_de(exe: str) -> str:
+    """El Python con que corre tidal-dl-ng (primera línea del lanzador), que es el que tiene tidalapi."""
+    try:
+        with open(exe, encoding="utf-8", errors="replace") as f:
+            linea = f.readline().strip()
+        if linea.startswith("#!"):
+            partes = linea[2:].split()
+            if partes and os.path.basename(partes[0]) == "env" and len(partes) > 1:
+                return partes[1]
+            if partes:
+                return partes[0]
+    except OSError:
+        pass
+    return "python3"
+
+
 def _tidal_renovar():
-    """Renueva la sesión con «tidal-dl-ng login» (con un token aún renovable no pide nada y guarda el nuevo) y la
-    vuelve a leer. Es lo mismo que hace la pestaña Buscar de la ingesta."""
+    """Token vigente con la misma lógica de tidal-dl-ng (tidal_sesion.py): el de token.json puede estar vencido
+    aunque tidal-dl-ng diga que la sesión está bien, porque renueva solo en memoria."""
     import shutil
-    exe = shutil.which("tidal-dl-ng") or os.path.join(os.path.expanduser("~"), ".local", "bin", "tidal-dl-ng")
-    antes = _tidal["token"]
-    if os.path.isfile(exe):
-        env = dict(os.environ)
-        env["PATH"] = os.path.join(os.path.expanduser("~"), ".local", "bin") + os.pathsep + env.get("PATH", "")
-        try:
-            subprocess.run([exe, "login"], stdin=subprocess.DEVNULL, capture_output=True, timeout=45, env=env)
-        except subprocess.TimeoutExpired:
-            pass                                     # pidió iniciar sesión de nuevo (código en pantalla)
-        except Exception as e:
-            log.debug("tidal-dl-ng login: %s", e)
-    _tidal["token"] = _tidal_token()
-    if _tidal["token"] and _tidal["token"] != antes:
+    casa = os.path.expanduser("~")
+    exe = shutil.which("tidal-dl-ng") or os.path.join(casa, ".local", "bin", "tidal-dl-ng")
+    token = None
+    for n in ("tidal_dl_ng-dev", "tidal_dl_ng"):
+        if os.path.isfile(os.path.join(casa, ".config", n, "token.json")):
+            token = os.path.join(casa, ".config", n, "token.json")
+            break
+    if not token:
+        return
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tidal_sesion.py")
+    try:
+        r = subprocess.run([_python_de(exe) if os.path.isfile(exe) else "python3", script, token],
+                           stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=45)
+        d = json.loads((r.stdout or "{}").strip().splitlines()[-1] or "{}")
+    except Exception as e:
+        log.debug("tidal_sesion: %s", e)
+        return
+    if d.get("access_token"):
+        _tidal["token"] = d["access_token"]
+        _tidal["pais"] = d.get("country_code") or _tidal["pais"]
         log.info("  · Tidal: sesión renovada")
+    else:
+        log.warning("Tidal: no se pudo renovar la sesión (%s)", d.get("error") or "sin respuesta")
 
 
 def buscar_letras_tidal(title: str, artist: str, album: str = "", duration_s: Optional[float] = None,
