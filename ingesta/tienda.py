@@ -87,7 +87,7 @@ def _audios(carpeta):
     out = []
     for raiz, _d, archivos in os.walk(carpeta):
         out += [os.path.join(raiz, a) for a in archivos
-                if a.lower().endswith(EXT_AUDIO) and not a.startswith('.')]
+                if a.lower().endswith(EXT_AUDIO) and not a.startswith('._')]
     return out
 
 

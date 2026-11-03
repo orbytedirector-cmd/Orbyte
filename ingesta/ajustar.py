@@ -27,7 +27,7 @@ def _audio(ruta):
     for raiz, dirs, archivos in os.walk(ruta):
         dirs[:] = sorted(d for d in dirs if d != 'Extras' and not d.startswith('.'))
         for a in sorted(archivos):
-            if os.path.splitext(a)[1].lower() in analisis.AUDIO_EXT and not a.startswith('.'):
+            if os.path.splitext(a)[1].lower() in analisis.AUDIO_EXT and not a.startswith('._'):
                 out.append(os.path.relpath(os.path.join(raiz, a), ruta))
     return out
 
