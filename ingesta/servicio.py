@@ -43,6 +43,7 @@ from . import autocorregir as autocorregir_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
 from . import tienda as tienda_mod
+from . import nacionalidades as nacionalidades_mod
 import threading
 import traceback
 
@@ -1474,6 +1475,77 @@ def api_artistas_unificar():
 def api_artistas_unificacion(uid):
     u = next((x for x in almacen.unificaciones(50) if x['id'] == uid), None)
     return jsonify(u or {})
+
+
+# ─────────────────────────── países de origen ───────────────────────────
+
+recalculo_paises = nacionalidades_mod.Recalculo(os.path.join(DATOS, 'nacionalidades.json'))
+
+
+@app.route('/artistas/paises')
+def paises_pagina():
+    return render_template('paises.html', pagina='artistas', artista=request.args.get('artista', ''))
+
+
+@app.route('/api/paises')
+def api_paises():
+    d = recalculo_paises.estado()
+    d['corriendo'] = recalculo_paises.corriendo()
+    d['paises'] = nacionalidades_mod.lista_paises()
+    return jsonify(d)
+
+
+@app.route('/api/paises/recalcular', methods=['POST'])
+def api_paises_recalcular():
+    continuar = bool((request.get_json(silent=True) or {}).get('continuar'))
+    ok = recalculo_paises.iniciar(almacen.ajustes()['db_orbyte'], vigilante.cliente_mb, continuar=continuar)
+    return jsonify(ok=ok, error=None if ok else 'Ya hay una revisión en curso')
+
+
+@app.route('/api/paises/detener', methods=['POST'])
+def api_paises_detener():
+    recalculo_paises.parar()
+    return jsonify(ok=True)
+
+
+@app.route('/api/paises/aplicar', methods=['POST'])
+def api_paises_aplicar():
+    ids = [int(i) for i in (request.get_json(silent=True) or {}).get('ids') or [] if str(i).isdigit()]
+    try:
+        n = recalculo_paises.aplicar(almacen.ajustes()['db_orbyte'], ids)
+    except Exception as e:
+        return jsonify(ok=False, error=str(e)), 500
+    return jsonify(ok=True, aplicados=n)
+
+
+@app.route('/api/paises/buscar')
+def api_paises_buscar():
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify(artistas=[])
+    return jsonify(artistas=nacionalidades_mod.buscar(almacen.ajustes()['db_orbyte'], q))
+
+
+@app.route('/api/paises/<int:artist_id>', methods=['POST'])
+def api_paises_fijar(artist_id):
+    codigo = (request.get_json(silent=True) or {}).get('codigo') or ''
+    try:
+        nacionalidades_mod.fijar(almacen.ajustes()['db_orbyte'], artist_id, codigo)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    recalculo_paises.marcar_manual(artist_id, codigo.lower() or None)
+    return jsonify(ok=True)
+
+
+@app.route('/api/paises/<int:artist_id>/buscar', methods=['POST'])
+def api_paises_uno(artist_id):
+    try:
+        fila = recalculo_paises.uno(almacen.ajustes()['db_orbyte'], vigilante.cliente_mb, artist_id)
+    except RuntimeError as e:
+        return jsonify(ok=False, error=str(e)), 502
+    if not fila:
+        return jsonify(ok=False, error='Artista no encontrado'), 404
+    return jsonify(ok=True, fila=fila)
 
 
 # ─────────────────────────── álbumes fantasma ───────────────────────────
