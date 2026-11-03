@@ -493,3 +493,10 @@ input[type=search].campo-buscar:focus, .campo > input[type=search]:focus { outli
 .p-ed label { display: inline-flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
 .p-ed select { background: var(--elev); color: var(--texto); border: 1px solid var(--borde-2); border-radius: 6px; padding: .3rem .5rem; font: inherit; max-width: 260px; }
 tr.p-editor td { background: var(--card-2); }
+
+/* ── descargas: pistas con pérdida ── */
+.d-item.e-decision { border-color: var(--borde-oro); }
+.d-decision { display: flex; flex-direction: column; gap: .35rem; }
+.d-pend { margin: 0; padding-left: 1.1rem; font-size: .84rem; }
+.d-opc { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; font-size: .86rem; }
+.d-opc label { display: inline-flex; gap: .4rem; align-items: center; cursor: pointer; }

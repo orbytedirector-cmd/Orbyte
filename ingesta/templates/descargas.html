@@ -13,7 +13,9 @@
 <script>
 (function () {
   const NOMBRE = {qobuz: 'Qobuz', tidal: 'Tidal'};
-  const ESTADO = {en_cola: 'En cola', descargando: 'Descargando', terminada: 'Descargada', error: 'Error', cancelada: 'Cancelada'};
+  const ESTADO = {en_cola: 'En cola', descargando: 'Descargando', terminada: 'Descargada', error: 'Error', cancelada: 'Cancelada',
+                  decision: 'Requiere decisión', convirtiendo: 'Convirtiendo'};
+  const formato = new Map();             // id → 'flac' | 'mp3' (se conserva entre refrescos)
   const BANDEJA = {copiando: 'esperando a revisarse', en_cola: 'en cola para revisar', analizando: 'revisándose',
                    revisado: 'lista para ubicar', requiere_revision: 'requiere revisión', por_ubicar: 'en cola para ubicar',
                    ubicando: 'ubicándose', por_metadata: 'en cola de metadata', metadata: 'corriendo la metadata',
@@ -26,13 +28,28 @@
     const acciones = [];
     if (d.estado === 'descargando' || d.estado === 'en_cola') acciones.push(`<button class="btn chico" data-acc="cancelar" data-id="${d.id}">Cancelar</button>`);
     if (d.estado === 'error' || d.estado === 'cancelada') acciones.push(`<button class="btn chico oro" data-acc="reintentar" data-id="${d.id}">Reintentar</button>`);
-    if (d.estado !== 'descargando' && d.estado !== 'en_cola') acciones.push(`<button class="btn chico" data-acc="quitar" data-id="${d.id}">Quitar</button>`);
+    if (!['descargando', 'en_cola', 'decision', 'convirtiendo'].includes(d.estado)) acciones.push(`<button class="btn chico" data-acc="quitar" data-id="${d.id}">Quitar</button>`);
     if (d.bandeja) acciones.unshift(`<a class="btn chico" href="/album/${d.bandeja.id}">Abrir en la Bandeja</a>`);
     let detalle = '';
     if (d.estado === 'descargando') detalle = `<div class="d-barra"><div style="width:${pct ?? 5}%"></div></div><div class="tenue t-nota">${esc(d.progreso || '')}</div>`;
     else if (d.estado === 'en_cola') detalle = '<div class="tenue t-nota">En cola</div>';
     else if (d.estado === 'terminada') detalle = `<div class="ok t-nota">${esc(d.progreso || 'Descargada')}${d.bandeja ? ' · en la Bandeja: ' + esc(BANDEJA[d.bandeja.estado] || d.bandeja.estado) : ' · esperando a que la ingesta la vea'}</div>`;
     else if (d.estado === 'error') detalle = `<div class="mal t-nota">${esc(d.error || 'Error')}</div>`;
+    else if (d.estado === 'convirtiendo') detalle = `<div class="d-barra"><div style="width:50%"></div></div><div class="tenue t-nota">Convirtiendo ${d.pendientes.length} pista(s)…</div>`;
+    else if (d.estado === 'decision') {
+      const f = formato.get(d.id) || 'flac';
+      detalle = `<div class="d-decision">
+        <div class="med t-nota">⚠ No existe sin pérdida ni en Tidal ni en Qobuz:</div>
+        <ul class="d-pend">${d.pendientes.map(p => `<li>${esc(p.archivo)} <span class="tenue">(${esc((p.codec || '?').toUpperCase())})</span></li>`).join('')}</ul>
+        <div class="tenue t-nota">Para que el álbum quede en un solo tipo de archivo, se convierten y se agrega «(Lossy)» al final de su título. No sube la calidad.</div>
+        <div class="d-opc" role="radiogroup" aria-label="Convertir a">
+          <label><input type="radio" name="fmt-${d.id}" value="flac" data-fmt="${d.id}" ${f === 'flac' ? 'checked' : ''}> Convertir a FLAC</label>
+          <label><input type="radio" name="fmt-${d.id}" value="mp3" data-fmt="${d.id}" ${f === 'mp3' ? 'checked' : ''}> Convertir a MP3 320</label>
+        </div></div>`;
+      acciones.length = 0;
+      acciones.push(`<button class="btn chico oro" data-acc="convertir" data-id="${d.id}">Aplicar</button>`,
+                    `<button class="btn chico" data-acc="descartar" data-id="${d.id}">Descartar el disco</button>`);
+    }
     else detalle = '<div class="muy-tenue t-nota">Cancelada: lo que alcanzó a bajar se borró</div>';
     return `<article class="d-item e-${esc(d.estado)}">
       <div class="d-txt"><div><b>${esc(d.artista)} — ${esc(d.album)}</b> <span class="tenue t-nota">${NOMBRE[d.servicio] || ''} · ${esc(d.calidad || '')}</span></div>
@@ -46,18 +63,24 @@
     const el = document.getElementById('d-lista');
     el.querySelectorAll('details[data-reg]').forEach(x => { if (x.open) abiertos.add(+x.dataset.reg); else abiertos.delete(+x.dataset.reg); });
     if (!r.descargas.length) { el.innerHTML = '<div class="vacio"><p>Todavía no hay descargas. Búscalas en «Buscar».</p></div>'; return; }
-    const vivas = r.descargas.filter(d => ['descargando', 'en_cola'].includes(d.estado));
-    const resto = r.descargas.filter(d => !['descargando', 'en_cola'].includes(d.estado));
+    const VIVAS = ['decision', 'convirtiendo', 'descargando', 'en_cola'];
+    const vivas = r.descargas.filter(d => VIVAS.includes(d.estado)).sort((a, b) => VIVAS.indexOf(a.estado) - VIVAS.indexOf(b.estado));
+    const resto = r.descargas.filter(d => !VIVAS.includes(d.estado));
     el.innerHTML = vivas.map(tarjeta).join('') +
       (resto.length ? `<div class="rotulo" style="margin:1.4rem 0 .6rem">Terminadas</div>` + resto.map(tarjeta).join('') : '');
   }
   document.getElementById('d-lista').addEventListener('click', async e => {
     const b = e.target.closest('[data-acc]');
     if (!b) return;
+    if (b.dataset.acc === 'descartar' && !confirm('Se borra lo descargado de este disco y no pasa a la Bandeja. ¿Seguir?')) return;
     b.disabled = true;
-    const r = await post(`/api/descargas/${b.dataset.id}/${b.dataset.acc}`);
+    const r = await post(`/api/descargas/${b.dataset.id}/${b.dataset.acc}`,
+                         b.dataset.acc === 'convertir' ? {formato: formato.get(+b.dataset.id) || 'flac'} : {});
     if (r && r.ok === false) toast('No se pudo', r.error || '');
     cargar();
+  });
+  document.getElementById('d-lista').addEventListener('change', e => {
+    if (e.target.dataset.fmt) formato.set(+e.target.dataset.fmt, e.target.value);
   });
   cargar();
   setInterval(cargar, 2500);

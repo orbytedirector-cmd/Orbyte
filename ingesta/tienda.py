@@ -782,10 +782,11 @@ def olvidar_error_medicion(tidal_id, qobuz_id):
 class Descargador(threading.Thread):
     """Una descarga a la vez. Mientras baja, el vigilante no revisa la carpeta destino (pausa_rutas)."""
 
-    def __init__(self, almacen, vigilante):
+    def __init__(self, almacen, vigilante, datos=None):
         super().__init__(daemon=True, name='descargas')
         self.almacen = almacen
         self.vigilante = vigilante
+        self.datos = datos or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ingesta_datos')
         self.despertar = threading.Event()
         self.proc = None
         self.actual = None
@@ -804,8 +805,12 @@ class Descargador(threading.Thread):
             return True
         return False
 
+    def _pausar_pendientes(self, extra=()):
+        self.vigilante.pausa_rutas = set(extra) | self.almacen.rutas_en_decision()
+
     def run(self):
         self.almacen.reiniciar_descargas()
+        self._pausar_pendientes()
         while True:
             d = self.almacen.siguiente_descarga()
             if not d:
@@ -820,7 +825,7 @@ class Descargador(threading.Thread):
                                                  error=str(e) if isinstance(e, FalloTienda) else f'{type(e).__name__}: {e}')
             finally:
                 self.actual, self.proc, self.cancelar = None, None, False
-                self.vigilante.pausa_rutas = set()
+                self._pausar_pendientes()
                 self.vigilante.ya()
             if self.almacen.siguiente_descarga():
                 time.sleep(random.uniform(*PAUSA_ENTRE_ALBUMES))
@@ -845,7 +850,7 @@ class Descargador(threading.Thread):
         if not exe:
             raise FalloTienda('No se encontró ' + ('tidal-dl-ng' if d['servicio'] == 'tidal' else 'rip'))
         os.makedirs(base, exist_ok=True)
-        self.vigilante.pausa_rutas = {base.rstrip('/')}
+        self._pausar_pendientes({base.rstrip('/')})
         antes = self._foto(base)
         inicio = time.time()
         self.almacen.actualizar_descarga(did, estado='descargando', inicio=inicio, progreso='Empezando…', error=None)
@@ -901,16 +906,30 @@ class Descargador(threading.Thread):
             return
         pedida_con_perdida = bool(re.search(r'lossy|aac|mp3', d.get('calidad') or '', re.I))
         if not pedida_con_perdida:
-            llegados = {codec(sorted(_audios(p))[0]) for p in carpetas}
-            malos = sorted(c for c in llegados if c in CODECS_CON_PERDIDA)
-            if malos:
-                for p in carpetas + recien:          # no debe llegar a la Bandeja como si fuera la versión sin pérdida
-                    shutil.rmtree(p, ignore_errors=True)
-                raise FalloTienda(f'{d["servicio"].capitalize()} entregó {"/".join(m.upper() for m in malos)} '
-                                  f'(con pérdida) en vez de {d.get("calidad") or "sin pérdida"}: se borró lo descargado. '
-                                  + ('Revisa la sesión PKCE: python3 tools/metadata/tidal_calidad.py URL_DEL_ALBUM'
-                                     if d['servicio'] == 'tidal' else 'Revisa la calidad configurada en streamrip.'))
-            lineas.append('Formato verificado: ' + ', '.join(sorted(c or '?' for c in llegados)))
+            from . import rescate
+
+            def nota(t):
+                lineas.append(t)
+                self.almacen.actualizar_descarga(did, progreso=t[:160], registro='\n'.join(lineas[-120:]))
+            self.almacen.actualizar_descarga(did, progreso='Revisando el formato de cada pista…')
+            tmp = os.path.join(self.datos, 'rescate')
+            os.makedirs(tmp, exist_ok=True)
+            pendientes, notas = rescate.rescatar(d, carpetas, tmp, nota)
+            if pendientes:
+                lista = [{'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'codec': f['codec']} for f in pendientes]
+                nota(f'{len(lista)} pista(s) siguen con pérdida: esperan tu decisión en Descargas')
+                self.almacen.actualizar_descarga(did, estado='decision', fin=time.time(), carpetas=json.dumps(carpetas),
+                                                 pendientes=json.dumps(lista, ensure_ascii=False),
+                                                 progreso=f'{len(lista)} pista(s) sin versión sin pérdida',
+                                                 registro='\n'.join(lineas[-120:]))
+                self.almacen.avisar('aviso', f'Descarga en espera: {d["artista"]} — {d["album"]}',
+                                    f'{len(lista)} pista(s) no existen sin pérdida ni en Tidal ni en Qobuz: '
+                                    'elige en Descargas si convertirlas o descartar el disco')
+                return
+            if notas:
+                self.almacen.avisar('ok', f'Pistas recuperadas sin pérdida: {d["artista"]} — {d["album"]}',
+                                    '; '.join(f'{n["archivo"]}: {n["como"]}' for n in notas))
+            nota('Formato verificado: todas las pistas sin pérdida')
         n = sum(len(_audios(p)) for p in carpetas)
         self.almacen.actualizar_descarga(did, estado='terminada', fin=time.time(), carpetas=json.dumps(carpetas),
                                          progreso=f'{n} pista(s) descargadas', registro='\n'.join(lineas[-80:]))

@@ -81,6 +81,9 @@ class Almacen:
                               ('origen', 'TEXT'), ('reproceso', 'TEXT')):
                 if col not in columnas:
                     c.execute(f'ALTER TABLE albumes ADD COLUMN {col} {tipo}')
+            columnas = {r[1] for r in c.execute('PRAGMA table_info(descargas)')}
+            if 'pendientes' not in columnas:            # pistas con pérdida que esperan tu decisión (JSON)
+                c.execute('ALTER TABLE descargas ADD COLUMN pendientes TEXT')
 
     def _con(self):
         c = sqlite3.connect(self.ruta, timeout=30)
@@ -347,10 +350,23 @@ class Almacen:
         with _lock, self._con() as c:
             c.execute("DELETE FROM descargas WHERE id=? AND estado != 'descargando'", (did,))
 
+    def rutas_en_decision(self):
+        """Carpetas de descargas que esperan tu decisión (pistas con pérdida): el vigilante no las revisa."""
+        with self._con() as c:
+            filas = c.execute("SELECT carpetas FROM descargas WHERE estado IN ('decision', 'convirtiendo')").fetchall()
+        rutas = set()
+        for f in filas:
+            try:
+                rutas.update(p.rstrip('/') for p in json.loads(f[0] or '[]'))
+            except ValueError:
+                pass
+        return rutas
+
     def reiniciar_descargas(self):
         """Tras un reinicio, la que quedó a medias vuelve a la cola."""
         with _lock, self._con() as c:
             c.execute("UPDATE descargas SET estado='en_cola', progreso=NULL WHERE estado='descargando'")
+            c.execute("UPDATE descargas SET estado='decision' WHERE estado='convirtiendo'")
 
     def nueva_unificacion(self, clave, nombres, final):
         with _lock, self._con() as c:
