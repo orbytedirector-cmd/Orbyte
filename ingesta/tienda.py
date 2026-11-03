@@ -76,6 +76,13 @@ def _norm(s):
     return analisis._norm(s or '')
 
 
+def _con_version(titulo, version):
+    """«Rock in Rio (Live) [2015 Remaster]» + «Live; 2015 Remaster» → sin repetir lo que el título ya dice."""
+    partes = [p.strip() for p in re.split(r'[;,/]', version or '') if p.strip()]
+    nuevas = [p for p in partes if _norm(p) not in _norm(titulo)]
+    return f'{titulo} ({"; ".join(nuevas)})' if nuevas else titulo
+
+
 def _audios(carpeta):
     out = []
     for raiz, _d, archivos in os.walk(carpeta):
@@ -188,8 +195,7 @@ class Qobuz:
     def _album(self, a):
         sr = a.get('maximum_sampling_rate')
         titulo = a.get('title') or ''
-        if a.get('version') and a['version'].lower() not in titulo.lower():
-            titulo += f' ({a["version"]})'
+        titulo = _con_version(titulo, a.get('version'))
         img = a.get('image') or {}
         return {'servicio': 'qobuz', 'id': str(a['id']), 'titulo': titulo,
                 'artista': (a.get('artist') or {}).get('name') or '',
@@ -290,8 +296,7 @@ class Tidal:
         hires = 'HIRES_LOSSLESS' in tags or a.get('audioQuality') == 'HI_RES_LOSSLESS'
         lossless = hires or 'LOSSLESS' in tags or a.get('audioQuality') in ('LOSSLESS', 'HI_RES')
         titulo = a.get('title') or ''
-        if a.get('version') and a['version'].lower() not in titulo.lower():
-            titulo += f' ({a["version"]})'
+        titulo = _con_version(titulo, a.get('version'))
         cover = a.get('cover')
         artista = (a.get('artist') or {}).get('name') or ', '.join(x.get('name', '') for x in a.get('artists') or [])
         return {'servicio': 'tidal', 'id': str(a['id']), 'titulo': titulo, 'artista': artista,
@@ -567,7 +572,11 @@ def _bajar_tidal_a(url, carpeta, casa):
     with open(os.path.join(cfg, 'settings.json'), 'w', encoding='utf-8') as f:
         json.dump(aj, f)
     os.symlink(os.path.join(origen, 'token.json'), os.path.join(cfg, 'token.json'))
-    return _correr([exe, 'dl', url], env=_entorno({'HOME': casa, 'XDG_CONFIG_HOME': os.path.join(casa, '.config')}),
+    # HOME apunta a la casa temporal (su configuración y su historial, no los tuyos), pero Python debe seguir
+    # encontrando tidal-dl-ng instalado con «pip --user» en tu ~/.local
+    env = _entorno({'HOME': casa, 'XDG_CONFIG_HOME': os.path.join(casa, '.config'),
+                    'PYTHONUSERBASE': os.environ.get('PYTHONUSERBASE') or _home('.local')})
+    return _correr([exe, 'dl', url], env=env,
                    timeout=600, cwd=casa)
 
 
