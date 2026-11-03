@@ -13,7 +13,7 @@
 <div class="heroe">
   <div class="portada"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg><img alt="Carátula" src="{{ url_for('biblioteca_caratula', oid=o.id) }}{% if portada and portada.actual %}?v={{ portada.actual.mtime }}{% endif %}" onerror="this.remove()"></div>
   <div>
-    <div class="h-art">{{ o.artista }}</div>
+    <div class="h-art">{{ o.artista }} <a class="t-nota" style="font-weight:400" href="{{ url_for('paises_pagina', artista=o.artista) }}">· país de origen</a></div>
     <h1 class="h-alb">{{ o.album }}{% if o.anio %} <span class="anio">({{ o.anio }})</span>{% endif %}</h1>
     <div class="h-chips">
       {% if a %}<span class="chip e-{{ a.estado }} {{ 'pulso' if a.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(a.estado, a.estado) }}</span>{% endif %}

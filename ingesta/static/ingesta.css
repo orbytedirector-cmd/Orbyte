@@ -482,3 +482,14 @@ input[type=search].campo-buscar:focus, .campo > input[type=search]:focus { outli
 .b-opcion { display: flex; gap: .6rem; align-items: flex-start; padding: .55rem .7rem; border: 1px solid var(--borde-2); border-radius: 10px; cursor: pointer; }
 .b-opcion:has(input:checked) { border-color: var(--oro); background: var(--oro-tenue); }
 .b-opcion input { margin-top: .25rem; }
+
+/* ── países de origen ── */
+.p-estado { margin-bottom: 1rem; }
+.p-fila { display: flex; flex-wrap: wrap; gap: .8rem; align-items: center; justify-content: space-between; }
+.p-txt { flex: 1 1 360px; min-width: 0; }
+.p-flag { width: 20px; height: 15px; object-fit: cover; border-radius: 2px; vertical-align: -2px; margin-right: .4rem; }
+.p-filtro-txt { margin-bottom: .7rem; max-width: 360px; }
+.p-ed { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin-bottom: .3rem; }
+.p-ed label { display: inline-flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.p-ed select { background: var(--elev); color: var(--texto); border: 1px solid var(--borde-2); border-radius: 6px; padding: .3rem .5rem; font: inherit; max-width: 260px; }
+tr.p-editor td { background: var(--card-2); }

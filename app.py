@@ -108,26 +108,8 @@ def _user_fav_track_ids(conn, user_id):
 # ── Nationality / Language → ISO 3166-1 alpha-2 country code ─────────────────
 # Used to build flagcdn.com image URLs — works on all OS/browser combos,
 # unlike Unicode flag emoji which require Noto Color Emoji on Linux.
-COUNTRY_ISO = {
-    'United States':'us','United Kingdom':'gb','England':'gb','Scotland':'gb',
-    'Wales':'gb','Northern Ireland':'gb','Pontypridd':'gb','Brighton':'gb','London':'gb',
-    'Germany':'de','Saarbrücken':'de','Dortmund':'de',
-    'France':'fr','Italy':'it','Savona':'it',
-    'Spain':'es','Madrid':'es','Asturias':'es',
-    'Sweden':'se','Arvika Municipality':'se',
-    'Norway':'no','Finland':'fi','Denmark':'dk','Copenhagen':'dk',
-    'Netherlands':'nl','Australia':'au','Canada':'ca',
-    'Brazil':'br','Argentina':'ar','Mexico':'mx','Chile':'cl',
-    'Colombia':'co','Venezuela':'ve',
-    'Japan':'jp','South Korea':'kr','Ireland':'ie','Portugal':'pt',
-    'Greece':'gr','Poland':'pl','Switzerland':'ch','Iceland':'is',
-    'New Zealand':'nz','South Africa':'za','Jamaica':'jm','Cuba':'cu',
-    'Dominican Republic':'do','Puerto Rico':'pr','Philippines':'ph',
-    'Kazakhstan':'kz','Bali':'id','Indonesia':'id',
-    'Boston':'us','Miami':'us','New York':'us','San Francisco':'us',
-    'Seattle':'us','Texas':'us','Washington':'us','Raleigh':'us',
-    'Arlington':'us','Volcano':'us',
-}
+# Tabla completa (250 países + nombres viejos de ciudades) en paises.py, compartida con la ingesta.
+from paises import COUNTRY_ISO  # noqa: E402
 
 # Language code → ISO country code (language → representative country)
 LANG_ISO = {

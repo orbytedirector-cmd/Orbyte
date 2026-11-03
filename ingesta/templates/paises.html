@@ -1,0 +1,225 @@
+{% extends 'base.html' %}
+{% block titulo %}Países de origen{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Países de origen</h1>
+  <div class="sub">El país de cada artista se busca en MusicBrainz y se verifica con tus discos (los IDs de los tags o un álbum tuyo en su discografía), para no confundir artistas que se llaman igual. Siempre se guarda el país, nunca la ciudad. Nada se escribe hasta que lo apliques; lo que corrijas a mano no se vuelve a tocar.</div>
+</div>
+  <div class="acciones" style="margin:0"><a class="btn" href="{{ url_for('artistas_pagina') }}">Artistas duplicados</a></div>
+</div>
+
+<section class="panel p-estado" id="p-estado"><div class="tenue">Cargando…</div></section>
+
+<div class="filtros" id="p-filtros" hidden></div>
+<div class="campo p-filtro-txt" id="p-filtro-txt-wrap" hidden>
+  <input type="search" class="campo-buscar" id="p-filtro-txt" placeholder="Filtrar por artista…" aria-label="Filtrar por artista">
+</div>
+<div class="tabla-wrap" id="p-tabla-wrap" hidden><table>
+  <thead><tr><th style="width:1%"><span class="oculto-lector">Elegir</span></th><th>Artista</th><th>Ahora</th><th>Propuesto</th><th class="oculto-movil">Cómo se identificó</th><th style="width:1%"></th></tr></thead>
+  <tbody id="p-filas"></tbody>
+</table></div>
+<div class="t-barra" id="p-barra" hidden>
+  <span id="p-barra-txt"></span>
+  <button class="btn oro" id="p-aplicar">Aplicar</button>
+</div>
+
+<section class="seccion">
+  <h2 class="rotulo">Corregir un artista</h2>
+  <div class="campo" style="max-width:420px;margin-bottom:.7rem"><input type="search" class="campo-buscar" id="p-q" placeholder="Buscar artista en la biblioteca…" aria-label="Buscar artista" value="{{ artista }}"></div>
+  <div class="tabla-wrap" id="p-res-wrap" hidden><table><tbody id="p-res"></tbody></table></div>
+</section>
+{% endblock %}
+{% block js %}
+<script>
+(function () {
+  const TIPO = {
+    cambia: ['Cambian de país', 'El país guardado no es el del artista que tiene tus discos'],
+    nuevo: ['Sin país hasta ahora', 'Ahora sí se encontró'],
+    normaliza: ['Ciudad → país', 'Mismo país; se guardaba la ciudad o la región'],
+    sin_verificar: ['No se pudo verificar', 'Se deja lo que hay; revísalo o corrígelo a mano'],
+    sin_datos: ['Sin datos', 'MusicBrainz no lo tiene o no se pudo identificar'],
+    igual: ['Sin cambios', 'Ya estaba bien'],
+    manual: ['Corregidos a mano', 'No se buscan'],
+  };
+  const METODO = {tags: 'con los IDs de los tags', discos: 'con tus discos', nombre: 'solo por el nombre (único con ese nombre)'};
+  const MARCADOS = new Set(['cambia', 'nuevo', 'normaliza']);
+  let d = null, filtro = null, texto = '', elegidos = new Set(), paises = [], yaPintado = new Set();
+
+  const bandera = iso => iso ? `<img class="p-flag" src="https://flagcdn.com/w40/${esc(iso)}.png" alt="" onerror="this.remove()">` : '';
+  const pais = (iso, nombre) => nombre ? `${bandera(iso)}${esc(nombre)}` : '<span class="muy-tenue">—</span>';
+  const opciones = sel => `<option value="">Sin país</option>` + paises.map(p => `<option value="${p.codigo}" ${p.codigo === sel ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('');
+
+  function cuenta() {
+    const c = {};
+    for (const f of d.filas) c[f.tipo] = (c[f.tipo] || 0) + 1;
+    return c;
+  }
+  function pintarEstado() {
+    const el = document.getElementById('p-estado');
+    const min = Math.max(1, Math.round((d.total - d.hechos) * 3 / 60));
+    if (d.corriendo) {
+      const pct = d.total ? Math.round(100 * d.hechos / d.total) : 0;
+      el.innerHTML = `<div class="p-fila"><div class="p-txt"><b>Revisando artistas…</b> <span class="tenue">${d.hechos} de ${d.total}${d.actual ? ' · ' + esc(d.actual) : ''} · quedan ~${min} min</span>
+        <div class="d-barra" style="margin-top:.5rem"><div style="width:${pct}%"></div></div>
+        <div class="muy-tenue t-nota" style="margin-top:.35rem">Puedes ir aplicando lo que ya está revisado.</div></div>
+        <button class="btn" id="p-detener">Detener</button></div>`;
+    } else if (!d.estado || (d.estado === 'parcial' && !d.total)) {
+      el.innerHTML = `<div class="p-fila"><div class="p-txt"><b>Revisar todos los artistas</b>
+        <div class="tenue t-nota">Una consulta por segundo a MusicBrainz: unos 3 segundos por artista. Puedes dejarlo corriendo y volver.</div></div>
+        <button class="btn oro" id="p-iniciar">Revisar</button></div>`;
+    } else {
+      const est = {listo: 'Revisión terminada', detenido: 'Revisión detenida', interrumpido: 'Revisión interrumpida (se reinició el servicio)', error: 'La revisión falló', parcial: 'Revisión'}[d.estado] || 'Revisión';
+      const cuando = d.fin ? new Date(d.fin * 1000).toLocaleString('es-CL') : '';
+      const seguir = d.hechos < d.total ? `<button class="btn" id="p-continuar">Continuar (${d.total - d.hechos} pendientes)</button>` : '';
+      el.innerHTML = `<div class="p-fila"><div class="p-txt"><b>${est}</b> <span class="tenue">${d.hechos} de ${d.total} artistas${cuando ? ' · ' + cuando : ''}</span>
+        ${d.error ? `<div class="mal t-nota">${esc(d.error)}</div>` : ''}</div>
+        <div class="acciones" style="margin:0">${seguir}<button class="btn" id="p-iniciar">Revisar de nuevo</button></div></div>`;
+    }
+  }
+  function pintarFiltros() {
+    const c = cuenta();
+    const orden = Object.keys(TIPO).filter(t => c[t]);
+    if (!filtro || !c[filtro]) filtro = orden[0] || null;
+    const el = document.getElementById('p-filtros');
+    el.hidden = !orden.length;
+    document.getElementById('p-filtro-txt-wrap').hidden = !orden.length;
+    el.innerHTML = orden.map(t => `<button class="filtro ${t === filtro ? 'activo' : ''}" data-f="${t}" title="${esc(TIPO[t][1])}">${TIPO[t][0]} <b>${c[t]}</b></button>`).join('');
+  }
+  function como(f) {
+    if (!f.metodo) return `<span class="muy-tenue">${esc(f.detalle || '—')}</span>`;
+    const mb = f.mbid ? ` · <a href="https://musicbrainz.org/artist/${esc(f.mbid)}" target="_blank" rel="noopener">${esc(f.mb_nombre || 'MusicBrainz')}</a>` : '';
+    const det = f.metodo === 'discos' && f.detalle ? `<div class="s">${esc(f.detalle.replace(/^discos: /, ''))}</div>` : '';
+    return `<span class="${f.metodo === 'nombre' ? 'med' : ''}">${METODO[f.metodo] || esc(f.metodo)}</span>${mb}${det}`;
+  }
+  function filaHtml(f, conCheck) {
+    const puede = conCheck && f.codigo && !f.aplicado && f.tipo !== 'igual' && f.tipo !== 'manual';
+    const chk = puede ? `<input type="checkbox" data-id="${f.id}" ${elegidos.has(f.id) ? 'checked' : ''} aria-label="Elegir ${esc(f.nombre)}">` : (f.aplicado ? '<span class="ok" title="Aplicado">✓</span>' : '');
+    return `<tr data-fila="${f.id}"><td>${chk}</td>
+      <td><b>${esc(f.nombre)}</b><div class="s">${f.albumes} álbum${f.albumes === 1 ? '' : 'es'}</div></td>
+      <td>${pais(f.actual_iso, f.actual)}${f.fuente_actual === 'manual' ? ' <span class="chip">a mano</span>' : ''}</td>
+      <td>${f.tipo === 'manual' ? '<span class="muy-tenue">—</span>' : pais(f.codigo, f.pais)}</td>
+      <td class="oculto-movil">${como(f)}</td>
+      <td><button class="btn chico" data-editar="${f.id}">Cambiar…</button></td></tr>`;
+  }
+  function pintarFilas() {
+    const wrap = document.getElementById('p-tabla-wrap');
+    const vis = d.filas.filter(f => f.tipo === filtro && (!texto || f.nombre.toLowerCase().includes(texto)));
+    wrap.hidden = !d.filas.length;
+    document.getElementById('p-filas').innerHTML = vis.map(f => filaHtml(f, true)).join('') ||
+      '<tr><td colspan="6" class="muy-tenue">Nada que mostrar con este filtro.</td></tr>';
+    pintarBarra();
+  }
+  function pintarBarra() {
+    const pend = d.filas.filter(f => elegidos.has(f.id) && !f.aplicado);
+    const iguales = d.filas.filter(f => f.tipo === 'igual' && !f.aplicado && f.codigo).length;
+    const barra = document.getElementById('p-barra');
+    barra.hidden = !pend.length && !iguales;
+    const c = {};
+    for (const f of pend) c[f.tipo] = (c[f.tipo] || 0) + 1;
+    const partes = Object.keys(c).map(t => `${c[t]} ${TIPO[t][0].toLowerCase()}`);
+    document.getElementById('p-barra-txt').innerHTML = (pend.length ? `<b>${pend.length} elegidos</b> · ${partes.join(' · ')}` : 'Nada elegido') +
+      (iguales ? ` <span class="tenue">· también se guarda el código de país de ${iguales} sin cambios</span>` : '');
+    document.getElementById('p-aplicar').textContent = pend.length ? `Aplicar ${pend.length}` : 'Guardar códigos';
+  }
+  function editor(tr, f) {
+    tr.insertAdjacentHTML('afterend', `<tr class="p-editor" data-editor="${f.id}"><td></td><td colspan="5">
+      <div class="p-ed"><label>País de ${esc(f.nombre)} <select data-sel="${f.id}">${opciones(f.codigo || f.actual_iso || '')}</select></label>
+        <button class="btn chico oro" data-guardar="${f.id}">Guardar a mano</button>
+        <button class="btn chico" data-rebuscar="${f.id}">Buscar de nuevo en MusicBrainz</button>
+        <button class="btn chico" data-cerrar="${f.id}">Cerrar</button></div>
+      <div class="muy-tenue t-nota">Lo guardado a mano queda fijo: las revisiones y la metadata no lo cambian.</div></td></tr>`);
+  }
+  async function cargar(primera) {
+    let r;
+    try { r = await (await fetch('/api/paises')).json(); } catch (e) { return; }
+    const antes = d ? d.filas.length : 0;
+    d = r; paises = r.paises;
+    for (const f of d.filas) {
+      if (!yaPintado.has(f.id)) { yaPintado.add(f.id); if (MARCADOS.has(f.tipo) && f.codigo && f.metodo !== 'nombre' && !f.aplicado) elegidos.add(f.id); }
+    }
+    pintarEstado();
+    const editando = document.querySelector('.p-editor') || document.activeElement === document.getElementById('p-filtro-txt');
+    if (primera || (!editando && d.filas.length !== antes)) { pintarFiltros(); pintarFilas(); }
+    else { pintarFiltros(); pintarBarra(); }
+    clearTimeout(cargar.t);
+    if (d.corriendo) cargar.t = setTimeout(() => cargar(false), 3000);
+  }
+  const buscarFila = id => (d && d.filas.find(f => f.id === id)) || resultados.find(f => f.id === id);
+  let resultados = [];
+
+  document.addEventListener('click', async e => {
+    const t = e.target;
+    if (t.id === 'p-iniciar' || t.id === 'p-continuar') {
+      if (t.id === 'p-iniciar' && d.filas.length && !confirm('Se descarta la revisión actual (lo aplicado ya está guardado). ¿Revisar de nuevo?')) return;
+      t.disabled = true;
+      const r = await post('/api/paises/recalcular', {continuar: t.id === 'p-continuar'});
+      if (r && r.ok === false) toast('No se pudo', r.error || '');
+      if (t.id === 'p-iniciar') { elegidos.clear(); yaPintado.clear(); }
+      return cargar(true);
+    }
+    if (t.id === 'p-detener') { t.disabled = true; await post('/api/paises/detener', {}); return setTimeout(() => cargar(true), 1500); }
+    if (t.dataset.f) { filtro = t.dataset.f; pintarFiltros(); pintarFilas(); return; }
+    if (t.id === 'p-aplicar') {
+      t.disabled = true;
+      const r = await post('/api/paises/aplicar', {ids: [...elegidos]});
+      t.disabled = false;
+      if (r && r.ok) toast('Listo', `${r.aplicados} artistas actualizados en la biblioteca`);
+      else toast('No se pudo', (r && r.error) || '');
+      return cargar(true);
+    }
+    const ed = t.dataset.editar;
+    if (ed) {
+      const tr = t.closest('tr'), sig = tr.nextElementSibling;
+      if (sig && sig.classList.contains('p-editor')) { sig.remove(); return; }
+      return editor(tr, buscarFila(+ed));
+    }
+    if (t.dataset.cerrar) { t.closest('tr').remove(); return; }
+    if (t.dataset.guardar) {
+      const id = +t.dataset.guardar, codigo = document.querySelector(`[data-sel="${id}"]`).value;
+      t.disabled = true;
+      const r = await post(`/api/paises/${id}`, {codigo});
+      if (r && r.ok) { toast('Guardado', 'País corregido a mano'); elegidos.delete(id); buscarRes(); return cargar(true); }
+      t.disabled = false; toast('No se pudo', (r && r.error) || '');
+      return;
+    }
+    if (t.dataset.rebuscar) {
+      const id = +t.dataset.rebuscar;
+      t.disabled = true; t.textContent = 'Buscando…';
+      const r = await post(`/api/paises/${id}/buscar`, {});
+      if (!r || !r.ok) { t.disabled = false; t.textContent = 'Buscar de nuevo en MusicBrainz'; toast('No se pudo', (r && r.error) || ''); return; }
+      const f = r.fila;
+      if (MARCADOS.has(f.tipo) && f.codigo) elegidos.add(f.id);
+      yaPintado.add(f.id);
+      toast(f.codigo ? `${f.nombre}: ${f.pais}` : `${f.nombre}: sin resultado`, f.codigo ? (f.tipo === 'igual' ? 'Coincide con lo guardado' : 'Quedó en la lista para aplicar') : (f.detalle || ''));
+      if (f.codigo && f.tipo !== 'igual') filtro = f.tipo;
+      return cargar(true);
+    }
+  });
+  document.addEventListener('change', e => {
+    const id = e.target.dataset && e.target.dataset.id;
+    if (!id || e.target.type !== 'checkbox') return;
+    if (e.target.checked) elegidos.add(+id); else elegidos.delete(+id);
+    pintarBarra();
+  });
+  document.getElementById('p-filtro-txt').addEventListener('input', e => { texto = e.target.value.trim().toLowerCase(); pintarFilas(); });
+
+  let tq = null;
+  async function buscarRes() {
+    const q = document.getElementById('p-q').value.trim();
+    const wrap = document.getElementById('p-res-wrap');
+    if (q.length < 2) { wrap.hidden = true; return; }
+    const r = await (await fetch('/api/paises/buscar?q=' + encodeURIComponent(q))).json();
+    resultados = r.artistas.map(a => Object.assign({codigo: null, pais: null, metodo: null, tipo: null}, a));
+    wrap.hidden = false;
+    document.getElementById('p-res').innerHTML = resultados.map(a => `<tr><td><b>${esc(a.nombre)}</b><div class="s">${a.albumes} álbum${a.albumes === 1 ? '' : 'es'}</div></td>
+      <td>${pais(a.actual_iso, a.actual)}${a.fuente_actual === 'manual' ? ' <span class="chip">a mano</span>' : ''}</td>
+      <td style="width:1%"><button class="btn chico" data-editar="${a.id}">Cambiar…</button></td></tr>`).join('') ||
+      '<tr><td class="muy-tenue">Ningún artista con ese nombre.</td></tr>';
+  }
+  document.getElementById('p-q').addEventListener('input', () => { clearTimeout(tq); tq = setTimeout(buscarRes, 300); });
+
+  cargar(true);
+  if (document.getElementById('p-q').value) buscarRes();
+})();
+</script>
+{% endblock %}

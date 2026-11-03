@@ -243,65 +243,65 @@ def _scope_label(scope: dict) -> str:
     return "?"
 
 # ============================================================
-# MÓDULO 1 — NACIONALIDAD  (MusicBrainz)
+# MÓDULO 1 — NACIONALIDAD  (MusicBrainz, verificada con los discos)
 # ============================================================
+# La lógica vive en paises.py (raíz del repo), compartida con la app y la ingesta:
+# identifica al artista por los IDs de MusicBrainz de los tags o por un disco suyo
+# que tengas, y guarda siempre el país (nunca la ciudad). Lo corregido a mano
+# (nationality_source='manual') no se toca ni con --force.
 
-def _mb_artist_search(name: str) -> Optional[dict]:
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import paises  # noqa: E402
+
+def _mb_api(ruta: str, **params) -> dict:
     _mb_wait()
-    try:
-        r = requests.get(
-            f"{MB_BASE}/artist",
-            params={"query": f'artist:"{name}"', "fmt": "json", "limit": 5},
-            headers=HEADERS_MB, timeout=12,
-        )
-        r.raise_for_status()
-        for a in r.json().get("artists", []):
-            if int(a.get("score", 0)) < 70: continue
-            if fuzz.ratio(_norm_name(a.get("name", "")), _norm_name(name)) < 75: continue
-            country   = a.get("country")
-            area_name = (a.get("area") or {}).get("name")
-            if country or area_name:
-                return {"country": country, "area_name": area_name}
-        return None
-    except Exception as e:
-        log.debug("MB artist error '%s': %s", name, e)
-        return None
+    params["fmt"] = "json"
+    for intento in range(3):
+        try:
+            r = requests.get(f"{MB_BASE}/{ruta}", params=params, headers=HEADERS_MB, timeout=15)
+            if r.status_code == 404:
+                return {}
+            if r.status_code in (429, 503):
+                time.sleep(2 + intento * 3); _mb_wait(); continue
+            r.raise_for_status()
+            return r.json()
+        except requests.RequestException as e:
+            log.debug("MB error %s: %s", ruta, e)
+            time.sleep(1 + intento * 2); _mb_wait()
+    raise RuntimeError(f"MusicBrainz no responde ({ruta})")
 
 def process_nationalities(conn: sqlite3.Connection,
                            scope: dict = SCOPE_ALL,
                            force: bool = False):
+    paises.asegurar_columnas(conn)
     cur = conn.cursor()
     aids = _scope_artist_ids(conn, scope)
-
+    filtro = "" if force else " AND nationality IS NULL"
+    manual = " AND COALESCE(nationality_source, '') != 'manual'"
     if aids is not None:
         ph = ",".join("?" * len(aids))
-        if force:
-            artists = cur.execute(
-                f"SELECT id, name FROM artists WHERE id IN ({ph}) ORDER BY name", list(aids)
-            ).fetchall()
-        else:
-            artists = cur.execute(
-                f"SELECT id, name FROM artists WHERE id IN ({ph}) AND nationality IS NULL ORDER BY name",
-                list(aids),
-            ).fetchall()
+        artists = cur.execute(
+            f"SELECT id, name FROM artists WHERE id IN ({ph}){filtro}{manual} ORDER BY name", list(aids)
+        ).fetchall()
     else:
-        if force:
-            artists = cur.execute("SELECT id, name FROM artists ORDER BY name").fetchall()
-        else:
-            artists = cur.execute(
-                "SELECT id, name FROM artists WHERE nationality IS NULL ORDER BY name"
-            ).fetchall()
+        artists = cur.execute(f"SELECT id, name FROM artists WHERE 1=1{filtro}{manual} ORDER BY name").fetchall()
 
     log.info("  Nacionalidades: %d artistas a procesar", len(artists))
     ok = skipped = 0
     for row in tqdm(artists, desc="Nacionalidades", unit="artista"):
-        result = _mb_artist_search(row["name"])
-        nat = (result.get("area_name") or result.get("country") or "Unknown") if result else "Unknown"
-        cur.execute("UPDATE artists SET nationality = ? WHERE id = ?", (nat, row["id"]))
-        log.debug("  %s → %s", row["name"], nat)
-        if result: ok += 1
-        else: skipped += 1
-        if (ok + skipped) % 50 == 0: conn.commit()
+        try:
+            res = paises.resolver(_mb_api, row["name"], paises.albumes_de(conn, row["id"]))
+        except RuntimeError as e:
+            log.warning("  %s → sin respuesta de MusicBrainz (%s); queda para la próxima", row["name"], e)
+            continue
+        paises.guardar(conn, row["id"], res["codigo"], res["metodo"] or "sin_datos", res["mbid"])
+        if res["codigo"]:
+            ok += 1
+            log.info("  %s → %s (%s · %s)", row["name"], res["pais"], res["metodo"], res["mb_nombre"] or "")
+        else:
+            skipped += 1
+            log.info("  %s → sin país (%s)", row["name"], res["detalle"])
+        if (ok + skipped) % 20 == 0: conn.commit()
     conn.commit()
     log.info("  ✓ Nacionalidades OK: %d  |  Sin datos: %d", ok, skipped)
 
