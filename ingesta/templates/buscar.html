@@ -47,7 +47,7 @@
   function chipCal(v) {
     const c = clase(v);
     return `<span class="chip ${c ? 'q-' + c : ''}"><span class="led"></span>${c === 'Lossy' ? 'Lossy' : (c || '—')}</span>
-            <span class="chip">FLAC ${esc(res(v))}</span>`;
+            <span class="chip">${v.aac ? 'AAC 320' : 'FLAC ' + esc(res(v))}</span>`;
   }
   function rango(v) { return [v.bits || v.lossless || v.servicio === 'qobuz' ? 1 : 0, v.bits || 0, v.sr || 0]; }
   function cmp(a, b) { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; }
@@ -84,7 +84,7 @@
     return '<div class="med t-nota">No mejora la que tienes</div>';
   }
   function item(v, g) {
-    return {servicio: v.servicio, id: v.id, artista: g.artista, album: g.titulo, calidad: res(v), n_pistas: v.n_pistas};
+    return {servicio: v.servicio, id: v.id, artista: g.artista, album: g.titulo, calidad: v.aac ? 'AAC 320' : res(v), n_pistas: v.n_pistas};
   }
 
   // ── pantalla ──
