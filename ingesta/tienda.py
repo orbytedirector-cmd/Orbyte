@@ -33,7 +33,7 @@ log = logging.getLogger('ingesta')
 UA = 'OrbyteIngesta/1.0'
 EXT_AUDIO = ('.flac', '.m4a', '.mp3', '.wav', '.aiff', '.aif', '.dsf', '.dff', '.alac', '.ogg', '.opus')
 PAUSA_ENTRE_ALBUMES = (20, 40)          # segundos, al azar: que no parezca una descarga masiva
-VERSION_CACHE = 'v1'
+VERSION_CACHE = 'v2'          # v2: lo medido con la sesión de dispositivo (solo AAC) no sirve
 
 
 class FalloTienda(Exception):
@@ -89,6 +89,75 @@ def _audios(carpeta):
         out += [os.path.join(raiz, a) for a in archivos
                 if a.lower().endswith(EXT_AUDIO) and not a.startswith('.')]
     return out
+
+
+SCRIPTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'metadata')
+CODECS_CON_PERDIDA = ('aac', 'mp3', 'opus', 'vorbis', 'eac3', 'ac3', 'mp2', 'wmav1', 'wmav2')
+
+
+def python_tidal():
+    """El Python de tidal-dl-ng (primera línea de su ejecutable): es el que tiene tidalapi."""
+    exe = herramienta('tidal-dl-ng')
+    if exe:
+        try:
+            with open(exe, encoding='utf-8', errors='replace') as f:
+                linea = f.readline().strip()
+            if linea.startswith('#!'):
+                partes = linea[2:].split()
+                return partes[1] if partes and os.path.basename(partes[0]) == 'env' and len(partes) > 1 else partes[0]
+        except (OSError, IndexError):
+            pass
+    return 'python3'
+
+
+def preparar_tidal(album_id=None, pistas=None):
+    """
+    Antes de bajar de Tidal:
+      · deja en el token.json de tidal-dl-ng la sesión PKCE recién renovada (tools/metadata/tidal_pkce.py): la de
+        «tidal-dl-ng login» (código de dispositivo) Tidal la limita a AAC 320
+      · saca del historial de tidal-dl-ng las pistas de ese álbum, para que no las salte si ya se bajaron antes
+    Devuelve cuántas pistas sacó del historial.
+    """
+    try:
+        r = subprocess.run([python_tidal(), os.path.join(SCRIPTS, 'tidal_pkce.py'), 'renovar'], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=60, env=_entorno())
+        d = json.loads((r.stdout or '{}').strip().splitlines()[-1] or '{}')
+    except Exception as e:  # noqa: BLE001
+        raise FalloTienda(f'Tidal: no se pudo renovar la sesión PKCE ({type(e).__name__})') from e
+    if not d.get('ok'):
+        err = d.get('error') or 'no se pudo renovar la sesión PKCE'
+        raise FalloTienda(f'Tidal: {err}' + ('' if 'login-pkce' in err else
+                          '. En el servidor: python3 tools/metadata/tidal_calidad.py URL_DE_UN_ALBUM --login-pkce'))
+    olvidar('tidal')                                  # el cliente de búsqueda toma el token nuevo
+    if not album_id and not pistas:
+        return 0
+    if pistas is None:
+        pistas = [p['id'] for p in cliente('tidal').pistas(album_id)]
+    ruta = os.path.join(dir_tidal() or '', 'downloaded_history.json')
+    if not os.path.isfile(ruta):
+        return 0
+    with open(ruta, encoding='utf-8') as f:
+        h = json.load(f)
+    tabla = h.get('tracks') if isinstance(h.get('tracks'), dict) else h
+    quitar = [k for k in list(tabla) if k in {str(x) for x in pistas}]
+    if quitar:
+        for k in quitar:
+            tabla.pop(k)
+        tmp = ruta + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(h, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, ruta)
+    return len(quitar)
+
+
+def codec(ruta):
+    try:
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=codec_name',
+                            '-of', 'csv=p=0', ruta], capture_output=True, text=True, timeout=60)
+        return r.stdout.strip().strip(',').lower() or None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ─────────────────────────── configuración de las herramientas ───────────────────────────
@@ -220,6 +289,17 @@ class Qobuz:
         d = self._get('artist/get', artist_id=art['id'], extra='albums', limit=500)
         return art.get('name'), [self._album(a) for a in (d.get('albums') or {}).get('items', [])]
 
+    def calidad_real(self, album_id):
+        """Lo que esta sesión recibe de verdad (no lo que dice el catálogo): 'HI_RES_LOSSLESS'|'LOSSLESS'|'HIGH'…"""
+        if getattr(self, '_calidad_real', None) is None:
+            pistas = self._get(f'albums/{album_id}/tracks', limit=1).get('items', [])
+            if not pistas:
+                return None
+            p = self._get(f'tracks/{pistas[0]["id"]}/playbackinfopostpaywall', audioquality='LOSSLESS',
+                          playbackmode='STREAM', assetpresentation='FULL')
+            self._calidad_real = p.get('audioQuality') or ''
+        return self._calidad_real
+
     def pistas(self, album_id):
         d = self._get('album/get', album_id=album_id)
         return [{'id': str(t['id']), 'titulo': t.get('title') or '', 'numero': t.get('track_number'),
@@ -249,19 +329,8 @@ class Tidal:
     def _refrescar(self):
         """Token vigente con la lógica de tidal-dl-ng (tools/metadata/tidal_sesion.py): el de token.json puede
         estar vencido aunque tidal-dl-ng diga que la sesión está bien (renueva solo en memoria)."""
-        exe = herramienta('tidal-dl-ng')
-        py = 'python3'
-        if exe:
-            try:
-                with open(exe, encoding='utf-8', errors='replace') as f:
-                    linea = f.readline().strip()
-                if linea.startswith('#!'):
-                    partes = linea[2:].split()
-                    py = partes[1] if partes and os.path.basename(partes[0]) == 'env' and len(partes) > 1 else partes[0]
-            except (OSError, IndexError):
-                pass
-        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', 'metadata',
-                              'tidal_sesion.py')
+        py = python_tidal()
+        script = os.path.join(SCRIPTS, 'tidal_sesion.py')
         try:
             r = subprocess.run([py, script, os.path.join(self.dir, 'token.json')], stdin=subprocess.DEVNULL,
                                capture_output=True, text=True, timeout=45, env=_entorno())
@@ -521,6 +590,21 @@ def buscar(texto, modo, bib):
             olvidar(s)
             errores[s] = f'{type(e).__name__}: {e}'
             log.warning('Buscar en %s: %s', s, e)
+    # la sesión de Tidal puede estar limitada a AAC aunque el catálogo diga sin pérdida: se pregunta una vez
+    sin_perdida_tidal = next((v for v in versiones if v['servicio'] == 'tidal' and v.get('lossless')), None)
+    if sin_perdida_tidal and 'tidal' not in errores:
+        try:
+            real = cliente('tidal').calidad_real(sin_perdida_tidal['id'])
+        except Exception as e:  # noqa: BLE001
+            real = None
+            log.warning('Calidad real de Tidal: %s', e)
+        if real in ('HIGH', 'LOW'):
+            errores['tidal'] = ('tu sesión solo recibe AAC 320 (con pérdida), aunque el disco exista sin pérdida. '
+                                'Inicia la sesión PKCE en el servidor: python3 tools/metadata/tidal_calidad.py '
+                                'URL_DE_UN_ALBUM --login-pkce')
+            for v in versiones:
+                if v['servicio'] == 'tidal':
+                    v.update(lossless=False, hires=False, bits=None, sr=None, resolucion_exacta=True, aac=True)
     if modo == 'artista' and nombre:
         versiones = [v for v in versiones if _norm(nombre) in _norm(v['artista']) or _norm(v['artista']) in _norm(nombre)]
     grupos = agrupar(versiones, bib)
@@ -658,6 +742,7 @@ def medir(almacen, datos, tidal_id, qobuz_id):
                 raise FalloTienda('No hay pistas para comparar')
             a, b = random.choice(pares)
             st['texto'] = f'Descargando «{a["titulo"]}» de Tidal…'
+            preparar_tidal()
             os.makedirs(os.path.join(tmp, 't'), exist_ok=True)
             rc, sal = _bajar_tidal_a(f'https://tidal.com/browse/track/{a["id"]}', os.path.join(tmp, 't'), os.path.join(tmp, 'casa'))
             ft = _audios(os.path.join(tmp, 't'))
@@ -764,8 +849,13 @@ class Descargador(threading.Thread):
         antes = self._foto(base)
         inicio = time.time()
         self.almacen.actualizar_descarga(did, estado='descargando', inicio=inicio, progreso='Empezando…', error=None)
-        cmd = [exe, 'dl', d['url']] if d['servicio'] == 'tidal' else [exe, '--no-db', '--no-progress', 'url', d['url']]
         lineas = []
+        if d['servicio'] == 'tidal':
+            self.almacen.actualizar_descarga(did, progreso='Renovando la sesión de Tidal…')
+            n_hist = preparar_tidal(d.get('item_id'))
+            lineas.append('Sesión PKCE renovada' + (f' · {n_hist} pista(s) quitadas del historial de tidal-dl-ng'
+                                                    if n_hist else ''))
+        cmd = [exe, 'dl', d['url']] if d['servicio'] == 'tidal' else [exe, '--no-db', '--no-progress', 'url', d['url']]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, errors='replace', env=_entorno(), cwd=base)
 
@@ -809,6 +899,18 @@ class Descargador(threading.Thread):
             self.almacen.actualizar_descarga(did, estado='error', progreso=None, fin=time.time(),
                                              error=f'No se descargó nada ({pista})', registro='\n'.join(lineas[-80:]))
             return
+        pedida_con_perdida = bool(re.search(r'lossy|aac|mp3', d.get('calidad') or '', re.I))
+        if not pedida_con_perdida:
+            llegados = {codec(sorted(_audios(p))[0]) for p in carpetas}
+            malos = sorted(c for c in llegados if c in CODECS_CON_PERDIDA)
+            if malos:
+                for p in carpetas + recien:          # no debe llegar a la Bandeja como si fuera la versión sin pérdida
+                    shutil.rmtree(p, ignore_errors=True)
+                raise FalloTienda(f'{d["servicio"].capitalize()} entregó {"/".join(m.upper() for m in malos)} '
+                                  f'(con pérdida) en vez de {d.get("calidad") or "sin pérdida"}: se borró lo descargado. '
+                                  + ('Revisa la sesión PKCE: python3 tools/metadata/tidal_calidad.py URL_DEL_ALBUM'
+                                     if d['servicio'] == 'tidal' else 'Revisa la calidad configurada en streamrip.'))
+            lineas.append('Formato verificado: ' + ', '.join(sorted(c or '?' for c in llegados)))
         n = sum(len(_audios(p)) for p in carpetas)
         self.almacen.actualizar_descarga(did, estado='terminada', fin=time.time(), carpetas=json.dumps(carpetas),
                                          progreso=f'{n} pista(s) descargadas', registro='\n'.join(lineas[-80:]))

@@ -15,7 +15,9 @@ tiene tidalapi instalado.
 """
 import datetime
 import json
+import os
 import sys
+from pathlib import Path
 
 
 def main():
@@ -24,6 +26,20 @@ def main():
     except ImportError:
         print(json.dumps({"error": "tidalapi no está instalado en este Python"}))
         return 2
+    # Sesión PKCE de Orbyte (~/.config/orbyte/tidal_pkce.json, ver tidal_pkce.py): es la que recibe FLAC y la que
+    # se renueva con la app correcta. Si existe, manda; si no, la de tidal-dl-ng.
+    pkce = Path(os.path.expanduser("~/.config/orbyte/tidal_pkce.json"))
+    if pkce.is_file():
+        s = tidalapi.Session()
+        try:
+            if s.load_session_from_file(pkce):
+                s.save_session_to_file(pkce)
+                os.chmod(pkce, 0o600)
+                print(json.dumps({"access_token": s.access_token, "token_type": s.token_type,
+                                  "country_code": s.country_code, "pkce": True}))
+                return 0
+        except Exception:  # noqa: BLE001 — se intenta con la de tidal-dl-ng
+            pass
     with open(sys.argv[1], encoding="utf-8") as f:
         d = json.load(f)
     exp = d.get("expiry_time")
