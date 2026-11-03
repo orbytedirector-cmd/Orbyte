@@ -781,8 +781,9 @@ def biblioteca(db, raiz='/mnt/musica'):
             ruta = os.path.dirname(ruta)
         g = grupos.setdefault(ruta, {'ruta': ruta, 'album': f['name'], 'anio': f['year'],
                                      'artista': f['artista'], 'formato': f['primary_format'],
-                                     'pistas': 0, 'tags': Counter(), 'ids': []})
+                                     'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0})
         g['pistas'] += f['n'] or 0
+        g['sr'] = max(g['sr'], f['sr'] or 0)
         g['tags'][_tag_existente(f)] += f['n'] or 1
         g['ids'].append(f['id'])
         # /mnt/musica/<Letra>/<Artista>/… → (Letra, Artista)

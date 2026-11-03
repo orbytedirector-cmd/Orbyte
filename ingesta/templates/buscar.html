@@ -1,0 +1,300 @@
+{% extends 'base.html' %}
+{% block titulo %}Buscar{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Buscar música</h1>
+  <div class="sub">Busca en Tidal y Qobuz a la vez. Lo que descargas cae en la carpeta de entrada y sigue el flujo de siempre en la Bandeja.</div>
+  <div class="entrada-info" id="t-estado"><span class="tenue">Revisando las sesiones…</span></div>
+</div></div>
+
+<form class="t-form" id="t-form">
+  <label for="t-q" class="oculto-lector">Buscar</label>
+  <input type="search" id="t-q" value="{{ q }}" placeholder="Álbum o artista" autocomplete="off">
+  <div class="t-modo" role="group" aria-label="Buscar por">
+    <button type="button" data-modo="album" class="{{ 'activo' if modo != 'artista' }}">Álbum</button>
+    <button type="button" data-modo="artista" class="{{ 'activo' if modo == 'artista' }}">Artista</button>
+  </div>
+  <button type="submit" class="btn oro">Buscar</button>
+</form>
+<div id="t-avisos"></div>
+<div id="t-res"><div class="vacio"><p>Escribe un álbum o un artista.</p></div></div>
+<div class="t-barra" id="t-barra" hidden>
+  <span id="t-barra-txt"></span>
+  <button class="btn oro" id="t-barra-btn">Descargar</button>
+</div>
+{% endblock %}
+{% block js %}
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  let modo = {{ (modo if modo == 'artista' else 'album')|tojson }};
+  let datos = null;                        // última búsqueda
+  const elegidos = new Map();              // clave → versión elegida (modo artista)
+  const NOMBRE = {qobuz: 'Qobuz', tidal: 'Tidal'};
+  const TIPOS = [['album', 'Álbumes'], ['ep', 'EPs y sencillos'], ['recopilatorio', 'Recopilatorios'], ['en_vivo', 'En vivo']];
+
+  // ── calidad ──
+  function res(v) {
+    if (v.bits && v.sr) return `${v.bits}/${(v.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})}`;
+    if (v.servicio === 'tidal' && v.hires) return 'Hi-Res…';
+    return v.lossless === false ? 'con pérdida' : '?';
+  }
+  function clase(v) {
+    if (v.servicio === 'tidal' && v.lossless === false) return 'Lossy';
+    if (!v.sr) return v.hires ? 'HR' : '';
+    return v.sr > 48000 || (v.bits || 0) > 16 && v.sr > 44100 ? 'HR' : 'CD';
+  }
+  function chipCal(v) {
+    const c = clase(v);
+    return `<span class="chip ${c ? 'q-' + c : ''}"><span class="led"></span>${c === 'Lossy' ? 'Lossy' : (c || '—')}</span>
+            <span class="chip">FLAC ${esc(res(v))}</span>`;
+  }
+  function rango(v) { return [v.bits || v.lossless || v.servicio === 'qobuz' ? 1 : 0, v.bits || 0, v.sr || 0]; }
+  function cmp(a, b) { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; }
+  function sugerir(g) {                    // mismo criterio que el servidor (tienda.sugerir)
+    const vs = g.versiones;
+    vs.forEach(v => { v.sugerida = false; v.misma_calidad = false; });
+    if (vs.some(v => !v.resolucion_exacta)) { g.sugerencia = 'Averiguando la resolución exacta de Tidal…'; }
+    else {
+      const mejor = vs.reduce((m, v) => cmp(rango(v), m) > 0 ? rango(v) : m, [0, 0, 0]);
+      const top = vs.filter(v => cmp(rango(v), mejor) === 0);
+      if (top.length === 1 && vs.length > 1) { top[0].sugerida = true; g.sugerencia = `Mejor calidad en ${NOMBRE[top[0].servicio]}`; }
+      else if (top.length > 1) { top.forEach(v => v.misma_calidad = true); g.sugerencia = 'Misma resolución en ambos: «Medir master» dice si el master es el mismo'; }
+      else { vs[0].sugerida = true; g.sugerencia = null; }
+    }
+    const lib = g.biblioteca;
+    vs.forEach(v => {
+      v.mejora = null;
+      if (!lib || !v.sr) return;
+      if (['DSD', 'MQA'].includes(lib.tag)) v.mejora = 'no';
+      else if (lib.tag === 'Lossy') v.mejora = 'si';
+      else if (lib.sr) v.mejora = v.sr > lib.sr ? 'si' : (v.sr === lib.sr ? 'igual' : 'no');
+    });
+  }
+  function libTxt(g) {
+    const l = g.biblioteca;
+    if (!l) return '';
+    const sr = l.sr ? ` ${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '';
+    return `<span class="t-lib" title="${esc(l.ruta)}">Ya tienes ${l.album !== g.titulo ? 'una edición' : 'este álbum'} · <span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${esc(sr)}</span>`;
+  }
+  function mejoraTxt(v, g) {
+    if (!g.biblioteca || !v.mejora) return '';
+    if (v.mejora === 'si') return '<div class="ok t-nota">Mejor que la tuya: al revisarla, la ingesta te propondrá Reemplazar</div>';
+    if (v.mejora === 'igual') return '<div class="tenue t-nota">Misma resolución que la tuya</div>';
+    return '<div class="med t-nota">No mejora la que tienes</div>';
+  }
+  function item(v, g) {
+    return {servicio: v.servicio, id: v.id, artista: g.artista, album: g.titulo, calidad: res(v), n_pistas: v.n_pistas};
+  }
+
+  // ── pantalla ──
+  async function estado() {
+    let e;
+    try { e = await (await fetch('/api/tienda/estado')).json(); } catch (x) { return; }
+    $('t-estado').innerHTML = ['tidal', 'qobuz'].map(s => {
+      const x = e[s];
+      const ok = x.sesion && x.herramienta;
+      const motivo = !x.herramienta ? `no se encontró ${s === 'tidal' ? 'tidal-dl-ng' : 'rip'}` : (x.error || '');
+      return `<span title="${esc(x.destino || '')}"><span class="${ok ? 'ok' : 'mal'}">●</span> ${NOMBRE[s]} ${ok ? 'conectado' : '— ' + esc(motivo)}</span>`;
+    }).join('<span class="muy-tenue">·</span>');
+  }
+  function grupoAlbum(g, i) {
+    const t = g.versiones.find(v => v.servicio === 'tidal'), q = g.versiones.find(v => v.servicio === 'qobuz');
+    const vers = g.versiones.map(v => `
+      <article class="t-ver ${v.sugerida ? 'sugerida' : ''}">
+        <div class="t-ver-cab"><b>${NOMBRE[v.servicio].toUpperCase()}</b>
+          ${v.sugerida && g.versiones.length > 1 ? '<span class="t-badge">Sugerida · mejor calidad</span>' : ''}
+          ${v.misma_calidad ? '<span class="t-badge gris">Misma calidad</span>' : ''}</div>
+        <div class="f-chips" style="justify-content:flex-start">${chipCal(v)}${v.explicito ? '<span class="chip">E</span>' : ''}</div>
+        <div class="tenue t-nota">${[v.n_pistas ? v.n_pistas + ' pistas' : '', v.anio ? 'edición ' + v.anio : '', v.sello].filter(Boolean).map(esc).join(' · ')}</div>
+        ${!v.resolucion_exacta ? '<div class="muy-tenue t-nota">Averiguando la frecuencia exacta…</div>' : ''}
+        ${mejoraTxt(v, g)}
+        <button class="btn ${v.sugerida ? 'oro' : ''}" data-bajar="${i}:${esc(v.servicio)}">Descargar desde ${NOMBRE[v.servicio]}</button>
+      </article>`).join('');
+    const m = g.medicion;
+    return `<section class="t-grupo" data-i="${i}">
+      <div class="t-cab">
+        <div class="portada" ${g.portada ? `style="background-image:url('${esc(g.portada)}')"` : ''}></div>
+        <div class="t-cab-txt"><div class="tenue">${esc(g.artista)}</div>
+          <div class="t-titulo">${esc(g.titulo)}${g.anio ? ` <span class="tenue">(${esc(g.anio)})</span>` : ''}</div>
+          <div class="muy-tenue t-nota">${[g.n_pistas ? g.n_pistas + ' pistas' : '', g.versiones.length === 1 ? 'solo en ' + NOMBRE[g.versiones[0].servicio] : ''].filter(Boolean).join(' · ')}</div></div>
+        ${libTxt(g)}
+      </div>
+      <div class="t-vers">${vers}</div>
+      <div class="t-pie">
+        <span class="tenue t-nota">${esc(g.sugerencia || '')}</span>
+        ${t && q ? `<button class="btn chico" data-medir="${i}">${m ? 'Volver a medir' : 'Medir master'}</button>` : ''}
+      </div>
+      <div class="t-medicion" id="t-med-${i}">${m ? medicionHtml(m) : ''}</div>
+    </section>`;
+  }
+  function medicionHtml(m) {
+    if (!m || !m.estado && !m.tidal) return '';
+    if (m.estado === 'midiendo') return `<div class="estado-vivo"><span class="giro"></span><span>${esc(m.texto || 'Midiendo…')}</span></div>`;
+    if (m.estado === 'error') return `<div class="flash error">No se pudo medir: ${esc(m.texto)}</div>`;
+    const lado = (s, x) => `<div class="t-med-lado ${m.mejor === s ? 'gana' : ''}"><b>${NOMBRE[s]}</b>
+      <span class="mono">${x.lufs ?? '—'} LUFS · LRA ${x.lra ?? '—'} · pico ${x.pico ?? '—'} dBTP · PLR ${x.plr ?? '—'}</span>
+      <span class="tenue">${x.bits && x.sr ? x.bits + '/' + (x.sr / 1000) : ''}</span></div>`;
+    return `<div class="panel"><div class="rotulo" style="margin-bottom:.4rem">Master medido · «${esc(m.pista)}»</div>
+      ${lado('tidal', m.tidal)}${lado('qobuz', m.qobuz)}
+      <div style="margin-top:.5rem">${m.mejor ? `<b class="ok">Conviene ${NOMBRE[m.mejor]}.</b> ` : ''}${esc(m.texto)}</div></div>`;
+  }
+  function filaArtista(g, i) {
+    const k = g.clave;
+    const sel = elegidos.get(k);
+    const celda = s => {
+      const v = g.versiones.find(x => x.servicio === s);
+      if (!v) return '<td class="muy-tenue">—</td>';
+      const marcado = sel ? sel.servicio === s : v.sugerida;
+      return `<td><label class="t-radio"><input type="radio" name="r-${i}" data-ver="${i}:${s}" ${marcado ? 'checked' : ''}>
+        ${chipCal(v)}${v.sugerida && g.versiones.length > 1 ? '<span class="t-sug">sugerida</span>' : ''}</label></td>`;
+    };
+    const l = g.biblioteca;
+    const mejora = g.versiones.some(v => v.mejora === 'si');
+    return `<tr data-i="${i}" data-falta="${l ? 0 : 1}" data-mejora="${mejora ? 1 : 0}">
+      <td><input type="checkbox" data-elegir="${i}" aria-label="Elegir ${esc(g.titulo)}" ${sel ? 'checked' : ''}></td>
+      <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div></td>
+      <td>${l ? `<span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${mejora ? ' <span class="ok t-nota">se puede mejorar</span>' : ''}` : '<span class="muy-tenue">No lo tienes</span>'}</td>
+      ${celda('qobuz')}${celda('tidal')}</tr>`;
+  }
+  let filtro = 'todo';
+  function pintar() {
+    const r = $('t-res');
+    if (!datos) return;
+    const avisos = Object.entries(datos.errores || {}).map(([s, e]) => `<div class="flash error">${NOMBRE[s]}: ${esc(e)}</div>`).join('');
+    $('t-avisos').innerHTML = avisos;
+    const gs = datos.grupos;
+    if (!gs.length) { r.innerHTML = '<div class="vacio"><p>Sin resultados.</p></div>'; $('t-barra').hidden = true; return; }
+    if (modo === 'album') {
+      r.innerHTML = gs.map(grupoAlbum).join('');
+      $('t-barra').hidden = true;
+    } else {
+      const n = {todo: gs.length, falta: gs.filter(g => !g.biblioteca).length,
+                 mejora: gs.filter(g => g.versiones.some(v => v.mejora === 'si')).length};
+      let html = `<div class="barra" style="margin:0 0 1rem"><div><h2 class="titulo" style="font-size:1.2rem">${esc(datos.artista || '')}</h2>
+        <div class="sub">${gs.length} lanzamientos en Tidal o Qobuz · ${gs.length - n.falta} ya en tu biblioteca</div></div>
+        <div class="filtros" style="margin:0">
+          <button class="filtro ${filtro === 'todo' ? 'activo' : ''}" data-filtro="todo">Todo <b>${n.todo}</b></button>
+          <button class="filtro ${filtro === 'falta' ? 'activo' : ''}" data-filtro="falta">Me faltan <b>${n.falta}</b></button>
+          <button class="filtro ${filtro === 'mejora' ? 'activo' : ''}" data-filtro="mejora">Se pueden mejorar <b>${n.mejora}</b></button>
+        </div></div>`;
+      for (const [tipo, nombre] of TIPOS) {
+        const idx = gs.map((g, i) => [g, i]).filter(([g]) => g.tipo === tipo)
+          .filter(([g]) => filtro === 'todo' || (filtro === 'falta' ? !g.biblioteca : g.versiones.some(v => v.mejora === 'si')));
+        if (!idx.length) continue;
+        html += `<details class="t-seccion" ${tipo === 'album' ? 'open' : ''}><summary class="rotulo">${nombre} · ${idx.length}</summary>
+          <div class="tabla-wrap"><table class="t-tabla"><tr><th></th><th>Álbum</th><th>En tu biblioteca</th><th>Qobuz</th><th>Tidal</th></tr>
+          ${idx.map(([g, i]) => filaArtista(g, i)).join('')}</table></div></details>`;
+      }
+      r.innerHTML = html;
+      barra();
+    }
+  }
+  function barra() {
+    const n = elegidos.size;
+    $('t-barra').hidden = modo !== 'artista' || !n;
+    $('t-barra-txt').textContent = `${n} elegido${n === 1 ? '' : 's'} · se descargan de a uno, con pausa entre álbumes`;
+    $('t-barra-btn').textContent = `Descargar ${n} elegido${n === 1 ? '' : 's'}`;
+  }
+
+  // ── resolución exacta de Tidal (en segundo plano) ──
+  async function completarTidal() {
+    const pend = [];
+    datos.grupos.forEach(g => g.versiones.forEach(v => { if (v.servicio === 'tidal' && !v.resolucion_exacta) pend.push(v.id); }));
+    for (let i = 0; i < pend.length; i += 12) {
+      let r;
+      try { r = await post('/api/tienda/resolucion', {ids: pend.slice(i, i + 12)}); } catch (e) { return; }
+      if (!r || !r.ok) { toast('Tidal', (r && r.error) || 'No se pudo averiguar la resolución'); return; }
+      datos.grupos.forEach(g => {
+        g.versiones.forEach(v => {
+          const x = v.servicio === 'tidal' && r.resoluciones[v.id];
+          if (x) { if (x.sr) Object.assign(v, {bits: x.bits, sr: x.sr}); v.resolucion_exacta = true; }
+        });
+        sugerir(g);
+      });
+      pintar();
+    }
+  }
+
+  async function buscar(e) {
+    if (e) e.preventDefault();
+    const q = $('t-q').value.trim();
+    if (q.length < 2) return;
+    history.replaceState(null, '', `?${new URLSearchParams({q, modo})}`);
+    elegidos.clear();
+    $('t-res').innerHTML = '<div class="estado-vivo"><span class="giro"></span><span>Buscando en Tidal y Qobuz…</span></div>';
+    try { datos = await (await fetch(`/api/tienda/buscar?${new URLSearchParams({q, modo})}`)).json(); }
+    catch (x) { $('t-res').innerHTML = '<div class="flash error">No se pudo buscar</div>'; return; }
+    pintar();
+    completarTidal();
+  }
+  $('t-form').onsubmit = buscar;
+  document.querySelectorAll('[data-modo]').forEach(b => b.onclick = () => {
+    modo = b.dataset.modo;
+    document.querySelectorAll('[data-modo]').forEach(x => x.classList.toggle('activo', x === b));
+    if ($('t-q').value.trim()) buscar();
+  });
+
+  async function encolar(items) {
+    const r = await post('/api/descargas', {items});
+    if (!r || !r.ok) { toast('No se pudo', ''); return; }
+    toast(r.agregadas ? `${r.agregadas} en la cola de descargas` : 'Ya estaba en la cola', 'Míralas en «Descargas»');
+  }
+  const medidores = {};
+  async function medir(i, nueva) {
+    const g = datos.grupos[i];
+    const t = g.versiones.find(v => v.servicio === 'tidal'), q = g.versiones.find(v => v.servicio === 'qobuz');
+    const caja = () => document.getElementById(`t-med-${i}`);
+    let st = nueva ? await post('/api/tienda/medir', {tidal: t.id, qobuz: q.id})
+                   : await (await fetch(`/api/tienda/medir?${new URLSearchParams({tidal: t.id, qobuz: q.id})}`)).json();
+    if (caja()) caja().innerHTML = medicionHtml(st);
+    if (st.estado === 'midiendo') { clearTimeout(medidores[i]); medidores[i] = setTimeout(() => medir(i, false), 3000); }
+    else if (st.estado === 'listo') g.medicion = st;
+  }
+  $('t-res').addEventListener('click', e => {
+    const b = e.target.closest('[data-bajar]');
+    if (b) {
+      const [i, s] = b.dataset.bajar.split(':');
+      const g = datos.grupos[+i];
+      b.disabled = true;
+      encolar([item(g.versiones.find(v => v.servicio === s), g)]);
+      return;
+    }
+    const m = e.target.closest('[data-medir]');
+    if (m) { m.disabled = true; medir(+m.dataset.medir, true); return; }
+    const f = e.target.closest('[data-filtro]');
+    if (f) { filtro = f.dataset.filtro; pintar(); }
+  });
+  $('t-res').addEventListener('change', e => {
+    const c = e.target.closest('[data-elegir]');
+    const rd = e.target.closest('[data-ver]');
+    if (c) {
+      const g = datos.grupos[+c.dataset.elegir];
+      const tr = c.closest('tr');
+      let marcada = tr.querySelector('input[type=radio]:checked');
+      if (!marcada && c.checked) { marcada = tr.querySelector('input[type=radio]'); if (marcada) marcada.checked = true; }
+      const s = marcada ? marcada.dataset.ver.split(':')[1] : g.versiones[0].servicio;
+      if (c.checked) elegidos.set(g.clave, item(g.versiones.find(v => v.servicio === s), g)); else elegidos.delete(g.clave);
+      barra();
+    } else if (rd) {
+      const [i, s] = rd.dataset.ver.split(':');
+      const g = datos.grupos[+i];
+      elegidos.set(g.clave, item(g.versiones.find(v => v.servicio === s), g));
+      const chk = rd.closest('tr').querySelector('[data-elegir]');
+      if (chk) chk.checked = true;
+      barra();
+    }
+  });
+  $('t-barra-btn').onclick = async () => {
+    $('t-barra-btn').disabled = true;
+    await encolar([...elegidos.values()]);
+    elegidos.clear();
+    $('t-barra-btn').disabled = false;
+    pintar();
+  };
+
+  estado();
+  if ($('t-q').value.trim()) buscar();
+})();
+</script>
+{% endblock %}

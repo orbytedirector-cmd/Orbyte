@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block titulo %}Descargas{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Descargas</h1>
+  <div class="sub">De a una, con pausa entre álbumes. Mientras un álbum se descarga, la ingesta no lo revisa; al terminar pasa solo a la Bandeja.</div>
+</div>
+  <div class="acciones" style="margin:0"><a class="btn" href="{{ url_for('buscar_pagina') }}">Buscar más</a></div>
+</div>
+<div id="d-lista"><div class="vacio"><p>Cargando…</p></div></div>
+{% endblock %}
+{% block js %}
+<script>
+(function () {
+  const NOMBRE = {qobuz: 'Qobuz', tidal: 'Tidal'};
+  const ESTADO = {en_cola: 'En cola', descargando: 'Descargando', terminada: 'Descargada', error: 'Error', cancelada: 'Cancelada'};
+  const BANDEJA = {copiando: 'esperando a revisarse', en_cola: 'en cola para revisar', analizando: 'revisándose',
+                   revisado: 'lista para ubicar', requiere_revision: 'requiere revisión', por_ubicar: 'en cola para ubicar',
+                   ubicando: 'ubicándose', por_metadata: 'en cola de metadata', metadata: 'corriendo la metadata',
+                   completado: 'completa en la biblioteca', error: 'con error', error_ubicar: 'error al ubicar',
+                   error_metadata: 'error en la metadata', descartado: 'descartada'};
+  let abiertos = new Set();
+  function tarjeta(d) {
+    const m = /pista (\d+) de (\d+)/.exec(d.progreso || '');
+    const pct = m && +m[2] ? Math.min(100, Math.round(100 * m[1] / m[2])) : null;
+    const acciones = [];
+    if (d.estado === 'descargando' || d.estado === 'en_cola') acciones.push(`<button class="btn chico" data-acc="cancelar" data-id="${d.id}">Cancelar</button>`);
+    if (d.estado === 'error' || d.estado === 'cancelada') acciones.push(`<button class="btn chico oro" data-acc="reintentar" data-id="${d.id}">Reintentar</button>`);
+    if (d.estado !== 'descargando' && d.estado !== 'en_cola') acciones.push(`<button class="btn chico" data-acc="quitar" data-id="${d.id}">Quitar</button>`);
+    if (d.bandeja) acciones.unshift(`<a class="btn chico" href="/album/${d.bandeja.id}">Abrir en la Bandeja</a>`);
+    let detalle = '';
+    if (d.estado === 'descargando') detalle = `<div class="d-barra"><div style="width:${pct ?? 5}%"></div></div><div class="tenue t-nota">${esc(d.progreso || '')}</div>`;
+    else if (d.estado === 'en_cola') detalle = '<div class="tenue t-nota">En cola</div>';
+    else if (d.estado === 'terminada') detalle = `<div class="ok t-nota">${esc(d.progreso || 'Descargada')}${d.bandeja ? ' · en la Bandeja: ' + esc(BANDEJA[d.bandeja.estado] || d.bandeja.estado) : ' · esperando a que la ingesta la vea'}</div>`;
+    else if (d.estado === 'error') detalle = `<div class="mal t-nota">${esc(d.error || 'Error')}</div>`;
+    else detalle = '<div class="muy-tenue t-nota">Cancelada: lo que alcanzó a bajar se borró</div>';
+    return `<article class="d-item e-${esc(d.estado)}">
+      <div class="d-txt"><div><b>${esc(d.artista)} — ${esc(d.album)}</b> <span class="tenue t-nota">${NOMBRE[d.servicio] || ''} · ${esc(d.calidad || '')}</span></div>
+        ${detalle}
+        ${d.registro ? `<details data-reg="${d.id}" ${abiertos.has(d.id) ? 'open' : ''}><summary class="muy-tenue t-nota">Registro</summary><pre class="registro">${esc(d.registro)}</pre></details>` : ''}</div>
+      <div class="acciones" style="margin:0">${acciones.join('')}</div></article>`;
+  }
+  async function cargar() {
+    let r;
+    try { r = await (await fetch('/api/descargas')).json(); } catch (e) { return; }
+    const el = document.getElementById('d-lista');
+    el.querySelectorAll('details[data-reg]').forEach(x => { if (x.open) abiertos.add(+x.dataset.reg); else abiertos.delete(+x.dataset.reg); });
+    if (!r.descargas.length) { el.innerHTML = '<div class="vacio"><p>Todavía no hay descargas. Búscalas en «Buscar».</p></div>'; return; }
+    const vivas = r.descargas.filter(d => ['descargando', 'en_cola'].includes(d.estado));
+    const resto = r.descargas.filter(d => !['descargando', 'en_cola'].includes(d.estado));
+    el.innerHTML = vivas.map(tarjeta).join('') +
+      (resto.length ? `<div class="rotulo" style="margin:1.4rem 0 .6rem">Terminadas</div>` + resto.map(tarjeta).join('') : '');
+  }
+  document.getElementById('d-lista').addEventListener('click', async e => {
+    const b = e.target.closest('[data-acc]');
+    if (!b) return;
+    b.disabled = true;
+    const r = await post(`/api/descargas/${b.dataset.id}/${b.dataset.acc}`);
+    if (r && r.ok === false) toast('No se pudo', r.error || '');
+    cargar();
+  });
+  cargar();
+  setInterval(cargar, 2500);
+})();
+</script>
+{% endblock %}
