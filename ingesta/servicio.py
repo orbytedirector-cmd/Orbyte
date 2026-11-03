@@ -767,6 +767,26 @@ def api_biblioteca_titulos():
                    ignorados=len(almacen.titulos_ignorados()), raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
 
 
+@app.route('/api/biblioteca/buscar')
+def api_biblioteca_buscar():
+    """Álbumes de toda la biblioteca cuyo artista o título contiene el texto (sin acentos ni mayúsculas)."""
+    q = (request.args.get('q') or '').strip()
+    aj = almacen.ajustes()
+    if len(q) < 2:
+        return jsonify(albumes=[], mas=False)
+    try:
+        bib = analisis.biblioteca(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+    except Exception as e:
+        return jsonify(error=f'No se pudo leer music.db: {e}'), 409
+    palabras = analisis._norm(q).split()
+    hallados = [g for g in bib['grupos']
+                if all(p in f'{g["n_artista"]} {analisis._norm(g["album"])}' for p in palabras)]
+    hallados.sort(key=lambda g: (g['n_artista'], str(g.get('anio') or ''), g['n_album']))
+    return jsonify(mas=len(hallados) > 200, albumes=[
+        {'id': g['ids'][0], 'artista': g['artista'], 'album': g['album'], 'anio': g.get('anio'), 'ruta': g['ruta'],
+         'n_pistas': g['pistas'], 'tag': g.get('tag'), 'formato': g.get('formato')} for g in hallados[:200]])
+
+
 def _album_orbyte(oid):
     db = almacen.ajustes().get('db_orbyte')
     if not db or not os.path.isfile(db):
