@@ -74,6 +74,9 @@
       {% elif a.estado in ('error_metadata', 'completado') %}
         <button class="btn" data-accion="metadata">Correr la metadata de nuevo</button>
       {% endif %}
+      {% if sin_indexar %}
+        <button class="btn" id="descartar-ubicado" title="Orbyte no lo alcanzó a indexar: se borra su carpeta de la biblioteca y sale de la bandeja">Borrar de la biblioteca y descartar</button>
+      {% endif %}
       {% if lib and a.estado in ('error_metadata', 'completado') %}
         <button class="btn" id="reprocesar" data-api="/api/reprocesar/a/{{ a.id }}" title="Vuelve a revisar la carpeta desde la biblioteca como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar</button>
       {% endif %}
@@ -424,6 +427,19 @@
 {% endif %}
 {% endblock %}
 {% block js %}
+<script>
+(function () {
+  const b = document.getElementById('descartar-ubicado');
+  if (!b) return;
+  b.addEventListener('click', async () => {
+    if (!confirm({{ ('Se borra ' ~ (a.ubicado_en or '') ~ ' con todos sus archivos y el álbum sale de la bandeja. Orbyte no lo tiene, así que no se pierden escuchas ni favoritos. ¿Seguir?')|tojson }})) return;
+    b.disabled = true;
+    const r = await post('/api/album/{{ a.id }}/descartar_ubicado', {});
+    if (r && r.ok) location.href = '/';
+    else { b.disabled = false; toast('No se pudo', (r && r.error) || ''); }
+  });
+})();
+</script>
 <script>
 const AID = {{ a.id }}, ESTADO = {{ a.estado|tojson }};
 const VIVOS = {{ VIVOS|list|tojson }};
