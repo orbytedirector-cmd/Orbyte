@@ -30,7 +30,7 @@ def sin_tags(raiz):
     for d, dirs, archivos in os.walk(raiz):
         dirs[:] = sorted(x for x in dirs if not x.startswith('.'))
         for a in sorted(archivos):
-            if not a.lower().endswith('.dff') or a.startswith('.'):
+            if not a.lower().endswith('.dff') or a.startswith('._'):
                 continue
             ruta = os.path.join(d, a)
             try:
