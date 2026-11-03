@@ -656,7 +656,7 @@ def _correr(cmd, env=None, timeout=900, cwd=None):
     return r.returncode, ANSI.sub('', (r.stdout or '') + (r.stderr or ''))
 
 
-def _bajar_tidal_a(url, carpeta, casa):
+def _bajar_tidal_a(url, carpeta, casa, letras=False):
     """tidal-dl-ng con una copia de su configuración que descarga a `carpeta` (la sesión es la tuya, enlazada)."""
     origen = dir_tidal()
     exe = herramienta('tidal-dl-ng')
@@ -666,7 +666,8 @@ def _bajar_tidal_a(url, carpeta, casa):
     os.makedirs(cfg, exist_ok=True)
     aj = ajustes_tidal()
     aj.update({'download_base_path': carpeta, 'format_track': 'Tracks/{track_title}', 'skip_existing': False,
-               'downloads_concurrent_max': 1, 'lyrics_embed': False, 'video_download': False})
+               'downloads_concurrent_max': 1, 'lyrics_embed': bool(letras and aj.get('lyrics_embed', True)),
+               'video_download': False})
     with open(os.path.join(cfg, 'settings.json'), 'w', encoding='utf-8') as f:
         json.dump(aj, f)
     os.symlink(os.path.join(origen, 'token.json'), os.path.join(cfg, 'token.json'))
