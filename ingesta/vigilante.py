@@ -38,6 +38,7 @@ class Vigilante(threading.Thread):
         self.cliente_mb = edicion.Cliente(almacen.ruta)
         self.procesador = None
         self.datos = os.path.dirname(almacen.ruta)
+        self.pausa_rutas = set()        # carpetas donde se está descargando ahora (tienda.Descargador): no se revisan
 
     def ya(self):
         """Fuerza un escaneo inmediato (botón «Revisar ahora» o cambio de ajustes)."""
@@ -89,6 +90,8 @@ class Vigilante(threading.Thread):
         ahora = time.time()
         for u in unidades:
             vistos.add(u['ruta'])
+            if any(u['ruta'] == p or u['ruta'].startswith(p + os.sep) for p in set(self.pausa_rutas)):
+                continue                # se está descargando: se revisa cuando termine
             fila = conocidos.get(u['ruta'])
             if not fila:
                 self.almacen.nuevo_album(u['ruta'], u['rel'], u['firma'])

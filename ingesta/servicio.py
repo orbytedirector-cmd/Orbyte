@@ -41,6 +41,7 @@ from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
+from . import tienda as tienda_mod
 import threading
 import traceback
 
@@ -81,6 +82,7 @@ app.config.update(
 
 vigilante = Vigilante(almacen)
 procesador = Procesador(almacen)
+descargador = tienda_mod.Descargador(almacen, vigilante)
 vigilante.procesador = procesador
 
 
@@ -816,6 +818,128 @@ def biblioteca_album(oid):
                            portada=portada, fmt=fmt,
                            reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
                            ignorado=oid in almacen.titulos_ignorados())
+
+
+# ─────────────────────────── buscar y descargar (Tidal / Qobuz) ───────────────────────────
+
+@app.route('/buscar')
+def buscar_pagina():
+    return render_template('buscar.html', pagina='buscar', q=request.args.get('q', ''),
+                           modo=request.args.get('modo', 'album'))
+
+
+@app.route('/descargas')
+def descargas_pagina():
+    return render_template('descargas.html', pagina='descargas')
+
+
+@app.route('/api/tienda/estado')
+def api_tienda_estado():
+    return jsonify(tienda_mod.estado())
+
+
+def _bib_tienda():
+    aj = almacen.ajustes()
+    try:
+        return analisis.biblioteca(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+    except Exception:
+        return None
+
+
+@app.route('/api/tienda/buscar')
+def api_tienda_buscar():
+    q = (request.args.get('q') or '').strip()
+    modo = 'artista' if request.args.get('modo') == 'artista' else 'album'
+    if len(q) < 2:
+        return jsonify(grupos=[], errores={}, artista=None)
+    res = tienda_mod.buscar(q, modo, _bib_tienda())
+    # resolución de Tidal ya conocida (caché): se completa al tiro
+    for g in res['grupos']:
+        for v in g['versiones']:
+            if v['servicio'] == 'tidal' and not v.get('resolucion_exacta'):
+                c = almacen.sugerencia(f'tienda:res:tidal:{v["id"]}', tienda_mod.VERSION_CACHE)
+                if c:
+                    v.update(bits=c['bits'], sr=c['sr'], resolucion_exacta=True)
+        tienda_mod.sugerir(g)
+        g['medicion'] = None
+        t = next((v for v in g['versiones'] if v['servicio'] == 'tidal'), None)
+        qz = next((v for v in g['versiones'] if v['servicio'] == 'qobuz'), None)
+        if t and qz:
+            g['medicion'] = almacen.sugerencia(tienda_mod.clave_medicion(t['id'], qz['id']), tienda_mod.VERSION_CACHE)
+    return jsonify(res)
+
+
+@app.route('/api/tienda/resolucion', methods=['POST'])
+def api_tienda_resolucion():
+    ids = [str(i) for i in (request.get_json(silent=True) or {}).get('ids') or [] if str(i).isdigit()][:40]
+    try:
+        return jsonify(ok=True, resoluciones=tienda_mod.resolucion_tidal(almacen, ids))
+    except tienda_mod.FalloTienda as e:
+        return jsonify(ok=False, error=str(e)), 409
+
+
+@app.route('/api/tienda/medir', methods=['GET', 'POST'])
+def api_tienda_medir():
+    d = (request.get_json(silent=True) or {}) if request.method == 'POST' else request.args
+    t, q = str(d.get('tidal') or ''), str(d.get('qobuz') or '')
+    if not t.isdigit() or not q.isdigit():
+        return jsonify(ok=False, error='Faltan las dos versiones'), 400
+    if request.method == 'POST':
+        tienda_mod.olvidar_error_medicion(t, q)
+        st = tienda_mod.medir(almacen, DATOS, t, q)
+    else:
+        st = almacen.sugerencia(tienda_mod.clave_medicion(t, q), tienda_mod.VERSION_CACHE)
+        st = dict(st, estado='listo') if st else (tienda_mod._mediciones.get(tienda_mod.clave_medicion(t, q))
+                                                  or {'estado': None})
+    return jsonify(ok=True, **st)
+
+
+@app.route('/api/descargas', methods=['GET', 'POST'])
+def api_descargas():
+    if request.method == 'POST':
+        n = 0
+        for it in ((request.get_json(silent=True) or {}).get('items') or [])[:60]:
+            s, i = it.get('servicio'), str(it.get('id') or '')
+            if s not in ('tidal', 'qobuz') or not i.isdigit():
+                continue
+            url = f'https://tidal.com/browse/album/{i}' if s == 'tidal' else f'https://open.qobuz.com/album/{i}'
+            _did, nueva = almacen.nueva_descarga(s, i, url, str(it.get('artista') or '')[:200],
+                                                 str(it.get('album') or '')[:300], str(it.get('calidad') or '')[:40],
+                                                 int(it['n_pistas']) if str(it.get('n_pistas') or '').isdigit() else None)
+            n += nueva
+        descargador.ya()
+        return jsonify(ok=True, agregadas=n)
+    lista = almacen.descargas()
+    for d in lista:
+        d['carpetas'] = json.loads(d['carpetas']) if d.get('carpetas') else []
+        d['bandeja'] = None
+        for c in d['carpetas']:
+            aid = almacen.fila_de_ruta(c)
+            if aid:
+                fila = almacen.album(aid)
+                d['bandeja'] = {'id': aid, 'estado': fila['estado']}
+                break
+    return jsonify(descargas=lista, pausa=sorted(vigilante.pausa_rutas))
+
+
+@app.route('/api/descargas/<int:did>/<accion>', methods=['POST'])
+def api_descarga_accion(did, accion):
+    d = almacen.descarga(did)
+    if not d:
+        return jsonify(ok=False), 404
+    if accion == 'cancelar':
+        if d['estado'] == 'descargando':
+            descargador.cancelar_actual(did)
+        elif d['estado'] == 'en_cola':
+            almacen.actualizar_descarga(did, estado='cancelada', fin=time.time())
+    elif accion == 'reintentar' and d['estado'] in ('error', 'cancelada'):
+        almacen.actualizar_descarga(did, estado='en_cola', error=None, progreso=None, ts=time.time())
+        descargador.ya()
+    elif accion == 'quitar' and d['estado'] != 'descargando':
+        almacen.borrar_descarga(did)
+    else:
+        return jsonify(ok=False, error='No se puede en este estado'), 409
+    return jsonify(ok=True)
 
 
 # ─────────────────────────── reprocesar un álbum de la biblioteca ───────────────────────────
@@ -1625,5 +1749,6 @@ def main():
     log.info('Uso del procesador: núcleos %s', cpus)
     vigilante.start()
     procesador.start()
+    descargador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)

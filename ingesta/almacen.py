@@ -64,6 +64,11 @@ class Almacen:
                 CREATE TABLE IF NOT EXISTS titulos_ignorados (album_id INTEGER PRIMARY KEY, ruta TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS mediciones (ruta TEXT PRIMARY KEY, bytes INTEGER, datos TEXT, ts REAL);
                 CREATE TABLE IF NOT EXISTS sugerencias_ia (clave TEXT PRIMARY KEY, firma TEXT, datos TEXT, ts REAL);
+                CREATE TABLE IF NOT EXISTS descargas (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, servicio TEXT, item_id TEXT, url TEXT,
+                    artista TEXT, album TEXT, calidad TEXT, n_pistas INTEGER, estado TEXT, progreso TEXT,
+                    registro TEXT, carpetas TEXT, error TEXT, inicio REAL, fin REAL
+                );
                 CREATE TABLE IF NOT EXISTS unificaciones (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, clave TEXT, nombres TEXT, final TEXT,
                     estado TEXT, registro TEXT, resultado TEXT
@@ -302,6 +307,50 @@ class Almacen:
         with _lock, self._con() as c:
             c.execute('INSERT OR REPLACE INTO sugerencias_ia VALUES (?, ?, ?, ?)',
                       (clave, firma, json.dumps(datos, ensure_ascii=False), time.time()))
+
+    # ── descargas (Tidal / Qobuz) ──
+    def nueva_descarga(self, servicio, item_id, url, artista, album, calidad, n_pistas):
+        with _lock, self._con() as c:
+            r = c.execute("SELECT id FROM descargas WHERE servicio=? AND item_id=? AND estado IN ('en_cola', 'descargando')",
+                          (servicio, item_id)).fetchone()
+            if r:
+                return r[0], False
+            return c.execute("INSERT INTO descargas (ts, servicio, item_id, url, artista, album, calidad, n_pistas, estado) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'en_cola')",
+                             (time.time(), servicio, item_id, url, artista, album, calidad, n_pistas)).lastrowid, True
+
+    def descargas(self, limite=100):
+        with self._con() as c:
+            return [dict(r) for r in c.execute('SELECT * FROM descargas ORDER BY '
+                                               "CASE estado WHEN 'descargando' THEN 0 WHEN 'en_cola' THEN 1 ELSE 2 END, "
+                                               "CASE WHEN estado='en_cola' THEN id ELSE -COALESCE(fin, ts) END LIMIT ?",
+                                               (limite,))]
+
+    def descarga(self, did):
+        with self._con() as c:
+            r = c.execute('SELECT * FROM descargas WHERE id=?', (did,)).fetchone()
+        return dict(r) if r else None
+
+    def siguiente_descarga(self):
+        with self._con() as c:
+            r = c.execute("SELECT * FROM descargas WHERE estado='en_cola' ORDER BY id LIMIT 1").fetchone()
+        return dict(r) if r else None
+
+    def actualizar_descarga(self, did, **campos):
+        if not campos:
+            return
+        sets = ', '.join(f'{k}=?' for k in campos)
+        with _lock, self._con() as c:
+            c.execute(f'UPDATE descargas SET {sets} WHERE id=?', (*campos.values(), did))
+
+    def borrar_descarga(self, did):
+        with _lock, self._con() as c:
+            c.execute("DELETE FROM descargas WHERE id=? AND estado != 'descargando'", (did,))
+
+    def reiniciar_descargas(self):
+        """Tras un reinicio, la que quedó a medias vuelve a la cola."""
+        with _lock, self._con() as c:
+            c.execute("UPDATE descargas SET estado='en_cola', progreso=NULL WHERE estado='descargando'")
 
     def nueva_unificacion(self, clave, nombres, final):
         with _lock, self._con() as c:
