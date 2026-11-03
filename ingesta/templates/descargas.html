@@ -22,6 +22,7 @@
                    completado: 'completa en la biblioteca', error: 'con error', error_ubicar: 'error al ubicar',
                    error_metadata: 'error en la metadata', descartado: 'descartada'};
   let abiertos = new Set();
+  let ultimo = '';                          // lo último pintado: si no cambió, no se repinta (el scroll queda donde está)
   function tarjeta(d) {
     const m = /pista (\d+) de (\d+)/.exec(d.progreso || '');
     const pct = m && +m[2] ? Math.min(100, Math.round(100 * m[1] / m[2])) : null;
@@ -62,12 +63,26 @@
     try { r = await (await fetch('/api/descargas')).json(); } catch (e) { return; }
     const el = document.getElementById('d-lista');
     el.querySelectorAll('details[data-reg]').forEach(x => { if (x.open) abiertos.add(+x.dataset.reg); else abiertos.delete(+x.dataset.reg); });
+    const firma = JSON.stringify(r.descargas);
+    if (firma === ultimo) return;
+    ultimo = firma;
+    const scroll = new Map();               // posición de cada registro abierto, para dejarla igual tras repintar
+    el.querySelectorAll('details[data-reg] pre').forEach(p => {
+      const id = +p.parentElement.dataset.reg;
+      scroll.set(id, {top: p.scrollTop, alFinal: p.scrollTop + p.clientHeight >= p.scrollHeight - 4});
+    });
+    const pagina = window.scrollY;
     if (!r.descargas.length) { el.innerHTML = '<div class="vacio"><p>Todavía no hay descargas. Búscalas en «Buscar».</p></div>'; return; }
     const VIVAS = ['decision', 'convirtiendo', 'descargando', 'en_cola'];
     const vivas = r.descargas.filter(d => VIVAS.includes(d.estado)).sort((a, b) => VIVAS.indexOf(a.estado) - VIVAS.indexOf(b.estado));
     const resto = r.descargas.filter(d => !VIVAS.includes(d.estado));
     el.innerHTML = vivas.map(tarjeta).join('') +
       (resto.length ? `<div class="rotulo" style="margin:1.4rem 0 .6rem">Terminadas</div>` + resto.map(tarjeta).join('') : '');
+    el.querySelectorAll('details[data-reg] pre').forEach(p => {
+      const s = scroll.get(+p.parentElement.dataset.reg);
+      if (s) p.scrollTop = s.alFinal ? p.scrollHeight : s.top;      // si ibas al final, sigue al final mientras baja
+    });
+    window.scrollTo(0, pagina);
   }
   document.getElementById('d-lista').addEventListener('click', async e => {
     const b = e.target.closest('[data-acc]');

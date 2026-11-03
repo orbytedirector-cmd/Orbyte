@@ -119,17 +119,21 @@ def album_en_otro(origen, album_id, artista, album, n_pistas):
 
 # ─────────────────────────── bajar una sola pista ───────────────────────────
 
+ultima_salida = {}          # pista_id → últimas líneas de la herramienta (para el registro si no bajó nada)
+
+
 def bajar_pista(servicio, pista_id, tmp):
     """Archivo descargado (en tmp) o None."""
-    os.makedirs(tmp, exist_ok=True)
+    os.makedirs(os.path.join(tmp, 'audio'), exist_ok=True)
     if servicio == 'tidal':
         tienda.preparar_tidal()
-        tienda._bajar_tidal_a(f'https://tidal.com/browse/track/{pista_id}', os.path.join(tmp, 'audio'),
-                              os.path.join(tmp, 'casa'))
-        audios = tienda._audios(os.path.join(tmp, 'audio'))
+        rc, sal = tienda._bajar_tidal_a(f'https://tidal.com/browse/track/{pista_id}', os.path.join(tmp, 'audio'),
+                                        os.path.join(tmp, 'casa'), letras=True)
     else:
-        tienda._bajar_qobuz_a(f'https://open.qobuz.com/track/{pista_id}', os.path.join(tmp, 'audio'))
-        audios = tienda._audios(os.path.join(tmp, 'audio'))
+        rc, sal = tienda._bajar_qobuz_a(f'https://open.qobuz.com/track/{pista_id}', os.path.join(tmp, 'audio'))
+    audios = tienda._audios(os.path.join(tmp, 'audio'))
+    lineas = [l.strip() for l in (sal or '').splitlines() if l.strip() and '━' not in l]
+    ultima_salida[str(pista_id)] = f'código {rc}: ' + ' | '.join(lineas[-4:]) if lineas else f'código {rc}, sin salida'
     return audios[0] if audios else None
 
 
@@ -172,6 +176,8 @@ def rescatar(d, carpetas, base_tmp, avisar):
                 return True
             avisar(f'  · {os.path.basename(f["ruta"])}: {servicio.capitalize()} no la entregó sin pérdida '
                    f'({"llegó " + c.upper() if c else "no se descargó"})')
+            if not nuevo:
+                avisar(f'      {servicio}: {ultima_salida.get(str(pista["id"]), "sin salida")[:400]}')
         except Exception as e:  # noqa: BLE001
             avisar(f'  · {os.path.basename(f["ruta"])}: {etiqueta} falló ({type(e).__name__}: {e})')
         finally:
