@@ -16,6 +16,7 @@ import re
 import logging
 import os
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import time
@@ -245,8 +246,9 @@ def album(aid):
     dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
     actuales = ajustar_mod.pistas_actuales(a.get('reporte'), lib) if lib else {}
     portada = _portada_vista(a['ubicado_en'] or a['ruta']) if lib else None
+    sin_indexar = a['estado'] == 'error_metadata' and not _en_music_db(a.get('ubicado_en'))
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
-                           actuales=actuales, portada=portada,
+                           actuales=actuales, portada=portada, sin_indexar=sin_indexar,
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
@@ -458,6 +460,45 @@ def api_descartar(aid):
         almacen.cancelar_reproceso(aid)
         return jsonify(ok=True, ir=_ficha_de_ruta(a['ruta']))
     almacen.actualizar(aid, estado='descartado', progreso=None)
+    return jsonify(ok=True)
+
+
+def _en_music_db(ruta):
+    """¿Orbyte tiene este álbum? (si la metadata falló en el indexador, la carpeta está en la biblioteca pero no en Orbyte)."""
+    if not ruta:
+        return False
+    try:
+        con = sqlite3.connect(f'file:{almacen.ajustes()["db_orbyte"]}?mode=ro', uri=True, timeout=20)
+        try:
+            return con.execute('SELECT 1 FROM albums WHERE path=? OR path=?',
+                               (ruta.rstrip('/'), ruta.rstrip('/') + '/')).fetchone() is not None
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return True                  # ante la duda, no se ofrece borrar
+
+
+@app.route('/api/album/<int:aid>/descartar_ubicado', methods=['POST'])
+def api_descartar_ubicado(aid):
+    """Álbum ubicado cuya metadata falló antes de entrar a Orbyte: se borra su carpeta de la biblioteca y se descarta."""
+    a = almacen.album(aid)
+    if not a or a['estado'] != 'error_metadata':
+        return jsonify(ok=False, error='Solo para álbumes con error en la metadata'), 409
+    ruta = (a.get('ubicado_en') or '').rstrip('/')
+    raiz = os.path.realpath(almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    if _en_music_db(ruta):
+        return jsonify(ok=False, error='Orbyte ya tiene este álbum: elimínalo desde la Biblioteca'), 409
+    if ruta and os.path.isdir(ruta):
+        real = os.path.realpath(ruta)
+        if not real.startswith(raiz + os.sep) or real.count(os.sep) - raiz.count(os.sep) < 3:
+            return jsonify(ok=False, error='La carpeta no está dentro de la biblioteca'), 409
+        shutil.rmtree(real)
+        try:
+            os.rmdir(os.path.dirname(real))          # la carpeta del artista, solo si quedó vacía
+        except OSError:
+            pass
+    almacen.actualizar(aid, estado='descartado', progreso=None)
+    almacen.avisar('ok', f'Descartado: {a.get("artista")} — {a.get("album")}', f'Se borró {ruta or "(sin carpeta)"}')
     return jsonify(ok=True)
 
 
