@@ -140,6 +140,7 @@ def main():
         return 1
     t = items[0]
     print(f'Pista: {t.get("title")} · catálogo: {t.get("audioQuality")} {(t.get("mediaMetadata") or {}).get("tags", "")}')
+    print(f'       https://tidal.com/browse/track/{t["id"]}')
     for q in ('HI_RES_LOSSLESS', 'LOSSLESS', 'HIGH'):
         st, p = get(f'tracks/{t["id"]}/playbackinfopostpaywall', audioquality=q, playbackmode='STREAM',
                     assetpresentation='FULL')
