@@ -308,11 +308,17 @@ def escribir_tags(ruta, x, ta, rep):
     elif ext in ('.mp3', '.dsf', '.aif', '.aiff', '.dff'):
         _tags_id3(ruta, v, ext)
     elif ext in ('.m4a', '.mp4'):
-        from mutagen.easymp4 import EasyMP4
+        from mutagen.easymp4 import EasyMP4, EasyMP4Tags
+        # EasyMP4 no trae estas claves: se registran como átomos «----:com.apple.iTunes:…» (los nombres de Picard)
+        for clave, atomo in (('musicbrainz_releasegroupid', 'MusicBrainz Release Group Id'), ('barcode', 'BARCODE'),
+                             ('label', 'LABEL'), ('catalognumber', 'CATALOGNUMBER'), ('originaldate', 'ORIGINALDATE')):
+            if clave not in EasyMP4Tags.Get:
+                EasyMP4Tags.RegisterFreeformKey(clave, atomo)
         f = EasyMP4(ruta)
         mapa = {'titulo': 'title', 'artista': 'artist', 'artista_album': 'albumartist', 'album': 'album',
-                'fecha': 'date', 'genero': 'genre', 'mbid': 'musicbrainz_albumid',
-                'mb_grupo': 'musicbrainz_releasegroupid', 'pais': 'releasecountry', 'barcode': 'barcode'}
+                'fecha': 'date', 'anio_original': 'originaldate', 'genero': 'genre', 'mbid': 'musicbrainz_albumid',
+                'mb_grupo': 'musicbrainz_releasegroupid', 'pais': 'releasecountry', 'barcode': 'barcode',
+                'sello': 'label', 'catalogo': 'catalognumber'}
         for k, clave in mapa.items():
             if k in v:
                 f[clave] = str(v[k])
