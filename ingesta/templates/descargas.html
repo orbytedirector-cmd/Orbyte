@@ -39,17 +39,24 @@
     else if (d.estado === 'convirtiendo') detalle = `<div class="d-barra"><div style="width:50%"></div></div><div class="tenue t-nota">Convirtiendo ${d.pendientes.length} pista(s)…</div>`;
     else if (d.estado === 'decision') {
       const f = formato.get(d.id) || 'flac';
-      detalle = `<div class="d-decision">
-        <div class="med t-nota">⚠ No existe sin pérdida ni en Tidal ni en Qobuz:</div>
-        <ul class="d-pend">${d.pendientes.map(p => `<li>${esc(p.archivo)} <span class="tenue">(${esc((p.codec || '?').toUpperCase())})</span></li>`).join('')}</ul>
-        <div class="tenue t-nota">Para que el álbum quede en un solo tipo de archivo, se convierten y se agrega «(Lossy)» al final de su título. No sube la calidad.</div>
-        <div class="d-opc" role="radiogroup" aria-label="Convertir a">
-          <label><input type="radio" name="fmt-${d.id}" value="flac" data-fmt="${d.id}" ${f === 'flac' ? 'checked' : ''}> Convertir a FLAC</label>
-          <label><input type="radio" name="fmt-${d.id}" value="mp3" data-fmt="${d.id}" ${f === 'mp3' ? 'checked' : ''}> Convertir a MP3 320</label>
-        </div></div>`;
+      const danadas = d.pendientes.filter(p => p.danada);
+      const lista = ps => `<ul class="d-pend">${ps.map(p => `<li>${esc(p.archivo)} <span class="tenue">(${p.danada ? 'dañada o incompleta' : esc((p.codec || '?').toUpperCase())})</span></li>`).join('')}</ul>`;
       acciones.length = 0;
-      acciones.push(`<button class="btn chico oro" data-acc="convertir" data-id="${d.id}">Aplicar</button>`,
-                    `<button class="btn chico" data-acc="descartar" data-id="${d.id}">Descartar el disco</button>`);
+      if (danadas.length) {
+        detalle = `<div class="d-decision">
+          <div class="mal t-nota">✗ Llegaron dañadas y no se pudieron volver a bajar de Tidal ni de Qobuz:</div>${lista(d.pendientes)}
+          <div class="tenue t-nota">Un archivo dañado no se puede convertir. Descarta el disco y vuelve a bajarlo más tarde.</div></div>`;
+      } else {
+        detalle = `<div class="d-decision">
+          <div class="med t-nota">⚠ No existe sin pérdida ni en Tidal ni en Qobuz:</div>${lista(d.pendientes)}
+          <div class="tenue t-nota">Para que el álbum quede en un solo tipo de archivo, se convierten y se agrega «(Lossy)» al final de su título. No sube la calidad.</div>
+          <div class="d-opc" role="radiogroup" aria-label="Convertir a">
+            <label><input type="radio" name="fmt-${d.id}" value="flac" data-fmt="${d.id}" ${f === 'flac' ? 'checked' : ''}> Convertir a FLAC</label>
+            <label><input type="radio" name="fmt-${d.id}" value="mp3" data-fmt="${d.id}" ${f === 'mp3' ? 'checked' : ''}> Convertir a MP3 320</label>
+          </div></div>`;
+        acciones.push(`<button class="btn chico oro" data-acc="convertir" data-id="${d.id}">Aplicar</button>`);
+      }
+      acciones.push(`<button class="btn chico" data-acc="descartar" data-id="${d.id}">Descartar el disco</button>`);
     }
     else detalle = '<div class="muy-tenue t-nota">Cancelada: lo que alcanzó a bajar se borró</div>';
     return `<article class="d-item e-${esc(d.estado)}">

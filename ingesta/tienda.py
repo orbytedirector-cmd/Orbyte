@@ -928,15 +928,19 @@ class Descargador(threading.Thread):
             os.makedirs(tmp, exist_ok=True)
             pendientes, notas = rescate.rescatar(d, carpetas, tmp, nota)
             if pendientes:
-                lista = [{'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'codec': f['codec']} for f in pendientes]
+                lista = [{'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'codec': f['codec'],
+                          'danada': bool(f.get('danada'))} for f in pendientes]
                 nota(f'{len(lista)} pista(s) siguen con pérdida: esperan tu decisión en Descargas')
                 self.almacen.actualizar_descarga(did, estado='decision', fin=time.time(), carpetas=json.dumps(carpetas),
                                                  pendientes=json.dumps(lista, ensure_ascii=False),
                                                  progreso=f'{len(lista)} pista(s) sin versión sin pérdida',
                                                  registro='\n'.join(lineas[-120:]))
                 self.almacen.avisar('aviso', f'Descarga en espera: {d["artista"]} — {d["album"]}',
-                                    f'{len(lista)} pista(s) no existen sin pérdida ni en Tidal ni en Qobuz: '
-                                    'elige en Descargas si convertirlas o descartar el disco')
+                                    (f'{len(lista)} pista(s) llegaron dañadas y no se pudieron volver a bajar: '
+                                     'descarta el disco en Descargas o reintenta más tarde')
+                                    if any(x['danada'] for x in lista) else
+                                    (f'{len(lista)} pista(s) no existen sin pérdida ni en Tidal ni en Qobuz: '
+                                     'elige en Descargas si convertirlas o descartar el disco'))
                 return
             if notas:
                 self.almacen.avisar('ok', f'Pistas recuperadas sin pérdida: {d["artista"]} — {d["album"]}',
