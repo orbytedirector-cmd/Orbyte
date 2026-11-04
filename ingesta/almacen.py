@@ -357,7 +357,7 @@ class Almacen:
     def rutas_en_decision(self):
         """Carpetas de descargas que esperan tu decisión (pistas con pérdida): el vigilante no las revisa."""
         with self._con() as c:
-            filas = c.execute("SELECT carpetas FROM descargas WHERE estado IN ('decision', 'convirtiendo')").fetchall()
+            filas = c.execute("SELECT carpetas FROM descargas WHERE estado IN ('decision', 'convirtiendo', 'recuperando')").fetchall()
         rutas = set()
         for f in filas:
             try:
@@ -370,7 +370,7 @@ class Almacen:
         """Tras un reinicio, la que quedó a medias vuelve a la cola."""
         with _lock, self._con() as c:
             c.execute("UPDATE descargas SET estado='en_cola', progreso=NULL WHERE estado='descargando'")
-            c.execute("UPDATE descargas SET estado='decision' WHERE estado='convirtiendo'")
+            c.execute("UPDATE descargas SET estado='decision' WHERE estado IN ('convirtiendo', 'recuperando')")
 
     def nueva_unificacion(self, clave, nombres, final):
         with _lock, self._con() as c:

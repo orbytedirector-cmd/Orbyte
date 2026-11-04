@@ -14,7 +14,7 @@
 (function () {
   const NOMBRE = {qobuz: 'Qobuz', tidal: 'Tidal'};
   const ESTADO = {en_cola: 'En cola', descargando: 'Descargando', terminada: 'Descargada', error: 'Error', cancelada: 'Cancelada',
-                  decision: 'Requiere decisión', convirtiendo: 'Convirtiendo'};
+                  decision: 'Requiere decisión', convirtiendo: 'Convirtiendo', recuperando: 'Intentando de nuevo'};
   const formato = new Map();             // id → 'flac' | 'mp3' (se conserva entre refrescos)
   const BANDEJA = {copiando: 'esperando a revisarse', en_cola: 'en cola para revisar', analizando: 'revisándose',
                    revisado: 'lista para ubicar', requiere_revision: 'requiere revisión', por_ubicar: 'en cola para ubicar',
@@ -29,13 +29,14 @@
     const acciones = [];
     if (d.estado === 'descargando' || d.estado === 'en_cola') acciones.push(`<button class="btn chico" data-acc="cancelar" data-id="${d.id}">Cancelar</button>`);
     if (d.estado === 'error' || d.estado === 'cancelada') acciones.push(`<button class="btn chico oro" data-acc="reintentar" data-id="${d.id}">Reintentar</button>`);
-    if (!['descargando', 'en_cola', 'decision', 'convirtiendo'].includes(d.estado)) acciones.push(`<button class="btn chico" data-acc="quitar" data-id="${d.id}">Quitar</button>`);
+    if (!['descargando', 'en_cola', 'decision', 'convirtiendo', 'recuperando'].includes(d.estado)) acciones.push(`<button class="btn chico" data-acc="quitar" data-id="${d.id}">Quitar</button>`);
     if (d.bandeja) acciones.unshift(`<a class="btn chico" href="/album/${d.bandeja.id}">Abrir en la Bandeja</a>`);
     let detalle = '';
     if (d.estado === 'descargando') detalle = `<div class="d-barra"><div style="width:${pct ?? 5}%"></div></div><div class="tenue t-nota">${esc(d.progreso || '')}</div>`;
     else if (d.estado === 'en_cola') detalle = '<div class="tenue t-nota">En cola</div>';
     else if (d.estado === 'terminada') detalle = `<div class="ok t-nota">${esc(d.progreso || 'Descargada')}${d.bandeja ? ' · en la Bandeja: ' + esc(BANDEJA[d.bandeja.estado] || d.bandeja.estado) : ' · esperando a que la ingesta la vea'}</div>`;
     else if (d.estado === 'error') detalle = `<div class="mal t-nota">${esc(d.error || 'Error')}</div>`;
+    else if (d.estado === 'recuperando') detalle = `<div class="d-barra"><div style="width:50%"></div></div><div class="tenue t-nota">${esc(d.progreso || 'Intentando de nuevo…')}</div>`;
     else if (d.estado === 'convirtiendo') detalle = `<div class="d-barra"><div style="width:50%"></div></div><div class="tenue t-nota">Convirtiendo ${d.pendientes.length} pista(s)…</div>`;
     else if (d.estado === 'decision') {
       const f = formato.get(d.id) || 'flac';
@@ -45,7 +46,7 @@
       if (danadas.length) {
         detalle = `<div class="d-decision">
           <div class="mal t-nota">✗ Llegaron dañadas y no se pudieron volver a bajar de Tidal ni de Qobuz:</div>${lista(d.pendientes)}
-          <div class="tenue t-nota">Un archivo dañado no se puede convertir. Descarta el disco y vuelve a bajarlo más tarde.</div></div>`;
+          <div class="tenue t-nota">Un archivo dañado no se puede convertir. Prueba «Intentar de nuevo» en un rato (suele ser un corte del servicio) o descarta el disco.</div></div>`;
       } else {
         detalle = `<div class="d-decision">
           <div class="med t-nota">⚠ No existe sin pérdida ni en Tidal ni en Qobuz:</div>${lista(d.pendientes)}
@@ -56,7 +57,8 @@
           </div></div>`;
         acciones.push(`<button class="btn chico oro" data-acc="convertir" data-id="${d.id}">Aplicar</button>`);
       }
-      acciones.push(`<button class="btn chico" data-acc="descartar" data-id="${d.id}">Descartar el disco</button>`);
+      acciones.push(`<button class="btn chico" data-acc="recuperar" data-id="${d.id}" title="Vuelve a buscar esas pistas en Tidal y Qobuz, sin bajar de nuevo el disco">Intentar de nuevo</button>`,
+                    `<button class="btn chico" data-acc="descartar" data-id="${d.id}">Descartar el disco</button>`);
     }
     else detalle = '<div class="muy-tenue t-nota">Cancelada: lo que alcanzó a bajar se borró</div>';
     return `<article class="d-item e-${esc(d.estado)}">
@@ -80,7 +82,7 @@
     });
     const pagina = window.scrollY;
     if (!r.descargas.length) { el.innerHTML = '<div class="vacio"><p>Todavía no hay descargas. Búscalas en «Buscar».</p></div>'; return; }
-    const VIVAS = ['decision', 'convirtiendo', 'descargando', 'en_cola'];
+    const VIVAS = ['decision', 'recuperando', 'convirtiendo', 'descargando', 'en_cola'];
     const vivas = r.descargas.filter(d => VIVAS.includes(d.estado)).sort((a, b) => VIVAS.indexOf(a.estado) - VIVAS.indexOf(b.estado));
     const resto = r.descargas.filter(d => !VIVAS.includes(d.estado));
     el.innerHTML = vivas.map(tarjeta).join('') +
