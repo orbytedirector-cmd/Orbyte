@@ -35,7 +35,7 @@ try:
 except ImportError:
     Image = None
 
-VERSION_REPORTE = 14   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
+VERSION_REPORTE = 15   # súbela cuando la revisión cambie: las revisiones viejas se rehacen solas
 
 AUDIO_EXT = {'.flac', '.wav', '.aif', '.aiff', '.aifc', '.dsf', '.dff', '.wv', '.ape',
              '.m4a', '.mp4', '.alac', '.mp3', '.ogg', '.oga', '.opus', '.aac', '.wma',
@@ -1711,6 +1711,21 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             dif = RANGO_TAG.get(tag_calidad, 0) - RANGO_TAG.get(d0['tag'], 0)
             comp = ' — el nuevo es de MEJOR calidad' if dif > 0 else (
                 ' — el nuevo es de PEOR calidad' if dif < 0 else ' — misma calidad')
+            if dif == 0 and tag_calidad in ('CD', 'HR'):
+                # misma etiqueta (p. ej. CD y CD): se comparan bits y frecuencia (24/44,1 mejora a 16/44,1)
+                g_lib = next((g for g in (bib or {}).get('grupos', []) if g['ruta'] == d0['ruta']), {})
+                sin_perdida = [p for p in pistas if p.get('sr') and not p.get('dsd') and p.get('codec') not in LOSSY_CODECS]
+                n_sr = max((p['sr'] for p in sin_perdida), default=0)
+                n_bits = max((p.get('bits') or 0 for p in sin_perdida), default=0) or 16
+                l_sr, l_bits = g_lib.get('sr') or 0, g_lib.get('bits') or 16
+                res = lambda b, f: f'{b}/{f / 1000:g}'.replace('.', ',')
+                if n_sr and l_sr and (n_bits, n_sr) != (l_bits, l_sr):
+                    if n_bits >= l_bits and n_sr >= l_sr:
+                        comp = f' — el nuevo tiene MEJOR resolución ({res(n_bits, n_sr)} frente a {res(l_bits, l_sr)})'
+                    elif n_bits <= l_bits and n_sr <= l_sr:
+                        comp = f' — el nuevo tiene MENOR resolución ({res(n_bits, n_sr)} frente a {res(l_bits, l_sr)})'
+                    else:
+                        comp = f' — resolución distinta ({res(n_bits, n_sr)} frente a {res(l_bits, l_sr)})'
         problema('decision', 'duplicado',
                  f'Ya está en la biblioteca: {d0["artista"]} — {d0["album"]} [{d0["tag"] or "?"}]{comp}')
 
