@@ -500,3 +500,5 @@ tr.p-editor td { background: var(--card-2); }
 .d-pend { margin: 0; padding-left: 1.1rem; font-size: .84rem; }
 .d-opc { display: flex; flex-wrap: wrap; gap: .4rem 1.2rem; font-size: .86rem; }
 .d-opc label { display: inline-flex; gap: .4rem; align-items: center; cursor: pointer; }
+.d-cab-term { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin: 1.4rem 0 .6rem; }
+.d-cab-term .rotulo { margin: 0; }
