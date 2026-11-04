@@ -146,6 +146,18 @@
       ${lado('tidal', m.tidal)}${lado('qobuz', m.qobuz)}
       <div style="margin-top:.5rem">${m.mejor ? `<b class="ok">Conviene ${NOMBRE[m.mejor]}.</b> ` : ''}${esc(m.texto)}</div></div>`;
   }
+  const compacto = new Intl.NumberFormat('es-CL', {notation: 'compact', maximumFractionDigits: 1});
+  function popTxt(g) {                      // ★ #1 · 87 · 412 mil oyentes · 3,1 M reproducciones · 3 pistas en el top
+    const p = g.pop;
+    if (!p || p.score == null) return '';
+    const partes = [];
+    if (p.oyentes) partes.push(`${compacto.format(p.oyentes)} oyentes`);
+    if (p.reproducciones) partes.push(`${compacto.format(p.reproducciones)} reproducciones`);
+    if (p.pistas_top) partes.push(`${p.pistas_top} pista${p.pistas_top === 1 ? '' : 's'} en el top`);
+    const cab = p.estrella ? `<span class="t-estrella">★ #${p.puesto}</span>` : `<span class="muy-tenue">#${p.puesto}</span>`;
+    return `<div class="t-pop" title="Popularidad ${p.score}/100 · ${esc(p.fuentes.join(' + '))}">${cab}
+      <span class="t-score">${Math.round(p.score)}</span>${partes.length ? ' · ' + partes.join(' · ') : ''}</div>`;
+  }
   function filaArtista(g, i) {
     const k = g.clave;
     const sel = elegidos.get(k);
@@ -160,11 +172,11 @@
     const mejora = g.versiones.some(v => v.mejora === 'si');
     return `<tr data-i="${i}" data-falta="${l ? 0 : 1}" data-mejora="${mejora ? 1 : 0}">
       <td><input type="checkbox" data-elegir="${i}" aria-label="Elegir ${esc(g.titulo)}" ${sel ? 'checked' : ''}></td>
-      <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div></td>
+      <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div>${popTxt(g)}</td>
       <td>${l ? `<span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${libRes(l) ? ` <span class="chip">${esc(libRes(l))}</span>` : ''}${mejora ? ' <span class="ok t-nota">se puede mejorar</span>' : ''}` : '<span class="muy-tenue">No lo tienes</span>'}</td>
       ${celda('qobuz')}${celda('tidal')}</tr>`;
   }
-  let filtro = 'todo';
+  let filtro = 'todo', soloTop = false;
   function pintar() {
     const r = $('t-res');
     if (!datos) return;
@@ -176,18 +188,25 @@
       r.innerHTML = gs.map(grupoAlbum).join('');
       $('t-barra').hidden = true;
     } else {
-      const n = {todo: gs.length, falta: gs.filter(g => !g.biblioteca).length,
-                 mejora: gs.filter(g => g.versiones.some(v => v.mejora === 'si')).length};
+      const top = g => !soloTop || (g.pop && g.pop.estrella);
+      const n = {todo: gs.filter(top).length, falta: gs.filter(g => !g.biblioteca && top(g)).length,
+                 mejora: gs.filter(g => g.versiones.some(v => v.mejora === 'si') && top(g)).length,
+                 estrella: gs.filter(g => g.pop && g.pop.estrella).length};
+      const fuentesPop = datos.popularidad ? [datos.popularidad.lastfm && 'Last.fm', datos.popularidad.tidal && 'Tidal'].filter(Boolean) : [];
       let html = `<div class="barra" style="margin:0 0 1rem"><div><h2 class="titulo" style="font-size:1.2rem">${esc(datos.artista || '')}</h2>
         <div class="sub">${gs.length} lanzamientos en Tidal o Qobuz · ${gs.length - n.falta} ya en tu biblioteca</div></div>
         <div class="filtros" style="margin:0">
           <button class="filtro ${filtro === 'todo' ? 'activo' : ''}" data-filtro="todo">Todo <b>${n.todo}</b></button>
           <button class="filtro ${filtro === 'falta' ? 'activo' : ''}" data-filtro="falta">Me faltan <b>${n.falta}</b></button>
           <button class="filtro ${filtro === 'mejora' ? 'activo' : ''}" data-filtro="mejora">Se pueden mejorar <b>${n.mejora}</b></button>
-        </div></div>`;
+          ${n.estrella ? `<button class="filtro ${soloTop ? 'activo' : ''}" data-top="1" title="Solo los más escuchados de cada sección; se combina con los otros filtros">★ Imprescindibles <b>${n.estrella}</b></button>` : ''}
+        </div></div>
+        <div class="muy-tenue t-nota" style="margin:-.5rem 0 1rem">${fuentesPop.length
+          ? `Cada sección, de lo más escuchado a lo menos (popularidad: ${fuentesPop.join(' + ')})`
+          : 'Sin datos de popularidad: ordenado por año'}</div>`;
       for (const [tipo, nombre] of TIPOS) {
         const idx = gs.map((g, i) => [g, i]).filter(([g]) => g.tipo === tipo)
-          .filter(([g]) => filtro === 'todo' || (filtro === 'falta' ? !g.biblioteca : g.versiones.some(v => v.mejora === 'si')));
+          .filter(([g]) => top(g) && (filtro === 'todo' || (filtro === 'falta' ? !g.biblioteca : g.versiones.some(v => v.mejora === 'si'))));
         if (!idx.length) continue;
         html += `<details class="t-seccion" ${tipo === 'album' ? 'open' : ''}><summary class="rotulo">${nombre} · ${idx.length}</summary>
           <div class="tabla-wrap"><table class="t-tabla"><tr><th></th><th>Álbum</th><th>En tu biblioteca</th><th>Qobuz</th><th>Tidal</th></tr>
@@ -271,6 +290,7 @@
     if (m) { m.disabled = true; medir(+m.dataset.medir, true); return; }
     const f = e.target.closest('[data-filtro]');
     if (f) { filtro = f.dataset.filtro; pintar(); }
+    if (e.target.closest('[data-top]')) { soloTop = !soloTop; pintar(); }
   });
   $('t-res').addEventListener('change', e => {
     const c = e.target.closest('[data-elegir]');

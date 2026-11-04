@@ -21,6 +21,7 @@ AJUSTES_DEFECTO = {
     'metadata': '1',            # etapa 3: correr los 5 scripts de metadata tras ubicar
     'python_scripts': '',       # Python que corre los 5 scripts (vacío = python3 del sistema)
     'sacd_extract': '',         # sacd_extract para ISOs de SACD (vacío = el del PATH)
+    'buscar_estrellas': '5',    # Buscar → Artista: cuántos discos por sección llevan ★ (los más escuchados)
 }
 
 PREVIOS = ('copiando', 'en_cola', 'analizando', 'revisado', 'requiere_revision', 'error', 'descartado')

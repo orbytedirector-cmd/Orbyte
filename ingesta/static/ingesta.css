@@ -502,3 +502,8 @@ tr.p-editor td { background: var(--card-2); }
 .d-opc label { display: inline-flex; gap: .4rem; align-items: center; cursor: pointer; }
 .d-cab-term { display: flex; align-items: center; justify-content: space-between; gap: .6rem; margin: 1.4rem 0 .6rem; }
 .d-cab-term .rotulo { margin: 0; }
+
+/* ── Buscar: popularidad ── */
+.t-pop { font-size: .78rem; color: var(--texto-2, #a8a8a8); margin-top: .2rem; }
+.t-estrella { color: var(--oro); font-weight: 700; }
+.t-score { display: inline-block; min-width: 1.6rem; text-align: center; border: 1px solid var(--borde-2); border-radius: 6px; padding: 0 .3rem; margin-left: .3rem; font-variant-numeric: tabular-nums; }

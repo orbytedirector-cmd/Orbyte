@@ -45,6 +45,7 @@ from . import sacd as sacd_mod
 from . import portada as portada_mod
 from . import tienda as tienda_mod
 from . import nacionalidades as nacionalidades_mod
+from . import popularidad as popularidad_mod
 import threading
 import traceback
 
@@ -271,6 +272,10 @@ def ajustes():
         nuevo['musicbrainz'] = '1' if request.form.get('musicbrainz') else '0'
         for k in ('desatendido', 'borrar_origen', 'metadata'):
             nuevo[k] = '1' if request.form.get(k) else '0'
+        try:
+            nuevo['buscar_estrellas'] = str(max(0, min(50, int(request.form.get('buscar_estrellas') or 5))))
+        except ValueError:
+            nuevo['buscar_estrellas'] = '5'
         nuevo['python_scripts'] = (request.form.get('python_scripts') or '').strip()
         nuevo['sacd_extract'] = (request.form.get('sacd_extract') or '').strip()
         if nuevo['sacd_extract'] and not (os.path.isfile(nuevo['sacd_extract'])
@@ -1088,6 +1093,25 @@ def api_tienda_buscar():
     if len(q) < 2:
         return jsonify(grupos=[], errores={}, artista=None)
     res = tienda_mod.buscar(q, modo, _bib_tienda())
+    if modo == 'artista' and res['grupos']:
+        # popularidad: 0,7 Last.fm + 0,3 Tidal; dentro de cada sección, los más escuchados primero
+        try:
+            top = popularidad_mod.tidal_top(tienda_mod.cliente('tidal'), res.get('tidal_artista')) \
+                if 'tidal' not in res['errores'] else []
+        except Exception:  # noqa: BLE001
+            top = []
+        lfm = popularidad_mod.lastfm(almacen, res.get('artista') or q)
+        try:
+            estrellas = max(0, int(almacen.ajustes().get('buscar_estrellas') or 5))
+        except ValueError:
+            estrellas = 5
+        popularidad_mod.anotar(res['grupos'], lfm, top, estrellas)
+        res['popularidad'] = {'lastfm': bool(lfm and lfm.get('albumes')), 'tidal': bool(top), 'estrellas': estrellas}
+        orden = {'album': 0, 'ep': 1, 'recopilatorio': 2, 'en_vivo': 3}
+        res['grupos'].sort(key=lambda g: (orden.get(g['tipo'], 9),
+                                          -(g['pop']['score'] if g['pop']['score'] is not None else -1),
+                                          -(int(g['anio'] or 0))))
+    res.pop('tidal_artista', None)
     # resolución de Tidal ya conocida (caché): se completa al tiro
     for g in res['grupos']:
         for v in g['versiones']:
