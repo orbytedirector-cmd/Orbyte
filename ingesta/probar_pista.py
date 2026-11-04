@@ -17,6 +17,19 @@ import tempfile
 from . import tienda
 
 
+def _resolucion(ruta):
+    import subprocess
+    r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                        'stream=sample_rate,bits_per_raw_sample,bits_per_sample', '-of', 'json', ruta],
+                       capture_output=True, text=True)
+    try:
+        st = json.loads(r.stdout)['streams'][0]
+        bits = st.get('bits_per_raw_sample') or st.get('bits_per_sample') or '?'
+        return f'{bits} bits · {st.get("sample_rate")} Hz'
+    except Exception:  # noqa: BLE001
+        return '?'
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
@@ -38,11 +51,12 @@ def main():
         return 1
     print(f'{servicio.capitalize()} · pista {disco}-{numero}: {pista["titulo"]} (id {pista["id"]})')
     if servicio == 'tidal':
-        for q in ('LOSSLESS', 'HIGH'):
+        for q in ('HI_RES_LOSSLESS', 'LOSSLESS'):
             try:
                 p = c._get(f'tracks/{pista["id"]}/playbackinfopostpaywall', audioquality=q, playbackmode='STREAM',
                            assetpresentation='FULL')
-                print(f'  pedida {q:9} → Tidal entrega {p.get("audioQuality")} · {p.get("manifestMimeType")}')
+                print(f'  pedida {q:15} → Tidal entrega {p.get("audioQuality")} · {p.get("bitDepth") or "-"} bits · '
+                      f'{p.get("sampleRate") or "-"} Hz · {p.get("manifestMimeType")}')
             except Exception as e:  # noqa: BLE001
                 print(f'  pedida {q:9} → error {type(e).__name__}: {e}')
     tmp = tempfile.mkdtemp(prefix='probar-pista-')
@@ -61,7 +75,7 @@ def main():
             todo = [os.path.relpath(os.path.join(r, f), tmp) for r, _d, fs in os.walk(tmp) for f in fs]
             print('Archivos en la carpeta temporal: ' + (json.dumps(todo[:15], ensure_ascii=False) if todo else 'ninguno'))
         for a in audios:
-            print(f'Llegó: {os.path.basename(a)} · {(tienda.codec(a) or "?").upper()}')
+            print(f'Llegó: {os.path.basename(a)} · {(tienda.codec(a) or "?").upper()} · {_resolucion(a)}')
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     return 0
