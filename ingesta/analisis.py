@@ -752,10 +752,8 @@ def _tag_existente(row):
         return 'MQA'
     if row['lossy'] * 2 > row['n']:
         return 'Lossy'
-    sr = row['sr'] or 0
-    bits = (row['bits'] if 'bits' in row.keys() else 0) or 0
-    # igual que en Buscar: Hi-Res = más de 48 kHz, o más de 16 bits sobre 44,1 (24/48 es Hi-Res)
-    return 'HR' if sr > 48000 or (bits > 16 and sr > 44100) else 'CD'
+    # según el LED del DAC (probado): amarillo hasta 48 kHz con 16 o 24 bits = CD; blanco desde 88,2 kHz = HR
+    return 'HR' if (row['sr'] or 0) > 48000 else 'CD'
 
 
 def biblioteca(db, raiz='/mnt/musica'):
