@@ -77,7 +77,9 @@
     const vivas = r.descargas.filter(d => VIVAS.includes(d.estado)).sort((a, b) => VIVAS.indexOf(a.estado) - VIVAS.indexOf(b.estado));
     const resto = r.descargas.filter(d => !VIVAS.includes(d.estado));
     el.innerHTML = vivas.map(tarjeta).join('') +
-      (resto.length ? `<div class="rotulo" style="margin:1.4rem 0 .6rem">Terminadas</div>` + resto.map(tarjeta).join('') : '');
+      (resto.length ? `<div class="d-cab-term"><div class="rotulo">Terminadas</div>${resto.some(d => d.estado === 'terminada')
+        ? '<button class="btn chico" id="d-limpiar" title="Quita de la lista las descargadas bien; no toca archivos ni la Bandeja">Limpiar terminadas</button>' : ''}</div>`
+        + resto.map(tarjeta).join('') : '');
     el.querySelectorAll('details[data-reg] pre').forEach(p => {
       const s = scroll.get(+p.parentElement.dataset.reg);
       if (s) p.scrollTop = s.alFinal ? p.scrollHeight : s.top;      // si ibas al final, sigue al final mientras baja
@@ -85,6 +87,13 @@
     window.scrollTo(0, pagina);
   }
   document.getElementById('d-lista').addEventListener('click', async e => {
+    if (e.target.id === 'd-limpiar') {
+      e.target.disabled = true;
+      const r = await post('/api/descargas/limpiar', {});
+      if (r && r.ok) toast('Listo', `${r.quitadas} descarga(s) quitadas de la lista`);
+      ultimo = '';
+      return cargar();
+    }
     const b = e.target.closest('[data-acc]');
     if (!b) return;
     if (b.dataset.acc === 'descartar' && !confirm('Se borra lo descargado de este disco y no pasa a la Bandeja. ¿Seguir?')) return;

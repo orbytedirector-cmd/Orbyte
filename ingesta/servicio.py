@@ -1117,7 +1117,7 @@ def api_tienda_resolucion():
 def api_tienda_medir():
     d = (request.get_json(silent=True) or {}) if request.method == 'POST' else request.args
     t, q = str(d.get('tidal') or ''), str(d.get('qobuz') or '')
-    if not t.isdigit() or not q.isdigit():
+    if not t.isdigit() or not re.fullmatch(r'[0-9A-Za-z]{1,40}', q or ''):
         return jsonify(ok=False, error='Faltan las dos versiones'), 400
     if request.method == 'POST':
         tienda_mod.olvidar_error_medicion(t, q)
@@ -1135,7 +1135,7 @@ def api_descargas():
         n = 0
         for it in ((request.get_json(silent=True) or {}).get('items') or [])[:60]:
             s, i = it.get('servicio'), str(it.get('id') or '')
-            if s not in ('tidal', 'qobuz') or not i.isdigit():
+            if s not in ('tidal', 'qobuz') or not re.fullmatch(r'[0-9A-Za-z]{1,40}', i):   # Qobuz: IDs alfanuméricos
                 continue
             url = f'https://tidal.com/browse/album/{i}' if s == 'tidal' else f'https://open.qobuz.com/album/{i}'
             _did, nueva = almacen.nueva_descarga(s, i, url, str(it.get('artista') or '')[:200],
@@ -1156,6 +1156,12 @@ def api_descargas():
                 d['bandeja'] = {'id': aid, 'estado': fila['estado']}
                 break
     return jsonify(descargas=lista, pausa=sorted(vigilante.pausa_rutas))
+
+
+@app.route('/api/descargas/limpiar', methods=['POST'])
+def api_descargas_limpiar():
+    """Quita de la lista las descargas terminadas bien (no toca archivos ni la Bandeja)."""
+    return jsonify(ok=True, quitadas=almacen.limpiar_descargas())
 
 
 @app.route('/api/descargas/<int:did>/<accion>', methods=['POST'])

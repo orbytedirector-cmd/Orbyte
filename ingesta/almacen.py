@@ -346,6 +346,10 @@ class Almacen:
         with _lock, self._con() as c:
             c.execute(f'UPDATE descargas SET {sets} WHERE id=?', (*campos.values(), did))
 
+    def limpiar_descargas(self):
+        with _lock, self._con() as c:
+            return c.execute("DELETE FROM descargas WHERE estado='terminada'").rowcount
+
     def borrar_descarga(self, did):
         with _lock, self._con() as c:
             c.execute("DELETE FROM descargas WHERE id=? AND estado != 'descargando'", (did,))
