@@ -3,6 +3,7 @@ Prueba la descarga de UNA pista tal como la hace el rescate de Descargas (reinte
 servicio), en una carpeta temporal que se borra al terminar. No toca la entrada ni tu historial de tidal-dl-ng.
 
   python3 -m ingesta.probar_pista URL_DEL_ALBUM NUMERO_DE_PISTA [DISCO]
+  python3 -m ingesta.probar_pista buscar 'ARTISTA ÁLBUM'        URLs del álbum en Tidal y Qobuz, con su resolución
 
 Muestra qué calidad dice Tidal que entrega para esa pista, el código de salida y las últimas líneas de la
 herramienta, y el formato del archivo que llegó.
@@ -30,7 +31,27 @@ def _resolucion(ruta):
         return '?'
 
 
+def buscar(texto):
+    for s in ('tidal', 'qobuz'):
+        try:
+            if s == 'tidal':
+                tienda.preparar_tidal()
+            vs = tienda.cliente(s).buscar_albumes(texto, limite=8)
+        except Exception as e:  # noqa: BLE001
+            print(f'{s.capitalize()}: error {type(e).__name__}: {e}')
+            continue
+        print(f'{s.capitalize()}:')
+        for v in vs:
+            res = f'{v.get("bits") or "?"}/{v.get("sr") or "?"}' if s == 'qobuz' else \
+                ('Hi-Res' if v.get('hires') else ('16/44100' if v.get('lossless') else 'con pérdida'))
+            print(f'  {v["artista"]} — {v["titulo"]} ({v.get("anio") or "?"}) · {v.get("n_pistas")} pistas · {res}')
+            print(f'      {v["url"]}')
+    return 0
+
+
 def main():
+    if len(sys.argv) >= 3 and sys.argv[1] == 'buscar':
+        return buscar(' '.join(sys.argv[2:]))
     if len(sys.argv) < 3:
         print(__doc__)
         return 2
