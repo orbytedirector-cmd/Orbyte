@@ -147,6 +147,15 @@ def album_en_otro(origen, album_id, artista, album, n_pistas, avisar=None):
         if avisar:
             avisar(f'No se pudo buscar en {otro.capitalize()}: {type(e).__name__}: {e}')
         return []
+    if n_pistas and not any(v.get('n_pistas') == n_pistas and _parecido(v.get('titulo'), album) >= 0.9 for v in cands):
+        # la búsqueda por texto no siempre trae todas las ediciones (Ghostlights de 24 pistas): la discografía sí
+        try:
+            _n, disco = tienda.cliente(otro).buscar_artista(artista)
+            vistos = {v['id'] for v in cands}
+            cands += [v for v in disco if v['id'] not in vistos]
+        except Exception as e:  # noqa: BLE001
+            if avisar:
+                avisar(f'No se pudo leer la discografía en {otro.capitalize()}: {type(e).__name__}: {e}')
     salida = []
     if upc:
         salida += [(otro, v['id'], 'mismo código de barras', v.get('n_pistas')) for v in cands
