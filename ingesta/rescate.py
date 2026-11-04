@@ -10,6 +10,7 @@ Orden (por pista):
 """
 import difflib
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -30,9 +31,26 @@ def _num(v):
         return None
 
 
+def _sondeo(ruta):
+    """(codec, frecuencia, duración) según ffprobe; un archivo dañado o incompleto da frecuencia/duración vacías."""
+    import json
+    try:
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                            'stream=codec_name,sample_rate:format=duration', '-of', 'json', ruta],
+                           capture_output=True, text=True, timeout=60)
+        d = json.loads(r.stdout or '{}')
+        st = (d.get('streams') or [{}])[0]
+        dur = float((d.get('format') or {}).get('duration') or 0)
+        return (st.get('codec_name') or '').lower() or None, int(st.get('sample_rate') or 0), dur
+    except Exception:  # noqa: BLE001
+        return None, 0, 0.0
+
+
 def ficha(ruta):
-    """{'ruta', 'codec', 'titulo', 'numero', 'disco', 'duracion'} de un archivo de audio."""
-    info = {'ruta': ruta, 'codec': tienda.codec(ruta), 'titulo': None, 'numero': None, 'disco': 1, 'duracion': None}
+    """{'ruta', 'codec', 'titulo', 'numero', 'disco', 'duracion', 'danada'} de un archivo de audio."""
+    codec, sr, dur = _sondeo(ruta)
+    info = {'ruta': ruta, 'codec': codec, 'titulo': None, 'numero': None, 'disco': 1, 'duracion': None,
+            'danada': not codec or not sr or dur < 1}
     try:
         import mutagen
         f = mutagen.File(ruta, easy=True)
@@ -51,17 +69,26 @@ def ficha(ruta):
             info['disco'], info['numero'] = int(cab.split('-')[0]), int(cab.split('-')[1])
         elif cab.isdigit():
             info['numero'] = int(cab)
+    if info['disco'] == 1:                                    # «Disc 2/01. …», «CD 2/…»
+        m = re.search(r'(?:disc|disco|cd)\s*0*(\d+)\s*$', os.path.basename(os.path.dirname(ruta)), re.I)
+        if m:
+            info['disco'] = int(m.group(1))
     return info
 
 
 def con_perdida(carpetas):
+    """Pistas con pérdida o dañadas/incompletas (las dos se intentan recuperar)."""
     salida = []
     for c in carpetas:
         for a in sorted(tienda._audios(c)):
             f = ficha(a)
-            if f['codec'] in tienda.CODECS_CON_PERDIDA:
+            if f['danada'] or f['codec'] in tienda.CODECS_CON_PERDIDA:
                 salida.append(f)
     return salida
+
+
+def _motivo(f):
+    return 'dañada o incompleta' if f.get('danada') else (f.get('codec') or '?').upper()
 
 
 # ─────────────────────────── emparejar con el catálogo ───────────────────────────
@@ -154,8 +181,8 @@ def rescatar(d, carpetas, base_tmp, avisar):
     if not pendientes:
         return [], []
     notas = []
-    avisar(f'{len(pendientes)} pista(s) llegaron con pérdida: '
-           + ', '.join(f'{os.path.basename(f["ruta"])} ({(f["codec"] or "?").upper()})' for f in pendientes[:6])
+    avisar(f'{len(pendientes)} pista(s) llegaron con pérdida o dañadas: '
+           + ', '.join(f'{os.path.basename(f["ruta"])} ({_motivo(f)})' for f in pendientes[:6])
            + (' …' if len(pendientes) > 6 else ''))
     origen = d['servicio']
     pistas_origen = None
@@ -168,14 +195,14 @@ def rescatar(d, carpetas, base_tmp, avisar):
         tmp = tempfile.mkdtemp(prefix='rescate-', dir=base_tmp)
         try:
             nuevo = bajar_pista(servicio, pista['id'], tmp)
-            c = tienda.codec(nuevo) if nuevo else None
-            if nuevo and c and c not in tienda.CODECS_CON_PERDIDA:
+            c, sr_n, dur_n = _sondeo(nuevo) if nuevo else (None, 0, 0.0)
+            if nuevo and c and sr_n and dur_n >= 1 and c not in tienda.CODECS_CON_PERDIDA:
                 final = _reemplazar(f, nuevo)
                 avisar(f'  ✓ {os.path.basename(final)}: {etiqueta} ({c.upper()})')
                 notas.append({'archivo': os.path.basename(final), 'como': etiqueta})
                 return True
-            avisar(f'  · {os.path.basename(f["ruta"])}: {servicio.capitalize()} no la entregó sin pérdida '
-                   f'({"llegó " + c.upper() if c else "no se descargó"})')
+            avisar(f'  · {os.path.basename(f["ruta"])}: {servicio.capitalize()} no la entregó bien '
+                   f'({("llegó " + c.upper()) if c and sr_n else ("llegó dañada" if nuevo else "no se descargó")})')
             if not nuevo:
                 avisar(f'      {servicio}: {ultima_salida.get(str(pista["id"]), "sin salida")[:400]}')
         except Exception as e:  # noqa: BLE001
@@ -184,15 +211,17 @@ def rescatar(d, carpetas, base_tmp, avisar):
             shutil.rmtree(tmp, ignore_errors=True)
         return False
 
-    # 1) reintento en el mismo servicio (Tidal: la sesión PKCE se renueva antes de cada pista)
-    if origen == 'tidal' and pistas_origen:
-        avisar('Reintentando en Tidal con la sesión renovada…')
-        for f in list(pendientes):
+    # 1) reintento en el mismo servicio: Tidal (sesión PKCE renovada) para todas; Qobuz solo para las dañadas
+    #    (si Qobuz entregó con pérdida, volver a pedirla da lo mismo)
+    reintentar = [f for f in pendientes if origen == 'tidal' or f.get('danada')]
+    if reintentar and pistas_origen:
+        avisar(f'Reintentando en {origen.capitalize()}' + (' con la sesión renovada…' if origen == 'tidal' else '…'))
+        for f in reintentar:
             p = emparejar(f, pistas_origen)
             if not p:
-                avisar(f'  · {os.path.basename(f["ruta"])}: no se encontró la pista en el álbum de Tidal')
+                avisar(f'  · {os.path.basename(f["ruta"])}: no se encontró la pista en el álbum de {origen.capitalize()}')
                 continue
-            if intentar(f, 'tidal', p, 'reintento en Tidal'):
+            if intentar(f, origen, p, f'reintento en {origen.capitalize()}'):
                 pendientes.remove(f)
             time.sleep(2)
 
