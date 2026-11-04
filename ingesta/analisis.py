@@ -683,8 +683,13 @@ def mejor_imagen(carpeta):
 _CACHE_BIB = {'clave': None, 'datos': None}
 
 
+_SIN_DESCOMPONER = str.maketrans({'ø': 'o', 'Ø': 'O', 'æ': 'ae', 'Æ': 'AE', 'œ': 'oe', 'Œ': 'OE', 'ß': 'ss',
+                                  'đ': 'd', 'Đ': 'D', 'ł': 'l', 'Ł': 'L', 'þ': 'th', 'Þ': 'TH'})
+
+
 def _norm(s):
-    s = sin_acentos(s or '').lower()
+    # letras que NFKD no separa en base + acento («Ømni» → «omni», no «mni»)
+    s = sin_acentos((s or '').translate(_SIN_DESCOMPONER)).lower()
     s = s.replace('&', ' and ')
     s = re.sub(r'^the\s+', '', s)
     s = re.sub(r'[^a-z0-9]+', ' ', s)
@@ -693,6 +698,8 @@ def _norm(s):
 
 def _norm_album(s):
     s = re.sub(r'\[[^\]]*\]', ' ', s or '')
+    s = re.sub(r'<[^>]*>', ' ', s)                       # «<Japanese Edition>», «<Reissued 1998>»
+    s = re.sub(r'\((?:ep|single|compilation|compilación|recopilatorio)\)', ' ', s, flags=re.I)
     s = re.sub(r'\((?:[^)]*(?:remaster|deluxe|edition|edición|version|versión|expanded|anniversary|bonus|\d{4})[^)]*)\)',
                ' ', s, flags=re.I)
     s = re.sub(r'\s*[-–]\s*(?:cd|disc|disco)\s*\d+\s*$', ' ', s, flags=re.I)
@@ -745,7 +752,10 @@ def _tag_existente(row):
         return 'MQA'
     if row['lossy'] * 2 > row['n']:
         return 'Lossy'
-    return 'HR' if (row['sr'] or 0) > 48000 else 'CD'
+    sr = row['sr'] or 0
+    bits = (row['bits'] if 'bits' in row.keys() else 0) or 0
+    # igual que en Buscar: Hi-Res = más de 48 kHz, o más de 16 bits sobre 44,1 (24/48 es Hi-Res)
+    return 'HR' if sr > 48000 or (bits > 16 and sr > 44100) else 'CD'
 
 
 def biblioteca(db, raiz='/mnt/musica'):
