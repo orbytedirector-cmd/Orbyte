@@ -763,7 +763,7 @@ def biblioteca(db, raiz='/mnt/musica'):
                  + ','.join(f"'{c}'" for c in sorted(LOSSY_CODECS)) + "))")
     filas = con.execute(f'''
         SELECT al.id, al.name, al.year, al.path, al.primary_format, ar.name AS artista,
-               COUNT(t.id) AS n, MAX(t.sample_rate) AS sr,
+               COUNT(t.id) AS n, MAX(t.sample_rate) AS sr, MAX(t.bit_depth) AS bits,
                SUM(CASE WHEN t.is_dsd=1 THEN 1 ELSE 0 END) AS dsd,
                SUM(CASE WHEN t.is_mqa=1 THEN 1 ELSE 0 END) AS mqa,
                SUM(CASE WHEN {lossy_sql} THEN 1 ELSE 0 END) AS lossy
@@ -781,9 +781,10 @@ def biblioteca(db, raiz='/mnt/musica'):
             ruta = os.path.dirname(ruta)
         g = grupos.setdefault(ruta, {'ruta': ruta, 'album': f['name'], 'anio': f['year'],
                                      'artista': f['artista'], 'formato': f['primary_format'],
-                                     'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0})
+                                     'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0, 'bits': 0})
         g['pistas'] += f['n'] or 0
         g['sr'] = max(g['sr'], f['sr'] or 0)
+        g['bits'] = max(g['bits'], f['bits'] or 0)
         g['tags'][_tag_existente(f)] += f['n'] or 1
         g['ids'].append(f['id'])
         # /mnt/musica/<Letra>/<Artista>/… → (Letra, Artista)

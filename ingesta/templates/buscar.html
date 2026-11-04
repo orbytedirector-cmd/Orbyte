@@ -68,13 +68,20 @@
       if (!lib || !v.sr) return;
       if (['DSD', 'MQA'].includes(lib.tag)) v.mejora = 'no';
       else if (lib.tag === 'Lossy') v.mejora = 'si';
-      else if (lib.sr) v.mejora = v.sr > lib.sr ? 'si' : (v.sr === lib.sr ? 'igual' : 'no');
+      else if (lib.sr) {                 // mismo criterio que tienda.comparar_resolucion
+        const b = v.bits || 16, bl = lib.bits || 16;
+        v.mejora = b === bl && v.sr === lib.sr ? 'igual' : (b >= bl && v.sr >= lib.sr ? 'si' : 'no');
+      }
     });
+  }
+  function libRes(l) {                    // «16/44,1» como en las versiones (sin bits en MP3/AAC: solo kHz)
+    if (!l || !l.sr || ['DSD', 'MQA', 'Lossy'].includes(l.tag)) return l && l.sr && l.tag === 'Lossy' ? `${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '';
+    return `${l.bits || 16}/${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})}`;
   }
   function libTxt(g) {
     const l = g.biblioteca;
     if (!l) return '';
-    const sr = l.sr ? ` ${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '';
+    const sr = libRes(l) ? ` ${libRes(l)}` : '';
     return `<span class="t-lib" title="${esc(l.ruta)}">Ya tienes ${l.album !== g.titulo ? 'una edición' : 'este álbum'} · <span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${esc(sr)}</span>`;
   }
   function mejoraTxt(v, g) {
@@ -154,7 +161,7 @@
     return `<tr data-i="${i}" data-falta="${l ? 0 : 1}" data-mejora="${mejora ? 1 : 0}">
       <td><input type="checkbox" data-elegir="${i}" aria-label="Elegir ${esc(g.titulo)}" ${sel ? 'checked' : ''}></td>
       <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div></td>
-      <td>${l ? `<span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${mejora ? ' <span class="ok t-nota">se puede mejorar</span>' : ''}` : '<span class="muy-tenue">No lo tienes</span>'}</td>
+      <td>${l ? `<span class="chip q-${esc(l.tag || '')}"><span class="led"></span>${esc(l.tag || '?')}</span>${libRes(l) ? ` <span class="chip">${esc(libRes(l))}</span>` : ''}${mejora ? ' <span class="ok t-nota">se puede mejorar</span>' : ''}` : '<span class="muy-tenue">No lo tienes</span>'}</td>
       ${celda('qobuz')}${celda('tidal')}</tr>`;
   }
   let filtro = 'todo';

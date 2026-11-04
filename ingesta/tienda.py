@@ -502,7 +502,8 @@ def _en_biblioteca(bib, artista, titulo):
     for d in analisis.buscar_duplicados(bib, artista, titulo)[:1]:
         g = next((x for x in bib['grupos'] if x['ruta'] == d['ruta']), {})
         return {'ruta': d['ruta'], 'album': d['album'], 'tag': d.get('tag'), 'formato': d.get('formato'),
-                'pistas': d.get('pistas'), 'sr': g.get('sr') or None, 'similitud': d.get('similitud')}
+                'pistas': d.get('pistas'), 'sr': g.get('sr') or None, 'bits': g.get('bits') or None,
+                'similitud': d.get('similitud')}
     return None
 
 
@@ -567,8 +568,18 @@ def sugerir(g):
             elif tag == 'Lossy':
                 v['mejora'] = 'si'
             elif lib.get('sr'):
-                v['mejora'] = 'si' if v['sr'] > lib['sr'] else ('igual' if v['sr'] == lib['sr'] else 'no')
+                v['mejora'] = comparar_resolucion(v.get('bits'), v['sr'], lib.get('bits'), lib['sr'])
     return g
+
+
+def comparar_resolucion(bits, sr, bits_lib, sr_lib):
+    """'si' si mejora en bits o en frecuencia sin empeorar la otra; 'igual'; 'no'. Sin bits conocidos: 16."""
+    b, bl = bits or 16, bits_lib or 16
+    if (b, sr) == (bl, sr_lib):
+        return 'igual'
+    if b >= bl and sr >= sr_lib:
+        return 'si'
+    return 'no'
 
 
 def buscar(texto, modo, bib):
