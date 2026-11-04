@@ -92,6 +92,12 @@
       <div class="ayuda" id="probar-sacd-res" style="margin-top:.4rem"></div>
     </div>
   </div>
+  <div class="bloque">
+    <div class="rotulo">Buscar</div>
+    <div class="campo"><label for="buscar_estrellas">Discos con ★ por sección</label>
+      <div class="ayuda">Al buscar un artista, los más escuchados de cada sección (álbumes, EPs, recopilatorios, en vivo) llevan ★. Score: 0,7 Last.fm (oyentes, pistas en su top, reproducciones) + 0,3 Tidal (popularidad y pistas más escuchadas).</div>
+      <input type="number" id="buscar_estrellas" name="buscar_estrellas" min="0" max="50" value="{{ aj.buscar_estrellas or 5 }}" style="max-width:120px"></div>
+  </div>
   <div><button class="btn oro">Guardar</button></div>
 </form>
 

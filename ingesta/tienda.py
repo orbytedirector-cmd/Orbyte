@@ -390,6 +390,7 @@ class Tidal:
                 'hires': hires, 'lossless': lossless, 'upc': a.get('upc'), 'sello': a.get('copyright'),
                 'portada': f'https://resources.tidal.com/images/{cover.replace("-", "/")}/320x320.jpg' if cover else None,
                 'tipo': self._tipo(a), 'explicito': bool(a.get('explicit')),
+                'popularidad': a.get('popularity'),
                 'url': f'https://tidal.com/browse/album/{a["id"]}',
                 # solo Dolby Atmos (sin versión estéreo sin pérdida): no se ofrece
                 'disponible': a.get('streamReady', True) is not False and not (tags and set(tags) <= {'DOLBY_ATMOS'}),
@@ -405,6 +406,7 @@ class Tidal:
         if not artistas:
             return None, []
         art = max(artistas, key=lambda a: (_norm(a.get('name')) == _norm(q), a.get('popularity') or 0))
+        self.artista_id = art['id']                    # para la popularidad (sus pistas más escuchadas)
         out, vistos = [], set()
         for filtro in (None, 'EPSANDSINGLES', 'COMPILATIONS'):
             params = {'limit': 100}
@@ -584,13 +586,15 @@ def comparar_resolucion(bits, sr, bits_lib, sr_lib):
 
 def buscar(texto, modo, bib):
     """{'artista': nombre|None, 'grupos': [...], 'errores': {servicio: texto}}"""
-    versiones, errores, nombre = [], {}, None
+    versiones, errores, nombre, tidal_artista = [], {}, None, None
     for s in ('qobuz', 'tidal'):
         try:
             c = cliente(s)
             if modo == 'artista':
                 n, vs = c.buscar_artista(texto)
                 nombre = nombre or n
+                if s == 'tidal':
+                    tidal_artista = getattr(c, 'artista_id', None)
             else:
                 vs = c.buscar_albumes(texto)
             versiones += vs
@@ -622,7 +626,7 @@ def buscar(texto, modo, bib):
     if modo == 'artista':
         orden = {'album': 0, 'ep': 1, 'recopilatorio': 2, 'en_vivo': 3}
         grupos.sort(key=lambda g: (orden.get(g['tipo'], 9), -(int(g['anio'] or 0))))
-    return {'artista': nombre, 'grupos': grupos, 'errores': errores}
+    return {'artista': nombre, 'grupos': grupos, 'errores': errores, 'tidal_artista': tidal_artista}
 
 
 def resolucion_tidal(almacen, ids):
