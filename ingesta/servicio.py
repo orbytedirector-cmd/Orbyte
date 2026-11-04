@@ -1185,6 +1185,9 @@ def api_descarga_accion(did, accion):
             return jsonify(ok=False, error='Formato no válido'), 400
         almacen.actualizar_descarga(did, estado='convirtiendo', progreso='Convirtiendo…')
         threading.Thread(target=_convertir_descarga, args=(did, formato), daemon=True, name='convertir').start()
+    elif accion == 'recuperar' and d['estado'] == 'decision':
+        almacen.actualizar_descarga(did, estado='recuperando', progreso='Intentando de nuevo…')
+        threading.Thread(target=_recuperar_descarga, args=(did,), daemon=True, name='recuperar').start()
     elif accion == 'descartar' and d['estado'] == 'decision':
         for c in json.loads(d.get('carpetas') or '[]'):
             real = os.path.realpath(c)
@@ -1197,6 +1200,37 @@ def api_descarga_accion(did, accion):
     else:
         return jsonify(ok=False, error='No se puede en este estado'), 409
     return jsonify(ok=True)
+
+
+def _recuperar_descarga(did):
+    """«Intentar de nuevo» en una descarga que espera decisión: el mismo rescate, sin volver a bajar el álbum."""
+    from . import rescate
+    d = almacen.descarga(did)
+    lineas = (d.get('registro') or '').splitlines() + ['— Intentando de nuevo —']
+    carpetas = json.loads(d.get('carpetas') or '[]')
+
+    def nota(t):
+        lineas.append(t)
+        almacen.actualizar_descarga(did, progreso=t[:160], registro='\n'.join(lineas[-160:]))
+    try:
+        tmp = os.path.join(DATOS, 'rescate')
+        os.makedirs(tmp, exist_ok=True)
+        pendientes, _notas = rescate.rescatar(d, carpetas, tmp, nota)
+    except Exception as e:  # noqa: BLE001
+        nota(f'Error: {type(e).__name__}: {e}')
+        almacen.actualizar_descarga(did, estado='decision')
+        return
+    if pendientes:
+        lista = [{'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'codec': f['codec'],
+                  'danada': bool(f.get('danada'))} for f in pendientes]
+        almacen.actualizar_descarga(did, estado='decision', pendientes=json.dumps(lista, ensure_ascii=False),
+                                    progreso=f'{len(lista)} pista(s) siguen sin recuperarse')
+        return
+    nota('Todas las pistas recuperadas sin pérdida')
+    almacen.actualizar_descarga(did, estado='terminada', pendientes=None, fin=time.time(),
+                                progreso='Pistas recuperadas: pasa a la Bandeja')
+    vigilante.pausa_rutas = vigilante.pausa_rutas - {c.rstrip('/') for c in carpetas}
+    vigilante.ya()
 
 
 def _convertir_descarga(did, formato):

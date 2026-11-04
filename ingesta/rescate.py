@@ -69,6 +69,10 @@ def ficha(ruta):
             info['disco'], info['numero'] = int(cab.split('-')[0]), int(cab.split('-')[1])
         elif cab.isdigit():
             info['numero'] = int(cab)
+    if not info['titulo']:                                    # «19. Avantasia - Avantasia (Live).flac» → «Avantasia (Live)»
+        base = re.sub(r'^\s*\d+(?:-\d+)?\s*[.\-_)]?\s*', '', os.path.splitext(os.path.basename(ruta))[0])
+        info['titulo'] = base.split(' - ', 1)[1] if ' - ' in base else base
+        info['titulo_de_nombre'] = True
     if info['disco'] == 1:                                    # «Disc 2/01. …», «CD 2/…»
         m = re.search(r'(?:disc|disco|cd)\s*0*(\d+)\s*$', os.path.basename(os.path.dirname(ruta)), re.I)
         if m:
@@ -112,7 +116,16 @@ def emparejar(f, pistas):
         if _dur_ok(f, p) and (_parecido(f.get('titulo'), p.get('titulo')) >= 0.5 or not f.get('titulo')):
             return p
     candidatos = [p for p in pistas if _dur_ok(f, p) and _parecido(f.get('titulo'), p.get('titulo')) >= 0.85]
-    return max(candidatos, key=lambda p: _parecido(f.get('titulo'), p.get('titulo'))) if candidatos else None
+    if candidatos:
+        return max(candidatos, key=lambda p: _parecido(f.get('titulo'), p.get('titulo')))
+    # numeración corrida entre discos («19.» = disco 2, pista 6 en el otro servicio): por posición absoluta
+    orden = sorted(pistas, key=lambda p: ((p.get('disco') or 1), p.get('numero') or 0))
+    n = f.get('numero') or 0
+    if (f.get('disco') or 1) == 1 and 0 < n <= len(orden):
+        p = orden[n - 1]
+        if _dur_ok(f, p) and (_parecido(f.get('titulo'), p.get('titulo')) >= 0.6 or not f.get('titulo')):
+            return p
+    return None
 
 
 def _upc(servicio, album_id):
@@ -124,24 +137,26 @@ def _upc(servicio, album_id):
         return None
 
 
-def album_en_otro(origen, album_id, artista, album, n_pistas):
-    """El mismo álbum en el otro servicio: (servicio, id, cómo se encontró) o None."""
+def album_en_otro(origen, album_id, artista, album, n_pistas, avisar=None):
+    """Ediciones del mismo álbum en el otro servicio, la más parecida primero: [(servicio, id, cómo, n_pistas)]."""
     otro = 'qobuz' if origen == 'tidal' else 'tidal'
     upc = _upc(origen, album_id)
     try:
         cands = tienda.cliente(otro).buscar_albumes(f'{artista} {album}', limite=25)
-    except Exception:  # noqa: BLE001
-        return None
+    except Exception as e:  # noqa: BLE001
+        if avisar:
+            avisar(f'No se pudo buscar en {otro.capitalize()}: {type(e).__name__}: {e}')
+        return []
+    salida = []
     if upc:
-        for v in cands:
-            if str(v.get('upc') or '').lstrip('0') == upc:
-                return otro, v['id'], 'mismo código de barras'
-    mejores = [v for v in cands if _parecido(v.get('titulo'), album) >= 0.9 and _parecido(v.get('artista'), artista) >= 0.8
-               and (not n_pistas or not v.get('n_pistas') or abs(v['n_pistas'] - n_pistas) <= 2)]
-    if mejores:
-        mejores.sort(key=lambda v: (-(v.get('bits') or 0), abs((v.get('n_pistas') or 0) - (n_pistas or 0))))
-        return otro, mejores[0]['id'], 'mismo artista y título'
-    return None
+        salida += [(otro, v['id'], 'mismo código de barras', v.get('n_pistas')) for v in cands
+                   if str(v.get('upc') or '').lstrip('0') == upc]
+    mismos = [v for v in cands if _parecido(v.get('titulo'), album) >= 0.9 and _parecido(v.get('artista'), artista) >= 0.8
+              and v['id'] not in {x[1] for x in salida}]
+    # primero la edición con la misma cantidad de pistas (la deluxe de 24 antes que la normal de 13)
+    mismos.sort(key=lambda v: (abs((v.get('n_pistas') or 0) - (n_pistas or 0)), -(v.get('bits') or 0)))
+    salida += [(otro, v['id'], 'mismo artista y título', v.get('n_pistas')) for v in mismos]
+    return salida
 
 
 # ─────────────────────────── bajar una sola pista ───────────────────────────
@@ -227,21 +242,24 @@ def rescatar(d, carpetas, base_tmp, avisar):
 
     # 2) la misma pista en el otro servicio
     if pendientes:
-        otro = album_en_otro(origen, d['item_id'], d.get('artista') or '', d.get('album') or '', d.get('n_pistas'))
-        if not otro:
-            avisar(f'El álbum no está en {"Qobuz" if origen == "tidal" else "Tidal"}')
-        else:
-            servicio, alb, como = otro
-            avisar(f'Buscando en {servicio.capitalize()} (álbum {alb}, {como})…')
+        ediciones = album_en_otro(origen, d['item_id'], d.get('artista') or '', d.get('album') or '', d.get('n_pistas'),
+                                  avisar)
+        otro_nombre = 'Qobuz' if origen == 'tidal' else 'Tidal'
+        if not ediciones:
+            avisar(f'El álbum no está en {otro_nombre}')
+        for servicio, alb, como, n in ediciones[:3]:
+            if not pendientes:
+                break
+            avisar(f'Buscando en {servicio.capitalize()} (álbum {alb}, {n or "?"} pistas, {como})…')
             try:
                 pistas_otro = tienda.cliente(servicio).pistas(alb)
             except Exception as e:  # noqa: BLE001
-                pistas_otro = []
                 avisar(f'No se pudo leer el álbum en {servicio.capitalize()}: {e}')
+                continue
             for f in list(pendientes):
                 p = emparejar(f, pistas_otro)
                 if not p:
-                    avisar(f'  · {os.path.basename(f["ruta"])}: no está en el álbum de {servicio.capitalize()}')
+                    avisar(f'  · {os.path.basename(f["ruta"])}: no está en esta edición de {servicio.capitalize()}')
                     continue
                 if intentar(f, servicio, p, f'traída de {servicio.capitalize()} (puede ser otra masterización)'):
                     pendientes.remove(f)
