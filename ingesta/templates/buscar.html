@@ -41,8 +41,8 @@
   }
   function clase(v) {
     if (v.servicio === 'tidal' && v.lossless === false) return 'Lossy';
-    if (!v.sr) return v.hires ? 'HR' : '';
-    return v.sr > 48000 || (v.bits || 0) > 16 && v.sr > 44100 ? 'HR' : 'CD';
+    if (!v.sr) return '';                  // Tidal «Hi-Res» sin resolución exacta todavía (puede ser 24/44,1)
+    return v.sr > 48000 ? 'HR' : 'CD';      // como el LED del DAC: hasta 48 kHz amarillo (CD), más arriba blanco (HR)
   }
   function chipCal(v) {
     const c = clase(v);
