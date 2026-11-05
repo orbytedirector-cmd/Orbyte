@@ -33,9 +33,7 @@ RANGO = {'Lossy': 0, 'CD': 1, 'HR': 2, 'MQA': 2, 'DSD': 3}
 
 def _base_edicion(ruta):
     """Los discos «CD 01», «Disc 2»… son parte de la misma edición: su carpeta es la del álbum."""
-    if ruta and analisis.dividir_por_disco(os.path.basename(ruta.rstrip('/'))) is not None:
-        return os.path.dirname(ruta.rstrip('/'))
-    return (ruta or '').rstrip('/')
+    return analisis.carpeta_album(ruta)
 
 
 def _formato(e):

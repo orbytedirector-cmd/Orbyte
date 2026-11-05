@@ -46,6 +46,7 @@ from . import portada as portada_mod
 from . import tienda as tienda_mod
 from . import nacionalidades as nacionalidades_mod
 from . import popularidad as popularidad_mod
+from . import salud as salud_mod
 import threading
 import traceback
 
@@ -88,6 +89,16 @@ vigilante = Vigilante(almacen)
 procesador = Procesador(almacen)
 descargador = tienda_mod.Descargador(almacen, vigilante, DATOS)
 vigilante.procesador = procesador
+
+
+def _ingesta_ocupada():
+    """¿La ingesta está trabajando? (la revisión de salud espera para no competir con ella)."""
+    if procesador.actual or descargador.actual:
+        return True
+    return bool(almacen.con_estado('analizando', 'ubicando', 'metadata', 'ajustando'))
+
+
+salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
 
 
 # ─────────────────────────── seguridad ───────────────────────────
@@ -1312,7 +1323,7 @@ def _base_multidisco(ruta):
     """Si la carpeta es un disco («CD 01», «Disc 2»…) de un álbum de varios discos, la carpeta del álbum."""
     ruta = ruta.rstrip('/')
     padre = os.path.dirname(ruta)
-    if analisis.dividir_por_disco(os.path.basename(ruta)) is None or not os.path.isdir(padre):
+    if analisis.carpeta_album(ruta) == ruta or not os.path.isdir(padre):   # «Artista/Load (Disc 1)» es un álbum
         return ruta
     try:
         hijos = os.listdir(padre)
@@ -1509,6 +1520,98 @@ def api_unir():
         almacen.registrar(aid, f'  Disco {n}: {os.path.relpath(fuentes[r], raiz)} · {por_ruta[r]["pistas"]} pistas')
     vigilante.ya()
     return jsonify(ok=True, ir=url_for('album', aid=aid))
+
+
+# ─────────────────────────── salud de la biblioteca ───────────────────────────
+
+@app.route('/salud')
+def salud_pagina():
+    return render_template('salud.html', pagina='salud', CALIDADES=salud_mod.CALIDADES)
+
+
+@app.route('/api/salud/discos')
+def api_salud_discos():
+    aj = almacen.ajustes()
+    try:
+        casos = salud_mod.discos_por_normalizar(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+    except Exception as e:
+        log.exception('Salud: discos por normalizar')
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+    return jsonify(ok=True, casos=casos, raiz=aj.get('biblioteca') or '/mnt/musica')
+
+
+@app.route('/api/salud/estado')
+def api_salud_estado():
+    return jsonify(salud.progreso())
+
+
+@app.route('/api/salud/estimar', methods=['POST'])
+def api_salud_estimar():
+    try:
+        return jsonify(ok=True, **salud.estimar(request.get_json(silent=True) or {}))
+    except Exception as e:
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+
+
+@app.route('/api/salud/iniciar', methods=['POST'])
+def api_salud_iniciar():
+    try:
+        salud.iniciar(request.get_json(silent=True) or {})
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True)
+
+
+@app.route('/api/salud/control', methods=['POST'])
+def api_salud_control():
+    accion = (request.get_json(silent=True) or {}).get('accion')
+    if accion == 'pausar':
+        salud.pausar(True)
+    elif accion == 'reanudar':
+        salud.pausar(False)
+    elif accion == 'detener':
+        salud.detener()
+    else:
+        return jsonify(ok=False, error='Acción desconocida'), 400
+    return jsonify(ok=True)
+
+
+@app.route('/api/salud/ajustes', methods=['POST'])
+def api_salud_ajustes():
+    d = request.get_json(silent=True) or {}
+    cambios = {}
+    if 'hilos' in d:
+        cambios['hilos'] = max(1, min(4, int(d['hilos'] or 1)))
+    if 'pausa' in d:
+        cambios['pausa'] = max(0.0, min(60.0, float(d['pausa'] or 0)))
+    if 'horario' in d:
+        h = (d['horario'] or '').strip()
+        if h and not re.fullmatch(r'\d{1,2}:\d{2}\s*-\s*\d{1,2}:\d{2}', h):
+            return jsonify(ok=False, error='Horario: usa el formato 01:00-08:00 (o déjalo vacío)'), 400
+        cambios['horario'] = h
+    if 'escuchas' in d:
+        cambios['escuchas'] = '1' if d['escuchas'] else '0'
+    salud.poner(**cambios)
+    return jsonify(ok=True)
+
+
+@app.route('/api/salud/danadas')
+def api_salud_danadas():
+    try:
+        return jsonify(ok=True, albumes=salud.danadas(request.args.get('ignorados') == '1'),
+                       raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    except Exception as e:
+        log.exception('Salud: pistas dañadas')
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+
+
+@app.route('/api/salud/ignorar', methods=['POST'])
+def api_salud_ignorar():
+    d = request.get_json(silent=True) or {}
+    if not d.get('carpeta'):
+        return jsonify(ok=False), 400
+    salud.ignorar(d['carpeta'], bool(d.get('si', True)))
+    return jsonify(ok=True)
 
 
 # ─────────────────────────── carátula de un álbum ya en la biblioteca ───────────────────────────
@@ -2351,5 +2454,6 @@ def main():
     vigilante.start()
     procesador.start()
     descargador.start()
+    salud.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)
