@@ -1364,7 +1364,7 @@ def api_reprocesar(k, i):
 # reemplaza a todos (escuchas, favoritos y playlists pasan al nuevo) y recién ahí se borran sus carpetas.
 
 UNIR = os.path.join(DATOS, 'unir')
-MAX_UNIR = 9
+MAX_UNIR = 200          # cajas de 100 CD
 
 
 def _grupos_bib():
@@ -1397,7 +1397,8 @@ def _info_union(g, discos):
     d = [discos.get(i) for i in g['ids'] if discos.get(i)]
     return {'ruta': g['ruta'], 'id': g['ids'][0], 'album': g['album'], 'anio': g.get('anio'), 'artista': g['artista'],
             'n_pistas': g['pistas'], 'tag': g.get('tag'), 'formato': g.get('formato'),
-            'disco_tag': max(set(d), key=d.count) if d else None}
+            'disco_tag': max(set(d), key=d.count) if d else None,
+            'disco_nombre': salud_mod._disco_nombre({'album': g['album'], 'ruta': g['ruta']})}
 
 
 def _carpetas_de(ids):
@@ -1442,7 +1443,7 @@ def api_unir_candidatos():
             continue
         cands.append((analisis._parecido(_limpio(base['album']), _limpio(g['album'])), g))
     cands.sort(key=lambda x: (-x[0], str(x[1].get('anio') or ''), x[1]['n_album']))
-    cands = cands[:30]
+    cands = cands[:300]                              # una caja de 100 CD cabe entera
     discos = _discos_tag(base['ids'] + [i for _s, g in cands for i in g['ids']])
     return jsonify(ok=True, base=_info_union(base, discos), raiz=(almacen.ajustes().get('biblioteca') or '/mnt/musica'),
                    candidatos=[dict(_info_union(g, discos), parecido=round(sc, 2)) for sc, g in cands])
@@ -1450,12 +1451,22 @@ def api_unir_candidatos():
 
 @app.route('/api/unir', methods=['POST'])
 def api_unir():
-    """{rutas: [...]} en el orden de los discos → arma la carpeta de enlaces y la deja en la cola de revisión."""
-    rutas = [str(r).rstrip('/') for r in (request.get_json(silent=True) or {}).get('rutas') or []]
+    """{rutas: [...], discos?: [...]} en el orden de los discos → arma la carpeta de enlaces y la deja en la cola de
+    revisión. `discos`: el número de cada disco (para conservar «CD 51» de una caja incompleta); si no, 1, 2, 3…"""
+    d = request.get_json(silent=True) or {}
+    rutas = [str(r).rstrip('/') for r in d.get('rutas') or []]
     if len(rutas) < 2 or len(set(rutas)) != len(rutas):
         return jsonify(ok=False, error='Elige al menos dos álbumes distintos'), 400
     if len(rutas) > MAX_UNIR:
         return jsonify(ok=False, error=f'Máximo {MAX_UNIR} discos'), 400
+    numeros = list(range(1, len(rutas) + 1))
+    if d.get('discos'):
+        try:
+            numeros = [int(x) for x in d['discos']]
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error='Números de disco inválidos'), 400
+        if len(numeros) != len(rutas) or len(set(numeros)) != len(numeros) or not all(1 <= x <= 999 for x in numeros):
+            return jsonify(ok=False, error='Cada disco necesita un número distinto (1 a 999)'), 400
     try:
         bib = _grupos_bib()
     except Exception as e:
@@ -1497,7 +1508,7 @@ def api_unir():
     tanda = os.path.join(UNIR, datetime.now().strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(3))
     destino = os.path.join(tanda, analisis.nombre_seguro(os.path.basename(rutas[0])) or 'Album')
     try:
-        for n, r in enumerate(rutas, 1):
+        for n, r in zip(numeros, rutas):
             cd = os.path.join(destino, f'CD {n}')
             os.makedirs(cd, exist_ok=True)
             f = fuentes[r]
@@ -1516,7 +1527,7 @@ def api_unir():
     nombres = ' + '.join(f'«{os.path.basename(r)}»' for r in rutas)
     aid = almacen.iniciar_union(destino, f'Unir {len(rutas)} discos: {nombres}', analisis.firma(destino), rutas)
     almacen.registrar(aid, f'Unir como un álbum de {len(rutas)} discos (no se mueve nada hasta ubicar):')
-    for n, r in enumerate(rutas, 1):
+    for n, r in zip(numeros, rutas):
         almacen.registrar(aid, f'  Disco {n}: {os.path.relpath(fuentes[r], raiz)} · {por_ruta[r]["pistas"]} pistas')
     vigilante.ya()
     return jsonify(ok=True, ir=url_for('album', aid=aid))

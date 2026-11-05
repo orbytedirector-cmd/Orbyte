@@ -443,7 +443,7 @@ def _int(v):
 # ─────────────────────────── discos por normalizar ───────────────────────────
 
 # solo «CD 2», «Disc 2», «Disco 2»: «Part 2» / «Pt. 2» / «Vol. 2» suelen ser álbumes distintos (otra fecha, otra edición)
-DISCO_EN_NOMBRE = re.compile(r'[\s\-_,:(\[]*\b(?:cd|dis[ck]o?|disk)\s*0*(\d{1,2})\b[\])]?', re.I)
+DISCO_EN_NOMBRE = re.compile(r'[\s\-_,:(\[]*\b(?:cd|dis[ck]o?|disk)\s*0*(\d{1,3})\b[\])]?', re.I)
 _CACHE = {'clave': None, 'datos': None}
 
 
@@ -452,6 +452,18 @@ def _base_nombre(nombre):
     n = _nombre_limpio(nombre or '')
     n = DISCO_EN_NOMBRE.sub(' ', n)
     return analisis._norm_album(n)
+
+
+def _detalle_separados(elegidos):
+    if len(elegidos) <= 4:
+        return ' + '.join(f'«{m["album"]}» (disco {e} · {m["n_pistas"]} pistas)' for m, e in elegidos)
+    nums = [e for _m, e in elegidos]
+    total = max([max(nums)] + [m['total_discos'] for m, _e in elegidos])
+    txt = (f'{len(elegidos)} álbumes que son discos de uno: discos {", ".join(map(str, nums[:6]))}… {nums[-1]} · '
+           f'{sum(m["n_pistas"] for m, _e in elegidos)} pistas')
+    if total > len(set(nums)):
+        txt += f' · faltan {total - len(set(nums))} de {total} discos'
+    return txt
 
 
 def _disco_nombre(m):
@@ -528,7 +540,7 @@ def discos_por_normalizar(db, biblioteca):
         ms = [m for m, _e in elegidos]
         en_caso.update(m['ruta'] for m in ms)
         casos.append({'tipo': 'separados', 'artista': ms[0]['artista'], 'titulo': ms[0]['album'], 'miembros': ms,
-                      'detalle': ' + '.join(f'«{m["album"]}» (disco {e} · {m["n_pistas"]} pistas)' for m, e in elegidos)})
+                      'detalle': _detalle_separados(elegidos)})
     # discos faltantes: los tags dicen más discos de los que hay y no hay otro álbum que los complete
     for m in simples:
         if m['ruta'] in en_caso or m['total_discos'] < 2 or not m['discos'] or m['total_discos'] > 20:
