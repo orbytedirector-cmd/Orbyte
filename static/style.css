@@ -2447,10 +2447,15 @@ button.header-user-link { background: none; font-family: inherit; cursor: pointe
 .vx-cap { font-size: 0.68rem; letter-spacing: 1.5px; text-transform: uppercase; color: #6f6f6f; }
 .vx-ed-q { display: flex; flex-direction: column; gap: 0.4rem; }
 .vx-qs { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-.vx-qbtn { display: inline-flex; align-items: center; gap: 0.45rem; height: 36px; padding: 0 0.9rem 0 0.7rem; border-radius: 999px;
-  background: var(--bg-elevated); border: 1px solid var(--border-light); color: var(--text-primary); font-family: Orbitron, sans-serif;
-  font-size: 0.75rem; text-decoration: none; }
-.vx-qbtn:hover, .vx-qsel { border-color: var(--accent-bright); }
+.vx-qgrp { display: inline-flex; align-items: center; height: 36px; border-radius: 999px; overflow: hidden;
+  background: var(--bg-elevated); border: 1px solid var(--border-light); }
+.vx-qgrp:hover, .vx-qgrp.vx-qsel { border-color: var(--accent-bright); }
+.vx-qbtn { display: inline-flex; align-items: center; gap: 0.45rem; height: 100%; padding: 0 0.7rem 0 0.7rem;
+  color: var(--text-primary); font-family: Orbitron, sans-serif; font-size: 0.75rem; text-decoration: none; }
+.vx-qbtn:hover { background: rgba(255,255,255,0.04); }
+.vx-qplay { height: 100%; padding: 0 0.75rem; border: none; border-left: 1px solid var(--border-light); background: transparent;
+  color: var(--accent-bright); font-size: 0.75rem; cursor: pointer; }
+.vx-qplay:hover { background: rgba(200,146,10,0.2); }
 .vx-link { align-self: flex-start; padding: 0; background: none; border: none; font-size: 0.7rem; color: var(--text-secondary); cursor: pointer; }
 .vx-link:hover { color: var(--accent-bright); }
 .vx-pistas { margin-top: 1rem; padding: 0.75rem 0.9rem; border-radius: 10px; background: var(--bg-elevated); border: 1px solid #1f1f1f;
