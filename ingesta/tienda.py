@@ -917,6 +917,15 @@ class Descargador(threading.Thread):
         if not carpetas:
             pista = ('¿ya estaba en el historial de tidal-dl-ng?' if d['servicio'] == 'tidal'
                      else 'revisa la sesión de Qobuz')
+            # tidal-dl-ng no reescribe archivos que ya existen: si en la entrada quedó otra descarga del mismo álbum
+            # (p. ej. la versión CD), con los mismos nombres, salta todas las pistas
+            # (la consola corta las líneas largas: el nombre puede venir partido en dos líneas)
+            ya = {os.path.dirname(m.group(1).replace('\n', ' ')) for m in
+                  re.finditer(r"since file exists: '([^']+)'", '\n'.join(lineas))}
+            if ya:
+                pista = ('ya hay una descarga de este álbum en la entrada con los mismos nombres: «'
+                         + '», «'.join(os.path.basename(c) for c in sorted(ya)) + '». Bórrala desde la Bandeja '
+                         '(«Borrar de la entrada») o ubícala primero, y presiona Reintentar')
             self.almacen.actualizar_descarga(did, estado='error', progreso=None, fin=time.time(),
                                              error=f'No se descargó nada ({pista})', registro='\n'.join(lineas[-80:]))
             return
