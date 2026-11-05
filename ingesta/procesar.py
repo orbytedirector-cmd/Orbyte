@@ -483,8 +483,10 @@ def copiar_extras(rep, origen, tmp):
                 # en «Extras/» no queda en «Extras/Extras/»
                 if a.lower().startswith('richmetapro_'):
                     continue
-                if rel.split(os.sep)[0] == 'Extras':
-                    rel = os.path.join(*rel.split(os.sep)[1:])
+                partes = rel.split(os.sep)
+                if 'Extras' in partes[:-1]:          # «Extras/x» o, al unir discos, «CD 2/Extras/x»
+                    partes.remove('Extras')
+                    rel = os.path.join(*partes)
             if ext in EXTRAS_EXT or ext in analisis.IMAGEN_EXT:
                 dst = os.path.join(tmp, 'Extras', rel)
                 os.makedirs(os.path.dirname(dst), exist_ok=True)

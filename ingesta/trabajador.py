@@ -146,6 +146,8 @@ class Procesador(threading.Thread):
         es_iso = bool(rep.get('origen_entrada'))
         if es_iso:
             self._cerrar_iso(aid, rep, aj, reg)
+        if (a.get('cambios') or {}).get('union'):
+            borrar_union(self.almacen, a['ruta'])        # los enlaces armados para unir ya no hacen falta
         self.almacen.actualizar(aid, estado='por_metadata' if aj.get('metadata', '1') == '1' else 'completado',
                                 ubicado_en=destino, progreso=None, ubicado=time.time(),
                                 terminado=None if aj.get('metadata', '1') == '1' else time.time(),
@@ -333,6 +335,14 @@ class Procesador(threading.Thread):
             self.almacen.avisar('error', f'{_nombre(a)}: la metadata quedó incompleta',
                                 '; '.join(resultado.get('errores', [])[:2]), aid)
         self.actual = None
+
+
+def borrar_union(almacen, ruta):
+    """Borra la carpeta de enlaces que se armó en ingesta_datos/unir para «Unir como discos» (solo si está ahí)."""
+    raiz = os.path.join(os.path.dirname(os.path.abspath(almacen.ruta)), 'unir')
+    tanda = os.path.dirname(os.path.abspath(ruta or ''))
+    if tanda.startswith(raiz + os.sep) and os.path.isdir(tanda):
+        shutil.rmtree(tanda, ignore_errors=True)
 
 
 def _ids_de(db, rutas):

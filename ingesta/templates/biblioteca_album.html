@@ -25,6 +25,7 @@
     <div class="acciones">
       <button class="btn" id="ignorar">{{ 'Dejar de ignorar' if ignorado else 'Ignorar en la revisión' }}</button>
       {% if lib and not (a and a.estado in VIVOS) %}<button class="btn" id="reprocesar" data-api="/api/reprocesar/b/{{ o.id }}" title="Vuelve a revisar la carpeta como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar{% if n_discos %} los {{ n_discos }} discos{% endif %}</button>{% endif %}
+      {% if lib and not n_discos and not (a and a.estado in VIVOS) %}<button class="btn" id="unir" title="Este álbum y otro(s) de la biblioteca son los discos de uno solo: se juntan en un álbum de varios discos">⧉ Unir como discos…</button>{% endif %}
     </div>
   </div>
 </div>
@@ -41,7 +42,10 @@
 {% if portada %}<section class="seccion">{% with pk='b', pid=o.id, artista_q=o.artista, album_q=o.album, ocupado=(a and a.estado in VIVOS) %}{% include '_portada_biblioteca.html' %}{% endwith %}</section>{% endif %}
 {% endblock %}
 {% block js %}
+{% include '_unir_discos.html' %}
 <script>
+const un = document.getElementById('unir');
+if (un) un.onclick = () => abrirUnir({oid: {{ o.id }}});
 const rp = document.getElementById('reprocesar');
 if (rp) rp.onclick = async () => {
   if (!confirm({% if n_discos %}'Este es uno de los {{ n_discos }} discos del álbum (cada uno en su subcarpeta, por eso Orbyte los muestra separados). Se reprocesan los {{ n_discos }} juntos y quedan en una sola carpeta y un solo álbum.\n\n' + {% endif %}'¿Reprocesar este álbum desde la biblioteca?\n\nLa carpeta se revisa como un álbum nuevo (cortes por cue, tags, edición, carátula) sin moverla. Al ubicarla, la versión nueva se arma y verifica aparte y, cuando su metadata termina bien, reemplaza a la actual: escuchas, favoritos y playlists pasan a la nueva y se borra la carpeta anterior. Puedes cancelar en cualquier momento antes de ubicar.')) return;

@@ -38,6 +38,7 @@
 </div>
 {% endblock %}
 {% block js %}
+{% include '_unir_discos.html' %}
 <script>
 const PAG = 40;
 let datos = null, filtro = 'todos', texto = '', mostrar = PAG, timer = null;
@@ -142,6 +143,7 @@ function grupoHtml(g) {
           <button class="btn chico" data-medir>Medir masters</button>
           ${datos.ia ? `<button class="btn chico" data-ia>Pedir sugerencia a la IA</button>` : '<span class="s muy-tenue">IA: falta GEMINI_API_KEY o GROQ_API_KEY</span>'}
           <button class="btn chico" data-conservar title="No vuelve a aparecer salvo que el grupo cambie">Conservar todas</button>
+          <button class="btn chico" data-unir title="No son ediciones repetidas sino los discos de un mismo álbum: se juntan en uno de varios discos">Unir como discos…</button>
         </div>
         <div class="acciones" style="margin:0">
           ${borrar.length && quedan.length > 1 ? `<label class="s">Escuchas y playlists pasan a
@@ -225,6 +227,8 @@ function enlazar(cont, solo) {
       datos.grupos = datos.grupos.filter(x => x.clave !== clave); abiertos.delete(clave); pintar();
     };
     const el = card.querySelector('[data-eliminar]'); if (el) el.onclick = () => confirmar(g);
+    const un = card.querySelector('[data-unir]');
+    if (un) un.onclick = () => abrirUnir({ruta: g.ediciones[0].ruta, preseleccion: g.ediciones.map(e => e.ruta)});
   });
 }
 

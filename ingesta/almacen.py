@@ -161,6 +161,37 @@ class Almacen:
                             "'En cola para revisar')", (ruta, rel, json.dumps(firma), ahora, ahora, cambios))
             return cur.lastrowid
 
+    def iniciar_union(self, ruta, rel, firma, rutas):
+        """«Unir como discos»: `ruta` es la carpeta armada en ingesta_datos/unir (una subcarpeta «CD N» por álbum,
+        con enlaces a sus archivos); `rutas` son los álbumes de la biblioteca en el orden de los discos. Se revisa
+        como un reproceso: al terminar la metadata del álbum unido, reemplaza a todos (los más profundos primero,
+        por si uno está dentro de la carpeta de otro). Devuelve el id."""
+        rutas = [r.rstrip('/') for r in rutas]
+        ahora = time.time()
+        cambios = json.dumps({'reproceso_de': rutas[0], 'union': rutas,
+                              'reemplazar': sorted(rutas, key=len, reverse=True), 'aceptadas': ['duplicado']},
+                             ensure_ascii=False)
+        with _lock, self._con() as c:
+            cur = c.execute("INSERT INTO albumes(ruta, rel, firma, firma_desde, detectado, estado, origen, reproceso, "
+                            "cambios, progreso) VALUES(?, ?, ?, ?, ?, 'en_cola', 'reproceso', 'null', ?, "
+                            "'En cola para revisar')", (ruta, rel, json.dumps(firma), ahora, ahora, cambios))
+            return cur.lastrowid
+
+    def uniones_activas(self):
+        """[(id, rutas)] de las uniones que todavía no reemplazaron a sus álbumes."""
+        with self._con() as c:
+            filas = c.execute("SELECT id, cambios FROM albumes WHERE origen='reproceso' AND cambios LIKE '%\"union\"%' "
+                              "AND estado != 'descartado'").fetchall()
+        res = []
+        for r in filas:
+            try:
+                cam = json.loads(r['cambios'] or '{}')
+            except ValueError:
+                continue
+            if cam.get('union') and not cam.get('reemplazo_hecho'):
+                res.append((r['id'], cam['union']))
+        return res
+
     def cancelar_reproceso(self, aid):
         """Deja la fila como estaba antes de «Reprocesar» (o la borra si no existía). La carpeta nunca se tocó."""
         with _lock, self._con() as c:
