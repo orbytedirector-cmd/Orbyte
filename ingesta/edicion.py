@@ -11,6 +11,7 @@ Orden (se detiene en el primer resultado seguro):
 Solo consultas: no escribe ni mueve archivos. MusicBrainz admite 1 consulta por segundo;
 todas las respuestas quedan guardadas en ingesta.db.
 """
+import contextlib
 import json
 import logging
 import os
@@ -36,6 +37,18 @@ _lock_red = threading.Lock()
 _ultima = [0.0]
 
 
+@contextlib.contextmanager
+def _cache_db(ruta):
+    """Caché de MusicBrainz: confirma y CIERRA la conexión (el with de sqlite3 solo confirma; abiertas hasta el
+    recolector, una revisión con muchas consultas llegaba a «Too many open files»)."""
+    c = sqlite3.connect(ruta, timeout=30)
+    try:
+        with c:
+            yield c
+    finally:
+        c.close()
+
+
 class SinRed(Exception):
     pass
 
@@ -45,19 +58,19 @@ class Cliente:
 
     def __init__(self, ruta_cache):
         self.ruta_cache = ruta_cache
-        with sqlite3.connect(ruta_cache, timeout=30) as c:
+        with _cache_db(ruta_cache) as c:
             c.execute('CREATE TABLE IF NOT EXISTS mb_cache (url TEXT PRIMARY KEY, ts REAL, json TEXT)')
         self.consultas = 0
 
     def _cache(self, url):
-        with sqlite3.connect(self.ruta_cache, timeout=30) as c:
+        with _cache_db(self.ruta_cache) as c:
             r = c.execute('SELECT ts, json FROM mb_cache WHERE url=?', (url,)).fetchone()
         if r and time.time() - r[0] < CACHE_DIAS * 86400:
             return json.loads(r[1])
         return None
 
     def _guardar(self, url, datos):
-        with sqlite3.connect(self.ruta_cache, timeout=30) as c:
+        with _cache_db(self.ruta_cache) as c:
             c.execute('INSERT OR REPLACE INTO mb_cache VALUES (?, ?, ?)', (url, time.time(), json.dumps(datos)))
 
     def get(self, url, cachear=True, pausa=1.1):

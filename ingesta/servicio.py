@@ -1524,7 +1524,8 @@ def api_unir():
     except OSError as e:
         shutil.rmtree(tanda, ignore_errors=True)
         return jsonify(ok=False, error=f'No se pudo armar la unión: {e}'), 500
-    nombres = ' + '.join(f'«{os.path.basename(r)}»' for r in rutas)
+    nombres = (' + '.join(f'«{os.path.basename(r)}»' for r in rutas) if len(rutas) <= 3 else
+               f'«{os.path.basename(rutas[0])}» … «{os.path.basename(rutas[-1])}»')
     aid = almacen.iniciar_union(destino, f'Unir {len(rutas)} discos: {nombres}', analisis.firma(destino), rutas)
     almacen.registrar(aid, f'Unir como un álbum de {len(rutas)} discos (no se mueve nada hasta ubicar):')
     for n, r in zip(numeros, rutas):
