@@ -23,7 +23,7 @@
   <meta property="og:type" content="website">
   <meta property="og:image" content="/static/og-image.png">
 
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=20261105">
 </head>
 <body class="{{ 'collab-guest-mode' if collab_guest }}">
   <div class="base-container">
@@ -435,6 +435,7 @@
   </div>
 
   <script src="{{ url_for('static', filename='player.js') }}?v=20261029"></script>
+  <script src="{{ url_for('static', filename='versiones.js') }}?v=20261105"></script>
   {% if current_user %}<script src="{{ url_for('static', filename='escuchas.js') }}?v=20261029"></script>{% endif %}
   {% if collab_guest %}
   <!-- Invitado de playlist colaborativa: sobrescribe playTrack/appendToQueue/
