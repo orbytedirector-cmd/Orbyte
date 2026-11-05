@@ -57,7 +57,7 @@ DSD_RATES = {2822400: 'DSD64', 5644800: 'DSD128', 11289600: 'DSD256', 22579200: 
 STD_KBPS = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
 
 # Subcarpetas de disco: «CD 1», «CD01», «Disc 2», «Disco 1», «Vol. 1 - Disc 2», «DVD 1»…
-DISCO_RE = re.compile(r'(?:^|[\s\-_.\[(])(?:cd|dis[ck]|disco|dvd|sacd)\s*[-_.]?\s*(\d{1,2})(?!\d)', re.I)
+DISCO_RE = re.compile(r'(?:^|[\s\-_.\[(])(?:cd|dis[ck]|disco|dvd|sacd)\s*[-_.]?\s*(\d{1,3})(?!\d)', re.I)   # cajas de 100 CD
 VOLUMEN_RE = re.compile(r'^(?:vol(?:ume|umen)?\.?)\s*(\d{1,2})$', re.I)
 
 # Prioridad para desempatar el tag de calidad cuando la mayoría empata
@@ -1770,7 +1770,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         'mb_grupo': ed_el.get('grupo_id') or edicion.get('mb_grupo'),
         'sello': ed_el.get('sello') or edicion.get('sello'), 'catalogo': ed_el.get('catalogo') or edicion.get('catalogo'),
         'pais': ed_el.get('pais') or edicion.get('pais'), 'barcode': ed_el.get('barcode') or edicion.get('barcode'),
-        'total_discos': n_discos,
+        'total_discos': max([n_discos] + discos_n),     # una caja incompleta (CD 1…100 con 31 discos) sigue diciendo 100
     }
     plan = []
     for p in sorted(legibles, key=lambda p: (p['disco'], p.get('numero') or 999, p['archivo'])):

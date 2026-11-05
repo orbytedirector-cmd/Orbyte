@@ -17,7 +17,17 @@
   let st = null;   // {raiz, todos: {ruta: info}, sel: [ruta], manual, filtro}
   const relU = r => r && st && r.startsWith(st.raiz.replace(/\/$/, '') + '/') ? r.slice(st.raiz.replace(/\/$/, '').length + 1) : r;
   // orden por defecto: el disco de los tags si cada uno marca uno distinto; si no, el de menos pistas primero
+  // número propio de cada disco («The Piano - CD51» = 51): el del nombre o el de los tags
+  const numero = x => x.disco_nombre || x.disco_tag || null;
+  function puedeConservar() {
+    const ns = st.sel.map(r => numero(st.todos[r]));
+    return ns.length > 1 && ns.every(n => n) && new Set(ns).size === ns.length;
+  }
   function ordenar() {
+    if (st.conservar && puedeConservar()) {
+      st.sel.sort((a, b) => numero(st.todos[a]) - numero(st.todos[b]));
+      return;
+    }
     if (st.manual) return;
     const it = st.sel.map(r => st.todos[r]);
     const tags = it.map(x => x.disco_tag);
@@ -26,23 +36,29 @@
       : (a.n_pistas - b.n_pistas) || String(a.anio || '').localeCompare(String(b.anio || '')) || a.ruta.localeCompare(b.ruta));
     st.sel = it.map(x => x.ruta);
   }
+  const conservando = () => st.conservar && puedeConservar();
+  const nDisco = (x, i) => conservando() ? numero(x) : i + 1;
   function fila(x, i) {
     return `<div class="u-disco">
-      <span class="u-n">Disco ${i + 1}</span>
+      <span class="u-n">Disco ${nDisco(x, i)}</span>
       <span style="min-width:0;flex:1"><b>${esc(x.album)}</b>${x.anio ? ` <span class="tenue">(${esc(x.anio)})</span>` : ''}
         ${x.tag ? `<span class="chip q-${esc(x.tag)}"><span class="led"></span>${esc(x.tag)}</span>` : ''}
         <span class="s tenue">${x.n_pistas} pistas${x.disco_tag ? ` · tags: disco ${x.disco_tag}` : ''}</span>
         <span class="s mono muy-tenue" style="display:block;word-break:break-all">${esc(relU(x.ruta))}</span></span>
       <span class="u-mover">
-        <button class="btn chico" data-sube="${i}" ${i === 0 ? 'disabled' : ''} title="Subir" aria-label="Subir">↑</button>
-        <button class="btn chico" data-baja="${i}" ${i === st.sel.length - 1 ? 'disabled' : ''} title="Bajar" aria-label="Bajar">↓</button>
+        ${conservando() ? '' : `<button class="btn chico" data-sube="${i}" ${i === 0 ? 'disabled' : ''} title="Subir" aria-label="Subir">↑</button>
+        <button class="btn chico" data-baja="${i}" ${i === st.sel.length - 1 ? 'disabled' : ''} title="Bajar" aria-label="Bajar">↓</button>`}
         <button class="btn chico" data-quita="${i}" title="Quitar" aria-label="Quitar">✕</button></span></div>`;
   }
   function pintar() {
     const q = (st.filtro || '').trim().toLowerCase();
     const libres = Object.values(st.todos).filter(x => !st.sel.includes(x.ruta)
       && (!q || `${x.album} ${x.anio || ''}`.toLowerCase().includes(q)));
+    const nums = st.sel.map(r => numero(st.todos[r]));
+    const huecos = puedeConservar() && Math.max(...nums) > nums.length;
     cuerpo.innerHTML = `
+      ${puedeConservar() ? `<label class="s" style="display:block"><input type="checkbox" id="u-conservar" ${st.conservar ? 'checked' : ''}>
+        Conservar el número de cada disco <span class="tenue">(«CD ${Math.max(...nums)}» sigue siendo el disco ${Math.max(...nums)}${huecos ? '; útil en una caja incompleta' : ''})</span></label>` : ''}
       <div class="rotulo">Discos, en orden</div>
       <div class="u-discos">${st.sel.length ? st.sel.map((r, i) => fila(st.todos[r], i)).join('')
         : '<div class="s tenue">Agrega los álbumes que son discos de este.</div>'}</div>
@@ -55,6 +71,8 @@
           <span class="s" style="color:var(--oro-claro)">+ Agregar</span></button>`).join('')
         : '<div class="s tenue">No hay más álbumes de este artista' + (q ? ' con ese texto' : '') + '.</div>'}</div>`;
     ok.disabled = st.sel.length < 2;
+    const cb = document.getElementById('u-conservar');
+    if (cb) cb.onchange = () => { st.conservar = cb.checked; st.manual = false; ordenar(); pintar(); };
     nota.textContent = st.sel.length < 2 ? 'Elige al menos dos' : `Quedará un álbum de ${st.sel.length} discos y ${st.sel.reduce((s, r) => s + st.todos[r].n_pistas, 0)} pistas`;
     const f = document.getElementById('u-filtro');
     f.oninput = () => { st.filtro = f.value; const pos = f.selectionStart; pintar(); const g = document.getElementById('u-filtro'); g.focus(); g.setSelectionRange(pos, pos); };
@@ -65,17 +83,20 @@
     if (b.dataset.sube !== undefined) { [st.sel[i - 1], st.sel[i]] = [st.sel[i], st.sel[i - 1]]; st.manual = true; }
     else if (b.dataset.baja !== undefined) { [st.sel[i + 1], st.sel[i]] = [st.sel[i], st.sel[i + 1]]; st.manual = true; }
     else if (b.dataset.quita !== undefined) { st.sel.splice(i, 1); }
-    else if (b.dataset.agrega) { if (st.sel.length >= 9) { toast('Máximo 9 discos', ''); return; } st.sel.push(b.dataset.agrega); ordenar(); }
+    else if (b.dataset.agrega) { if (st.sel.length >= 200) { toast('Máximo 200 discos', ''); return; } st.sel.push(b.dataset.agrega); ordenar(); }
     else return;
     pintar();
   });
   document.getElementById('u-cancelar').onclick = () => { m.hidden = true; };
   m.addEventListener('click', e => { if (e.target === m) m.hidden = true; });
   ok.onclick = async () => {
-    const lista = st.sel.map((r, i) => `Disco ${i + 1}: ${st.todos[r].album} (${st.todos[r].n_pistas} pistas)`).join('\n');
+    const lista = st.sel.length > 12
+      ? `${st.sel.length} discos (${st.sel.slice(0, 3).map((r, i) => 'disco ' + nDisco(st.todos[r], i)).join(', ')}… disco ${nDisco(st.todos[st.sel[st.sel.length - 1]], st.sel.length - 1)}), ${st.sel.reduce((s, r) => s + st.todos[r].n_pistas, 0)} pistas`
+      : st.sel.map((r, i) => `Disco ${nDisco(st.todos[r], i)}: ${st.todos[r].album} (${st.todos[r].n_pistas} pistas)`).join('\n');
     if (!confirm(`¿Unir como un solo álbum?\n\n${lista}\n\nSe revisa como un reproceso; no se mueve ni se borra nada hasta que el álbum unido termine bien su metadata. Puedes cancelar antes de ubicar.`)) return;
     ok.disabled = true;
-    const r = await post('/api/unir', {rutas: st.sel});
+    const r = await post('/api/unir', conservando()
+      ? {rutas: st.sel, discos: st.sel.map(x => numero(st.todos[x]))} : {rutas: st.sel});
     if (!r || r.ok === false) {
       toast('No se pudo unir', (r && r.error) || ''); ok.disabled = false;
       if (r && r.ir) location.href = r.ir;
@@ -91,7 +112,7 @@
     if (!r.ok) { cuerpo.innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
     const todos = {[r.base.ruta]: r.base};
     r.candidatos.forEach(c => { todos[c.ruta] = c; });
-    st = {raiz: r.raiz, artista: r.base.artista, todos, sel: [r.base.ruta], manual: false, filtro: ''};
+    st = {raiz: r.raiz, artista: r.base.artista, todos, sel: [r.base.ruta], manual: false, filtro: '', conservar: true};
     (o.preseleccion || []).forEach(p => { if (todos[p] && !st.sel.includes(p)) st.sel.push(p); });
     ordenar();
     pintar();
