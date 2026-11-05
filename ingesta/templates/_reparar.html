@@ -1,0 +1,98 @@
+{# «Reparar pistas dañadas»: abrirReparar({rutas, aid?}) desde Salud o desde la ficha de la Bandeja.
+   Necesita post/esc/toast de base.html. #}
+<div class="modal-fondo" id="r-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="r-tit" style="width:min(980px,100%)">
+    <div class="modal-cab"><b id="r-tit">Reparar pistas dañadas</b>
+      <span class="s tenue" style="display:block;margin-top:.3rem">Se baja de Tidal solo cada pista marcada, se verifica (decodifica sin errores y dura lo mismo), recibe la metadata de la vieja y la reemplaza en el mismo lugar con el mismo nombre. Para Orbyte es el mismo archivo: escuchas, favoritos y playlists no cambian.</span></div>
+    <div class="modal-cuerpo" id="r-cuerpo"></div>
+    <div class="modal-pie"><span class="tenue t-nota" id="r-nota"></span>
+      <span style="display:flex;gap:.5rem"><button class="btn" id="r-cancelar">Cancelar</button>
+        <button class="btn oro" id="r-ok" disabled>Reparar</button></span></div>
+  </div>
+</div>
+<script>
+(function () {
+  const m = document.getElementById('r-modal'), cuerpo = document.getElementById('r-cuerpo');
+  const ok = document.getElementById('r-ok'), nota = document.getElementById('r-nota');
+  let st = null;    // {rutas, aid, plan, sel: {ruta: {on, acepto}}}
+  const mmss = s => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  const num = (d, n) => `${d && d > 1 ? d + '-' : ''}${String(n ?? '?').padStart(2, '0')}`;
+  const chipQ = q => q ? `<span class="chip q-${q.startsWith('HR') ? 'HR' : 'CD'}"><span class="led"></span>${esc(q.replace('-', ' '))}</span>` : '<span class="tenue">?</span>';
+
+  async function cargar(edicion) {
+    cuerpo.innerHTML = '<div class="estado-vivo"><span class="giro"></span>Buscando la edición en Tidal y emparejando las pistas…</div>';
+    ok.disabled = true; nota.textContent = '';
+    const r = await post('/api/reparar/plan', {rutas: st.rutas, edicion_id: edicion || null});
+    if (!r || r.ok === false) { cuerpo.innerHTML = `<div class="flash error">${esc((r && r.error) || 'No se pudo')}</div>`; return; }
+    st.plan = r; st.sel = {};
+    r.pistas.forEach(p => { st.sel[p.ruta] = {on: !!(p.reparable && p.pareja && p.igual), acepto: false}; });
+    pintar();
+  }
+  function pintar() {
+    const p = st.plan;
+    cuerpo.innerHTML = `
+      <div class="s-fila" style="margin-bottom:.6rem"><div style="min-width:0">
+        <div class="t">${esc(p.artista)} — ${esc(p.album)}</div>
+        <div class="s tenue">${p.n_pistas} pistas en la carpeta · calidad del álbum: ${p.calidad_album ? chipQ(p.calidad_album) : '?'}</div></div>
+        <div class="campo" style="margin:0;min-width:260px"><label for="r-ed">Edición en Tidal</label>
+          <select id="r-ed">${p.ediciones.map(e => `<option value="${esc(e.id)}" ${e.id === p.edicion.id ? 'selected' : ''}>${esc(e.titulo)}${e.anio ? ' (' + esc(e.anio) + ')' : ''} · ${e.n_pistas || '?'} pistas${e.hires ? ' · Hi-Res' : ''} · ${esc(e.como)}</option>`).join('')}</select></div></div>
+      <div class="tabla-wrap"><table>
+        <tr><th style="width:1%"></th><th>Pista dañada</th><th>En Tidal</th><th>Qué pasa</th></tr>
+        ${p.pistas.map((x, i) => {
+          const s = st.sel[x.ruta], pa = x.pareja;
+          let que;
+          if (!x.reparable || !pa) que = `<span class="mal">✗ ${esc(x.motivo || 'sin pareja')}</span>`;
+          else if (x.igual) que = '<span class="ok">✓ misma calidad</span>';
+          else que = `<span class="med">⚠ Tidal la entrega en ${esc(pa.calidad || '?')} y el álbum es ${esc(p.calidad_album || '?')}</span>
+            <label class="s" style="display:block;margin-top:.25rem"><input type="checkbox" data-acepto="${i}" ${s.acepto ? 'checked' : ''}>
+            Usarla igual: el título queda «${esc((x.titulo || '').replace(/\s*\((CD|HR)-[^)]*\)$/, ''))} (${esc(pa.calidad || '?')})»</label>`;
+          return `<tr><td><input type="checkbox" data-on="${i}" ${s.on ? 'checked' : ''} ${(!x.reparable || !pa) ? 'disabled' : ''} aria-label="Reparar ${esc(x.titulo || x.archivo)}"></td>
+            <td><div class="t">${num(x.disco, x.numero)} ${esc(x.titulo || '')}</div>
+              <div class="s">${mmss(x.duracion)} · ${chipQ(x.calidad)}</div><div class="s mono muy-tenue" style="word-break:break-all">${esc(x.archivo)}</div></td>
+            <td>${pa ? `<div class="t">${num(pa.disco, pa.numero)} ${esc(pa.titulo || '')}</div><div class="s">${mmss(pa.duracion)} · ${chipQ(pa.calidad)}</div>` : '<span class="tenue">—</span>'}</td>
+            <td>${que}</td></tr>`;
+        }).join('')}
+      </table></div>`;
+    document.getElementById('r-ed').onchange = e => cargar(e.target.value);
+    cuerpo.querySelectorAll('[data-on]').forEach(c => c.onchange = () => {
+      const x = st.plan.pistas[+c.dataset.on]; st.sel[x.ruta].on = c.checked; resumen();
+    });
+    cuerpo.querySelectorAll('[data-acepto]').forEach(c => c.onchange = () => {
+      const x = st.plan.pistas[+c.dataset.acepto]; st.sel[x.ruta].acepto = c.checked;
+      if (c.checked) st.sel[x.ruta].on = true;
+      pintar();
+    });
+    resumen();
+  }
+  function elegidas() {
+    const out = {};
+    st.plan.pistas.forEach(x => {
+      const s = st.sel[x.ruta];
+      if (s.on && x.reparable && x.pareja && (x.igual || s.acepto)) out[x.ruta] = {acepto_calidad: !x.igual && s.acepto};
+    });
+    return out;
+  }
+  function resumen() {
+    const n = Object.keys(elegidas()).length;
+    const pend = st.plan.pistas.filter(x => st.sel[x.ruta].on && x.reparable && x.pareja && !x.igual && !st.sel[x.ruta].acepto).length;
+    ok.disabled = !n;
+    ok.textContent = n ? `Reparar ${n} pista${n > 1 ? 's' : ''}` : 'Reparar';
+    nota.textContent = pend ? `${pend} marcada${pend > 1 ? 's' : ''} con otra calidad: acéptala o desmárcala` : (n ? 'De a una, con pausa · la vieja se borra solo si la nueva pasa la verificación' : 'Marca al menos una');
+  }
+  document.getElementById('r-cancelar').onclick = () => { m.hidden = true; };
+  m.addEventListener('click', e => { if (e.target === m) m.hidden = true; });
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const r = await post('/api/reparar', {token: st.plan.token, elegidas: elegidas(), aid: st.aid || null});
+    if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); ok.disabled = false; return; }
+    m.hidden = true;
+    toast('Reparación en cola', 'Avanza de fondo; el resultado queda en el registro y en los avisos');
+    if (window.alEncolarReparacion) window.alEncolarReparacion();
+  };
+  window.abrirReparar = function (o) {
+    st = {rutas: o.rutas || [], aid: o.aid || null};
+    m.hidden = false;
+    cargar(null);
+  };
+})();
+</script>

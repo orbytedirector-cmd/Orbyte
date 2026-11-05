@@ -535,3 +535,5 @@ tr.p-editor td { background: var(--card-2); }
 .s-album { margin-bottom: .7rem; }
 .s-album details { margin-top: .5rem; }
 .s-album summary { cursor: pointer; color: var(--texto-2); }
+.modal select { width: 100%; background: #0a0a0a; border: 1px solid var(--borde-2); border-radius: 8px;
+  padding: .55rem .7rem; color: var(--texto); }

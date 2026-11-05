@@ -428,7 +428,7 @@ class Salud:
                                                'album': a['name'], 'anio': a['year'], 'pistas': [],
                                                'danada': 0, 'errores': 0, 'falta': 0})
             g[f['estado']] += 1
-            g['pistas'].append({'archivo': os.path.basename(f['ruta']), 'estado': f['estado'],
+            g['pistas'].append({'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'estado': f['estado'],
                                 'errores': json.loads(f['errores'] or '[]')[:2], 'disco': t.get('disc_number'),
                                 'numero': t.get('track_number'), 'titulo': t.get('title'),
                                 'segundos': f['segundos'], 'duracion': f['duracion']})
