@@ -68,7 +68,7 @@
 const TIPOS = {subcarpetas: 'Discos en subcarpetas', separados: 'Discos en álbumes separados', numeracion: 'Numeración repetida',
                faltantes: 'Discos faltantes'};
 const ESTADOS = {danada: ['Dañada o incompleta', 'mal'], errores: ['Errores, pero completa', 'med'], falta: ['Falta el archivo', 'mal']};
-let casos = null, fDiscos = 'todos', danadas = null, fDan = 'todas', verIgn = false, raiz = '';
+let casos = null, fDiscos = 'todos', verIgnDiscos = false, nIgnDiscos = 0, danadas = null, fDan = 'todas', verIgn = false, raiz = '';
 const relR = r => r && raiz && r.startsWith(raiz.replace(/\/$/, '') + '/') ? r.slice(raiz.replace(/\/$/, '').length + 1) : r;
 const buscarUrl = (ar, al) => '/buscar?' + new URLSearchParams({q: `${ar || ''} ${(al || '').replace(/\s*[\[(].*$/, '')}`.trim()});
 const mmss = s => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
@@ -85,10 +85,10 @@ try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySele
 
 // ── discos por normalizar ──
 async function cargarDiscos() {
-  const r = await (await fetch('/api/salud/discos')).json();
+  const r = await (await fetch('/api/salud/discos' + (verIgnDiscos ? '?ignorados=1' : ''))).json();
   if (!r.ok) { document.getElementById('l-discos').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
-  casos = r.casos; raiz = r.raiz;
-  document.getElementById('n-discos').textContent = casos.length;
+  casos = r.casos; raiz = r.raiz; nIgnDiscos = r.n_ignorados;
+  if (!verIgnDiscos) document.getElementById('n-discos').textContent = casos.length;
   pintarDiscos();
 }
 function accionCaso(c, i) {
@@ -101,19 +101,25 @@ function accionCaso(c, i) {
 function pintarDiscos() {
   const cuenta = t => casos.filter(c => t === 'todos' || c.tipo === t).length;
   document.getElementById('f-discos').innerHTML = [['todos', 'Todos'], ...Object.entries(TIPOS)].map(([k, n]) =>
-    `<button class="filtro ${fDiscos === k ? 'activo' : ''}" data-f="${k}">${esc(n)}<b>${cuenta(k)}</b></button>`).join('');
+    `<button class="filtro ${fDiscos === k ? 'activo' : ''}" data-f="${k}">${esc(n)}<b>${cuenta(k)}</b></button>`).join('')
+    + `<button class="filtro ${verIgnDiscos ? 'activo' : ''}" id="ver-ign-discos">No son un caso<b>${nIgnDiscos}</b></button>`;
   document.querySelectorAll('#f-discos [data-f]').forEach(b => b.onclick = () => { fDiscos = b.dataset.f; pintarDiscos(); });
+  document.getElementById('ver-ign-discos').onclick = () => { verIgnDiscos = !verIgnDiscos; cargarDiscos(); };
   const lista = casos.map((c, i) => [c, i]).filter(([c]) => fDiscos === 'todos' || c.tipo === fDiscos);
   const cont = document.getElementById('l-discos');
-  if (!lista.length) { cont.innerHTML = '<div class="sin-problemas">Nada por normalizar con este filtro.</div>'; return; }
+  if (!lista.length) { cont.innerHTML = `<div class="sin-problemas">${verIgnDiscos ? 'Nada marcado como «No es un caso».' : 'Nada por normalizar con este filtro.'}</div>`; return; }
   cont.innerHTML = `<div class="tabla-wrap"><table>
     <tr><th>Álbum</th><th>Qué pasa</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
     ${lista.map(([c, i]) => `<tr>
       <td><div class="t">${esc(c.titulo)}</div><div class="s">${esc(c.artista)} · <span class="tenue">${esc(TIPOS[c.tipo])}</span></div></td>
       <td><div class="s">${esc(c.detalle)}</div></td>
       <td class="oculto-movil">${c.miembros.map(m => `<div class="s mono muy-tenue">${esc(relR(m.ruta))}</div>`).join('')}</td>
-      <td><div style="display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end">${accionCaso(c, i)}</div></td></tr>`).join('')}
+      <td><div style="display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end">${verIgnDiscos ? '' : accionCaso(c, i)}
+        <button class="btn chico" data-nocaso="${i}" title="${verIgnDiscos ? 'Vuelve a la lista' : 'Son álbumes distintos (o está bien así): no vuelve a aparecer'}">${verIgnDiscos ? 'Volver a mostrar' : 'No es un caso'}</button></div></td></tr>`).join('')}
   </table></div>`;
+  cont.querySelectorAll('[data-nocaso]').forEach(b => b.onclick = async () => {
+    b.disabled = true; await post('/api/salud/discos/ignorar', {clave: casos[+b.dataset.nocaso].clave, si: !verIgnDiscos}); cargarDiscos();
+  });
   cont.querySelectorAll('[data-unir]').forEach(b => b.onclick = () => {
     const c = casos[+b.dataset.unir];
     abrirUnir({ruta: c.miembros[0].ruta, preseleccion: c.miembros.map(m => m.ruta)});

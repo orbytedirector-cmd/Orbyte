@@ -1537,7 +1537,19 @@ def api_salud_discos():
     except Exception as e:
         log.exception('Salud: discos por normalizar')
         return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
-    return jsonify(ok=True, casos=casos, raiz=aj.get('biblioteca') or '/mnt/musica')
+    ign = salud.ignorados_discos()
+    ver = request.args.get('ignorados') == '1'
+    return jsonify(ok=True, casos=[c for c in casos if (c['clave'] in ign) == ver], n_ignorados=len(ign),
+                   raiz=aj.get('biblioteca') or '/mnt/musica')
+
+
+@app.route('/api/salud/discos/ignorar', methods=['POST'])
+def api_salud_discos_ignorar():
+    d = request.get_json(silent=True) or {}
+    if not d.get('clave'):
+        return jsonify(ok=False), 400
+    salud.ignorar('disco:' + d['clave'], bool(d.get('si', True)))
+    return jsonify(ok=True)
 
 
 @app.route('/api/salud/estado')
