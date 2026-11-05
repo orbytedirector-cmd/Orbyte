@@ -3,8 +3,9 @@ Orbyte Ingesta — Salud de la biblioteca.
 
 1) Discos por normalizar (se calcula al momento, desde music.db y las carpetas):
    - subcarpetas: «Álbum/CD 1», «Álbum/CD 2»… que Orbyte muestra como álbumes separados → Reprocesar los N discos;
-   - separados: los discos de un mismo álbum en álbumes distintos (tags de disco distintos, «CD 2»/«Part 2» en el
-     nombre o un total de discos mayor al que tienen) → Unir como discos;
+   - separados: los discos de un mismo álbum en álbumes distintos, con evidencia de que son discos de uno (tags de
+     disco 2+, total de discos en los tags o «CD 2»/«Disc 2» en el nombre) y del mismo año → Unir como discos.
+     «Part 2», «Pt. 2» o «Vol. 2» no cuentan: suelen ser lanzamientos distintos;
    - numeración repetida: dos «01», dos «02»… sin tag de disco (discos mezclados en una carpeta) → Reprocesar;
    - discos faltantes: los tags dicen «disco 2 de 2» y no hay otro álbum con el resto.
 
@@ -375,6 +376,10 @@ class Salud:
             else:
                 c.execute('DELETE FROM ignorados WHERE album=?', (album,))
 
+    def ignorados_discos(self):
+        with self._con() as c:
+            return {r['album'][6:] for r in c.execute("SELECT album FROM ignorados WHERE album LIKE 'disco:%'")}
+
     def danadas(self, ver_ignorados=False):
         """Álbumes con pistas dañadas, con errores o que faltan (solo pistas que siguen en music.db)."""
         with self._con() as c:
@@ -437,7 +442,8 @@ def _int(v):
 
 # ─────────────────────────── discos por normalizar ───────────────────────────
 
-DISCO_EN_NOMBRE = re.compile(r'[\s\-_,:(\[]*\b(?:cd|dis[ck]o?|disk|part[e]?|pt\.?)\s*0*(\d{1,2})\b[\])]?', re.I)
+# solo «CD 2», «Disc 2», «Disco 2»: «Part 2» / «Pt. 2» / «Vol. 2» suelen ser álbumes distintos (otra fecha, otra edición)
+DISCO_EN_NOMBRE = re.compile(r'[\s\-_,:(\[]*\b(?:cd|dis[ck]o?|disk)\s*0*(\d{1,2})\b[\])]?', re.I)
 _CACHE = {'clave': None, 'datos': None}
 
 
@@ -446,6 +452,15 @@ def _base_nombre(nombre):
     n = _nombre_limpio(nombre or '')
     n = DISCO_EN_NOMBRE.sub(' ', n)
     return analisis._norm_album(n)
+
+
+def _disco_nombre(m):
+    """Número de disco escrito en el título o en la carpeta («Load (Disc 2)», «… CD2»), o None."""
+    for txt in (m.get('album') or '', os.path.basename(m.get('ruta') or '')):
+        x = DISCO_EN_NOMBRE.search(txt)
+        if x:
+            return int(x.group(1))
+    return None
 
 
 def discos_por_normalizar(db, biblioteca):
@@ -485,33 +500,49 @@ def discos_por_normalizar(db, biblioteca):
                 casos.append({'tipo': 'numeracion', 'artista': g['artista'], 'titulo': g['album'], 'miembros': [info],
                               'detalle': f'{rep} números de pista repetidos sin tag de disco: parecen varios discos '
                                          'mezclados en una carpeta'})
-    # discos de un mismo álbum en álbumes distintos
+    # discos de un mismo álbum en álbumes distintos: hace falta evidencia de que son discos de UNO (tags de disco 2+,
+    # un total de discos en los tags o «CD 2» en el nombre); el mismo título en dos ediciones es un repetido, no un disco
     grupos = {}
-    for s in simples:
-        grupos.setdefault((analisis._norm(s['artista']), _base_nombre(s['album'])), []).append(s)
+    for s_ in simples:
+        grupos.setdefault((analisis._norm(s_['artista']), _base_nombre(s_['album'])), []).append(s_)
+    en_caso = set()
     for (_a, base), ms in grupos.items():
-        if not base:
+        if not base or len(ms) < 2:
             continue
-        marca = any(DISCO_EN_NOMBRE.search(m['album'] or '') for m in ms)
-        tags = [tuple(m['discos']) for m in ms]
-        tags_distintos = len(ms) > 1 and all(tags) and len(set(tags)) == len(tags)
-        varios = any(m['total_discos'] > max(len(m['discos']), 1) for m in ms)
-        if len(ms) >= 2 and (tags_distintos or marca or varios):
-            ms = sorted(ms, key=lambda m: ((m['discos'] or [99])[0], m['n_pistas']))
-            casos.append({'tipo': 'separados', 'artista': ms[0]['artista'], 'titulo': ms[0]['album'], 'miembros': ms,
-                          'detalle': ' + '.join(f'«{m["album"]}» ({m["n_pistas"]} pistas'
-                                                + (f', disco {"/".join(map(str, m["discos"]))}' if m['discos'] else '')
-                                                + ')' for m in ms)})
-        elif len(ms) == 1 and varios and ms[0]['discos']:
-            m = ms[0]
-            faltan = [d for d in range(1, m['total_discos'] + 1) if d not in m['discos']]
-            if faltan:
-                casos.append({'tipo': 'faltantes', 'artista': m['artista'], 'titulo': m['album'], 'miembros': [m],
-                              'detalle': f'Los tags dicen {m["total_discos"]} discos; en la biblioteca '
-                                         f'{"están los discos" if len(m["discos"]) > 1 else "está el disco"} '
-                                         f'{", ".join(map(str, m["discos"]))} y '
-                                         f'{"faltan los discos" if len(faltan) > 1 else "falta el disco"} '
-                                         f'{", ".join(map(str, faltan))}'})
+        info = []
+        for m in ms:
+            n = _disco_nombre(m)
+            t = m['discos'][0] if len(m['discos']) == 1 else None
+            eff = n or t
+            fuerte = n is not None or (t or 0) >= 2 or (t == 1 and m['total_discos'] >= 2)
+            info.append((m, eff, fuerte))
+        if not any(e and e >= 2 and f for _m, e, f in info):
+            continue
+        elegidos = [(m, e) for m, e, f in info if e and (f or e == 1)]
+        if len({e for _m, e in elegidos}) < 2:
+            continue
+        anios = sorted(int(str(m['anio'])[:4]) for m, _e in elegidos if str(m.get('anio') or '')[:4].isdigit())
+        if anios and anios[-1] - anios[0] > 1:
+            continue                              # otra fecha: otro lanzamiento, no un disco del mismo
+        elegidos.sort(key=lambda x: (x[1], x[0]['n_pistas']))
+        ms = [m for m, _e in elegidos]
+        en_caso.update(m['ruta'] for m in ms)
+        casos.append({'tipo': 'separados', 'artista': ms[0]['artista'], 'titulo': ms[0]['album'], 'miembros': ms,
+                      'detalle': ' + '.join(f'«{m["album"]}» (disco {e} · {m["n_pistas"]} pistas)' for m, e in elegidos)})
+    # discos faltantes: los tags dicen más discos de los que hay y no hay otro álbum que los complete
+    for m in simples:
+        if m['ruta'] in en_caso or m['total_discos'] < 2 or not m['discos'] or m['total_discos'] > 20:
+            continue
+        faltan = [d for d in range(1, m['total_discos'] + 1) if d not in m['discos']]
+        if faltan:
+            casos.append({'tipo': 'faltantes', 'artista': m['artista'], 'titulo': m['album'], 'miembros': [m],
+                          'detalle': f'Los tags dicen {m["total_discos"]} discos; en la biblioteca '
+                                     f'{"están los discos" if len(m["discos"]) > 1 else "está el disco"} '
+                                     f'{", ".join(map(str, m["discos"]))} y '
+                                     f'{"faltan los discos" if len(faltan) > 1 else "falta el disco"} '
+                                     f'{", ".join(map(str, faltan))}'})
+    for c in casos:
+        c['clave'] = c['tipo'] + '|' + '|'.join(sorted(m['ruta'] for m in c['miembros']))
     casos.sort(key=lambda c: (analisis._norm(c['artista']), analisis._norm(c['titulo'])))
     _CACHE.update(clave=clave, datos=casos)
     return casos
