@@ -304,7 +304,8 @@ class Procesador(threading.Thread):
 
         try:
             resultado = metadata.correr(a['ubicado_en'] or a['ruta'], aj, reg,
-                                        richmeta_completo=bool((a.get('cambios') or {}).get('richmeta_completo')))
+                                        richmeta_completo=bool((a.get('cambios') or {}).get('richmeta_completo')),
+                                        letras=not (a.get('cambios') or {}).get('sin_letras'))
         except Exception as e:
             log.error('Metadata %s:\n%s', aid, traceback.format_exc())
             reg(f'ERROR: {type(e).__name__}: {e}')

@@ -95,6 +95,12 @@
       {% endif %}
       <span class="tenue" style="font-size:.8rem">Revisado {{ a.analizado|fecha }} · {{ r.segundos }} s{% if a.estado in PREVIOS %} · los archivos aún no se han tocado{% endif %}</span>
     </div>
+    {% if a.estado not in ('descartado',) %}
+    <label class="s" style="display:inline-flex;gap:.45rem;align-items:center;margin-top:.6rem;cursor:pointer"
+           title="En la metadata, RichMeta busca la letra de cada pista en LRCLib y en Tidal (~10 s por pista). Desmárcalo en música clásica o instrumental: las letras que ya traiga el archivo se conservan.">
+      <input type="checkbox" id="buscar-letras" {{ '' if (a.cambios or {}).sin_letras else 'checked' }}>
+      Buscar letras <span class="tenue">(LRCLib y Tidal, en la metadata)</span></label>
+    {% endif %}
     {% if a.estado == 'revisado' and a.origen == 'reproceso' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: la versión nueva se arma y verifica aparte; cuando su metadata termina bien reemplaza a la anterior (escuchas, favoritos y playlists pasan a la nueva) y recién ahí se borra la carpeta anterior con sus audios y su .cue.</p>
     {% elif a.estado == 'revisado' %}<p class="s tenue" style="font-size:.78rem;margin-top:.5rem">Al ubicar: se corrige, se copia y verifica en la biblioteca{% if aj_borrar %}, se borra de la entrada{% endif %}{% if aj_metadata %} y se corren los 5 scripts de metadata{% endif %}.</p>{% endif %}
   </div>
@@ -438,6 +444,19 @@
 {% endblock %}
 {% block js %}
 {% include '_reparar.html' %}
+<script>
+(function () {
+  const c = document.getElementById('buscar-letras');
+  if (!c) return;
+  c.onchange = async () => {
+    c.disabled = true;
+    const r = await post('/api/album/{{ a.id }}/letras', {buscar: c.checked});
+    c.disabled = false;
+    if (!r || r.ok === false) { c.checked = !c.checked; toast('No se pudo guardar', (r && r.error) || ''); return; }
+    toast(c.checked ? 'Se buscarán letras' : 'No se buscarán letras', 'Vale para la metadata de este álbum');
+  };
+})();
+</script>
 <script>
 (function () {
   const b = document.getElementById('reparar-pistas');

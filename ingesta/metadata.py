@@ -153,7 +153,7 @@ def album_id(db, ruta):
         con.close()
 
 
-def correr(ruta, aj, reg, richmeta_completo=False):
+def correr(ruta, aj, reg, richmeta_completo=False, letras=True):
     db = aj.get('db_orbyte')
     raiz = aj.get('biblioteca') or '/mnt/musica'
     if not db or not os.path.isfile(db):
@@ -176,8 +176,8 @@ def correr(ruta, aj, reg, richmeta_completo=False):
     # tras cambiar los tags (títulos, artista) RichMeta rehace todas las pistas: letras y ánimo dependen de ellos
     # «resume» = pistas sin procesar + las que aún no tienen letra sincronizada: en un álbum nuevo es lo mismo que
     # «pending», y al correr la metadata de nuevo vuelve a buscar las letras que faltaron (con «pending» se saltaban)
-    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'resume'], reg, aj,
-            limite('richmeta', n_pistas))
+    _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'resume']
+            + ([] if letras else ['--sin-letras']), reg, aj, limite('richmeta', n_pistas))
     _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, limite('import', n_pistas))
     _correr('relations', ['RichMetaRelations3.py', '--album', str(aid), '--all', '--db', db], reg, aj,
             LIMITE_S['relations'])

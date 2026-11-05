@@ -422,6 +422,24 @@ def api_cambios(aid):
     return jsonify(ok=True)
 
 
+@app.route('/api/album/<int:aid>/letras', methods=['POST'])
+def api_letras(aid):
+    """«Buscar letras» de la ficha: si no, RichMeta no consulta LRCLib ni Tidal en la metadata de este álbum
+    (no vuelve a revisar el álbum: solo cambia cómo se correrá la metadata)."""
+    a = almacen.album(aid)
+    if not a:
+        return jsonify(ok=False, error='No existe'), 404
+    cam = dict(a.get('cambios') or {})
+    if (request.get_json(silent=True) or {}).get('buscar', True):
+        cam.pop('sin_letras', None)
+    else:
+        cam['sin_letras'] = True
+    almacen.actualizar(aid, cambios=cam)
+    almacen.registrar(aid, 'Letras: ' + ('se buscarán en la metadata' if 'sin_letras' not in cam
+                                         else 'no se buscarán en la metadata (LRCLib ni Tidal)'))
+    return jsonify(ok=True)
+
+
 @app.route('/api/album/<int:aid>/autocorregir', methods=['POST'])
 def api_autocorregir(aid):
     """Propuesta de tags ordenados (no guarda nada: la pantalla la muestra y tú decides)."""
