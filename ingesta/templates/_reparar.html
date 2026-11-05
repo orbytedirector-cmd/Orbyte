@@ -1,5 +1,15 @@
 {# «Reparar pistas dañadas»: abrirReparar({rutas, aid?}) desde Salud o desde la ficha de la Bandeja.
    Necesita post/esc/toast de base.html. #}
+<style>
+  /* Un solo desplazamiento (el del cuerpo): las secciones no se encogen ni se vuelven cajitas con scroll propio. */
+  #r-modal .modal { max-height: 92vh; }
+  #r-cuerpo > * { flex-shrink: 0; }
+  #r-cuerpo .tabla-wrap { overflow-y: visible; }
+  #r-q { font-family: inherit; letter-spacing: normal; font-size: .95rem; }
+  .r-ed { display: flex; gap: .6rem; align-items: center; padding: .35rem .5rem; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
+  .r-ed.sel { border-color: var(--borde-oro); background: var(--oro-tenue); }
+  .r-ed img, .r-ed .r-sin { width: 40px; height: 40px; border-radius: 4px; flex: none; }
+</style>
 <div class="modal-fondo" id="r-modal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="r-tit" style="width:min(980px,100%)">
     <div class="modal-cab"><b id="r-tit">Reparar pistas dañadas</b>
@@ -42,11 +52,28 @@
   }
   function enlazarBuscador() {
     const q = document.getElementById('r-q');
-    const ir = () => { const v = q.value.trim(); if (!v) return; st.busqueda = v; st.edicion = null; st.elegir = {}; cargar(); };
+    const ir = () => { const v = q.value.trim(); if (!v) return; st.busqueda = v; st.edicion = null; st.elegir = {}; st.verEds = true; cargar(); };
     document.getElementById('r-buscar').onclick = ir;
     q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ir(); } };
     const a = document.getElementById('r-auto');
-    if (a) a.onclick = () => { st.busqueda = null; st.edicion = null; st.elegir = {}; cargar(); };
+    if (a) a.onclick = () => { st.busqueda = null; st.edicion = null; st.elegir = {}; st.verEds = false; cargar(); };
+  }
+  const edHtml = (e, sel, radio) => `<label class="r-ed${sel ? ' sel' : ''}">
+      ${radio ? `<input type="radio" name="r-ed" value="${esc(e.id)}" ${sel ? 'checked' : ''}>` : ''}
+      ${e.portada ? `<img src="${esc(e.portada)}" alt="" loading="lazy">` : '<span class="r-sin"></span>'}
+      <span style="min-width:0;flex:1"><span class="t">${esc(e.titulo)}${e.anio ? ' (' + esc(e.anio) + ')' : ''}</span>
+        <span class="s tenue" style="display:block">${esc(e.artista || '')} · ${e.n_pistas || '?'} pistas${e.hires ? ' · Hi-Res' : ''} · ${esc(e.como || '')}</span></span></label>`;
+  // La edición elegida en una línea; la lista completa solo al pedirla (o recién buscada a mano).
+  function edicionesHtml(p, eds) {
+    const titulo = `<div class="s tenue" style="margin-bottom:.3rem">Edición en Tidal${p.manual ? ' (búsqueda manual)' : ''}</div>`;
+    if (!st.verEds) {
+      const sel = eds.find(e => e.id === p.edicion.id) || eds[0];
+      return `<div>${titulo}<div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+        <div style="flex:1;min-width:240px">${edHtml(sel, true, false)}</div>
+        ${eds.length > 1 ? `<button class="btn chico" type="button" id="r-ver-eds">Cambiar edición (${eds.length})</button>` : ''}</div></div>`;
+    }
+    return `<div>${titulo}<div role="radiogroup" aria-label="Edición en Tidal" style="display:flex;flex-direction:column;gap:.35rem">
+      ${eds.map(e => edHtml(e, e.id === p.edicion.id, true)).join('')}</div></div>`;
   }
   const difTxt = d => d == null ? '' : (Math.abs(d) < 0.5 ? '' : ` <span class="${Math.abs(d) > 2 ? 'med' : 'tenue'}">(${d > 0 ? '+' : '−'}${Math.round(Math.abs(d))} s)</span>`);
   function pintar() {
@@ -59,14 +86,7 @@
         ${(p.fuentes || []).length ? `<div class="s muy-tenue">Datos de: ${esc(p.fuentes.join(' + '))}</div>` : ''}</div></div>
       ${buscador(p.consulta || '')}
       ${p.aviso ? `<div class="flash" style="margin-bottom:.7rem">${esc(p.aviso)}</div>` : ''}
-      ${eds.length ? `<div class="s tenue" style="margin-bottom:.3rem">Edición en Tidal${p.manual ? ' (búsqueda manual)' : ''}</div>
-        <div role="radiogroup" aria-label="Edición en Tidal" style="max-height:230px;overflow-y:auto;display:flex;flex-direction:column;gap:.35rem;margin-bottom:.8rem">
-        ${eds.map(e => `<label style="display:flex;gap:.6rem;align-items:center;padding:.35rem .5rem;border-radius:8px;cursor:pointer;border:1px solid ${e.id === p.edicion.id ? 'var(--borde-oro)' : 'transparent'};background:${e.id === p.edicion.id ? 'var(--oro-tenue)' : 'transparent'}">
-          <input type="radio" name="r-ed" value="${esc(e.id)}" ${e.id === p.edicion.id ? 'checked' : ''}>
-          ${e.portada ? `<img src="${esc(e.portada)}" alt="" width="40" height="40" style="border-radius:4px;flex:none" loading="lazy">` : '<span style="width:40px;height:40px;flex:none"></span>'}
-          <span style="min-width:0"><span class="t">${esc(e.titulo)}${e.anio ? ' (' + esc(e.anio) + ')' : ''}</span>
-            <span class="s tenue" style="display:block">${esc(e.artista || '')} · ${e.n_pistas || '?'} pistas${e.hires ? ' · Hi-Res' : ''} · ${esc(e.como || '')}</span></span></label>`).join('')}
-        </div>` : ''}
+      ${eds.length ? edicionesHtml(p, eds) : ''}
       <div class="tabla-wrap"><table>
         <tr><th style="width:1%"></th><th>Pista dañada</th><th>En Tidal</th><th>Qué pasa</th></tr>
         ${p.pistas.map((x, i) => {
@@ -98,7 +118,9 @@
         }).join('')}
       </table></div>`;
     enlazarBuscador();
-    cuerpo.querySelectorAll('input[name=r-ed]').forEach(r => r.onchange = () => { st.edicion = r.value; st.elegir = {}; cargar(); });
+    cuerpo.querySelectorAll('input[name=r-ed]').forEach(r => r.onchange = () => { st.edicion = r.value; st.elegir = {}; st.verEds = false; cargar(); });
+    const ver = document.getElementById('r-ver-eds');
+    if (ver) ver.onclick = () => { st.verEds = true; pintar(); };
     cuerpo.querySelectorAll('[data-elegir]').forEach(c => c.onchange = () => {
       const x = st.plan.pistas[+c.dataset.elegir];
       if (!c.value) return;
@@ -149,7 +171,7 @@
     if (window.alEncolarReparacion) window.alEncolarReparacion();
   };
   window.abrirReparar = function (o) {
-    st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}};
+    st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}, verEds: false};
     m.hidden = false;
     cargar();
   };

@@ -179,19 +179,28 @@ def _de_ruta(carpeta):
     return artista.strip(), album.strip()
 
 
+_DESCONOCIDO_RE = re.compile(r'^\s*(?:unknown(?: artist| album)?|artista desconocido|desconocido|various artists?|va|n/?a|-)?\s*$', re.I)
+
+
+def _valido(v):
+    """Descarta los valores de relleno («Unknown Artist», «Various Artists», vacío)."""
+    return v if v and not _DESCONOCIDO_RE.match(str(v)) else ''
+
+
 def _datos_busqueda(rutas, carpeta, db):
     """Artista, álbum y código de barras para buscar en Tidal, y de dónde salió cada uno.
     Orden: tags de la pista → biblioteca de Orbyte → pistas sanas del álbum → nombre de las carpetas."""
     t = _tags(rutas[0])
-    artista, album = t.get('albumartist') or t.get('artist') or '', t.get('album') or ''
+    artista = _valido(t.get('albumartist')) or _valido(t.get('artist'))
+    album = _valido(t.get('album'))
     upc = t.get('barcode') or t.get('upc')
     fuentes = []
     if artista or album:
         fuentes.append('tags de la pista')
     if not artista or not album:
         bd = _bd_pista(db, rutas[0])
-        nuevo_art = '' if artista else (bd.get('artista_album') or bd.get('artista') or '')
-        nuevo_alb = '' if album else (bd.get('album') or '')
+        nuevo_art = '' if artista else (_valido(bd.get('artista_album')) or _valido(bd.get('artista')))
+        nuevo_alb = '' if album else _valido(bd.get('album'))
         if nuevo_art or nuevo_alb:
             artista, album = artista or nuevo_art, album or nuevo_alb
             fuentes.append('biblioteca de Orbyte')
@@ -199,16 +208,17 @@ def _datos_busqueda(rutas, carpeta, db):
     if vecina and (not artista or not album or not upc):
         tv = _tags(vecina)
         usada = False
-        if not artista and (tv.get('albumartist') or tv.get('artist')):
-            artista, usada = tv.get('albumartist') or tv.get('artist'), True
-        if not album and tv.get('album'):
-            album, usada = tv['album'], True
+        if not artista and (_valido(tv.get('albumartist')) or _valido(tv.get('artist'))):
+            artista, usada = _valido(tv.get('albumartist')) or _valido(tv.get('artist')), True
+        if not album and _valido(tv.get('album')):
+            album, usada = _valido(tv['album']), True
         if not upc and (tv.get('barcode') or tv.get('upc')):
             upc, usada = tv.get('barcode') or tv.get('upc'), True
         if usada:
             fuentes.append('pistas sanas del álbum')
     if not artista or not album:
         ra, rb = _de_ruta(carpeta)
+        ra, rb = _valido(ra), _valido(rb)
         if (not artista and ra) or (not album and rb):
             artista, album = artista or ra, album or rb
             fuentes.append('nombre de las carpetas')
@@ -399,7 +409,7 @@ def _tags_de_respaldo(nueva, vecina, bd):
         pics = list(n.pictures)
         fuentes.append('álbum de Tidal')
     bd = bd or {}
-    pista = {'title': bd.get('titulo'), 'artist': bd.get('artista'),
+    pista = {'title': bd.get('titulo'), 'artist': _valido(bd.get('artista')) or None,
              'tracknumber': str(bd['numero']) if bd.get('numero') else None,
              'discnumber': str(bd['disco']) if bd.get('disco') else None, 'isrc': bd.get('isrc')}
     if any(pista.values()):
