@@ -54,7 +54,8 @@
 
   function tarjetaEdicion(e) {
     const calidades = e.versiones.map(v =>
-      `<a class="vx-qbtn${v.id === datos.frente_id ? ' vx-qsel' : ''}" href="/album/${v.id}">${chipDentro(v.calidad)}</a>`).join('');
+      `<span class="vx-qgrp${v.id === datos.frente_id ? ' vx-qsel' : ''}"><a class="vx-qbtn" href="/album/${v.id}" title="Abrir">${chipDentro(v.calidad)}</a>` +
+      `<button type="button" class="vx-qplay" data-play="${v.id}" aria-label="Reproducir ${esc(e.etiqueta)} ${esc(v.calidad ? v.calidad.texto : '')}">▶</button></span>`).join('');
     const marca = e.es_original
       ? '<span class="vx-star">★ Edición original · portada de la carta</span>'
       : (datos.puede_marcar ? `<button type="button" class="vx-link" data-marcar="${e.album_id}" title="Solo administrador: si la detección eligió mal la edición original">Marcar como original</button>` : '');
@@ -87,7 +88,7 @@
       ? `<p class="vx-hint">Todas las versiones, de mayor a menor calidad.</p>
          <div class="vx-list">${datos.versiones.map(filaCalidad).join('')}</div>
          <p class="vx-foot">La carta de la discografía muestra la portada y el nombre de la edición original; ▶ la reproduce en su mejor calidad. Escuchas, favoritos y playlists siguen siendo de cada versión.</p>`
-      : `<p class="vx-hint">Cada edición con las calidades que tienes de ella. Toca una calidad para abrirla.</p>
+      : `<p class="vx-hint">Cada edición con las calidades que tienes de ella. Toca una calidad para abrirla; ▶ la reproduce.</p>
          <div class="vx-eds">${datos.ediciones.map(tarjetaEdicion).join('')}</div>${pistas()}`;
     m.innerHTML = `
       <div class="vx-head">${portada}
