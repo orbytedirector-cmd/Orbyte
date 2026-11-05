@@ -315,8 +315,15 @@
 {% if lib or lib_error %}{% set lib_api = '/api/album/%d' % a.id %}{% include '_editor_biblioteca.html' %}{% endif %}
 
 {# ── pistas ── #}
+{% set danadas_rep = [] %}
+{% for disco in r.discos or [] %}{% for p in disco.pistas if p.legible and not p.decodifica and not p.error_por_id3 and not p.imagen_cue and not (p.error_completo and p.dsf_irregular) %}{% set _ = danadas_rep.append(a.ruta ~ '/' ~ p.archivo) %}{% endfor %}{% endfor %}
 <section class="seccion">
   <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivo{{ 's' if r.n_archivos_audio != 1 }} de audio</span></h2>
+  {% if danadas_rep and a.estado in ('revisado', 'requiere_revision', 'error', 'error_ubicar') and not r.fallo %}
+  <div class="acciones" style="margin:0 0 .7rem"><button class="btn oro" id="reparar-pistas" data-rutas='{{ danadas_rep|tojson }}'
+      title="Baja de Tidal solo las pistas con errores y las reemplaza con su misma metadata; después se vuelve a revisar">Reparar {{ danadas_rep|length }} pista{{ 's' if danadas_rep|length != 1 }} dañada{{ 's' if danadas_rep|length != 1 }}</button>
+    <span class="s tenue" id="reparar-estado"></span></div>
+  {% endif %}
   <div class="tabla-wrap">
   {% for disco in r.discos %}
     {% if r.n_discos > 1 %}<div class="disco-tit">DISCO {{ disco.numero }}</div>{% endif %}
@@ -430,6 +437,26 @@
 {% endif %}
 {% endblock %}
 {% block js %}
+{% include '_reparar.html' %}
+<script>
+(function () {
+  const b = document.getElementById('reparar-pistas');
+  if (!b) return;
+  b.onclick = () => abrirReparar({rutas: JSON.parse(b.dataset.rutas), aid: {{ a.id }}});
+  const EST = {en_cola: 'Reparación en cola', reparando: 'Reparando pistas en Tidal…', hecho: 'Pistas reparadas: se vuelve a revisar',
+               parcial: 'Reparadas en parte (ver el registro en Salud)', error: 'No se pudo reparar (ver el registro en Salud)'};
+  async function estado() {
+    try {
+      const r = await (await fetch('/api/reparar?aid={{ a.id }}')).json();
+      const t = r.trabajos[0];
+      document.getElementById('reparar-estado').innerHTML = t ? `${esc(EST[t.estado] || t.estado)} · <a href="/salud">ver en Salud</a>` : '';
+      if (t && ['en_cola', 'reparando'].includes(t.estado)) { b.disabled = true; setTimeout(estado, 5000); } else b.disabled = false;
+    } catch (e) {}
+  }
+  window.alEncolarReparacion = estado;
+  estado();
+})();
+</script>
 <script>
 (function () {
   const b = document.getElementById('descartar-borrar');

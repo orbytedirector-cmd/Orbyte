@@ -57,6 +57,9 @@
     </div>
   </div>
 
+  <div id="b-rep" hidden><h2 class="rotulo" style="margin:1.4rem 0 .6rem">Reparaciones</h2>
+  <div id="l-rep"></div></div>
+
   <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Resultados</h2>
   <div class="filtros" id="f-danadas"></div>
   <div id="l-danadas"></div>
@@ -64,6 +67,7 @@
 {% endblock %}
 {% block js %}
 {% include '_unir_discos.html' %}
+{% include '_reparar.html' %}
 <script>
 const TIPOS = {subcarpetas: 'Discos en subcarpetas', separados: 'Discos en álbumes separados', numeracion: 'Numeración repetida',
                faltantes: 'Discos faltantes'};
@@ -217,7 +221,8 @@ function pintarDanadas() {
     <div class="s-fila"><div style="min-width:0"><div class="t">${esc(a.artista)} — ${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
       <div class="s">${a.danada ? `<span class="mal">${a.danada} dañada${a.danada > 1 ? 's' : ''}</span> · ` : ''}${a.falta ? `<span class="mal">${a.falta} sin archivo</span> · ` : ''}${a.errores ? `<span class="med">${a.errores} con errores</span>` : ''}</div>
       <div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(a.carpeta))}</div></div>
-      <div class="acciones" style="margin:0"><a class="btn chico oro" href="${buscarUrl(a.artista, a.album)}">Buscar para re-descargar</a>
+      <div class="acciones" style="margin:0">${a.pistas.some(p => p.estado !== 'falta') ? `<button class="btn chico oro" data-rep="${i}" title="Baja de Tidal solo las pistas dañadas y las reemplaza con su misma metadata">Reparar pistas dañadas</button>` : ''}
+        <a class="btn chico" href="${buscarUrl(a.artista, a.album)}">Re-descargar el álbum</a>
         <a class="btn chico" href="/biblioteca/album/${a.album_id}">Abrir ficha</a>
         <button class="btn chico" data-ign="${i}">${verIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div>
     <details><summary class="s">Ver pistas (${a.pistas.length})</summary>
@@ -226,14 +231,41 @@ function pintarDanadas() {
         <td><span class="${ESTADOS[p.estado][1]}">⚠ ${ESTADOS[p.estado][0]}</span>${p.estado === 'danada' && p.segundos != null && p.duracion ? ` <span class="s tenue">(se lee hasta ${mmss(p.segundos)} de ${mmss(p.duracion)})</span>` : ''}
           ${p.errores.map(e => `<div class="s mono muy-tenue">${esc(e)}</div>`).join('')}</td></tr>`).join('')}</table></div></details>
   </div>`).join('');
+  cont.querySelectorAll('[data-rep]').forEach(b => b.onclick = () =>
+    abrirReparar({rutas: lista[+b.dataset.rep].pistas.filter(p => p.estado !== 'falta').map(p => p.ruta)}));
   cont.querySelectorAll('[data-ign]').forEach(b => b.onclick = async () => {
     b.disabled = true; await post('/api/salud/ignorar', {carpeta: lista[+b.dataset.ign].carpeta, si: !verIgn}); cargarDanadas();
   });
 }
 
+// ── reparaciones ──
+const EST_REP = {en_cola: ['En cola', ''], reparando: ['Reparando…', 'med'], hecho: ['Reparado', 'ok'], parcial: ['Reparado en parte', 'med'], error: ['No se pudo', 'mal']};
+let repAbiertos = new Set(), prevRep = {};
+async function cargarReparaciones() {
+  let r; try { r = await (await fetch('/api/reparar')).json(); } catch (e) { return; }
+  const cont = document.getElementById('l-rep');
+  document.getElementById('b-rep').hidden = !r.trabajos.length;
+  cont.querySelectorAll('details[open]').forEach(d => repAbiertos.add(d.dataset.id));
+  cont.innerHTML = r.trabajos.map(t => `<div class="panel s-album">
+    <div class="s-fila"><div style="min-width:0"><div class="t">${esc(t.titulo)}</div>
+      <div class="s"><span class="${EST_REP[t.estado][1]}">${EST_REP[t.estado][0]}</span> · ${t.pistas.length} pista${t.pistas.length > 1 ? 's' : ''} · ${new Date(t.creado * 1000).toLocaleString('es-CL')}</div></div>
+      ${t.estado !== 'reparando' ? `<button class="btn chico" data-quitar-rep="${t.id}">${t.estado === 'en_cola' ? 'Cancelar' : 'Quitar de la lista'}</button>` : ''}</div>
+    ${t.registro ? `<details data-id="${t.id}" ${repAbiertos.has(String(t.id)) || t.estado === 'reparando' ? 'open' : ''}><summary class="s">Registro</summary><pre class="s mono" style="white-space:pre-wrap;margin:.4rem 0 0">${esc(t.registro)}</pre></details>` : ''}
+  </div>`).join('');
+  cont.querySelectorAll('[data-quitar-rep]').forEach(b => b.onclick = async () => {
+    b.disabled = true; await post(`/api/reparar/${b.dataset.quitarRep}/quitar`, {}); cargarReparaciones();
+  });
+  const recien = r.trabajos.some(t => ['hecho', 'parcial'].includes(t.estado) && prevRep[t.id] && prevRep[t.id] !== t.estado);
+  prevRep = Object.fromEntries(r.trabajos.map(t => [t.id, t.estado]));
+  if (recien) cargarDanadas();          // una reparación terminó: el álbum sale (o baja) de la lista
+}
+window.alEncolarReparacion = cargarReparaciones;
+
 cargarDiscos();
 cargarEstado();
 cargarDanadas();
+cargarReparaciones();
+setInterval(cargarReparaciones, 6000);
 setInterval(cargarEstado, 4000);
 setInterval(() => { if (est && est.activa && !document.querySelector('#l-danadas details[open]')) cargarDanadas(); }, 30000);
 </script>

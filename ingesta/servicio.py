@@ -47,6 +47,7 @@ from . import tienda as tienda_mod
 from . import nacionalidades as nacionalidades_mod
 from . import popularidad as popularidad_mod
 from . import salud as salud_mod
+from . import reparar as reparar_mod
 import threading
 import traceback
 
@@ -99,6 +100,8 @@ def _ingesta_ocupada():
 
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
+reparador = reparar_mod.Reparador(salud, almacen.ajustes, lambda: bool(descargador.actual),
+                                  al_terminar=lambda aid: _revisar_tras_reparar(aid), avisar_fn=almacen.avisar)
 
 
 # ─────────────────────────── seguridad ───────────────────────────
@@ -1638,6 +1641,67 @@ def api_salud_ignorar():
     return jsonify(ok=True)
 
 
+# ─────────────────────────── reparar solo las pistas dañadas ───────────────────────────
+
+_PLANES = {}          # token → (momento, plan): lo que se mostró es lo que se repara
+
+
+def _revisar_tras_reparar(aid):
+    a = almacen.album(aid)
+    if a and _editable(a):
+        _requeue(aid)
+
+
+def _ruta_reparable(r):
+    """Archivo dentro de la biblioteca o de la entrada (los enlaces de una unión se resuelven a la biblioteca)."""
+    aj = almacen.ajustes()
+    real = os.path.realpath(r or '')
+    raices = [os.path.realpath(x) for x in (aj.get('biblioteca') or '/mnt/musica', aj.get('carpeta_entrada') or '') if x]
+    return real if os.path.isfile(real) and any(real.startswith(x + os.sep) for x in raices) else None
+
+
+@app.route('/api/reparar/plan', methods=['POST'])
+def api_reparar_plan():
+    d = request.get_json(silent=True) or {}
+    rutas = [_ruta_reparable(r) for r in d.get('rutas') or []]
+    if not rutas or not all(rutas):
+        return jsonify(ok=False, error='Alguna pista no está en la biblioteca ni en la entrada'), 400
+    try:
+        p = reparar_mod.plan(rutas, almacen.ajustes().get('db_orbyte'), d.get('edicion_id'))
+    except reparar_mod.Fallo as e:
+        return jsonify(ok=False, error=str(e)), 409
+    except Exception as e:
+        log.exception('Reparar: plan')
+        return jsonify(ok=False, error=f'{type(e).__name__}: {e}'), 500
+    ahora = time.time()
+    for k in [k for k, (t, _p) in _PLANES.items() if ahora - t > 3600]:
+        _PLANES.pop(k, None)
+    token = secrets.token_hex(8)
+    _PLANES[token] = (ahora, p)
+    return jsonify(ok=True, token=token, **p)
+
+
+@app.route('/api/reparar', methods=['GET', 'POST'])
+def api_reparar():
+    if request.method == 'GET':
+        return jsonify(ok=True, trabajos=reparador.lista(request.args.get('aid', type=int)), actual=reparador.actual)
+    d = request.get_json(silent=True) or {}
+    t = _PLANES.pop(d.get('token') or '', None)
+    if not t:
+        return jsonify(ok=False, error='La propuesta venció: ábrela de nuevo'), 409
+    try:
+        jid = reparador.encolar(t[1], {r: v or {} for r, v in (d.get('elegidas') or {}).items()}, d.get('aid'))
+    except reparar_mod.Fallo as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True, id=jid)
+
+
+@app.route('/api/reparar/<int:jid>/quitar', methods=['POST'])
+def api_reparar_quitar(jid):
+    reparador.quitar(jid)
+    return jsonify(ok=True)
+
+
 # ─────────────────────────── carátula de un álbum ya en la biblioteca ───────────────────────────
 # <k>: «b» = álbum de Orbyte (ficha de Biblioteca, id de music.db) · «a» = fila de Ingesta ya ubicada (ficha de Bandeja)
 
@@ -2479,5 +2543,6 @@ def main():
     procesador.start()
     descargador.start()
     salud.start()
+    reparador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)
