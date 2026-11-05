@@ -1,4 +1,5 @@
 """Orbyte Ingesta — almacén propio (ingesta.db): ajustes, álbumes de la bandeja y avisos."""
+import contextlib
 import json
 import os
 import sqlite3
@@ -86,10 +87,18 @@ class Almacen:
             if 'pendientes' not in columnas:            # pistas con pérdida que esperan tu decisión (JSON)
                 c.execute('ALTER TABLE descargas ADD COLUMN pendientes TEXT')
 
+    @contextlib.contextmanager
     def _con(self):
+        """Conexión que se CIERRA al salir del with (y confirma o deshace). Antes el with de sqlite3 solo confirmaba:
+        la conexión quedaba abierta hasta que pasara el recolector, y con muchas consultas seguidas (la página de
+        Salud, la revisión de fondo) se juntaban cientos de archivos abiertos → «Too many open files»."""
         c = sqlite3.connect(self.ruta, timeout=30)
         c.row_factory = sqlite3.Row
-        return c
+        try:
+            with c:
+                yield c
+        finally:
+            c.close()
 
     # ── ajustes ──
     def ajustes(self):

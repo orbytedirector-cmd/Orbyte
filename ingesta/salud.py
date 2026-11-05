@@ -21,6 +21,7 @@ Orbyte Ingesta — Salud de la biblioteca.
    - se revisa por partes: texto (artista/álbum), letra, calidad, agregados desde una fecha, y «solo pendientes»,
      «todo de nuevo» o «solo las que dieron error».
 """
+import contextlib
 import json
 import logging
 import os
@@ -102,10 +103,15 @@ class Salud:
                 CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);''')
 
     # ── base propia ──
+    @contextlib.contextmanager
     def _con(self):
         c = sqlite3.connect(self.ruta, timeout=60)
         c.row_factory = sqlite3.Row
-        return c
+        try:
+            with c:              # confirma o deshace
+                yield c
+        finally:
+            c.close()            # y cierra: si no, quedan abiertas hasta el recolector (Too many open files)
 
     def estado(self):
         with self._con() as c:
