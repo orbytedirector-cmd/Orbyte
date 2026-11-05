@@ -1,6 +1,11 @@
 """
 Orbyte Ingesta — reparar solo las pistas dañadas de un álbum (sin re-descargarlo entero ni reprocesarlo).
 
+Si la pista está dañada desde el inicio y sus tags no se leen, artista y álbum salen de la biblioteca de Orbyte, de
+las pistas sanas del álbum o del nombre de las carpetas; si ni así aparece, la ventana ofrece buscar a mano (texto
+o enlace de Tidal) y elegir la pista. La metadata nueva se arma con la del álbum (pista sana) y la de la pista
+(Orbyte y, si falta algo, Tidal).
+
 Por pista dañada (FLAC):
   1. la misma edición en Tidal (código de barras si el álbum lo trae, si no artista + título, y la discografía del
      artista si la búsqueda no la trae) y la misma pista: disco + número, título y duración (±2 s);
@@ -30,6 +35,15 @@ from . import analisis, rescate, tienda
 log = logging.getLogger('ingesta.reparar')
 
 PAUSA_S = 5
+# Pista elegida a mano que dura distinto de la vieja: hasta este margen se puede confirmar («Usar igual»);
+# más allá no es la misma pista y se bloquea.
+MAX_DIF_CONFIRMABLE_S = 10.0
+_TIDAL_URL_RE = re.compile(r'tidal\.com/(?:browse/)?(album|track)/(\d+)', re.I)
+# Tags de la pista (no del álbum): no se copian de una pista vecina.
+_TAGS_DE_PISTA = ('title', 'tracknumber', 'isrc', 'lyrics', 'unsyncedlyrics', 'syncedlyrics', 'length', 'comment',
+                  'musicbrainz_trackid', 'musicbrainz_releasetrackid', 'musicbrainz_recordingid', 'acoustid_id',
+                  'acoustid_fingerprint', 'replaygain_track_gain', 'replaygain_track_peak', 'bpm', 'initialkey',
+                  'composer', 'lyricist', 'artist', 'artists', 'artistsort', 'discnumber', 'part', 'version')
 SUFIJO_RE = re.compile(r'\s*\((?:CD|HR)-\d+/[\d.]+\)\s*$')
 
 
@@ -113,6 +127,124 @@ def _tags(ruta):
         return {}
 
 
+def _bd_pista(db, ruta):
+    """Lo que la biblioteca de Orbyte guardó de la pista cuando se indexó (sirve si sus tags ya no se leen)."""
+    if not db or not os.path.isfile(db):
+        return {}
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        r = con.execute('SELECT t.title, t.artist, t.album_artist, t.track_number, t.disc_number, t.duration, t.isrc, '
+                        'a.name AS album FROM tracks t LEFT JOIN albums a ON a.id = t.album_id WHERE t.file_path=?',
+                        (ruta,)).fetchone()
+    except sqlite3.Error:
+        r = None
+    finally:
+        con.close()
+    if not r:
+        return {}
+    return {'titulo': SUFIJO_RE.sub('', r['title'] or '') or None, 'artista': r['artist'] or None,
+            'artista_album': r['album_artist'] or None, 'album': r['album'] or None,
+            'numero': rescate._num(r['track_number']), 'disco': rescate._num(r['disc_number']) or 1,
+            'duracion': r['duration'], 'isrc': r['isrc'] or None}
+
+
+def _vecina(carpeta, excluir):
+    """Una pista FLAC sana del mismo álbum con sus tags legibles (para los datos del álbum y la carátula)."""
+    from mutagen.flac import FLAC
+    for a in sorted(tienda._audios(carpeta)):
+        if os.path.realpath(a) in excluir or not a.lower().endswith('.flac'):
+            continue
+        try:
+            f = FLAC(a)
+        except Exception:  # noqa: BLE001
+            continue
+        if f.tags is not None and (f.tags.get('album') or [''])[0]:
+            return a
+    return None
+
+
+_ANIO_CALIDAD_RE = re.compile(r'\s*(?:\((?:19|20)\d{2}\)|\[[^\]]*\]|\((?:CD|HR|Hi-?Res|24[^)]*|16[^)]*)\))\s*$', re.I)
+
+
+def _de_ruta(carpeta):
+    """(artista, álbum) desde «…/B.B. King/Lucille (1968) [CD]»."""
+    album = re.sub(r'^\s*(?:19|20)\d{2}\s*[-–]\s*', '', os.path.basename(carpeta.rstrip('/')))
+    for _ in range(4):
+        nuevo = _ANIO_CALIDAD_RE.sub('', album)
+        if nuevo == album:
+            break
+        album = nuevo
+    artista = os.path.basename(os.path.dirname(carpeta.rstrip('/')))
+    return artista.strip(), album.strip()
+
+
+def _datos_busqueda(rutas, carpeta, db):
+    """Artista, álbum y código de barras para buscar en Tidal, y de dónde salió cada uno.
+    Orden: tags de la pista → biblioteca de Orbyte → pistas sanas del álbum → nombre de las carpetas."""
+    t = _tags(rutas[0])
+    artista, album = t.get('albumartist') or t.get('artist') or '', t.get('album') or ''
+    upc = t.get('barcode') or t.get('upc')
+    fuentes = []
+    if artista or album:
+        fuentes.append('tags de la pista')
+    if not artista or not album:
+        bd = _bd_pista(db, rutas[0])
+        nuevo_art = '' if artista else (bd.get('artista_album') or bd.get('artista') or '')
+        nuevo_alb = '' if album else (bd.get('album') or '')
+        if nuevo_art or nuevo_alb:
+            artista, album = artista or nuevo_art, album or nuevo_alb
+            fuentes.append('biblioteca de Orbyte')
+    vecina = _vecina(carpeta, set(rutas))
+    if vecina and (not artista or not album or not upc):
+        tv = _tags(vecina)
+        usada = False
+        if not artista and (tv.get('albumartist') or tv.get('artist')):
+            artista, usada = tv.get('albumartist') or tv.get('artist'), True
+        if not album and tv.get('album'):
+            album, usada = tv['album'], True
+        if not upc and (tv.get('barcode') or tv.get('upc')):
+            upc, usada = tv.get('barcode') or tv.get('upc'), True
+        if usada:
+            fuentes.append('pistas sanas del álbum')
+    if not artista or not album:
+        ra, rb = _de_ruta(carpeta)
+        if (not artista and ra) or (not album and rb):
+            artista, album = artista or ra, album or rb
+            fuentes.append('nombre de las carpetas')
+    return artista, album, upc, fuentes, vecina
+
+
+def _ficha(ruta, db):
+    """Ficha de la pista dañada (título, disco, número, duración); lo que sus tags no traen sale de Orbyte."""
+    f = rescate.ficha(ruta)
+    bd = _bd_pista(db, ruta)
+    if bd:
+        if (f.get('titulo_de_nombre') or not f.get('titulo')) and bd.get('titulo'):
+            f['titulo'] = bd['titulo']
+            f.pop('titulo_de_nombre', None)
+        if bd.get('numero') and (not f.get('numero') or not f.get('codec')):
+            f['numero'], f['disco'] = bd['numero'], bd.get('disco') or 1
+        f['duracion'] = bd.get('duracion') or f.get('duracion')
+    return f, bd
+
+
+def _ediciones_de(busqueda):
+    """Búsqueda manual: texto libre o enlace de Tidal (álbum o pista). → (ediciones, id de pista del enlace)."""
+    c = tienda.cliente('tidal')
+    m = _TIDAL_URL_RE.search(busqueda or '')
+    if m:
+        tipo, i = m.group(1).lower(), m.group(2)
+        pista = None
+        if tipo == 'track':
+            t = c._get(f'tracks/{i}')
+            pista, i = str(t['id']), str((t.get('album') or {}).get('id') or '')
+            if not i:
+                raise Fallo('Ese enlace de pista no trae su álbum')
+        return [dict(c._album(c._get(f'albums/{i}')), como='enlace de Tidal')], pista
+    return [dict(v, como='búsqueda manual') for v in c.buscar_albumes(busqueda, limite=25)], None
+
+
 def _ediciones(artista, album, n_pistas, upc=None):
     c = tienda.cliente('tidal')
     cands = c.buscar_albumes(f'{artista} {album}', limite=25)
@@ -134,71 +266,105 @@ def _ediciones(artista, album, n_pistas, upc=None):
     return salida
 
 
-def plan(rutas, db=None, edicion_id=None):
-    """Qué se haría con cada pista dañada. `rutas`: archivos dañados (se resuelven los enlaces de una unión)."""
+def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
+    """Qué se haría con cada pista dañada. `rutas`: archivos dañados (se resuelven los enlaces de una unión).
+    `busqueda`: búsqueda manual en Tidal (texto o enlace); `elegir`: {ruta: id de pista de Tidal} elegidas a mano."""
     rutas = [os.path.realpath(r) for r in rutas if r]
     if not rutas:
         raise Fallo('No hay pistas para reparar')
     faltan = [r for r in rutas if not os.path.isfile(r)]
     if faltan:
         raise Fallo(f'No está el archivo {os.path.basename(faltan[0])}')
+    elegir = {os.path.realpath(k): str(v) for k, v in (elegir or {}).items() if v}
+    busqueda = (busqueda or '').strip() or None
     carpeta = analisis.carpeta_album(os.path.dirname(rutas[0]))
     n_pistas = len(tienda._audios(carpeta))
-    t = _tags(rutas[0])
-    artista, album = t.get('albumartist') or t.get('artist') or '', t.get('album') or ''
-    if not artista or not album:
-        raise Fallo('La pista no trae artista o álbum en sus tags: no se puede buscar en Tidal')
+    artista, album, upc, fuentes, vecina = _datos_busqueda(rutas, carpeta, db)
     album_q = calidad_album(carpeta, db, excluir=set(rutas))
+    base = {'carpeta': carpeta, 'artista': artista or '?', 'album': album or '?', 'n_pistas': n_pistas,
+            'fuentes': fuentes, 'consulta': busqueda or f'{artista} {album}'.strip(), 'manual': bool(busqueda),
+            'vecina': vecina,
+            'calidad_album': etiqueta(*album_q) if album_q[1] else None, 'bits_album': album_q[0], 'sr_album': album_q[1]}
+    pista_enlace = None
     try:
         tienda.preparar_tidal()                         # sesión PKCE renovada (la búsqueda también la usa)
-        eds = _ediciones(artista, album, n_pistas, t.get('barcode') or t.get('upc'))
+        if busqueda:
+            eds, pista_enlace = _ediciones_de(busqueda)
+        elif artista and album:
+            eds = _ediciones(artista, album, n_pistas, upc)
+        else:
+            eds = []
+    except Fallo:
+        raise
     except Exception as e:  # noqa: BLE001
         raise Fallo(f'No se pudo buscar en Tidal: {type(e).__name__}: {e}')
     if not eds:
-        raise Fallo(f'Tidal no tiene «{artista} — {album}»')
+        # Sin edición: la ventana ofrece la búsqueda manual en vez de un error.
+        if busqueda:
+            aviso = f'Tidal no encontró nada con «{busqueda}»'
+        elif artista and album:
+            aviso = f'Tidal no tiene «{artista} — {album}»: búscalo a mano'
+        else:
+            aviso = 'No se sabe el artista ni el álbum de la pista: búscalo a mano'
+        return dict(base, edicion=None, ediciones=[], pistas_tidal=[], aviso=aviso,
+                    pistas=[_item(r, carpeta, db, None, None, album_q) for r in rutas])
     ed = next((e for e in eds if e['id'] == str(edicion_id)), None) if edicion_id else eds[0]
     if not ed:
         raise Fallo('Esa edición ya no aparece en Tidal')
     pistas_t = tienda.cliente('tidal').pistas(ed['id'])
-    durs = {}
-    if db and os.path.isfile(db):
-        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
-        try:
-            durs = {fp: d for fp, d in con.execute(
-                f'SELECT file_path, duration FROM tracks WHERE file_path IN ({",".join("?" * len(rutas))})', rutas)}
-        finally:
-            con.close()
-    items = []
-    for r in rutas:
-        f = rescate.ficha(r)
-        f['duracion'] = durs.get(r) or f.get('duracion')
-        b, s = calidad_archivo(r)
-        it = {'ruta': r, 'archivo': os.path.relpath(r, carpeta), 'titulo': f.get('titulo'), 'disco': f.get('disco'),
-              'numero': f.get('numero'), 'duracion': f.get('duracion'), 'bits': b, 'sr': s,
-              'calidad': etiqueta(b, s), 'reparable': True, 'motivo': None, 'pareja': None}
-        if os.path.splitext(r)[1].lower() != '.flac':
-            it.update(reparable=False, motivo=f'es {os.path.splitext(r)[1].lstrip(".").upper()}: Tidal entrega FLAC; '
-                                              're-descarga el álbum completo')
-        else:
-            p = rescate.emparejar(f, pistas_t)
-            if not p:
-                it.update(reparable=False, motivo='no hay una pista segura en esa edición (disco, número, título y duración)')
-            else:
-                try:
-                    tb, ts, aq = calidad_tidal(p['id'])
-                except Exception as e:  # noqa: BLE001
-                    tb, ts, aq = None, None, f'{type(e).__name__}'
-                if aq and aq not in ('HI_RES_LOSSLESS', 'LOSSLESS'):
-                    it.update(reparable=False, motivo=f'Tidal la entrega con pérdida ({aq})')
-                it['pareja'] = {'id': p['id'], 'titulo': p.get('titulo'), 'disco': p.get('disco'), 'numero': p.get('numero'),
-                                'duracion': p.get('duracion'), 'bits': tb, 'sr': ts, 'calidad': etiqueta(tb, ts)}
-                it['igual'] = (tb, ts) == tuple(album_q) if album_q[1] else (tb, ts) == (b, s)
-        items.append(it)
-    return {'carpeta': carpeta, 'artista': artista, 'album': album, 'n_pistas': n_pistas,
-            'calidad_album': etiqueta(*album_q) if album_q[1] else None, 'bits_album': album_q[0], 'sr_album': album_q[1],
-            'edicion': {k: ed.get(k) for k in ('id', 'titulo', 'artista', 'anio', 'n_pistas', 'hires', 'como', 'url')},
-            'ediciones': [{k: e.get(k) for k in ('id', 'titulo', 'artista', 'anio', 'n_pistas', 'hires', 'como')} for e in eds[:15]],
-            'pistas': items}
+    if pista_enlace and len(rutas) == 1 and rutas[0] not in elegir and str(ed['id']) == str(eds[0]['id']):
+        elegir[rutas[0]] = pista_enlace
+    items = [_item(r, carpeta, db, pistas_t, elegir.get(r), album_q) for r in rutas]
+    campos = ('id', 'titulo', 'artista', 'anio', 'n_pistas', 'hires', 'como', 'portada')
+    return dict(base, aviso=None,
+                edicion={k: ed.get(k) for k in campos + ('url',)},
+                ediciones=[{k: e.get(k) for k in campos} for e in eds[:15]],
+                pistas_tidal=[{k: p.get(k) for k in ('id', 'titulo', 'disco', 'numero', 'duracion')} for p in pistas_t],
+                pistas=items)
+
+
+def _item(r, carpeta, db, pistas_t, elegida, album_q):
+    f, bd = _ficha(r, db)
+    b, s = calidad_archivo(r)
+    it = {'ruta': r, 'archivo': os.path.relpath(r, carpeta), 'titulo': f.get('titulo'), 'disco': f.get('disco'),
+          'numero': f.get('numero'), 'duracion': f.get('duracion'), 'bits': b, 'sr': s,
+          'calidad': etiqueta(b, s), 'reparable': True, 'motivo': None, 'pareja': None, 'manual': False,
+          'dif_duracion': None, 'confirmar_duracion': False, 'bd': bd or None}
+    if os.path.splitext(r)[1].lower() != '.flac':
+        it.update(reparable=False, motivo=f'es {os.path.splitext(r)[1].lstrip(".").upper()}: Tidal entrega FLAC; '
+                                          're-descarga el álbum completo')
+        return it
+    if pistas_t is None:
+        it.update(reparable=False, motivo='falta elegir la edición en Tidal')
+        return it
+    if elegida:
+        p = next((x for x in pistas_t if str(x['id']) == str(elegida)), None)
+        it['manual'] = True
+    else:
+        p = rescate.emparejar(f, pistas_t)
+    if not p:
+        it.update(reparable=False, motivo='esa pista no está en la edición elegida' if elegida
+                  else 'no hay una pista segura en esa edición: elígela')
+        return it
+    ref, dur = f.get('duracion'), p.get('duracion')
+    if ref and dur:
+        dif = float(dur) - float(ref)
+        it['dif_duracion'] = round(dif, 1)
+        if abs(dif) > MAX_DIF_CONFIRMABLE_S:
+            it.update(reparable=False, motivo=f'dura {abs(dif):.0f} s {"más" if dif > 0 else "menos"} que la vieja: '
+                                              'no es la misma pista')
+        elif abs(dif) > rescate.TOLERANCIA_S:
+            it['confirmar_duracion'] = True
+    try:
+        tb, ts, aq = calidad_tidal(p['id'])
+    except Exception as e:  # noqa: BLE001
+        tb, ts, aq = None, None, f'{type(e).__name__}'
+    if aq and aq not in ('HI_RES_LOSSLESS', 'LOSSLESS'):
+        it.update(reparable=False, motivo=f'Tidal la entrega con pérdida ({aq})')
+    it['pareja'] = {'id': p['id'], 'titulo': p.get('titulo'), 'disco': p.get('disco'), 'numero': p.get('numero'),
+                    'duracion': p.get('duracion'), 'bits': tb, 'sr': ts, 'calidad': etiqueta(tb, ts)}
+    it['igual'] = (tb, ts) == tuple(album_q) if album_q[1] else (tb, ts) == (b, s)
+    return it
 
 
 # ─────────────────────────── reparar una pista ───────────────────────────
@@ -212,27 +378,78 @@ def _replaygain(ruta):
     return (float(g.group(1)) if g else None), (float(p.group(1)) if p else None)
 
 
-def copiar_tags(vieja, nueva, sufijo=None):
-    """Todos los tags y la carátula de la vieja a la nueva; ReplayGain de pista recalculado; sufijo de calidad."""
+def _tags_de_respaldo(nueva, vecina, bd):
+    """Tags para la pista nueva cuando los de la vieja no se pueden leer: los del álbum (y la carátula) de una
+    pista sana del mismo álbum; los de la pista, de la biblioteca de Orbyte y, si falta algo, de Tidal."""
     from mutagen.flac import FLAC
+    n = FLAC(nueva)
+    de_tidal = n.tags.as_dict() if n.tags is not None else {}
+    tags, pics, fuentes = {}, [], []
+    if vecina:
+        try:
+            v = FLAC(vecina)
+            tags = {k: vals for k, vals in (v.tags.as_dict() if v.tags is not None else {}).items()
+                    if k.lower() not in _TAGS_DE_PISTA}
+            pics = list(v.pictures)
+            fuentes.append('álbum y carátula de una pista sana')
+        except Exception:  # noqa: BLE001
+            tags, pics = {}, []
+    if not tags:
+        tags = {k: vals for k, vals in de_tidal.items() if k.lower() not in _TAGS_DE_PISTA}
+        pics = list(n.pictures)
+        fuentes.append('álbum de Tidal')
+    bd = bd or {}
+    pista = {'title': bd.get('titulo'), 'artist': bd.get('artista'),
+             'tracknumber': str(bd['numero']) if bd.get('numero') else None,
+             'discnumber': str(bd['disco']) if bd.get('disco') else None, 'isrc': bd.get('isrc')}
+    if any(pista.values()):
+        fuentes.append('pista de la biblioteca de Orbyte')
+    usados_tidal = False
+    for k, v in pista.items():
+        if v:
+            tags[k] = [v]
+        elif de_tidal.get(k):
+            tags[k] = de_tidal[k]
+            usados_tidal = True
+    for k in ('lyrics', 'unsyncedlyrics'):
+        if de_tidal.get(k):
+            tags[k] = de_tidal[k]
+    if usados_tidal:
+        fuentes.append('pista de Tidal')
+    return tags, pics, fuentes
+
+
+def copiar_tags(vieja, nueva, sufijo=None, respaldo=None):
+    """Todos los tags y la carátula de la vieja a la nueva; ReplayGain de pista recalculado; sufijo de calidad.
+    Si la vieja no se deja leer (dañada desde el inicio), `respaldo` = {'vecina', 'bd'} arma los tags.
+    Devuelve (título final, de dónde salió la metadata —None si fue de la vieja—)."""
+    from mutagen.flac import FLAC
+    tags, pics, fuentes, error = None, [], None, None
     try:
         v = FLAC(vieja)
+        tags = v.tags.as_dict() if v.tags is not None else {}
+        pics = list(v.pictures)
+        if not tags.get('title'):
+            error = 'la pista vieja no trae título en sus tags'
     except Exception as e:  # noqa: BLE001
-        raise Fallo(f'no se pudieron leer los tags de la pista vieja ({type(e).__name__}): no se reemplaza')
+        error = f'no se pudieron leer los tags de la pista vieja ({type(e).__name__})'
+    if error:
+        if not respaldo:
+            raise Fallo(error + ': no se reemplaza')
+        tags, pics, fuentes = _tags_de_respaldo(nueva, respaldo.get('vecina'), respaldo.get('bd'))
+        if not tags.get('title'):
+            raise Fallo(error + ' y no hay otra fuente para el título: no se reemplaza')
     n = FLAC(nueva)
     n.clear_pictures()
     if n.tags is not None:
         n.tags.clear()
     else:
         n.add_tags()
-    tags = v.tags.as_dict() if v.tags is not None else {}
-    if not tags.get('title'):
-        raise Fallo('la pista vieja no trae título en sus tags: no se reemplaza')
     for k, vals in tags.items():
         n[k] = vals
-    for pic in v.pictures:
+    for pic in pics:
         n.add_picture(pic)
-    if any(k.lower().startswith('replaygain_track') for k in tags):
+    if fuentes is not None or any(k.lower().startswith('replaygain_track') for k in tags):
         g, p = _replaygain(nueva)
         if g is not None:
             n['replaygain_track_gain'] = [f'{g:+.2f} dB']
@@ -241,7 +458,7 @@ def copiar_tags(vieja, nueva, sufijo=None):
     titulos = [SUFIJO_RE.sub('', t) for t in tags.get('title', [])]
     n['title'] = [f'{t} ({sufijo})' for t in titulos] if sufijo else titulos
     n.save()
-    return n['title'][0]
+    return n['title'][0], (' + '.join(fuentes) if fuentes else None)
 
 
 def reparar_pista(it, job, aj, reg, salud=None):
@@ -261,14 +478,18 @@ def reparar_pista(it, job, aj, reg, salud=None):
         if not ok:
             raise Fallo('la pista nueva también trae errores: ' + '; '.join(errores[:2]))
         ref = it.get('duracion') or (it.get('pareja') or {}).get('duracion')
-        if ref and seg is not None and abs(seg - float(ref)) > rescate.TOLERANCIA_S:
+        margen = MAX_DIF_CONFIRMABLE_S if it.get('acepto_duracion') else rescate.TOLERANCIA_S
+        if ref and seg is not None and abs(seg - float(ref)) > margen:
             raise Fallo(f'dura {seg:.0f} s y la vieja {float(ref):.0f} s: no es la misma pista')
         b, s = calidad_archivo(nuevo)
         album_q = (job.get('bits_album'), job.get('sr_album'))
         distinta = bool(album_q[1]) and (b, s) != album_q
         if distinta and not it.get('acepto_calidad'):
             raise Fallo(f'llegó en {etiqueta(b, s)} y el álbum es {etiqueta(*album_q)}: no aceptaste otra calidad')
-        titulo = copiar_tags(ruta, nuevo, etiqueta(b, s) if distinta else None)
+        titulo, fuente_meta = copiar_tags(ruta, nuevo, etiqueta(b, s) if distinta else None,
+                                          {'vecina': job.get('vecina'), 'bd': it.get('bd')})
+        if fuente_meta:
+            reg(f'   · la vieja no se pudo leer: metadata de {fuente_meta}')
         # al lado de la vieja (mismo disco) y recién ahí reemplaza: la vieja se borra solo si todo lo anterior anduvo
         provisorio = ruta + '.reparando'
         shutil.copyfile(nuevo, provisorio)
@@ -276,7 +497,8 @@ def reparar_pista(it, job, aj, reg, salud=None):
             os.remove(provisorio)
             raise Fallo('la copia a la biblioteca quedó incompleta')
         os.replace(provisorio, ruta)
-        reg(f'   ✓ {it["archivo"]}: reemplazada por la de Tidal ({etiqueta(b, s)}){" · título: " + titulo if distinta else ""}')
+        reg(f'   ✓ {it["archivo"]}: reemplazada por la de Tidal ({etiqueta(b, s)})'
+            f'{" · título: " + titulo if distinta or fuente_meta else ""}')
         _orbyte(ruta, aj, b, s, reg)
         if salud:
             st = os.stat(ruta)
@@ -328,15 +550,19 @@ class Reparador:
             c.execute("UPDATE reparaciones SET estado='en_cola' WHERE estado='reparando'")
 
     def encolar(self, p, elegidas, aid=None):
-        """`p`: el plan; `elegidas`: {ruta: {'acepto_calidad': bool}} de las pistas que se reparan."""
+        """`p`: el plan; `elegidas`: {ruta: {'acepto_calidad', 'acepto_duracion'}} de las pistas que se reparan."""
         pistas = []
         for it in p['pistas']:
             if it['ruta'] in elegidas and it.get('reparable') and it.get('pareja'):
-                pistas.append(dict(it, acepto_calidad=bool(elegidas[it['ruta']].get('acepto_calidad'))))
+                e = elegidas[it['ruta']]
+                if it.get('confirmar_duracion') and not e.get('acepto_duracion'):
+                    continue                            # dura distinto y no se confirmó «Usar igual»
+                pistas.append(dict(it, acepto_calidad=bool(e.get('acepto_calidad')),
+                                   acepto_duracion=bool(it.get('confirmar_duracion') and e.get('acepto_duracion'))))
         if not pistas:
             raise Fallo('No hay pistas para reparar')
         trabajo = {'pistas': pistas, 'bits_album': p.get('bits_album'), 'sr_album': p.get('sr_album'),
-                   'edicion': p.get('edicion')}
+                   'edicion': p.get('edicion'), 'vecina': p.get('vecina')}
         with self.salud._con() as c:
             cur = c.execute('INSERT INTO reparaciones(creado, estado, titulo, carpeta, aid, trabajo, registro) '
                             "VALUES(?, 'en_cola', ?, ?, ?, ?, '')",
