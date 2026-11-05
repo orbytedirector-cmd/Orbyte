@@ -85,6 +85,7 @@
         <div class="s tenue">${p.n_pistas} pistas en la carpeta · calidad del álbum: ${p.calidad_album ? chipQ(p.calidad_album) : '?'}</div>
         ${(p.fuentes || []).length ? `<div class="s muy-tenue">Datos de: ${esc(p.fuentes.join(' + '))}</div>` : ''}</div></div>
       ${buscador(p.consulta || '')}
+      ${st.resto ? `<div class="flash" style="margin-bottom:.7rem">Las otras ya quedaron en cola. Estas quedan por resolver: elige otra edición o búscala a mano.</div>` : ''}
       ${p.aviso ? `<div class="flash" style="margin-bottom:.7rem">${esc(p.aviso)}</div>` : ''}
       ${eds.length ? edicionesHtml(p, eds) : ''}
       <div class="tabla-wrap"><table>
@@ -166,9 +167,18 @@
     ok.disabled = true;
     const r = await post('/api/reparar', {token: st.plan.token, elegidas: elegidas(), aid: st.aid || null});
     if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); ok.disabled = false; return; }
-    m.hidden = true;
-    toast('Reparación en cola', 'Avanza de fondo; el resultado queda en el registro y en los avisos');
+    const encoladas = new Set(Object.keys(elegidas()));
+    const resto = st.plan.pistas.filter(x => !encoladas.has(x.ruta) && /\.flac$/i.test(x.ruta)).map(x => x.ruta);
     if (window.alEncolarReparacion) window.alEncolarReparacion();
+    if (!resto.length) {
+      m.hidden = true;
+      toast('Reparación en cola', 'Avanza de fondo; el resultado queda en el registro y en los avisos');
+      return;
+    }
+    // Quedan pistas sin resolver (p. ej. están en otra edición): la ventana sigue con ellas.
+    toast(`${encoladas.size} en cola`, `Quedan ${resto.length} por resolver: prueba otra edición o búscala a mano`);
+    st = {rutas: resto, aid: st.aid, edicion: null, busqueda: null, elegir: {}, verEds: true, resto: true};
+    cargar();
   };
   window.abrirReparar = function (o) {
     st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}, verEds: false};

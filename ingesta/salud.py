@@ -375,6 +375,15 @@ class Salud:
             return {r['estado']: r['n'] for r in c.execute('SELECT estado, COUNT(*) AS n FROM pistas GROUP BY estado')}
 
     # ── resultados ──
+    def problemas_en(self, carpeta):
+        """Rutas de la carpeta (y sus «CD N») que siguen dañadas o con errores y cuyo archivo existe."""
+        base = os.path.realpath(carpeta).rstrip('/') + '/'
+        with self._con() as c:
+            filas = [r[0] for r in c.execute(
+                "SELECT ruta FROM pistas WHERE ruta >= ? AND ruta < ? AND estado IN ('danada', 'errores') ORDER BY ruta",
+                (base, base[:-1] + '0'))]
+        return [r for r in filas if os.path.isfile(r)]
+
     def ignorar(self, album, si=True):
         with self._lock, self._con() as c:
             if si:

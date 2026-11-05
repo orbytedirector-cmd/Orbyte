@@ -249,9 +249,15 @@ async function cargarReparaciones() {
   cont.innerHTML = r.trabajos.map(t => `<div class="panel s-album">
     <div class="s-fila"><div style="min-width:0"><div class="t">${esc(t.titulo)}</div>
       <div class="s"><span class="${EST_REP[t.estado][1]}">${EST_REP[t.estado][0]}</span> · ${t.pistas.length} pista${t.pistas.length > 1 ? 's' : ''} · ${new Date(t.creado * 1000).toLocaleString('es-CL')}</div></div>
-      ${t.estado !== 'reparando' ? `<button class="btn chico" data-quitar-rep="${t.id}">${t.estado === 'en_cola' ? 'Cancelar' : 'Quitar de la lista'}</button>` : ''}</div>
+      <div class="acciones" style="margin:0">${(t.pendientes || []).length ? `<button class="btn chico oro" data-pend="${t.id}" title="Sin volver a revisar el álbum">Reparar ${t.pendientes.length === 1 ? 'la pendiente' : `las ${t.pendientes.length} pendientes`}</button>` : ''}
+      ${t.estado !== 'reparando' ? `<button class="btn chico" data-quitar-rep="${t.id}">${t.estado === 'en_cola' ? 'Cancelar' : 'Quitar de la lista'}</button>` : ''}</div></div>
+    ${(t.pendientes || []).length ? `<div class="s med" style="margin-top:.3rem">Quedan ${t.pendientes.length} pista${t.pendientes.length > 1 ? 's' : ''} dañada${t.pendientes.length > 1 ? 's' : ''} en este álbum</div>` : ''}
     ${t.registro ? `<details data-id="${t.id}" ${repAbiertos.has(String(t.id)) || t.estado === 'reparando' ? 'open' : ''}><summary class="s">Registro</summary><pre class="s mono" style="white-space:pre-wrap;margin:.4rem 0 0">${esc(t.registro)}</pre></details>` : ''}
   </div>`).join('');
+  cont.querySelectorAll('[data-pend]').forEach(b => b.onclick = () => {
+    const t = r.trabajos.find(x => String(x.id) === b.dataset.pend);
+    if (t) abrirReparar({rutas: t.pendientes, aid: t.aid || null});
+  });
   cont.querySelectorAll('[data-quitar-rep]').forEach(b => b.onclick = async () => {
     b.disabled = true; await post(`/api/reparar/${b.dataset.quitarRep}/quitar`, {}); cargarReparaciones();
   });

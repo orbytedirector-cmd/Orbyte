@@ -586,12 +586,22 @@ class Reparador:
             q = 'SELECT id, creado, terminado, estado, titulo, carpeta, aid, trabajo, registro FROM reparaciones'
             filas = c.execute(q + (' WHERE aid=?' if aid else '') + ' ORDER BY id DESC LIMIT ?',
                               ((aid, limite) if aid else (limite,))).fetchall()
-        out = []
+            activos = [json.loads(x['trabajo'] or '{}') for x in c.execute(
+                "SELECT trabajo FROM reparaciones WHERE estado IN ('en_cola', 'reparando')")]
+        en_curso = {x['ruta'] for t in activos for x in t.get('pistas', [])}
+        out, vistas = [], set()
         for r in filas:
             t = json.loads(r['trabajo'] or '{}')
+            # Pistas del álbum que siguen dañadas (y no están ya en cola): «Reparar las pendientes» sin volver a
+            # revisar el álbum. Solo en el trabajo más reciente de cada carpeta.
+            pend = []
+            if r['estado'] not in ('en_cola', 'reparando') and r['carpeta'] and r['carpeta'] not in vistas:
+                pend = [p for p in self.salud.problemas_en(r['carpeta']) if p not in en_curso]
+            vistas.add(r['carpeta'])
             out.append({'id': r['id'], 'creado': r['creado'], 'terminado': r['terminado'], 'estado': r['estado'],
                         'titulo': r['titulo'], 'carpeta': r['carpeta'], 'aid': r['aid'],
-                        'pistas': [x['archivo'] for x in t.get('pistas', [])], 'registro': r['registro'] or ''})
+                        'pistas': [x['archivo'] for x in t.get('pistas', [])], 'pendientes': pend,
+                        'registro': r['registro'] or ''})
         return out
 
     def quitar(self, jid):
