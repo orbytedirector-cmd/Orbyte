@@ -1054,8 +1054,11 @@ def biblioteca_album(oid):
     x = _titulos()['por_ruta'].get(o['ruta'].rstrip('/'))
     portada = _portada_vista(o['ruta'], o.get('cover_path'))
     fmt = portada_mod.formatos(o['ruta'], lib['plan']) if lib else {}
+    base = _base_multidisco(o['ruta'])
+    n_discos = len([h for h in os.listdir(base) if os.path.isdir(os.path.join(base, h))
+                    and analisis.dividir_por_disco(h) is not None]) if base != o['ruta'].rstrip('/') else 0
     return render_template('biblioteca_album.html', pagina='biblioteca', o=o, a=a, lib=lib, lib_error=lib_error,
-                           portada=portada, fmt=fmt,
+                           portada=portada, fmt=fmt, n_discos=n_discos,
                            reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
                            ignorado=oid in almacen.titulos_ignorados())
 
@@ -1301,6 +1304,21 @@ def _ficha_de_ruta(ruta):
     return '/'
 
 
+def _base_multidisco(ruta):
+    """Si la carpeta es un disco («CD 01», «Disc 2»…) de un álbum de varios discos, la carpeta del álbum."""
+    ruta = ruta.rstrip('/')
+    padre = os.path.dirname(ruta)
+    if analisis.dividir_por_disco(os.path.basename(ruta)) is None or not os.path.isdir(padre):
+        return ruta
+    try:
+        hijos = os.listdir(padre)
+    except OSError:
+        return ruta
+    sueltos = [h for h in hijos if os.path.isfile(os.path.join(padre, h)) and os.path.splitext(h)[1].lower() in analisis.AUDIO_EXT]
+    discos = [h for h in hijos if os.path.isdir(os.path.join(padre, h)) and analisis.dividir_por_disco(h) is not None]
+    return padre if not sueltos and len(discos) >= 2 else ruta
+
+
 @app.route('/api/reprocesar/<k>/<int:i>', methods=['POST'])
 def api_reprocesar(k, i):
     """La carpeta del álbum en la biblioteca pasa por la revisión completa como si fuera nueva, sin moverla. Al
@@ -1309,6 +1327,7 @@ def api_reprocesar(k, i):
     ruta, _cp, fila, _o = _lib_portada(k, i)
     if not ruta:
         return jsonify(ok=False, error='El álbum no está en la biblioteca'), 404
+    ruta = _base_multidisco(ruta)                    # «…/Álbum/CD 01» → «…/Álbum»: se reprocesan todos los discos
     aj = almacen.ajustes()
     bib = os.path.realpath(aj.get('biblioteca') or '/mnt/musica')
     if not os.path.realpath(ruta).startswith(bib + os.sep):
