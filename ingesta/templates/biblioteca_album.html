@@ -24,7 +24,7 @@
       {% if reglas %}<div class="nota med">⚠ {% for r, n in reglas.items() %}{{ REGLAS[r] }} ({{ n }} pistas){{ ' · ' if not loop.last }}{% endfor %}</div>{% endif %}</div>
     <div class="acciones">
       <button class="btn" id="ignorar">{{ 'Dejar de ignorar' if ignorado else 'Ignorar en la revisión' }}</button>
-      {% if lib and not (a and a.estado in VIVOS) %}<button class="btn" id="reprocesar" data-api="/api/reprocesar/b/{{ o.id }}" title="Vuelve a revisar la carpeta como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar</button>{% endif %}
+      {% if lib and not (a and a.estado in VIVOS) %}<button class="btn" id="reprocesar" data-api="/api/reprocesar/b/{{ o.id }}" title="Vuelve a revisar la carpeta como un álbum nuevo: cortes por cue, tags, edición y carátula">↻ Reprocesar{% if n_discos %} los {{ n_discos }} discos{% endif %}</button>{% endif %}
     </div>
   </div>
 </div>
@@ -44,7 +44,7 @@
 <script>
 const rp = document.getElementById('reprocesar');
 if (rp) rp.onclick = async () => {
-  if (!confirm('¿Reprocesar este álbum desde la biblioteca?\n\nLa carpeta se revisa como un álbum nuevo (cortes por cue, tags, edición, carátula) sin moverla. Al ubicarla, la versión nueva se arma y verifica aparte y, cuando su metadata termina bien, reemplaza a la actual: escuchas, favoritos y playlists pasan a la nueva y se borra la carpeta anterior. Puedes cancelar en cualquier momento antes de ubicar.')) return;
+  if (!confirm({% if n_discos %}'Este es uno de los {{ n_discos }} discos del álbum (cada uno en su subcarpeta, por eso Orbyte los muestra separados). Se reprocesan los {{ n_discos }} juntos y quedan en una sola carpeta y un solo álbum.\n\n' + {% endif %}'¿Reprocesar este álbum desde la biblioteca?\n\nLa carpeta se revisa como un álbum nuevo (cortes por cue, tags, edición, carátula) sin moverla. Al ubicarla, la versión nueva se arma y verifica aparte y, cuando su metadata termina bien, reemplaza a la actual: escuchas, favoritos y playlists pasan a la nueva y se borra la carpeta anterior. Puedes cancelar en cualquier momento antes de ubicar.')) return;
   rp.disabled = true;
   const r = await post(rp.dataset.api);
   if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); rp.disabled = false; return; }
