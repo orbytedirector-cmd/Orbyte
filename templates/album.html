@@ -10,6 +10,9 @@
          onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
 
     <button class="album-play-all-btn" onclick="playAllAlbum()">▶ {% if multi_disc %}Reproducir todo{% else %}Reproducir álbum{% endif %}</button>
+    {% if n_versiones and n_versiones > 1 %}
+    <button type="button" class="vx-more vx-more-lg" onclick="abrirVersiones({{ album.id }})">⧉ Otras versiones ({{ n_versiones - 1 }})</button>
+    {% endif %}
 
     <div class="album-info">
       <div class="album-info-title">{{ album.name }}</div>

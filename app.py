@@ -43,6 +43,7 @@ import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección),
 import estadisticas     # estadísticas de uso para el administrador (solo lectura)
 import estadisticas_ia  # «Resumen IA» de esas estadísticas
 import login_seguro as _ls  # límite de intentos, recuperar contraseña, versión de sesión
+import versiones as _versiones  # versiones de un álbum (una carta en la discografía)
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -602,6 +603,20 @@ app.jinja_env.globals['lang_flag']        = lang_flag
 app.jinja_env.globals['lang_label']       = lang_label
 app.jinja_env.globals['diamond_svg']      = diamond_svg
 app.jinja_env.globals['album_quality_html'] = album_quality_html
+
+
+def album_versiones_html(album):
+    """Botón «⧉ +N versiones» de las tarjetas (búsqueda, filtros, inicio…)."""
+    n = (album or {}).get('n_versiones') or 1
+    if n < 2 or not album.get('id'):
+        return ''
+    otras = n - 1
+    return (f'<button type="button" class="vx-more" title="Ver todas las versiones" '
+            f'onclick="event.stopPropagation();event.preventDefault();abrirVersiones({int(album["id"])})">'
+            f'⧉ +{otras} {"versión" if otras == 1 else "versiones"}</button>')
+
+
+app.jinja_env.globals['album_versiones_html'] = album_versiones_html
 
 # Make MOOD_LABELS available in all templates
 @app.context_processor
@@ -3577,6 +3592,7 @@ def api_v1_artist_detail(artist_id):
             d['album_led'] = led_row['led_color'] if led_row else 'yellow'
             albums.append(d)
         anotar_calidad_albumes(conn, albums)
+        agrupar_versiones_artista(conn, albums, con_url=True)
 
         ar_data = dict(ar)
         ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
@@ -3774,7 +3790,40 @@ def api_v1_album_detail(album_id):
             'album_meta': album_meta, 'tracks': track_list,
             'is_favorite': is_favorite,
             'calidad': calidad['calidad'], 'n_discos': calidad['n_discos'],
+            'n_versiones': _versiones.anotar(conn, [{'id': album_id}])[0]['n_versiones'],
         })
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/album/<int:album_id>/versiones')
+@api_login_required
+def api_v1_album_versiones(album_id):
+    """Las versiones de un álbum (modal «Calidad» / «Ediciones»), web y apps."""
+    conn = get_db_connection()
+    try:
+        d = _versiones.detalle(conn, album_id, album_quality_map, _RANGO_CALIDAD,
+                               lambda p: cover_url_filter(clean_db_path(p)), _fmt_seconds)
+        if not d:
+            return jsonify({'error': 'sin_versiones'}), 404
+        ar = conn.execute('SELECT name FROM artists WHERE id=?', (d['artist_id'],)).fetchone()
+        d['artist_name'] = ar['name'] if ar else None
+        d['puede_marcar'] = bool(g.api_user.get('is_admin'))
+        return jsonify(d)
+    finally:
+        conn.close()
+
+
+@app.route('/api/v1/album/<int:album_id>/marcar-original', methods=['POST'])
+@api_admin_required
+def api_v1_album_marcar_original(album_id):
+    """Administrador: esta edición es la original (portada y nombre de la carta)."""
+    conn = get_db_connection()
+    try:
+        if not _versiones.grupo_de(conn, album_id)[0]:
+            return jsonify({'error': 'sin_versiones'}), 404
+        _versiones.marcar_original(conn, album_id, g.api_user.get('id'))
+        return jsonify({'ok': True})
     finally:
         conn.close()
 
@@ -4460,6 +4509,9 @@ def api_v1_albums():
         ).fetchall()
         total = conn.execute('SELECT COUNT(*) as c FROM albums').fetchone()['c']
         calidades = album_quality_map(conn, [r['id'] for r in rows])
+        for i, nv in ((a['id'], a['n_versiones']) for a in
+                      _versiones.anotar(conn, [{'id': r['id']} for r in rows])):
+            calidades.setdefault(i, {'calidad': None, 'n_discos': 1})['n_versiones'] = nv
     finally:
         conn.close()
 
@@ -4478,6 +4530,7 @@ def api_v1_albums():
             'cover_url':      cover_url_filter(d['cover_path']),
             'calidad':        q['calidad'],
             'n_discos':       q['n_discos'],
+            'n_versiones':    q.get('n_versiones', 1),
         })
     return jsonify({'albums': albums, 'total': total, 'limit': limit, 'offset': offset})
 
@@ -7171,6 +7224,17 @@ def anotar_calidad_albumes(conn, albums, clave_id='id'):
         q = mapa.get(a.get(clave_id)) or {'calidad': None, 'n_discos': 1}
         a['calidad'] = q['calidad']
         a['n_discos'] = q['n_discos']
+    _versiones.anotar(conn, albums, clave_id)
+    return albums
+
+
+def agrupar_versiones_artista(conn, albums, con_url=False):
+    """Vista de artista: marca la carta del frente de cada grupo de versiones
+    (`version_frente`, `titulo_base`, `n_versiones`, portadas del abanico)."""
+    _versiones.agrupar_artista(conn, albums, _RANGO_CALIDAD)
+    for a in albums:
+        covers = [clean_db_path(c) for c in a.pop('versiones_covers', []) or []]
+        a['versiones_covers'] = [cover_url_filter(c) for c in covers] if con_url else covers
     return albums
 
 
@@ -7497,6 +7561,7 @@ def artist(artist_id):
             d['album_led'] = led_row['led_color'] if led_row else 'yellow'
             albums.append(d)
         anotar_calidad_albumes(conn, albums)
+        agrupar_versiones_artista(conn, albums, con_url=False)
 
         ar_data = dict(ar)
         ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
@@ -7740,7 +7805,9 @@ def album(album_id):
         fav_ids = _user_fav_track_ids(conn, session.get('user_id'))
 
         calidad = album_quality_map(conn, [album_id])[album_id]['calidad']
+        n_versiones = _versiones.anotar(conn, [{'id': album_id}])[0]['n_versiones']
         return render_template('album.html', album=alb, tracks=track_list,
+                               n_versiones=n_versiones,
                                primary_format=alb.get('primary_format') or 'Unknown',
                                album_calidad=calidad,
                                total_discs=total_discs, multi_disc=total_discs > 1, discos=discos,

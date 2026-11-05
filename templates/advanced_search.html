@@ -244,6 +244,7 @@ window.AdvResults = (function () {
                 <span class="led-diamond-wrap led-d-${a.album_led || 'yellow'}">${diamondSvg(a.album_led || 'yellow', 'sm')}</span>
                 <span class="track-format-badge format-${a.album_led || 'yellow'}">${esc(a.primary_format)}</span>
               </span>` : '')}
+              ${a.n_versiones > 1 ? `<button type="button" class="vx-more" title="Ver todas las versiones" onclick="event.stopPropagation();event.preventDefault();abrirVersiones(${a.id})">⧉ +${a.n_versiones - 1} ${a.n_versiones === 2 ? 'versión' : 'versiones'}</button>` : ''}
               <span class="aci-stats">
                 ${a.year || ''}${a.year && (a.track_count || a.n_discos > 1) ? ' · ' : ''}${a.n_discos > 1 ? a.n_discos + ' discos' : (a.track_count ? a.track_count + ' pistas' : '')}${a.duration_fmt ? ' · ' + a.duration_fmt : ''}
               </span>
