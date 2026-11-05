@@ -131,6 +131,19 @@ def _texto(v):
     return s or None
 
 
+def carpeta_album(ruta):
+    """Carpeta del álbum de una carpeta de la biblioteca (<Letra>/<Artista>/<Álbum>…): «…/Álbum/CD 2» → «…/Álbum».
+    Una carpeta con nombre de disco directo bajo el artista («M/Metallica/Load (Disc 1)») es un álbum en sí: no se
+    sube a la carpeta del artista."""
+    ruta = (ruta or '').rstrip('/')
+    if dividir_por_disco(os.path.basename(ruta)) is None:
+        return ruta
+    padre = os.path.dirname(ruta)
+    if len(os.path.basename(os.path.dirname(padre))) == 1:        # el padre es <Letra>/<Artista>
+        return ruta
+    return padre
+
+
 def dividir_por_disco(nombre):
     """Número de disco de una subcarpeta, o None si no parece de disco."""
     m = DISCO_RE.search(nombre)
@@ -308,10 +321,11 @@ def tags_ffprobe(info):
 DECODIFICAR_V = 2   # súbela cuando cambie cómo se interpretan los errores: se vuelve a decodificar todo
 
 
-def decodificar(ruta):
-    """Decodifica la pista completa: (ok, errores[], pico_dB, segundos_decodificados)."""
-    cmd = ['ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'level+info',
-           '-i', ruta, '-map', '0:a:0', '-af',
+def decodificar(ruta, prefijo=None):
+    """Decodifica la pista completa: (ok, errores[], pico_dB, segundos_decodificados).
+    `prefijo` (p. ej. ['ionice', '-c3', 'nice', '-n19']): para revisiones de fondo, con un solo hilo de ffmpeg."""
+    cmd = list(prefijo or []) + ['ffmpeg', '-nostdin', '-hide_banner', '-nostats', '-loglevel', 'level+info'] + \
+        (['-threads', '1'] if prefijo else []) + ['-i', ruta, '-map', '0:a:0', '-af',
            'astats=measure_perchannel=none:measure_overall=Peak_level+Number_of_samples', '-f', 'null', '-']
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, errors='replace')
@@ -784,9 +798,7 @@ def biblioteca(db, raiz='/mnt/musica'):
     nombres = {}
     for f in filas:
         nombres.setdefault(_norm(f['artista']), Counter())[f['artista']] += 1
-        ruta = f['path'] or ''
-        if dividir_por_disco(os.path.basename(ruta)) is not None:
-            ruta = os.path.dirname(ruta)
+        ruta = carpeta_album(f['path'] or '')
         g = grupos.setdefault(ruta, {'ruta': ruta, 'album': f['name'], 'anio': f['year'],
                                      'artista': f['artista'], 'formato': f['primary_format'],
                                      'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0, 'bits': 0})

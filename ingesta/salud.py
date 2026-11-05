@@ -1,0 +1,517 @@
+"""
+Orbyte Ingesta — Salud de la biblioteca.
+
+1) Discos por normalizar (se calcula al momento, desde music.db y las carpetas):
+   - subcarpetas: «Álbum/CD 1», «Álbum/CD 2»… que Orbyte muestra como álbumes separados → Reprocesar los N discos;
+   - separados: los discos de un mismo álbum en álbumes distintos (tags de disco distintos, «CD 2»/«Part 2» en el
+     nombre o un total de discos mayor al que tienen) → Unir como discos;
+   - numeración repetida: dos «01», dos «02»… sin tag de disco (discos mezclados en una carpeta) → Reprocesar;
+   - discos faltantes: los tags dicen «disco 2 de 2» y no hay otro álbum con el resto.
+
+2) Pistas dañadas: decodificación completa de cada pista (mismo criterio que la revisión de la Bandeja), en segundo
+   plano y sin molestar:
+   - un hilo de ffmpeg por pista, con prioridad mínima de CPU y de disco (nice 19 / ionice idle), y los hilos que
+     elijas (1 por defecto) con una pausa entre pistas;
+   - espera sola mientras la ingesta trabaja (revisando, ubicando, metadata, descargas), fuera del horario que elijas
+     y, si quieres, mientras alguien escucha en Orbyte;
+   - el resultado de cada pista se guarda en ingesta_datos/salud.db apenas termina (ruta + tamaño + fecha): pausar,
+     detener, un error o reiniciar el servidor nunca hacen empezar de cero; solo se vuelve a decodificar lo que
+     cambió;
+   - se revisa por partes: texto (artista/álbum), letra, calidad, agregados desde una fecha, y «solo pendientes»,
+     «todo de nuevo» o «solo las que dieron error».
+"""
+import json
+import logging
+import os
+import re
+import shutil
+import sqlite3
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+
+from . import analisis, dsd
+
+log = logging.getLogger('ingesta.salud')
+
+V = f'{analisis.DECODIFICAR_V}.1'      # versión del criterio: si cambia, lo revisado con la anterior queda pendiente
+CALIDADES = ('CD', 'HR', 'DSD', 'MQA', 'Lossy')
+MODOS = ('pendientes', 'todas', 'con_error')
+PROBLEMAS = ('danada', 'errores', 'falta')
+AJUSTES_DEFECTO = {'hilos': '1', 'pausa': '1', 'horario': '', 'escuchas': '1'}
+LOSSY = {'mp3', 'aac', 'vorbis', 'opus', 'wmav1', 'wmav2', 'mp2'}
+
+
+def _prefijo():
+    p = []
+    if shutil.which('ionice'):
+        p += ['ionice', '-c', '3']
+    if shutil.which('nice'):
+        p += ['nice', '-n', '19']
+    return p
+
+
+def calidad_de(t):
+    if t.get('is_dsd'):
+        return 'DSD'
+    if t.get('is_mqa'):
+        return 'MQA'
+    if (t.get('compression_mode') or '') == 'Lossy' or (t.get('codec') or '').lower() in LOSSY:
+        return 'Lossy'
+    return 'HR' if (t.get('sample_rate') or 0) > 48000 else 'CD'
+
+
+def clasificar(ruta, ok, errores, segundos, duracion):
+    """('ok' | 'errores' | 'danada', notas): «errores» = el audio se leyó completo pero con cuadros malos."""
+    if ok:
+        return 'ok', []
+    completo = segundos is not None and bool(duracion) and segundos >= duracion - 0.5
+    ext = os.path.splitext(ruta)[1].lower()
+    if completo and ext == '.flac' and any(analisis.id3_en_flac(ruta)):
+        return 'ok', ['tags ID3 pegados al FLAC (el audio está entero)']
+    if completo and ext == '.dsf':
+        try:
+            if dsd.info(ruta).get('irregular'):
+                return 'ok', ['DSF con datos de más tras el audio (el audio está entero)']
+        except Exception:  # noqa: BLE001
+            pass
+    if not duracion and segundos:
+        return 'errores', errores          # sin duración en music.db: no se puede saber si está incompleta
+    return ('errores' if completo else 'danada'), errores
+
+
+class Salud:
+    def __init__(self, datos, ajustes_fn, ocupado_fn, avisar_fn=None):
+        self.ruta = os.path.join(datos, 'salud.db')
+        self.ajustes_fn, self.ocupado_fn, self.avisar_fn = ajustes_fn, ocupado_fn, avisar_fn
+        self._lock = threading.Lock()
+        self._despertar = threading.Event()
+        self.motivo = 'Detenida'
+        self.actual = None
+        self.cola, self.cola_clave, self.i, self.hechas = [], None, 0, 0
+        self.seg_audio, self.seg_reloj = 0.0, 0.0          # ritmo de esta sesión (para el tiempo restante)
+        self.restante_audio = 0.0
+        with self._con() as c:
+            c.executescript('''
+                CREATE TABLE IF NOT EXISTS pistas(ruta TEXT PRIMARY KEY, album_id INTEGER, tamano INTEGER, mtime REAL,
+                    v TEXT, estado TEXT, errores TEXT, segundos REAL, duracion REAL, revisado REAL);
+                CREATE INDEX IF NOT EXISTS pistas_estado ON pistas(estado);
+                CREATE TABLE IF NOT EXISTS ignorados(album TEXT PRIMARY KEY, desde REAL);
+                CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);''')
+
+    # ── base propia ──
+    def _con(self):
+        c = sqlite3.connect(self.ruta, timeout=60)
+        c.row_factory = sqlite3.Row
+        return c
+
+    def estado(self):
+        with self._con() as c:
+            d = {r['clave']: r['valor'] for r in c.execute('SELECT clave, valor FROM estado')}
+        for k, v in AJUSTES_DEFECTO.items():
+            d.setdefault(k, v)
+        return d
+
+    def poner(self, **kv):
+        with self._lock, self._con() as c:
+            for k, v in kv.items():
+                c.execute('INSERT INTO estado(clave, valor) VALUES(?, ?) ON CONFLICT(clave) DO UPDATE SET valor=excluded.valor',
+                          (k, None if v is None else str(v)))
+        self._despertar.set()
+
+    def _guardar(self, ruta, album_id, tamano, mtime, estado, errores, segundos, duracion):
+        with self._lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO pistas(ruta, album_id, tamano, mtime, v, estado, errores, segundos, duracion, '
+                      'revisado) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                      (ruta, album_id, tamano, mtime, V, estado, json.dumps(errores[:4], ensure_ascii=False),
+                       segundos, duracion, time.time()))
+
+    # ── qué entra en una revisión ──
+    def _db_orbyte(self):
+        return self.ajustes_fn().get('db_orbyte')
+
+    def pistas_de(self, criterio):
+        """Pistas de music.db que cumplen el criterio, en orden de carpeta, disco y número."""
+        aj = self.ajustes_fn()
+        db = aj.get('db_orbyte')
+        raiz = os.path.abspath(aj.get('biblioteca') or '/mnt/musica')
+        criterio = criterio or {}
+        con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            sql = ('SELECT t.file_path AS ruta, t.album_id, t.duration, t.sample_rate, t.is_dsd, t.is_mqa, t.codec, '
+                   't.compression_mode, al.name AS album, al.path AS carpeta, ar.name AS artista '
+                   'FROM tracks t JOIN albums al ON al.id = t.album_id LEFT JOIN artists ar ON ar.id = al.artist_id '
+                   'WHERE t.file_path IS NOT NULL')
+            params = []
+            if criterio.get('desde'):
+                sql += ' AND al.created_at >= ?'
+                params.append(str(criterio['desde']))
+            sql += ' ORDER BY al.path, CAST(t.disc_number AS INTEGER), CAST(t.track_number AS INTEGER)'
+            filas = [dict(r) for r in con.execute(sql, params)]
+        finally:
+            con.close()
+        texto = analisis._norm(criterio.get('texto') or '')
+        palabras = texto.split()
+        letra = (criterio.get('letra') or '').strip()
+        cal = criterio.get('calidad') or ''
+        out = []
+        for f in filas:
+            if palabras:
+                h = analisis._norm(f'{f.get("artista") or ""} {f.get("album") or ""}')
+                if not all(p in h for p in palabras):
+                    continue
+            if letra:
+                rel = os.path.relpath(f['ruta'], raiz).split(os.sep) if f['ruta'].startswith(raiz + os.sep) else ['']
+                if rel[0].upper() != letra.upper():
+                    continue
+            if cal and calidad_de(f) != cal:
+                continue
+            out.append({'ruta': f['ruta'], 'album_id': f['album_id'], 'duracion': f.get('duration') or 0})
+        return out
+
+    def estimar(self, criterio):
+        ps = self.pistas_de(criterio)
+        hechas = self._cache({p['ruta'] for p in ps})
+        modo = (criterio or {}).get('modo') or 'pendientes'
+        if modo == 'pendientes':
+            pend = [p for p in ps if not (hechas.get(p['ruta']) and hechas[p['ruta']]['v'] == V)]
+        elif modo == 'con_error':
+            pend = [p for p in ps if hechas.get(p['ruta']) and hechas[p['ruta']]['estado'] in PROBLEMAS]
+        else:
+            pend = ps
+        return {'pistas': len(ps), 'por_revisar': len(pend), 'horas_audio': round(sum(p['duracion'] for p in pend) / 3600, 1),
+                'albumes': len({p['album_id'] for p in pend})}
+
+    def _cache(self, rutas=None):
+        with self._con() as c:
+            filas = c.execute('SELECT ruta, tamano, mtime, v, estado, revisado FROM pistas').fetchall()
+        return {r['ruta']: dict(r) for r in filas if rutas is None or r['ruta'] in rutas}
+
+    # ── control ──
+    def iniciar(self, criterio):
+        criterio = {k: v for k, v in (criterio or {}).items() if k in ('texto', 'letra', 'calidad', 'desde', 'modo') and v}
+        criterio.setdefault('modo', 'pendientes')
+        if criterio['modo'] not in MODOS:
+            raise ValueError('Modo desconocido')
+        if criterio.get('calidad') and criterio['calidad'] not in CALIDADES:
+            raise ValueError('Calidad desconocida')
+        self.poner(criterio=json.dumps(criterio, ensure_ascii=False), activa='1', pausada='0', inicio=time.time(),
+                   terminada=None, resumen=None)
+
+    def pausar(self, si=True):
+        self.poner(pausada='1' if si else '0')
+
+    def detener(self):
+        self.poner(activa='0', pausada='0')
+
+    # ── por qué espera ──
+    def _espera(self, st):
+        if self.ocupado_fn():
+            return 'Esperando: la ingesta está trabajando (revisión, ubicar, metadata o descarga)'
+        h = (st.get('horario') or '').strip()
+        m = re.fullmatch(r'(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})', h)
+        if m:
+            ahora = datetime.now().hour * 60 + datetime.now().minute
+            ini, fin = int(m[1]) * 60 + int(m[2]), int(m[3]) * 60 + int(m[4])
+            dentro = ini <= ahora < fin if ini <= fin else (ahora >= ini or ahora < fin)
+            if not dentro:
+                return f'Esperando: fuera del horario ({h})'
+        if st.get('escuchas') == '1' and self._escuchando():
+            return 'Esperando: alguien está escuchando en Orbyte'
+        return None
+
+    def _escuchando(self):
+        try:
+            con = sqlite3.connect(f'file:{self._db_orbyte()}?mode=ro', uri=True, timeout=10)
+            try:
+                return con.execute("SELECT 1 FROM listening_events WHERE created_at >= datetime('now', '-10 minutes') "
+                                   'LIMIT 1').fetchone() is not None
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return False
+
+    # ── el trabajo ──
+    def start(self):
+        threading.Thread(target=self._bucle, daemon=True, name='salud').start()
+
+    def _bucle(self):
+        while True:
+            try:
+                espera = self._ciclo()
+            except Exception:  # noqa: BLE001 - la revisión de fondo nunca tumba la ingesta
+                log.exception('Salud: error en la revisión (se reintenta en 1 minuto)')
+                self.motivo, espera = 'Error: se reintenta en 1 minuto (detalle en el registro de la ingesta)', 60
+            if espera:
+                self._despertar.wait(espera)
+                self._despertar.clear()
+
+    def _ciclo(self):
+        st = self.estado()
+        if st.get('activa') != '1':
+            self.motivo = 'Terminada' if st.get('terminada') else 'Detenida'
+            self.actual = None
+            return 30
+        if st.get('pausada') == '1':
+            self.motivo, self.actual = 'Pausada', None
+            return 30
+        motivo = self._espera(st)
+        if motivo:
+            self.motivo, self.actual = motivo, None
+            return 20
+        clave = (st.get('criterio'), st.get('inicio'))
+        if clave != self.cola_clave:
+            self.motivo = 'Preparando la lista de pistas…'
+            criterio = json.loads(st.get('criterio') or '{}')
+            self.cola = self.pistas_de(criterio)
+            self.cola_clave, self.i, self.hechas = clave, 0, 0
+            self.modo, self.inicio = criterio.get('modo') or 'pendientes', float(st.get('inicio') or 0)
+            self.cache = self._cache({p['ruta'] for p in self.cola})
+            self.restante_audio = sum(p['duracion'] for p in self.cola)
+            self.seg_audio = self.seg_reloj = 0.0
+        hilos = max(1, min(4, int(st.get('hilos') or 1)))
+        lote = []
+        while len(lote) < hilos:
+            p = self._siguiente()
+            if not p:
+                break
+            lote.append(p)
+        if not lote:
+            self._terminar()
+            return 30
+        self.motivo = 'Revisando'
+        self.actual = lote[0]['ruta']
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=hilos) as ex:
+            list(ex.map(self._revisar, lote))
+        self.seg_reloj += time.time() - t0
+        self.seg_audio += sum(p['duracion'] for p in lote)
+        pausa = max(0.0, min(60.0, float(st.get('pausa') or 0)))
+        return pausa or None
+
+    def _siguiente(self):
+        """Avanza hasta la próxima pista que hay que decodificar (las ya revisadas se saltan sin decodificar)."""
+        while self.i < len(self.cola):
+            p = self.cola[self.i]
+            self.i += 1
+            c = self.cache.get(p['ruta'])
+            if self.modo == 'con_error':
+                if not c or c['estado'] not in PROBLEMAS or (c['revisado'] or 0) >= self.inicio:
+                    self._saltar(p)
+                    continue
+                return p
+            if c and c['v'] == V and (self.modo == 'pendientes' or (c['revisado'] or 0) >= self.inicio):
+                try:
+                    st = os.stat(p['ruta'])
+                    if c['tamano'] == st.st_size and abs((c['mtime'] or 0) - st.st_mtime) < 1:
+                        self._saltar(p)
+                        continue
+                except OSError:
+                    pass                 # ya no está: se revisa (queda como «falta»)
+            return p
+        return None
+
+    def _saltar(self, p):
+        self.hechas += 1
+        self.restante_audio -= p['duracion']
+
+    def _revisar(self, p):
+        ruta = p['ruta']
+        try:
+            st = os.stat(ruta)
+        except OSError:
+            self._guardar(ruta, p['album_id'], None, None, 'falta', ['el archivo no está en la biblioteca'], None,
+                          p['duracion'])
+            self._contar(p)
+            return
+        ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
+        estado, notas = clasificar(ruta, ok, errores, seg, p['duracion'])
+        self._guardar(ruta, p['album_id'], st.st_size, st.st_mtime, estado, notas, seg, p['duracion'])
+        self._contar(p)
+
+    def _contar(self, p):
+        with self._lock:
+            self.hechas += 1
+            self.restante_audio -= p['duracion']
+
+    def _terminar(self):
+        criterio = json.loads(self.estado().get('criterio') or '{}')
+        rutas = {p['ruta'] for p in self.cola}
+        cache = self._cache(rutas)
+        malas = [c for c in cache.values() if c['estado'] in PROBLEMAS]
+        resumen = {'pistas': len(self.cola), 'malas': len(malas)}
+        self.poner(activa='0', pausada='0', terminada=time.time(), resumen=json.dumps(resumen))
+        self.cola_clave = None
+        self.motivo, self.actual = 'Terminada', None
+        if self.avisar_fn:
+            alcance = ', '.join(f'{k}: {v}' for k, v in criterio.items() if k != 'modo') or 'toda la biblioteca'
+            self.avisar_fn('ok' if not malas else 'revision', 'Salud de la biblioteca: revisión terminada',
+                           f'{len(self.cola)} pistas ({alcance}) · {len(malas)} con problemas')
+
+    def progreso(self):
+        st = self.estado()
+        total = len(self.cola) if self.cola_clave == (st.get('criterio'), st.get('inicio')) else None
+        ritmo = self.seg_audio / self.seg_reloj if self.seg_reloj > 30 else None
+        return {'activa': st.get('activa') == '1', 'pausada': st.get('pausada') == '1', 'motivo': self.motivo,
+                'criterio': json.loads(st.get('criterio') or '{}') if st.get('criterio') else None,
+                'total': total, 'hechas': self.hechas if total is not None else None,
+                'actual': self.actual, 'ritmo': round(ritmo, 1) if ritmo else None,
+                'eta_s': round(max(0.0, self.restante_audio) / ritmo) if ritmo and total else None,
+                'terminada': float(st['terminada']) if st.get('terminada') else None,
+                'resumen': json.loads(st['resumen']) if st.get('resumen') else None,
+                'ajustes': {k: st.get(k) for k in AJUSTES_DEFECTO}, 'revisadas': self._contar_revisadas()}
+
+    def _contar_revisadas(self):
+        with self._con() as c:
+            return {r['estado']: r['n'] for r in c.execute('SELECT estado, COUNT(*) AS n FROM pistas GROUP BY estado')}
+
+    # ── resultados ──
+    def ignorar(self, album, si=True):
+        with self._lock, self._con() as c:
+            if si:
+                c.execute('INSERT OR REPLACE INTO ignorados(album, desde) VALUES(?, ?)', (album, time.time()))
+            else:
+                c.execute('DELETE FROM ignorados WHERE album=?', (album,))
+
+    def danadas(self, ver_ignorados=False):
+        """Álbumes con pistas dañadas, con errores o que faltan (solo pistas que siguen en music.db)."""
+        with self._con() as c:
+            filas = [dict(r) for r in c.execute(
+                f'SELECT ruta, album_id, estado, errores, segundos, duracion FROM pistas WHERE estado IN '
+                f'({",".join("?" * len(PROBLEMAS))})', PROBLEMAS)]
+            ign = {r['album'] for r in c.execute('SELECT album FROM ignorados')}
+        if not filas:
+            return []
+        con = sqlite3.connect(f'file:{self._db_orbyte()}?mode=ro', uri=True, timeout=30)
+        con.row_factory = sqlite3.Row
+        try:
+            vigentes = {}
+            rutas = [f['ruta'] for f in filas]
+            for k in range(0, len(rutas), 500):
+                parte = rutas[k:k + 500]
+                for r in con.execute(f'SELECT file_path, album_id, disc_number, track_number, title FROM tracks '
+                                     f'WHERE file_path IN ({",".join("?" * len(parte))})', parte):
+                    vigentes[r['file_path']] = dict(r)
+            ids = sorted({v['album_id'] for v in vigentes.values()})
+            albumes = {}
+            for k in range(0, len(ids), 500):
+                parte = ids[k:k + 500]
+                for r in con.execute(f'SELECT al.id, al.name, al.year, al.path, ar.name AS artista FROM albums al '
+                                     f'LEFT JOIN artists ar ON ar.id = al.artist_id WHERE al.id IN '
+                                     f'({",".join("?" * len(parte))})', parte):
+                    albumes[r['id']] = dict(r)
+        finally:
+            con.close()
+        por_album = {}
+        for f in filas:
+            t = vigentes.get(f['ruta'])
+            if not t or t['album_id'] not in albumes:
+                continue
+            a = albumes[t['album_id']]
+            carpeta = analisis.carpeta_album(a['path'])      # «Álbum/CD 2» se muestra como «Álbum»
+            if (carpeta in ign) != bool(ver_ignorados):
+                continue
+            g = por_album.setdefault(carpeta, {'carpeta': carpeta, 'album_id': a['id'], 'artista': a['artista'],
+                                               'album': a['name'], 'anio': a['year'], 'pistas': [],
+                                               'danada': 0, 'errores': 0, 'falta': 0})
+            g[f['estado']] += 1
+            g['pistas'].append({'archivo': os.path.basename(f['ruta']), 'estado': f['estado'],
+                                'errores': json.loads(f['errores'] or '[]')[:2], 'disco': t.get('disc_number'),
+                                'numero': t.get('track_number'), 'titulo': t.get('title'),
+                                'segundos': f['segundos'], 'duracion': f['duracion']})
+        out = list(por_album.values())
+        for g in out:
+            g['pistas'].sort(key=lambda p: (_int(p['disco']), _int(p['numero'])))
+        out.sort(key=lambda g: (-(g['danada'] + g['falta']), -g['errores'], (g['artista'] or '').lower(), g['album'] or ''))
+        return out
+
+
+def _int(v):
+    try:
+        return int(str(v or '0').split('/')[0])
+    except ValueError:
+        return 0
+
+
+# ─────────────────────────── discos por normalizar ───────────────────────────
+
+DISCO_EN_NOMBRE = re.compile(r'[\s\-_,:(\[]*\b(?:cd|dis[ck]o?|disk|part[e]?|pt\.?)\s*0*(\d{1,2})\b[\])]?', re.I)
+_CACHE = {'clave': None, 'datos': None}
+
+
+def _base_nombre(nombre):
+    from .repetidos import _nombre_limpio
+    n = _nombre_limpio(nombre or '')
+    n = DISCO_EN_NOMBRE.sub(' ', n)
+    return analisis._norm_album(n)
+
+
+def discos_por_normalizar(db, biblioteca):
+    """Casos de álbumes de varios discos que conviene normalizar (lista de dicts con tipo, miembros y acción)."""
+    clave = (db, os.path.getmtime(db), biblioteca)
+    if _CACHE['clave'] == clave:
+        return _CACHE['datos']
+    bib = analisis.biblioteca(db, biblioteca)
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    try:
+        pistas = {}
+        for aid, d, td, n in con.execute('SELECT album_id, disc_number, total_discs, track_number FROM tracks'):
+            pistas.setdefault(aid, []).append((_int(d), _int(td), _int(n)))
+        rutas = {i: (p or '').rstrip('/') for i, p in con.execute('SELECT id, path FROM albums')}
+    finally:
+        con.close()
+    casos = []
+    simples = []
+    for g in bib['grupos']:
+        ps = [x for i in g['ids'] for x in pistas.get(i, [])]
+        discos = sorted({d for d, _t, _n in ps if d})
+        total = max((t for _d, t, _n in ps), default=0)
+        info = {'ruta': g['ruta'], 'id': g['ids'][0], 'album': g['album'], 'anio': g.get('anio'), 'artista': g['artista'],
+                'n_pistas': g['pistas'], 'tag': g.get('tag'), 'discos': discos, 'total_discos': total}
+        if len(g['ids']) > 1:
+            carpetas = sorted({os.path.basename(rutas.get(i, '')) for i in g['ids']})
+            casos.append({'tipo': 'subcarpetas', 'artista': g['artista'], 'titulo': g['album'], 'miembros': [info],
+                          'detalle': f'{len(g["ids"])} discos en subcarpetas ({", ".join(carpetas[:4])}) que Orbyte '
+                                     'muestra como álbumes separados'})
+            continue
+        simples.append(info)
+        # numeración repetida sin tag de disco: discos mezclados en una carpeta
+        if len(discos) <= 1:
+            nums = [n for _d, _t, n in ps if n]
+            rep = len(nums) - len(set(nums))
+            if rep >= 2:
+                casos.append({'tipo': 'numeracion', 'artista': g['artista'], 'titulo': g['album'], 'miembros': [info],
+                              'detalle': f'{rep} números de pista repetidos sin tag de disco: parecen varios discos '
+                                         'mezclados en una carpeta'})
+    # discos de un mismo álbum en álbumes distintos
+    grupos = {}
+    for s in simples:
+        grupos.setdefault((analisis._norm(s['artista']), _base_nombre(s['album'])), []).append(s)
+    for (_a, base), ms in grupos.items():
+        if not base:
+            continue
+        marca = any(DISCO_EN_NOMBRE.search(m['album'] or '') for m in ms)
+        tags = [tuple(m['discos']) for m in ms]
+        tags_distintos = len(ms) > 1 and all(tags) and len(set(tags)) == len(tags)
+        varios = any(m['total_discos'] > max(len(m['discos']), 1) for m in ms)
+        if len(ms) >= 2 and (tags_distintos or marca or varios):
+            ms = sorted(ms, key=lambda m: ((m['discos'] or [99])[0], m['n_pistas']))
+            casos.append({'tipo': 'separados', 'artista': ms[0]['artista'], 'titulo': ms[0]['album'], 'miembros': ms,
+                          'detalle': ' + '.join(f'«{m["album"]}» ({m["n_pistas"]} pistas'
+                                                + (f', disco {"/".join(map(str, m["discos"]))}' if m['discos'] else '')
+                                                + ')' for m in ms)})
+        elif len(ms) == 1 and varios and ms[0]['discos']:
+            m = ms[0]
+            faltan = [d for d in range(1, m['total_discos'] + 1) if d not in m['discos']]
+            if faltan:
+                casos.append({'tipo': 'faltantes', 'artista': m['artista'], 'titulo': m['album'], 'miembros': [m],
+                              'detalle': f'Los tags dicen {m["total_discos"]} discos; en la biblioteca '
+                                         f'{"están los discos" if len(m["discos"]) > 1 else "está el disco"} '
+                                         f'{", ".join(map(str, m["discos"]))} y '
+                                         f'{"faltan los discos" if len(faltan) > 1 else "falta el disco"} '
+                                         f'{", ".join(map(str, faltan))}'})
+    casos.sort(key=lambda c: (analisis._norm(c['artista']), analisis._norm(c['titulo'])))
+    _CACHE.update(clave=clave, datos=casos)
+    return casos

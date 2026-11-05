@@ -519,3 +519,19 @@ tr.p-editor td { background: var(--card-2); }
            border-radius: 10px; background: none; color: var(--texto); cursor: pointer; font: inherit; }
 .u-libre:hover { border-color: var(--borde-oro); background: var(--elev); }
 @media (max-width: 560px) { .u-disco { flex-wrap: wrap; } .u-mover { margin-left: auto; } }
+
+/* ── salud de la biblioteca ── */
+.s-panel { margin-bottom: 1rem; }
+.s-dos { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+.s-dos > .panel { min-width: 0; }
+.s-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: .6rem .8rem; }
+.s-form .campo { margin: 0; }
+.s-form select, .s-form input[type=date] { width: 100%; background: #0a0a0a; border: 1px solid var(--borde-2); border-radius: 8px;
+  padding: .6rem .75rem; color: var(--texto); }
+.s-modos { display: flex; flex-direction: column; gap: .3rem; font-size: .9rem; }
+.s-fila { display: flex; justify-content: space-between; align-items: flex-start; gap: .8rem; flex-wrap: wrap; }
+.s-barra { height: 6px; border-radius: 3px; background: var(--elev); overflow: hidden; margin: .6rem 0 .35rem; }
+.s-barra span { display: block; height: 100%; background: var(--oro); transition: width .6s ease; }
+.s-album { margin-bottom: .7rem; }
+.s-album details { margin-top: .5rem; }
+.s-album summary { cursor: pointer; color: var(--texto-2); }

@@ -1,0 +1,234 @@
+{% extends 'base.html' %}
+{% block titulo %}Salud{% endblock %}
+{% block contenido %}
+<div class="barra"><div>
+  <h1 class="titulo">Salud de la biblioteca</h1>
+  <div class="sub">Álbumes de varios discos que Orbyte muestra mal, y pistas con el audio dañado. La revisión de pistas corre de fondo con prioridad mínima, se pausa sola cuando la ingesta trabaja y retoma donde quedó.</div>
+</div></div>
+<div class="filtros" id="pestanas">
+  <button class="filtro activo" data-p="discos">Discos por normalizar <b id="n-discos">…</b></button>
+  <button class="filtro" data-p="danadas">Pistas dañadas <b id="n-danadas">…</b></button>
+</div>
+
+<section id="p-discos">
+  <div class="filtros" id="f-discos"></div>
+  <div id="l-discos"><div class="estado-vivo"><span class="giro"></span>Leyendo music.db…</div></div>
+</section>
+
+<section id="p-danadas" hidden>
+  <div class="panel s-panel" id="s-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
+
+  <div class="s-dos">
+    <div class="panel">
+      <div class="rotulo" style="margin-bottom:.6rem">Nueva revisión · qué parte de la biblioteca</div>
+      <div class="s-form">
+        <div class="campo"><label for="c-texto">Artista o álbum</label>
+          <input type="search" id="c-texto" class="campo-buscar" placeholder="Vacío = todos" autocomplete="off"></div>
+        <div class="campo"><label for="c-letra">Letra</label>
+          <select id="c-letra"><option value="">Todas</option>{% for l in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#' %}<option>{{ l }}</option>{% endfor %}</select></div>
+        <div class="campo"><label for="c-calidad">Calidad</label>
+          <select id="c-calidad"><option value="">Todas</option>{% for c in CALIDADES %}<option>{{ c }}</option>{% endfor %}</select></div>
+        <div class="campo"><label for="c-desde">Agregados desde</label>
+          <input type="date" id="c-desde"></div>
+      </div>
+      <div class="campo" style="margin-top:.4rem"><label>Qué pistas</label>
+        <div class="s-modos" role="radiogroup">
+          <label><input type="radio" name="c-modo" value="pendientes" checked> Solo las que faltan por revisar <span class="s tenue">(o cambiaron)</span></label>
+          <label><input type="radio" name="c-modo" value="con_error"> Solo las que dieron error <span class="s tenue">(para confirmar tras re-descargar)</span></label>
+          <label><input type="radio" name="c-modo" value="todas"> Todas otra vez</label>
+        </div></div>
+      <div class="acciones"><button class="btn" id="estimar">Calcular</button>
+        <button class="btn oro" id="iniciar">Iniciar revisión</button>
+        <span class="s tenue" id="estimacion"></span></div>
+    </div>
+    <div class="panel">
+      <div class="rotulo" style="margin-bottom:.6rem">Ritmo · para no cargar el servidor</div>
+      <div class="s-form">
+        <div class="campo"><label for="a-hilos">Pistas a la vez</label>
+          <select id="a-hilos"><option>1</option><option>2</option><option>3</option><option>4</option></select></div>
+        <div class="campo"><label for="a-pausa">Pausa entre pistas (s)</label>
+          <input type="number" id="a-pausa" min="0" max="60" step="0.5"></div>
+        <div class="campo"><label for="a-horario">Solo en este horario</label>
+          <input type="text" id="a-horario" placeholder="Ej. 01:00-08:00 (vacío = siempre)" autocomplete="off"></div>
+      </div>
+      <label class="s" style="display:block;margin:.4rem 0"><input type="checkbox" id="a-escuchas"> Esperar mientras alguien escucha en Orbyte <span class="tenue">(escuchas de los últimos 10 min)</span></label>
+      <div class="s tenue">Siempre: prioridad mínima de procesador y disco, un hilo de ffmpeg por pista, y espera mientras la ingesta revisa, ubica, corre la metadata o descarga.</div>
+      <div class="acciones"><button class="btn" id="guardar-ritmo">Guardar ritmo</button></div>
+    </div>
+  </div>
+
+  <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Resultados</h2>
+  <div class="filtros" id="f-danadas"></div>
+  <div id="l-danadas"></div>
+</section>
+{% endblock %}
+{% block js %}
+{% include '_unir_discos.html' %}
+<script>
+const TIPOS = {subcarpetas: 'Discos en subcarpetas', separados: 'Discos en álbumes separados', numeracion: 'Numeración repetida',
+               faltantes: 'Discos faltantes'};
+const ESTADOS = {danada: ['Dañada o incompleta', 'mal'], errores: ['Errores, pero completa', 'med'], falta: ['Falta el archivo', 'mal']};
+let casos = null, fDiscos = 'todos', danadas = null, fDan = 'todas', verIgn = false, raiz = '';
+const relR = r => r && raiz && r.startsWith(raiz.replace(/\/$/, '') + '/') ? r.slice(raiz.replace(/\/$/, '').length + 1) : r;
+const buscarUrl = (ar, al) => '/buscar?' + new URLSearchParams({q: `${ar || ''} ${(al || '').replace(/\s*[\[(].*$/, '')}`.trim()});
+const mmss = s => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const hms = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
+  return h ? `${h} h ${m} min` : `${m} min`; };
+
+document.querySelectorAll('#pestanas [data-p]').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#pestanas [data-p]').forEach(x => x.classList.toggle('activo', x === b));
+  document.getElementById('p-discos').hidden = b.dataset.p !== 'discos';
+  document.getElementById('p-danadas').hidden = b.dataset.p !== 'danadas';
+  try { localStorage.setItem('salud-pestana', b.dataset.p); } catch (e) {}
+});
+try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySelector(`#pestanas [data-p="${p}"]`)?.click(); } catch (e) {}
+
+// ── discos por normalizar ──
+async function cargarDiscos() {
+  const r = await (await fetch('/api/salud/discos')).json();
+  if (!r.ok) { document.getElementById('l-discos').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  casos = r.casos; raiz = r.raiz;
+  document.getElementById('n-discos').textContent = casos.length;
+  pintarDiscos();
+}
+function accionCaso(c, i) {
+  const m = c.miembros[0];
+  if (c.tipo === 'separados') return `<button class="btn chico oro" data-unir="${i}">⧉ Unir como discos</button>`;
+  if (c.tipo === 'faltantes') return `<a class="btn chico" href="${buscarUrl(c.artista, c.titulo)}">Buscar el álbum completo</a>
+    <a class="btn chico" href="/biblioteca/album/${m.id}">Abrir ficha</a>`;
+  return `<a class="btn chico oro" href="/biblioteca/album/${m.id}">${c.tipo === 'subcarpetas' ? '↻ Reprocesar los discos' : '↻ Abrir y reprocesar'}</a>`;
+}
+function pintarDiscos() {
+  const cuenta = t => casos.filter(c => t === 'todos' || c.tipo === t).length;
+  document.getElementById('f-discos').innerHTML = [['todos', 'Todos'], ...Object.entries(TIPOS)].map(([k, n]) =>
+    `<button class="filtro ${fDiscos === k ? 'activo' : ''}" data-f="${k}">${esc(n)}<b>${cuenta(k)}</b></button>`).join('');
+  document.querySelectorAll('#f-discos [data-f]').forEach(b => b.onclick = () => { fDiscos = b.dataset.f; pintarDiscos(); });
+  const lista = casos.map((c, i) => [c, i]).filter(([c]) => fDiscos === 'todos' || c.tipo === fDiscos);
+  const cont = document.getElementById('l-discos');
+  if (!lista.length) { cont.innerHTML = '<div class="sin-problemas">Nada por normalizar con este filtro.</div>'; return; }
+  cont.innerHTML = `<div class="tabla-wrap"><table>
+    <tr><th>Álbum</th><th>Qué pasa</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
+    ${lista.map(([c, i]) => `<tr>
+      <td><div class="t">${esc(c.titulo)}</div><div class="s">${esc(c.artista)} · <span class="tenue">${esc(TIPOS[c.tipo])}</span></div></td>
+      <td><div class="s">${esc(c.detalle)}</div></td>
+      <td class="oculto-movil">${c.miembros.map(m => `<div class="s mono muy-tenue">${esc(relR(m.ruta))}</div>`).join('')}</td>
+      <td><div style="display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end">${accionCaso(c, i)}</div></td></tr>`).join('')}
+  </table></div>`;
+  cont.querySelectorAll('[data-unir]').forEach(b => b.onclick = () => {
+    const c = casos[+b.dataset.unir];
+    abrirUnir({ruta: c.miembros[0].ruta, preseleccion: c.miembros.map(m => m.ruta)});
+  });
+}
+
+// ── revisión de pistas ──
+let est = null, ritmoCargado = false;
+async function cargarEstado() {
+  try { est = await (await fetch('/api/salud/estado')).json(); } catch (e) { return; }
+  const c = est.criterio || {};
+  const alcance = [c.texto && `«${c.texto}»`, c.letra && `letra ${c.letra}`, c.calidad, c.desde && `desde ${c.desde}`]
+    .filter(Boolean).join(' · ') || 'toda la biblioteca';
+  const modo = {pendientes: 'las que faltan', con_error: 'las que dieron error', todas: 'todas otra vez'}[c.modo] || '';
+  const rev = est.revisadas || {};
+  const nRev = Object.values(rev).reduce((s, n) => s + n, 0);
+  let html;
+  if (est.activa) {
+    const pct = est.total ? Math.floor(100 * est.hechas / est.total) : 0;
+    html = `<div class="s-fila"><div><div class="t">${est.pausada ? '⏸ Pausada' : esc(est.motivo)}</div>
+        <div class="s tenue">Alcance: ${esc(alcance)} · ${esc(modo)}</div></div>
+      <div class="acciones" style="margin:0">${est.pausada ? '<button class="btn oro" data-c="reanudar">Reanudar</button>'
+        : '<button class="btn" data-c="pausar">Pausar</button>'}<button class="btn" data-c="detener">Detener</button></div></div>
+      ${est.total != null ? `<div class="s-barra"><span style="width:${pct}%"></span></div>
+      <div class="s">${est.hechas.toLocaleString('es-CL')} de ${est.total.toLocaleString('es-CL')} pistas · ${pct} %
+        ${est.eta_s ? ` · quedan ~${hms(est.eta_s)}` : ''}${est.ritmo ? ` <span class="tenue">(${est.ritmo}× tiempo real)</span>` : ''}</div>` : ''}
+      ${est.actual ? `<div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(est.actual))}</div>` : ''}`;
+  } else {
+    const r = est.resumen;
+    html = `<div class="s-fila"><div><div class="t">${est.terminada ? 'Última revisión terminada' : 'Sin revisión en curso'}</div>
+      <div class="s tenue">${est.terminada ? `${new Date(est.terminada * 1000).toLocaleString('es-CL')}${r ? ` · ${r.pistas} pistas · ${r.malas} con problemas` : ''}`
+        : 'Elige abajo qué parte revisar.'}</div></div></div>`;
+  }
+  html += `<div class="s tenue" style="margin-top:.4rem">Revisadas hasta ahora: ${nRev.toLocaleString('es-CL')} pistas ·
+    <span class="ok">${(rev.ok || 0).toLocaleString('es-CL')} bien</span> ·
+    <span class="mal">${((rev.danada || 0) + (rev.falta || 0)).toLocaleString('es-CL')} dañadas o faltantes</span> ·
+    <span class="med">${(rev.errores || 0).toLocaleString('es-CL')} con errores</span></div>`;
+  const box = document.getElementById('s-estado');
+  box.innerHTML = html;
+  box.querySelectorAll('[data-c]').forEach(b => b.onclick = async () => {
+    if (b.dataset.c === 'detener' && !confirm('¿Detener la revisión? Lo ya revisado queda guardado; al iniciarla de nuevo sigue con lo que falta.')) return;
+    b.disabled = true; await post('/api/salud/control', {accion: b.dataset.c}); cargarEstado();
+  });
+  if (!ritmoCargado) {
+    const a = est.ajustes || {};
+    document.getElementById('a-hilos').value = a.hilos || '1';
+    document.getElementById('a-pausa').value = a.pausa || '1';
+    document.getElementById('a-horario').value = a.horario || '';
+    document.getElementById('a-escuchas').checked = a.escuchas === '1';
+    ritmoCargado = true;
+  }
+}
+const criterio = () => ({texto: document.getElementById('c-texto').value.trim(), letra: document.getElementById('c-letra').value,
+  calidad: document.getElementById('c-calidad').value, desde: document.getElementById('c-desde').value,
+  modo: (document.querySelector('input[name=c-modo]:checked') || {}).value || 'pendientes'});
+document.getElementById('estimar').onclick = async () => {
+  const e = document.getElementById('estimacion'); e.textContent = 'Calculando…';
+  const r = await post('/api/salud/estimar', criterio());
+  e.textContent = r.ok ? `${r.por_revisar.toLocaleString('es-CL')} pistas por revisar (de ${r.pistas.toLocaleString('es-CL')}) en ${r.albumes} álbumes · ${r.horas_audio} h de audio`
+    : (r.error || 'No se pudo');
+};
+document.getElementById('iniciar').onclick = async () => {
+  if (est && est.activa && !confirm('Hay una revisión en curso: se reemplaza por esta. Lo ya revisado queda guardado. ¿Seguir?')) return;
+  const r = await post('/api/salud/iniciar', criterio());
+  if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+  toast('Revisión iniciada', 'Corre de fondo; puedes cerrar esta página');
+  cargarEstado();
+};
+document.getElementById('guardar-ritmo').onclick = async () => {
+  const r = await post('/api/salud/ajustes', {hilos: document.getElementById('a-hilos').value, pausa: document.getElementById('a-pausa').value,
+    horario: document.getElementById('a-horario').value, escuchas: document.getElementById('a-escuchas').checked});
+  r.ok ? toast('Ritmo guardado', '') : toast('No se pudo', r.error || '');
+};
+
+// ── resultados ──
+async function cargarDanadas() {
+  const r = await (await fetch('/api/salud/danadas' + (verIgn ? '?ignorados=1' : ''))).json();
+  if (!r.ok) { document.getElementById('l-danadas').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  danadas = r.albumes; raiz = r.raiz;
+  if (!verIgn) document.getElementById('n-danadas').textContent = danadas.length;
+  pintarDanadas();
+}
+function pintarDanadas() {
+  const pasa = (a, f) => f === 'todas' || (f === 'danada' ? a.danada + a.falta > 0 : a.errores > 0);
+  document.getElementById('f-danadas').innerHTML =
+    [['todas', 'Todos'], ['danada', 'Dañadas o faltantes'], ['errores', 'Con errores']].map(([k, n]) =>
+      `<button class="filtro ${fDan === k ? 'activo' : ''}" data-f="${k}">${n}<b>${danadas.filter(a => pasa(a, k)).length}</b></button>`).join('')
+    + `<button class="filtro ${verIgn ? 'activo' : ''}" id="ver-ign">Ignorados</button>`;
+  document.querySelectorAll('#f-danadas [data-f]').forEach(b => b.onclick = () => { fDan = b.dataset.f; pintarDanadas(); });
+  document.getElementById('ver-ign').onclick = () => { verIgn = !verIgn; cargarDanadas(); };
+  const lista = danadas.filter(a => pasa(a, fDan));
+  const cont = document.getElementById('l-danadas');
+  if (!lista.length) { cont.innerHTML = `<div class="sin-problemas">${verIgn ? 'No hay álbumes ignorados.' : 'Ninguna pista con problemas entre las revisadas.'}</div>`; return; }
+  cont.innerHTML = lista.map((a, i) => `<div class="panel s-album">
+    <div class="s-fila"><div style="min-width:0"><div class="t">${esc(a.artista)} — ${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
+      <div class="s">${a.danada ? `<span class="mal">${a.danada} dañada${a.danada > 1 ? 's' : ''}</span> · ` : ''}${a.falta ? `<span class="mal">${a.falta} sin archivo</span> · ` : ''}${a.errores ? `<span class="med">${a.errores} con errores</span>` : ''}</div>
+      <div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(a.carpeta))}</div></div>
+      <div class="acciones" style="margin:0"><a class="btn chico oro" href="${buscarUrl(a.artista, a.album)}">Buscar para re-descargar</a>
+        <a class="btn chico" href="/biblioteca/album/${a.album_id}">Abrir ficha</a>
+        <button class="btn chico" data-ign="${i}">${verIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div>
+    <details><summary class="s">Ver pistas (${a.pistas.length})</summary>
+      <div class="tabla-wrap"><table>${a.pistas.map(p => `<tr><td class="num">${p.disco > 1 ? p.disco + '-' : ''}${esc(p.numero ?? '')}</td>
+        <td>${esc(p.titulo || p.archivo)}<div class="s mono muy-tenue">${esc(p.archivo)}</div></td>
+        <td><span class="${ESTADOS[p.estado][1]}">⚠ ${ESTADOS[p.estado][0]}</span>${p.estado === 'danada' && p.segundos != null && p.duracion ? ` <span class="s tenue">(se lee hasta ${mmss(p.segundos)} de ${mmss(p.duracion)})</span>` : ''}
+          ${p.errores.map(e => `<div class="s mono muy-tenue">${esc(e)}</div>`).join('')}</td></tr>`).join('')}</table></div></details>
+  </div>`).join('');
+  cont.querySelectorAll('[data-ign]').forEach(b => b.onclick = async () => {
+    b.disabled = true; await post('/api/salud/ignorar', {carpeta: lista[+b.dataset.ign].carpeta, si: !verIgn}); cargarDanadas();
+  });
+}
+
+cargarDiscos();
+cargarEstado();
+cargarDanadas();
+setInterval(cargarEstado, 4000);
+setInterval(() => { if (est && est.activa && !document.querySelector('#l-danadas details[open]')) cargarDanadas(); }, 30000);
+</script>
+{% endblock %}
