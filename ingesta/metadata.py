@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 
 from . import analisis, recursos
@@ -24,6 +25,14 @@ CARPETA_SCRIPTS = os.path.join(BASE, 'tools', 'metadata')
 DEPENDENCIAS = ('requests', 'tqdm', 'rapidfuzz', 'dotenv', 'mutagen')
 OPCIONALES = ('numpy', 'langdetect')      # sin ellos los scripts funcionan, pero más lento / sin idioma de letras
 LIMITE_S = {'index': 1800, 'richmeta': 7200, 'import': 1800, 'relations': 3600, 'lastfm': 1800}
+# los pasos que van pista por pista escalan con el álbum: una caja de 490 pistas (The Piano) necesitaba más de las
+# 2 h fijas de RichMeta (letras + ánimo ~15 s por pista). El límite es el mayor de los dos.
+SEG_POR_PISTA = {'index': 10, 'richmeta': 60, 'import': 10}
+SIN_SALIDA_S = 1800      # un script que no escribe nada en 30 min se da por colgado (aunque no haya llegado al límite)
+
+
+def limite(paso, n_pistas):
+    return max(LIMITE_S[paso], SEG_POR_PISTA.get(paso, 0) * (n_pistas or 0))
 
 
 def python_scripts(aj):
@@ -60,8 +69,25 @@ def _correr(nombre, args, reg, aj, limite):
     p = subprocess.Popen(cmd, cwd=trabajo, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, errors='replace', env=env)
     ultimas = []
+    vigia = {'ultima': time.time(), 'motivo': None}
+
+    def vigilar():
+        # sin esto, un script colgado sin escribir nada no se cortaba nunca (el límite se revisaba al llegar una línea)
+        while p.poll() is None:
+            ahora = time.time()
+            if ahora - t0 > limite:
+                vigia['motivo'] = f'{args[0]} superó {limite // 60} minutos'
+            elif ahora - vigia['ultima'] > SIN_SALIDA_S:
+                vigia['motivo'] = f'{args[0]} no escribió nada en {SIN_SALIDA_S // 60} minutos (¿colgado?)'
+            if vigia['motivo']:
+                p.kill()
+                return
+            time.sleep(10)
+
+    threading.Thread(target=vigilar, daemon=True).start()
     try:
         for linea in p.stdout:
+            vigia['ultima'] = time.time()
             linea = linea.rstrip()
             # las barras de tqdm llegan como muchas líneas con \r: solo se guarda la última de cada tanda
             if '\r' in linea:
@@ -72,13 +98,12 @@ def _correr(nombre, args, reg, aj, limite):
             ultimas = ultimas[-40:]
             if '%|' not in linea:
                 reg('   ' + linea[:300])
-            if time.time() - t0 > limite:
-                p.kill()
-                raise RuntimeError(f'{args[0]} superó {limite // 60} minutos')
         p.wait(timeout=60)
     finally:
         if p.poll() is None:
             p.kill()
+    if vigia['motivo']:
+        raise RuntimeError(vigia['motivo'])
     seg = time.time() - t0
     if p.returncode != 0:
         raise RuntimeError(f'{args[0]} terminó con código {p.returncode}: ' + ' | '.join(ultimas[-3:]))
@@ -138,9 +163,11 @@ def correr(ruta, aj, reg, richmeta_completo=False):
         raise RuntimeError(f'Al Python de los scripts ({prueba["python"]}) le faltan módulos: '
                            f'{", ".join(prueba["faltan"]) or prueba.get("error")}')
     reg('Etapa 3: metadata')
+    n_pistas = sum(1 for _r, _d, fs in os.walk(ruta) for f in fs
+                   if os.path.splitext(f)[1].lower() in analisis.AUDIO_EXT and not f.startswith('._'))
     # --update: si el álbum ya estaba (otra pasada de metadata), se vuelven a leer sus archivos conservando los IDs
     _correr('index', ['index_libraryV3.py', '--update', '--album', ruta, '--db', db, '--root', raiz, '--quiet'],
-            reg, aj, LIMITE_S['index'])
+            reg, aj, limite('index', n_pistas))
     aid = album_id(db, ruta)
     if not aid:
         raise RuntimeError('El indexador terminó pero el álbum no aparece en music.db')
@@ -150,8 +177,8 @@ def correr(ruta, aj, reg, richmeta_completo=False):
     # «resume» = pistas sin procesar + las que aún no tienen letra sincronizada: en un álbum nuevo es lo mismo que
     # «pending», y al correr la metadata de nuevo vuelve a buscar las letras que faltaron (con «pending» se saltaban)
     _correr('richmeta', ['RichMetaDSD3.py', ruta, '--mode', 'full' if richmeta_completo else 'resume'], reg, aj,
-            LIMITE_S['richmeta'])
-    _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, LIMITE_S['import'])
+            limite('richmeta', n_pistas))
+    _correr('import', ['import_richmetapro.py', '--album', ruta, '--db', db], reg, aj, limite('import', n_pistas))
     _correr('relations', ['RichMetaRelations3.py', '--album', str(aid), '--all', '--db', db], reg, aj,
             LIMITE_S['relations'])
     _correr('lastfm', ['lastfm_fetch2.py', '--scope', f'album:{aid}', '--db', db], reg, aj, LIMITE_S['lastfm'])
