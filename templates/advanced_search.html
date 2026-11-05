@@ -237,12 +237,15 @@ window.AdvResults = (function () {
               ${artistLink}
             </div>
             <div class="aci-footer">
-              ${a.primary_format ? `<span class="aci-quality">
+              ${a.calidad ? `<span class="aci-quality" title="${a.calidad.mixto ? 'Calidad de la mayoría de las pistas' : 'Calidad del álbum'}">
+                <span class="led-diamond-wrap led-d-${a.calidad.color}">${diamondSvg(a.calidad.color, 'sm')}</span>${a.calidad.mixto && a.calidad.color2 ? `<span class="led-diamond-wrap led-d-${a.calidad.color2}">${diamondSvg(a.calidad.color2, 'sm')}</span>` : ''}
+                <span class="track-format-badge format-${a.calidad.color}">${esc(a.calidad.texto)}</span>
+              </span>` : (a.primary_format ? `<span class="aci-quality">
                 <span class="led-diamond-wrap led-d-${a.album_led || 'yellow'}">${diamondSvg(a.album_led || 'yellow', 'sm')}</span>
                 <span class="track-format-badge format-${a.album_led || 'yellow'}">${esc(a.primary_format)}</span>
-              </span>` : ''}
+              </span>` : '')}
               <span class="aci-stats">
-                ${a.year || ''}${a.year && a.track_count ? ' · ' : ''}${a.track_count ? a.track_count + ' pistas' : ''}${a.duration_fmt ? ' · ' + a.duration_fmt : ''}
+                ${a.year || ''}${a.year && (a.track_count || a.n_discos > 1) ? ' · ' : ''}${a.n_discos > 1 ? a.n_discos + ' discos' : (a.track_count ? a.track_count + ' pistas' : '')}${a.duration_fmt ? ' · ' + a.duration_fmt : ''}
               </span>
             </div>
           </div>
