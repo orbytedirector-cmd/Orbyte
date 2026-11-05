@@ -118,6 +118,9 @@ MODE_FULL    = "full"       # todas las pistas (comportamiento original)
 MODE_PENDING = "pending"    # solo pistas sin registro en audit
 MODE_LYRICS  = "no_lyrics"  # solo pistas con audit pero sin synced lyrics
 MODE_RESUME  = "resume"     # union: pending + sin synced lyrics (recomendado)
+# --sin-letras (la ingesta lo pasa cuando en la Bandeja desmarcas «Buscar letras»: música clásica, instrumental…):
+# no se consulta LRCLib ni Tidal; las letras que ya traiga el archivo se conservan
+SIN_LETRAS   = False
 
 LASTFM_API_KEY   = os.environ.get("LASTFM_API_KEY", "")
 ACOUSTID_API_KEY = os.environ.get("ACOUSTID_API_KEY", "")
@@ -2408,6 +2411,8 @@ def procesar(path: str, audit_log: list) -> dict:
         lrc_result = existing["lrc_incrustada"]
         log.info("  · %s — Letra sincronizada ya incrustada%s: no se busca en LRCLib (se ordena en SYNCEDLYRICS)",
                  title, " por Tidal" if lrc_result.get("fuente") == "Tidal" else " en el archivo")
+    elif SIN_LETRAS:
+        log.info("  · %s — Letras: no se buscan (desactivado para este álbum)", title)
     elif not existing["has_synced_lrc"]:
         _lrc_raw = buscar_lrclib(title=title, artist=artist,
                                   album=album or (mb_details.get("album") if mb_details else ""),
@@ -2568,7 +2573,7 @@ def seleccionar_pistas(album_path: Path, mode: str) -> List[Path]:
     audit_idx: dict = {Path(r.get("file", "")).name: r for r in audit}
 
     pending   = [f for f in all_files if f.name not in audit_idx]
-    no_lyrics = [f for f in all_files
+    no_lyrics = [] if SIN_LETRAS else [f for f in all_files
                  if f.name in audit_idx
                  and not audit_idx[f.name].get("has_synced_lrc_final", False)]
 
@@ -3001,11 +3006,17 @@ if __name__ == "__main__":
         help=f"Hilos paralelos (default: {MAX_WORKERS})",
     )
     parser.add_argument(
+        "--sin-letras",
+        action="store_true",
+        help="No buscar letras en LRCLib ni Tidal (álbumes instrumentales o de música clásica)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Mostrar logs DEBUG en consola",
     )
     args = parser.parse_args()
+    SIN_LETRAS = bool(args.sin_letras)
 
     if args.verbose:
         console_handler.setLevel(logging.DEBUG)
