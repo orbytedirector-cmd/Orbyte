@@ -1685,7 +1685,9 @@ def api_reparar_plan():
     if not rutas or not all(rutas):
         return jsonify(ok=False, error='Alguna pista no está en la biblioteca ni en la entrada'), 400
     try:
-        p = reparar_mod.plan(rutas, almacen.ajustes().get('db_orbyte'), d.get('edicion_id'))
+        elegir = {_ruta_reparable(k): v for k, v in (d.get('elegir') or {}).items()}
+        p = reparar_mod.plan(rutas, almacen.ajustes().get('db_orbyte'), d.get('edicion_id'),
+                             busqueda=d.get('busqueda'), elegir={k: v for k, v in elegir.items() if k})
     except reparar_mod.Fallo as e:
         return jsonify(ok=False, error=str(e)), 409
     except Exception as e:

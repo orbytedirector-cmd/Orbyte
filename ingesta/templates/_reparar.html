@@ -3,7 +3,7 @@
 <div class="modal-fondo" id="r-modal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="r-tit" style="width:min(980px,100%)">
     <div class="modal-cab"><b id="r-tit">Reparar pistas dañadas</b>
-      <span class="s tenue" style="display:block;margin-top:.3rem">Se baja de Tidal solo cada pista marcada, se verifica (decodifica sin errores y dura lo mismo), recibe la metadata de la vieja y la reemplaza en el mismo lugar con el mismo nombre. Para Orbyte es el mismo archivo: escuchas, favoritos y playlists no cambian.</span></div>
+      <span class="s tenue" style="display:block;margin-top:.3rem">Se baja de Tidal solo cada pista marcada, se verifica (decodifica sin errores y dura lo mismo), recibe la metadata de la vieja (o, si no se puede leer, la del álbum y la de Orbyte) y la reemplaza en el mismo lugar con el mismo nombre. Para Orbyte es el mismo archivo: escuchas, favoritos y playlists no cambian.</span></div>
     <div class="modal-cuerpo" id="r-cuerpo"></div>
     <div class="modal-pie"><span class="tenue t-nota" id="r-nota"></span>
       <span style="display:flex;gap:.5rem"><button class="btn" id="r-cancelar">Cancelar</button>
@@ -19,41 +19,91 @@
   const num = (d, n) => `${d && d > 1 ? d + '-' : ''}${String(n ?? '?').padStart(2, '0')}`;
   const chipQ = q => q ? `<span class="chip q-${q.startsWith('HR') ? 'HR' : 'CD'}"><span class="led"></span>${esc(q.replace('-', ' '))}</span>` : '<span class="tenue">?</span>';
 
-  async function cargar(edicion) {
-    cuerpo.innerHTML = '<div class="estado-vivo"><span class="giro"></span>Buscando la edición en Tidal y emparejando las pistas…</div>';
+  async function cargar() {
+    cuerpo.innerHTML = `<div class="estado-vivo"><span class="giro"></span>${st.busqueda ? 'Buscando en Tidal…' : 'Buscando la edición en Tidal y emparejando las pistas…'}</div>`;
     ok.disabled = true; nota.textContent = '';
-    const r = await post('/api/reparar/plan', {rutas: st.rutas, edicion_id: edicion || null});
-    if (!r || r.ok === false) { cuerpo.innerHTML = `<div class="flash error">${esc((r && r.error) || 'No se pudo')}</div>`; return; }
+    const r = await post('/api/reparar/plan', {rutas: st.rutas, edicion_id: st.edicion || null,
+                                               busqueda: st.busqueda || null, elegir: st.elegir});
+    if (!r || r.ok === false) {
+      cuerpo.innerHTML = buscador(st.busqueda || '') + `<div class="flash error">${esc((r && r.error) || 'No se pudo')}</div>`;
+      enlazarBuscador(); return;
+    }
     st.plan = r; st.sel = {};
-    r.pistas.forEach(p => { st.sel[p.ruta] = {on: !!(p.reparable && p.pareja && p.igual), acepto: false}; });
+    r.pistas.forEach(p => { st.sel[p.ruta] = {on: !!(p.reparable && p.pareja && p.igual && !p.confirmar_duracion), acepto: false, aceptoDur: false}; });
     pintar();
   }
+  // Búsqueda manual: texto libre o enlace de Tidal del álbum o de la pista.
+  function buscador(valor) {
+    return `<div class="campo" style="margin:0 0 .7rem"><label for="r-q">Buscar en Tidal</label>
+      <div class="ayuda">Texto (artista y álbum) o el enlace de Tidal del álbum o de la pista.</div>
+      <div class="fila-in"><input type="text" id="r-q" value="${esc(valor)}" placeholder="B.B. King Lucille · https://tidal.com/browse/track/…" style="flex:1;min-width:0">
+        <button class="btn chico" id="r-buscar" type="button">Buscar</button>
+        ${st.busqueda ? '<button class="btn chico" id="r-auto" type="button" title="Volver a la búsqueda automática">Automática</button>' : ''}</div></div>`;
+  }
+  function enlazarBuscador() {
+    const q = document.getElementById('r-q');
+    const ir = () => { const v = q.value.trim(); if (!v) return; st.busqueda = v; st.edicion = null; st.elegir = {}; cargar(); };
+    document.getElementById('r-buscar').onclick = ir;
+    q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ir(); } };
+    const a = document.getElementById('r-auto');
+    if (a) a.onclick = () => { st.busqueda = null; st.edicion = null; st.elegir = {}; cargar(); };
+  }
+  const difTxt = d => d == null ? '' : (Math.abs(d) < 0.5 ? '' : ` <span class="${Math.abs(d) > 2 ? 'med' : 'tenue'}">(${d > 0 ? '+' : '−'}${Math.round(Math.abs(d))} s)</span>`);
   function pintar() {
     const p = st.plan;
+    const eds = p.ediciones || [];
     cuerpo.innerHTML = `
       <div class="s-fila" style="margin-bottom:.6rem"><div style="min-width:0">
         <div class="t">${esc(p.artista)} — ${esc(p.album)}</div>
-        <div class="s tenue">${p.n_pistas} pistas en la carpeta · calidad del álbum: ${p.calidad_album ? chipQ(p.calidad_album) : '?'}</div></div>
-        <div class="campo" style="margin:0;min-width:260px"><label for="r-ed">Edición en Tidal</label>
-          <select id="r-ed">${p.ediciones.map(e => `<option value="${esc(e.id)}" ${e.id === p.edicion.id ? 'selected' : ''}>${esc(e.titulo)}${e.anio ? ' (' + esc(e.anio) + ')' : ''} · ${e.n_pistas || '?'} pistas${e.hires ? ' · Hi-Res' : ''} · ${esc(e.como)}</option>`).join('')}</select></div></div>
+        <div class="s tenue">${p.n_pistas} pistas en la carpeta · calidad del álbum: ${p.calidad_album ? chipQ(p.calidad_album) : '?'}</div>
+        ${(p.fuentes || []).length ? `<div class="s muy-tenue">Datos de: ${esc(p.fuentes.join(' + '))}</div>` : ''}</div></div>
+      ${buscador(p.consulta || '')}
+      ${p.aviso ? `<div class="flash" style="margin-bottom:.7rem">${esc(p.aviso)}</div>` : ''}
+      ${eds.length ? `<div class="s tenue" style="margin-bottom:.3rem">Edición en Tidal${p.manual ? ' (búsqueda manual)' : ''}</div>
+        <div role="radiogroup" aria-label="Edición en Tidal" style="max-height:230px;overflow-y:auto;display:flex;flex-direction:column;gap:.35rem;margin-bottom:.8rem">
+        ${eds.map(e => `<label style="display:flex;gap:.6rem;align-items:center;padding:.35rem .5rem;border-radius:8px;cursor:pointer;border:1px solid ${e.id === p.edicion.id ? 'var(--borde-oro)' : 'transparent'};background:${e.id === p.edicion.id ? 'var(--oro-tenue)' : 'transparent'}">
+          <input type="radio" name="r-ed" value="${esc(e.id)}" ${e.id === p.edicion.id ? 'checked' : ''}>
+          ${e.portada ? `<img src="${esc(e.portada)}" alt="" width="40" height="40" style="border-radius:4px;flex:none" loading="lazy">` : '<span style="width:40px;height:40px;flex:none"></span>'}
+          <span style="min-width:0"><span class="t">${esc(e.titulo)}${e.anio ? ' (' + esc(e.anio) + ')' : ''}</span>
+            <span class="s tenue" style="display:block">${esc(e.artista || '')} · ${e.n_pistas || '?'} pistas${e.hires ? ' · Hi-Res' : ''} · ${esc(e.como || '')}</span></span></label>`).join('')}
+        </div>` : ''}
       <div class="tabla-wrap"><table>
         <tr><th style="width:1%"></th><th>Pista dañada</th><th>En Tidal</th><th>Qué pasa</th></tr>
         ${p.pistas.map((x, i) => {
           const s = st.sel[x.ruta], pa = x.pareja;
           let que;
           if (!x.reparable || !pa) que = `<span class="mal">✗ ${esc(x.motivo || 'sin pareja')}</span>`;
-          else if (x.igual) que = '<span class="ok">✓ misma calidad</span>';
-          else que = `<span class="med">⚠ Tidal la entrega en ${esc(pa.calidad || '?')} y el álbum es ${esc(p.calidad_album || '?')}</span>
-            <label class="s" style="display:block;margin-top:.25rem"><input type="checkbox" data-acepto="${i}" ${s.acepto ? 'checked' : ''}>
-            Usarla igual: el título queda «${esc((x.titulo || '').replace(/\s*\((CD|HR)-[^)]*\)$/, ''))} (${esc(pa.calidad || '?')})»</label>`;
+          else {
+            que = x.igual ? '<span class="ok">✓ misma calidad</span>'
+              : `<span class="med">⚠ Tidal la entrega en ${esc(pa.calidad || '?')} y el álbum es ${esc(p.calidad_album || '?')}</span>
+                <label class="s" style="display:block;margin-top:.25rem"><input type="checkbox" data-acepto="${i}" ${s.acepto ? 'checked' : ''}>
+                Usarla igual: el título queda «${esc((x.titulo || '').replace(/\s*\((CD|HR)-[^)]*\)$/, ''))} (${esc(pa.calidad || '?')})»</label>`;
+            if (x.confirmar_duracion) {
+              const d = x.dif_duracion || 0;
+              que += `<div style="margin-top:.35rem"><span class="med">⚠ dura ${Math.round(Math.abs(d))} s ${d > 0 ? 'más' : 'menos'} que la vieja</span>
+                <label class="s" style="display:block;margin-top:.25rem"><input type="checkbox" data-dur="${i}" ${s.aceptoDur ? 'checked' : ''}> Usar igual</label></div>`;
+            }
+          }
+          const opciones = (p.pistas_tidal || []).map(t => `<option value="${esc(t.id)}" ${pa && String(pa.id) === String(t.id) ? 'selected' : ''}>${num(t.disco, t.numero)} ${esc(t.titulo)} · ${mmss(t.duracion)}</option>`).join('');
+          const enTidal = (p.pistas_tidal || []).length
+            ? `<select data-elegir="${i}" aria-label="Pista de Tidal para ${esc(x.titulo || x.archivo)}" style="max-width:100%">
+                 ${pa ? '' : '<option value="" selected>— elige la pista —</option>'}${opciones}</select>
+               ${pa ? `<div class="s">${mmss(pa.duracion)}${difTxt(x.dif_duracion)} · ${chipQ(pa.calidad)}${x.manual ? ' · <span class="tenue">elegida a mano</span>' : ''}</div>` : ''}`
+            : '<span class="tenue">—</span>';
           return `<tr><td><input type="checkbox" data-on="${i}" ${s.on ? 'checked' : ''} ${(!x.reparable || !pa) ? 'disabled' : ''} aria-label="Reparar ${esc(x.titulo || x.archivo)}"></td>
             <td><div class="t">${num(x.disco, x.numero)} ${esc(x.titulo || '')}</div>
               <div class="s">${mmss(x.duracion)} · ${chipQ(x.calidad)}</div><div class="s mono muy-tenue" style="word-break:break-all">${esc(x.archivo)}</div></td>
-            <td>${pa ? `<div class="t">${num(pa.disco, pa.numero)} ${esc(pa.titulo || '')}</div><div class="s">${mmss(pa.duracion)} · ${chipQ(pa.calidad)}</div>` : '<span class="tenue">—</span>'}</td>
+            <td style="min-width:240px">${enTidal}</td>
             <td>${que}</td></tr>`;
         }).join('')}
       </table></div>`;
-    document.getElementById('r-ed').onchange = e => cargar(e.target.value);
+    enlazarBuscador();
+    cuerpo.querySelectorAll('input[name=r-ed]').forEach(r => r.onchange = () => { st.edicion = r.value; st.elegir = {}; cargar(); });
+    cuerpo.querySelectorAll('[data-elegir]').forEach(c => c.onchange = () => {
+      const x = st.plan.pistas[+c.dataset.elegir];
+      if (!c.value) return;
+      st.edicion = st.plan.edicion.id; st.elegir[x.ruta] = c.value; cargar();
+    });
     cuerpo.querySelectorAll('[data-on]').forEach(c => c.onchange = () => {
       const x = st.plan.pistas[+c.dataset.on]; st.sel[x.ruta].on = c.checked; resumen();
     });
@@ -62,22 +112,31 @@
       if (c.checked) st.sel[x.ruta].on = true;
       pintar();
     });
+    cuerpo.querySelectorAll('[data-dur]').forEach(c => c.onchange = () => {
+      const x = st.plan.pistas[+c.dataset.dur]; st.sel[x.ruta].aceptoDur = c.checked;
+      if (c.checked) st.sel[x.ruta].on = true;
+      pintar();
+    });
     resumen();
   }
+  const lista = x => {
+    const s = st.sel[x.ruta];
+    return s.on && x.reparable && x.pareja && (x.igual || s.acepto) && (!x.confirmar_duracion || s.aceptoDur);
+  };
   function elegidas() {
     const out = {};
     st.plan.pistas.forEach(x => {
       const s = st.sel[x.ruta];
-      if (s.on && x.reparable && x.pareja && (x.igual || s.acepto)) out[x.ruta] = {acepto_calidad: !x.igual && s.acepto};
+      if (lista(x)) out[x.ruta] = {acepto_calidad: !x.igual && s.acepto, acepto_duracion: !!(x.confirmar_duracion && s.aceptoDur)};
     });
     return out;
   }
   function resumen() {
     const n = Object.keys(elegidas()).length;
-    const pend = st.plan.pistas.filter(x => st.sel[x.ruta].on && x.reparable && x.pareja && !x.igual && !st.sel[x.ruta].acepto).length;
+    const pend = st.plan.pistas.filter(x => st.sel[x.ruta].on && x.reparable && x.pareja && !lista(x)).length;
     ok.disabled = !n;
     ok.textContent = n ? `Reparar ${n} pista${n > 1 ? 's' : ''}` : 'Reparar';
-    nota.textContent = pend ? `${pend} marcada${pend > 1 ? 's' : ''} con otra calidad: acéptala o desmárcala` : (n ? 'De a una, con pausa · la vieja se borra solo si la nueva pasa la verificación' : 'Marca al menos una');
+    nota.textContent = pend ? `${pend} marcada${pend > 1 ? 's' : ''} con otra calidad o duración: acéptala o desmárcala` : (n ? 'De a una, con pausa · la vieja se borra solo si la nueva pasa la verificación' : 'Marca al menos una');
   }
   document.getElementById('r-cancelar').onclick = () => { m.hidden = true; };
   m.addEventListener('click', e => { if (e.target === m) m.hidden = true; });
@@ -90,9 +149,9 @@
     if (window.alEncolarReparacion) window.alEncolarReparacion();
   };
   window.abrirReparar = function (o) {
-    st = {rutas: o.rutas || [], aid: o.aid || null};
+    st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}};
     m.hidden = false;
-    cargar(null);
+    cargar();
   };
 })();
 </script>
