@@ -28,7 +28,7 @@ from werkzeug.security import check_password_hash
 
 from . import analisis
 from .almacen import Almacen
-from .trabajador import Procesador
+from .trabajador import Procesador, borrar_union
 from .vigilante import Vigilante
 from . import metadata as metadata_mod
 from . import procesar
@@ -463,6 +463,10 @@ def api_descartar(aid):
         return jsonify(ok=False), 409
     if a.get('origen') == 'reproceso':          # cancelar: vuelve a como estaba en la biblioteca (nada se tocó)
         almacen.cancelar_reproceso(aid)
+        union = (a.get('cambios') or {}).get('union')
+        if union:                                # «Unir como discos»: solo se borran los enlaces armados
+            borrar_union(almacen, a['ruta'])
+            return jsonify(ok=True, ir=_ficha_de_ruta(union[0]))
         return jsonify(ok=True, ir=_ficha_de_ruta(a['ruta']))
     almacen.actualizar(aid, estado='descartado', progreso=None)
     return jsonify(ok=True)
@@ -1342,6 +1346,145 @@ def api_reprocesar(k, i):
     return jsonify(ok=True, ir=url_for('album', aid=aid))
 
 
+# ─────────────────────────── unir álbumes como discos de uno solo ───────────────────────────
+# Dos (o más) álbumes de la biblioteca que en realidad son los discos de uno solo («Garage Inc» 11 pistas +
+# «Garage Inc.» 15 pistas): se arma en ingesta_datos/unir una carpeta con una subcarpeta «CD N» por álbum (enlaces a
+# sus archivos, no se copia ni se mueve nada) y se revisa como un reproceso. Al terminar la metadata del álbum unido,
+# reemplaza a todos (escuchas, favoritos y playlists pasan al nuevo) y recién ahí se borran sus carpetas.
+
+UNIR = os.path.join(DATOS, 'unir')
+MAX_UNIR = 9
+
+
+def _grupos_bib():
+    aj = almacen.ajustes()
+    return analisis.biblioteca(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+
+
+def _discos_tag(ids):
+    """{album_id: disco más frecuente en sus tags (o None)} desde music.db."""
+    if not ids:
+        return {}
+    con = sqlite3.connect(f'file:{almacen.ajustes()["db_orbyte"]}?mode=ro', uri=True, timeout=30)
+    try:
+        filas = con.execute(f'SELECT album_id, disc_number FROM tracks WHERE album_id IN ({",".join("?" * len(ids))})',
+                            list(ids)).fetchall()
+    finally:
+        con.close()
+    cuenta = {}
+    for aid, d in filas:
+        try:
+            n = int(str(d or '').split('/')[0])
+        except ValueError:
+            continue
+        cuenta.setdefault(aid, {}).setdefault(n, 0)
+        cuenta[aid][n] += 1
+    return {aid: max(c, key=c.get) for aid, c in cuenta.items() if c}
+
+
+def _info_union(g, discos):
+    d = [discos.get(i) for i in g['ids'] if discos.get(i)]
+    return {'ruta': g['ruta'], 'id': g['ids'][0], 'album': g['album'], 'anio': g.get('anio'), 'artista': g['artista'],
+            'n_pistas': g['pistas'], 'tag': g.get('tag'), 'formato': g.get('formato'),
+            'disco_tag': max(set(d), key=d.count) if d else None}
+
+
+def _subcarpetas_con_audio(ruta, excluir):
+    """Subcarpetas de `ruta` con audio (sin contar las que también se unen): si hay, ya es de varios discos."""
+    con_audio = []
+    for raiz, dirs, archivos in os.walk(ruta):
+        dirs[:] = [d for d in dirs if not d.startswith('.') and os.path.join(raiz, d).rstrip('/') not in excluir]
+        if raiz != ruta and any(os.path.splitext(a)[1].lower() in analisis.AUDIO_EXT and not a.startswith('._')
+                                for a in archivos):
+            con_audio.append(os.path.relpath(raiz, ruta))
+    return con_audio
+
+
+@app.route('/api/unir/candidatos')
+def api_unir_candidatos():
+    """Álbumes del mismo artista para unir como discos con el álbum ?oid= (o ?ruta=), los de nombre parecido primero."""
+    try:
+        bib = _grupos_bib()
+    except Exception as e:
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+    oid = request.args.get('oid', type=int)
+    ruta = (request.args.get('ruta') or '').rstrip('/')
+    base = next((g for g in (bib or {}).get('grupos', [])
+                 if (oid and oid in g['ids']) or (ruta and g['ruta'].rstrip('/') == ruta)), None)
+    if not base:
+        return jsonify(ok=False, error='Ese álbum no está en Orbyte'), 404
+    cands = []
+    for g in bib['grupos']:
+        if g is base or analisis._parecido(base['n_artista'], g['n_artista']) < 0.88:
+            continue
+        cands.append((analisis._parecido(_limpio(base['album']), _limpio(g['album'])), g))
+    cands.sort(key=lambda x: (-x[0], str(x[1].get('anio') or ''), x[1]['n_album']))
+    cands = cands[:30]
+    discos = _discos_tag(base['ids'] + [i for _s, g in cands for i in g['ids']])
+    return jsonify(ok=True, base=_info_union(base, discos), raiz=(almacen.ajustes().get('biblioteca') or '/mnt/musica'),
+                   candidatos=[dict(_info_union(g, discos), parecido=round(sc, 2)) for sc, g in cands])
+
+
+@app.route('/api/unir', methods=['POST'])
+def api_unir():
+    """{rutas: [...]} en el orden de los discos → arma la carpeta de enlaces y la deja en la cola de revisión."""
+    rutas = [str(r).rstrip('/') for r in (request.get_json(silent=True) or {}).get('rutas') or []]
+    if len(rutas) < 2 or len(set(rutas)) != len(rutas):
+        return jsonify(ok=False, error='Elige al menos dos álbumes distintos'), 400
+    if len(rutas) > MAX_UNIR:
+        return jsonify(ok=False, error=f'Máximo {MAX_UNIR} discos'), 400
+    try:
+        bib = _grupos_bib()
+    except Exception as e:
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+    por_ruta = {g['ruta'].rstrip('/'): g for g in (bib or {}).get('grupos', [])}
+    raiz = os.path.realpath(almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    for r in rutas:
+        if r not in por_ruta:
+            return jsonify(ok=False, error=f'«{os.path.basename(r)}» no está en Orbyte'), 404
+        if not os.path.realpath(r).startswith(raiz + os.sep) or not os.path.isdir(r):
+            return jsonify(ok=False, error=f'«{os.path.basename(r)}» no está en la carpeta de la biblioteca'), 400
+        fila = almacen.album(almacen.fila_de_ruta(r)) if almacen.fila_de_ruta(r) else None
+        if fila and fila['estado'] not in EN_BIBLIOTECA:
+            return jsonify(ok=False, error=f'«{os.path.basename(r)}» se está procesando: espera a que termine'), 409
+        sub = _subcarpetas_con_audio(r, set(rutas))
+        if sub:
+            return jsonify(ok=False, error=f'«{os.path.basename(r)}» ya tiene discos en subcarpetas '
+                                           f'({", ".join(sub[:3])}): reprocésalo primero para dejarlo en una carpeta'), 400
+    for uid, otras in almacen.uniones_activas():
+        if set(otras) & set(rutas):
+            return jsonify(ok=False, error='Alguno de esos álbumes ya está en otra unión en curso',
+                           ir=url_for('album', aid=uid)), 409
+    # carpeta de enlaces: <unir>/<marca>/<nombre del disco 1>/CD N/… (los archivos de cada álbum, con sus subcarpetas
+    # de escaneos; sin la carpeta de otro álbum que se une, si está anidada)
+    tanda = os.path.join(UNIR, datetime.now().strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(3))
+    destino = os.path.join(tanda, analisis.nombre_seguro(os.path.basename(rutas[0])) or 'Album')
+    excluir = set(rutas)
+    try:
+        for n, r in enumerate(rutas, 1):
+            cd = os.path.join(destino, f'CD {n}')
+            os.makedirs(cd, exist_ok=True)
+            for raiz_w, dirs, archivos in os.walk(r):
+                dirs[:] = [d for d in dirs if not d.startswith('.') and os.path.join(raiz_w, d).rstrip('/') not in excluir]
+                for a in archivos:
+                    if a.startswith('.'):
+                        continue
+                    origen = os.path.join(raiz_w, a)
+                    dst = os.path.join(cd, os.path.relpath(origen, r))
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    os.symlink(origen, dst)
+    except OSError as e:
+        shutil.rmtree(tanda, ignore_errors=True)
+        return jsonify(ok=False, error=f'No se pudo armar la unión: {e}'), 500
+    nombres = ' + '.join(f'«{os.path.basename(r)}»' for r in rutas)
+    aid = almacen.iniciar_union(destino, f'Unir {len(rutas)} discos: {nombres}', analisis.firma(destino), rutas)
+    almacen.registrar(aid, f'Unir como un álbum de {len(rutas)} discos (no se mueve nada hasta ubicar):')
+    for n, r in enumerate(rutas, 1):
+        almacen.registrar(aid, f'  Disco {n}: {os.path.relpath(r, raiz)} · {por_ruta[r]["pistas"]} pistas')
+    vigilante.ya()
+    return jsonify(ok=True, ir=url_for('album', aid=aid))
+
+
 # ─────────────────────────── carátula de un álbum ya en la biblioteca ───────────────────────────
 # <k>: «b» = álbum de Orbyte (ficha de Biblioteca, id de music.db) · «a» = fila de Ingesta ya ubicada (ficha de Bandeja)
 
@@ -2108,7 +2251,8 @@ def caratula(aid):
         raices = (base, os.path.realpath(r['origen_entrada']))
     else:
         base = os.path.realpath(a['ruta'])
-        raices = (base,)
+        # «Unir como discos»: la carpeta tiene enlaces a los archivos de los álbumes de la biblioteca
+        raices = (base,) + tuple(os.path.realpath(u) for u in (a.get('cambios') or {}).get('union') or [])
     raiz = base
     disco = request.args.get('disco', type=int)
     archivo = None

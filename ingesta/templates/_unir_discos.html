@@ -1,0 +1,100 @@
+{# «Unir como un álbum de varios discos»: abrirUnir({oid}) desde la ficha de Biblioteca o abrirUnir({ruta, preseleccion})
+   desde un grupo de Repetidos. Necesita post/esc/toast de base.html. #}
+<div class="modal-fondo" id="u-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="u-tit" style="width:min(760px,100%)">
+    <div class="modal-cab"><b id="u-tit">Unir como un álbum de varios discos</b>
+      <span class="s tenue" style="display:block;margin-top:.3rem">Cada álbum pasa a ser un disco. Se revisa como un reproceso: al terminar la metadata del álbum unido, reemplaza a estos (escuchas, favoritos y playlists pasan al nuevo) y recién ahí se borran sus carpetas.</span></div>
+    <div class="modal-cuerpo" id="u-cuerpo"></div>
+    <div class="modal-pie"><span class="tenue t-nota" id="u-nota"></span>
+      <span style="display:flex;gap:.5rem"><button class="btn" id="u-cancelar">Cancelar</button>
+        <button class="btn oro" id="u-ok" disabled>Unir y reprocesar</button></span></div>
+  </div>
+</div>
+<script>
+(function () {
+  const m = document.getElementById('u-modal'), cuerpo = document.getElementById('u-cuerpo');
+  const ok = document.getElementById('u-ok'), nota = document.getElementById('u-nota');
+  let st = null;   // {raiz, todos: {ruta: info}, sel: [ruta], manual, filtro}
+  const relU = r => r && st && r.startsWith(st.raiz.replace(/\/$/, '') + '/') ? r.slice(st.raiz.replace(/\/$/, '').length + 1) : r;
+  // orden por defecto: el disco de los tags si cada uno marca uno distinto; si no, el de menos pistas primero
+  function ordenar() {
+    if (st.manual) return;
+    const it = st.sel.map(r => st.todos[r]);
+    const tags = it.map(x => x.disco_tag);
+    const porTag = tags.every(t => t) && new Set(tags).size === tags.length;
+    it.sort((a, b) => porTag ? a.disco_tag - b.disco_tag
+      : (a.n_pistas - b.n_pistas) || String(a.anio || '').localeCompare(String(b.anio || '')) || a.ruta.localeCompare(b.ruta));
+    st.sel = it.map(x => x.ruta);
+  }
+  function fila(x, i) {
+    return `<div class="u-disco">
+      <span class="u-n">Disco ${i + 1}</span>
+      <span style="min-width:0;flex:1"><b>${esc(x.album)}</b>${x.anio ? ` <span class="tenue">(${esc(x.anio)})</span>` : ''}
+        ${x.tag ? `<span class="chip q-${esc(x.tag)}"><span class="led"></span>${esc(x.tag)}</span>` : ''}
+        <span class="s tenue">${x.n_pistas} pistas${x.disco_tag ? ` · tags: disco ${x.disco_tag}` : ''}</span>
+        <span class="s mono muy-tenue" style="display:block;word-break:break-all">${esc(relU(x.ruta))}</span></span>
+      <span class="u-mover">
+        <button class="btn chico" data-sube="${i}" ${i === 0 ? 'disabled' : ''} title="Subir" aria-label="Subir">↑</button>
+        <button class="btn chico" data-baja="${i}" ${i === st.sel.length - 1 ? 'disabled' : ''} title="Bajar" aria-label="Bajar">↓</button>
+        <button class="btn chico" data-quita="${i}" title="Quitar" aria-label="Quitar">✕</button></span></div>`;
+  }
+  function pintar() {
+    const q = (st.filtro || '').trim().toLowerCase();
+    const libres = Object.values(st.todos).filter(x => !st.sel.includes(x.ruta)
+      && (!q || `${x.album} ${x.anio || ''}`.toLowerCase().includes(q)));
+    cuerpo.innerHTML = `
+      <div class="rotulo">Discos, en orden</div>
+      <div class="u-discos">${st.sel.length ? st.sel.map((r, i) => fila(st.todos[r], i)).join('')
+        : '<div class="s tenue">Agrega los álbumes que son discos de este.</div>'}</div>
+      <div class="rotulo" style="margin-top:.4rem">Agregar otro álbum de ${esc(st.artista)}</div>
+      <div class="campo"><input type="search" id="u-filtro" class="campo-buscar" placeholder="Filtrar por título…" value="${esc(st.filtro || '')}" aria-label="Filtrar álbumes"></div>
+      <div class="u-libres">${libres.length ? libres.map(x => `<button class="u-libre" data-agrega="${esc(x.ruta)}">
+          <span style="min-width:0;flex:1;text-align:left"><b>${esc(x.album)}</b>${x.anio ? ` <span class="tenue">(${esc(x.anio)})</span>` : ''}
+            <span class="s tenue">· ${x.n_pistas} pistas${x.tag ? ' · ' + esc(x.tag) : ''}</span>
+            <span class="s mono muy-tenue" style="display:block;word-break:break-all">${esc(relU(x.ruta))}</span></span>
+          <span class="s" style="color:var(--oro-claro)">+ Agregar</span></button>`).join('')
+        : '<div class="s tenue">No hay más álbumes de este artista' + (q ? ' con ese texto' : '') + '.</div>'}</div>`;
+    ok.disabled = st.sel.length < 2;
+    nota.textContent = st.sel.length < 2 ? 'Elige al menos dos' : `Quedará un álbum de ${st.sel.length} discos y ${st.sel.reduce((s, r) => s + st.todos[r].n_pistas, 0)} pistas`;
+    const f = document.getElementById('u-filtro');
+    f.oninput = () => { st.filtro = f.value; const pos = f.selectionStart; pintar(); const g = document.getElementById('u-filtro'); g.focus(); g.setSelectionRange(pos, pos); };
+  }
+  cuerpo.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const i = +(b.dataset.sube ?? b.dataset.baja ?? b.dataset.quita);
+    if (b.dataset.sube !== undefined) { [st.sel[i - 1], st.sel[i]] = [st.sel[i], st.sel[i - 1]]; st.manual = true; }
+    else if (b.dataset.baja !== undefined) { [st.sel[i + 1], st.sel[i]] = [st.sel[i], st.sel[i + 1]]; st.manual = true; }
+    else if (b.dataset.quita !== undefined) { st.sel.splice(i, 1); }
+    else if (b.dataset.agrega) { if (st.sel.length >= 9) { toast('Máximo 9 discos', ''); return; } st.sel.push(b.dataset.agrega); ordenar(); }
+    else return;
+    pintar();
+  });
+  document.getElementById('u-cancelar').onclick = () => { m.hidden = true; };
+  m.addEventListener('click', e => { if (e.target === m) m.hidden = true; });
+  ok.onclick = async () => {
+    const lista = st.sel.map((r, i) => `Disco ${i + 1}: ${st.todos[r].album} (${st.todos[r].n_pistas} pistas)`).join('\n');
+    if (!confirm(`¿Unir como un solo álbum?\n\n${lista}\n\nSe revisa como un reproceso; no se mueve ni se borra nada hasta que el álbum unido termine bien su metadata. Puedes cancelar antes de ubicar.`)) return;
+    ok.disabled = true;
+    const r = await post('/api/unir', {rutas: st.sel});
+    if (!r || r.ok === false) {
+      toast('No se pudo unir', (r && r.error) || ''); ok.disabled = false;
+      if (r && r.ir) location.href = r.ir;
+      return;
+    }
+    location.href = r.ir;
+  };
+  window.abrirUnir = async function (o) {
+    m.hidden = false; ok.disabled = true; nota.textContent = '';
+    cuerpo.innerHTML = '<div class="estado-vivo"><span class="giro"></span>Buscando álbumes del artista…</div>';
+    const q = o.oid ? `oid=${o.oid}` : `ruta=${encodeURIComponent(o.ruta)}`;
+    const r = await (await fetch('/api/unir/candidatos?' + q)).json();
+    if (!r.ok) { cuerpo.innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
+    const todos = {[r.base.ruta]: r.base};
+    r.candidatos.forEach(c => { todos[c.ruta] = c; });
+    st = {raiz: r.raiz, artista: r.base.artista, todos, sel: [r.base.ruta], manual: false, filtro: ''};
+    (o.preseleccion || []).forEach(p => { if (todos[p] && !st.sel.includes(p)) st.sel.push(p); });
+    ordenar();
+    pintar();
+  };
+})();
+</script>

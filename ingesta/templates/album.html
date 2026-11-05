@@ -43,7 +43,8 @@
     <h1 class="h-alb">{{ r.album }}{% if r.anio %} <span class="anio">({{ r.anio }})</span>{% endif %}</h1>
     <div class="h-chips">
       <span class="chip e-{{ a.estado }} {{ 'pulso' if a.estado in VIVOS }}"><span class="led"></span>{{ NOMBRES.get(a.estado, a.estado) }}</span>
-      {% if a.origen == 'reproceso' %}<span class="chip" title="Origen: {{ a.ruta }}">↻ Reproceso de la biblioteca</span>{% endif %}
+      {% if a.origen == 'reproceso' and (a.cambios or {}).union %}<span class="chip" title="{{ (a.cambios.union)|join(' · ') }}">⧉ Unión de {{ a.cambios.union|length }} discos de la biblioteca</span>
+      {% elif a.origen == 'reproceso' %}<span class="chip" title="Origen: {{ a.ruta }}">↻ Reproceso de la biblioteca</span>{% endif %}
       {% if c.tag %}<span class="chip q-{{ c.tag }}"><span class="led"></span>{{ c.tag }}</span>{% endif %}
       {% if c.formato %}<span class="chip">{{ c.formato }}</span>{% endif %}
       <span class="chip">{{ r.n_pistas }} pistas{% if r.n_discos > 1 %} · {{ r.n_discos }} discos{% endif %}</span>

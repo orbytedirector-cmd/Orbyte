@@ -1691,16 +1691,19 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     # ── duplicados ──
     duplicados = buscar_duplicados(bib, artista, album)
     propio = ((cambios or {}).get('reproceso_de') or '').rstrip('/')
-    if propio and bib:
+    # «Unir como discos»: cada álbum de la biblioteca que se une es una versión propia que se reemplaza
+    propios = [r.rstrip('/') for r in (cambios or {}).get('union') or []] or ([propio] if propio else [])
+    if propios and bib:
         # «Reprocesar»: la versión que está en la biblioteca siempre es la que se reemplaza, aunque ahora cambien
         # el artista o el título (la búsqueda por nombre ya no la encontraría)
-        duplicados = [d for d in duplicados if d['ruta'].rstrip('/') != propio]
-        g = next((g for g in bib['grupos'] if g['ruta'].rstrip('/') == propio), None)
-        if g:
-            duplicados.insert(0, {'ruta': g['ruta'], 'album': g['album'], 'anio': g['anio'], 'ids': g['ids'],
-                                  'artista': g['artista'], 'formato': g['formato'], 'tag': g['tag'],
-                                  'pistas': g['pistas'], 'similitud': 1.0, 'propio': True})
-    if propio and not any(d.get('propio') for d in duplicados):
+        duplicados = [d for d in duplicados if d['ruta'].rstrip('/') not in propios]
+        for pr in reversed(propios):
+            g = next((g for g in bib['grupos'] if g['ruta'].rstrip('/') == pr), None)
+            if g:
+                duplicados.insert(0, {'ruta': g['ruta'], 'album': g['album'], 'anio': g['anio'], 'ids': g['ids'],
+                                      'artista': g['artista'], 'formato': g['formato'], 'tag': g['tag'],
+                                      'pistas': g['pistas'], 'similitud': 1.0, 'propio': True})
+    if propios and sum(1 for d in duplicados if d.get('propio')) < len(propios):
         problema('error', 'reproceso_sin_origen',
                  'Reproceso: no se encontró la versión actual en la base de Orbyte, así que no se podría reemplazar '
                  '(quedarían las dos). Revisa la ruta de music.db en Ajustes y vuelve a revisar.')

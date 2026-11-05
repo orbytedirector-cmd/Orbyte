@@ -507,3 +507,15 @@ tr.p-editor td { background: var(--card-2); }
 .t-pop { font-size: .78rem; color: var(--texto-2, #a8a8a8); margin-top: .2rem; }
 .t-estrella { color: var(--oro); font-weight: 700; }
 .t-score { display: inline-block; min-width: 1.6rem; text-align: center; border: 1px solid var(--borde-2); border-radius: 6px; padding: 0 .3rem; margin-left: .3rem; font-variant-numeric: tabular-nums; }
+
+/* ── unir álbumes como discos de uno solo ── */
+.u-discos { display: flex; flex-direction: column; gap: .45rem; }
+.u-disco { display: flex; gap: .7rem; align-items: center; padding: .55rem .7rem; border: 1px solid var(--borde-oro);
+           border-radius: 10px; background: var(--oro-tenue); }
+.u-n { font-family: var(--mono); font-size: .78rem; color: var(--oro-claro); white-space: nowrap; letter-spacing: .04em; }
+.u-mover { display: flex; gap: .25rem; flex: none; }
+.u-libres { display: flex; flex-direction: column; gap: .3rem; max-height: 260px; overflow-y: auto; }
+.u-libre { display: flex; gap: .6rem; align-items: center; width: 100%; padding: .5rem .7rem; border: 1px solid var(--borde-2);
+           border-radius: 10px; background: none; color: var(--texto); cursor: pointer; font: inherit; }
+.u-libre:hover { border-color: var(--borde-oro); background: var(--elev); }
+@media (max-width: 560px) { .u-disco { flex-wrap: wrap; } .u-mover { margin-left: auto; } }
