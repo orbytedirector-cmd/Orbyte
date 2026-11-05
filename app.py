@@ -576,11 +576,32 @@ def diamond_svg(led_color, size='sm'):
     svg   = _DIAMOND_SVG_TMPL.format(w=w, h=h)
     return f'<span class="led-diamond-wrap led-d-{color}">{svg}</span>'
 
+def album_quality_html(album):
+    """Etiqueta de calidad de una tarjeta de álbum (web). Usa `calidad` (mayoría de las
+    pistas, ver album_quality_map); si la lista no la trae, cae en la etiqueta antigua."""
+    from markupsafe import escape
+    album = album or {}
+    q = album.get('calidad')
+    if not q:
+        fmt = album.get('primary_format')
+        if not fmt:
+            return ''
+        led = album.get('album_led') or 'yellow'
+        return (f'<span class="aci-quality">{diamond_svg(led)}'
+                f'<span class="track-format-badge format-{led}">{escape(fmt)}</span></span>')
+    segundo = diamond_svg(q['color2']) if q.get('mixto') and q.get('color2') else ''
+    titulo = 'Calidad de la mayoría de las pistas' if q.get('mixto') else 'Calidad del álbum'
+    return (f'<span class="aci-quality{" aci-mixto" if segundo else ""}" title="{titulo}">'
+            f'{diamond_svg(q["color"])}{segundo}'
+            f'<span class="track-format-badge format-{q["color"]}">{escape(q["texto"])}</span></span>')
+
+
 # Register helpers in Jinja globals (must be after app is created)
 app.jinja_env.globals['nationality_flag'] = nationality_flag
 app.jinja_env.globals['lang_flag']        = lang_flag
 app.jinja_env.globals['lang_label']       = lang_label
 app.jinja_env.globals['diamond_svg']      = diamond_svg
+app.jinja_env.globals['album_quality_html'] = album_quality_html
 
 # Make MOOD_LABELS available in all templates
 @app.context_processor
@@ -2782,6 +2803,7 @@ def api_v1_home_facets():
             d = dict(a)
             d['cover_url'] = cover_url_filter(d.pop('cover_path'))
             recent.append(d)
+        anotar_calidad_albumes(conn, recent)
 
         return jsonify({
             'stats': {
@@ -2813,7 +2835,7 @@ def api_v1_album_tracks(album_id):
         album_artist_id = alb['artist_id'] if alb else None
         album_name      = alb['name'] if alb else None
         tracks = conn.execute(
-            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER)',
             (album_id,)
         ).fetchall()
         result = []
@@ -2877,7 +2899,7 @@ def api_v1_artist_tracks(artist_id):
                FROM tracks t
                JOIN albums al ON al.id = t.album_id
                WHERE al.artist_id=?
-               ORDER BY al.year, al.name, t.disc_number, CAST(t.track_number AS INTEGER)
+               ORDER BY al.year, al.name, CAST(t.disc_number AS INTEGER), CAST(t.track_number AS INTEGER)
                LIMIT 2000''',
             (artist_id,)
         ).fetchall()
@@ -3052,6 +3074,7 @@ def api_v1_favorites_detailed():
                 d = dict(r)
                 d['cover_url'] = cover_url_filter(d.get('cover_path'))
                 items.append(d)
+            anotar_calidad_albumes(conn, items)
 
         else:  # track
             total = conn.execute(
@@ -3553,6 +3576,7 @@ def api_v1_artist_detail(artist_id):
             ).fetchone()
             d['album_led'] = led_row['led_color'] if led_row else 'yellow'
             albums.append(d)
+        anotar_calidad_albumes(conn, albums)
 
         ar_data = dict(ar)
         ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
@@ -3675,7 +3699,7 @@ def api_v1_album_detail(album_id):
         if not alb:
             return jsonify({'error': 'not_found'}), 404
         tracks = conn.execute(
-            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER)',
             (album_id,)
         ).fetchall()
         alb = dict(alb)
@@ -3739,6 +3763,7 @@ def api_v1_album_detail(album_id):
             "SELECT 1 FROM user_item_favorites WHERE user_id=? AND item_type='album' AND item_id=?",
             (g.api_user['id'], album_id)
         ).fetchone())
+        calidad = album_quality_map(conn, [album_id])[album_id]
 
         return jsonify({
             'id': alb['id'], 'name': alb.get('name'), 'year': alb.get('year'),
@@ -3748,6 +3773,7 @@ def api_v1_album_detail(album_id):
             'artist_nationality': artist_nationality, 'artist_flag': artist_flag,
             'album_meta': album_meta, 'tracks': track_list,
             'is_favorite': is_favorite,
+            'calidad': calidad['calidad'], 'n_discos': calidad['n_discos'],
         })
     finally:
         conn.close()
@@ -4408,6 +4434,7 @@ def api_v1_albums():
             'track_count': a.get('track_count'), 'total_duration': a.get('total_duration'),
             'artist_id': a.get('artist_id'), 'artist_name': a.get('artist_name'),
             'cover_url': cover_url_filter(a.get('cover_path')),
+            'calidad': a.get('calidad'), 'n_discos': a.get('n_discos', 1),
         } for a in albums_raw]
         return jsonify({'albums': albums, 'total': total, 'page': page, 'total_pages': total_pages})
 
@@ -4432,12 +4459,14 @@ def api_v1_albums():
             (limit, offset)
         ).fetchall()
         total = conn.execute('SELECT COUNT(*) as c FROM albums').fetchone()['c']
+        calidades = album_quality_map(conn, [r['id'] for r in rows])
     finally:
         conn.close()
 
     albums = []
     for r in rows:
         d = dict(r)
+        q = calidades.get(d['id']) or {'calidad': None, 'n_discos': 1}
         albums.append({
             'id':             d['id'],
             'name':           d['name'],
@@ -4447,6 +4476,8 @@ def api_v1_albums():
             'artist_id':      d['artist_id'],
             'artist_name':    d['artist_name'],
             'cover_url':      cover_url_filter(d['cover_path']),
+            'calidad':        q['calidad'],
+            'n_discos':       q['n_discos'],
         })
     return jsonify({'albums': albums, 'total': total, 'limit': limit, 'offset': offset})
 
@@ -4535,6 +4566,7 @@ def api_v1_search():
             d = dict(a)
             d['cover_url'] = cover_url_filter(d.pop('cover_path'))
             albums_out.append(d)
+        anotar_calidad_albumes(conn, albums_out)
 
         tracks_out = []
         for t in tracks:
@@ -7067,6 +7099,81 @@ def _led_for_album_tracks(conn, album_id):
     best = sorted(rows, key=lambda r: priority.get(r['led_color'], -1), reverse=True)
     return best[0]['led_color']
 
+# ── Calidad por álbum (etiqueta de las tarjetas) ────────────────────────────
+# Una sola fuente para web, Desktop, iOS y Android: cada álbum de una lista
+# lleva `calidad` = {texto, color, color2, mixto} y `n_discos`.
+#   · color/texto = lo que tiene la MAYORÍA de sus pistas (empate → la mejor).
+#   · CD = PCM ≤ 48 kHz (LED amarillo), HR = > 48 kHz (LED blanco) — la misma
+#     regla que led_color.  DSD/MQA por su tipo; con pérdida → «Lossy».
+#   · mixto = hay pistas de otro color; color2 es el segundo más frecuente.
+_RANGO_CALIDAD = {'silver': 0, 'yellow': 1, 'white': 2, 'green': 3, 'cyan': 4,
+                  'blue': 5, 'red': 6, 'magenta': 7}
+
+
+def _khz(sr):
+    """44100 → '44.1' · 48000 → '48' · 176400 → '176.4'."""
+    return f'{sr / 1000:g}' if sr else ''
+
+
+def _texto_calidad(color, is_dsd, dsd_rate, is_mqa, bits, sr):
+    if color == LOSSY_COLOR:
+        return 'Lossy'
+    if is_dsd:
+        return dsd_rate or _dsd_label({'sample_rate_real': sr})
+    if is_mqa:
+        return 'MQA Studio' if color == 'blue' else ('MQB' if color == 'magenta' else 'MQA')
+    familia = 'HR' if color == 'white' else 'CD'
+    if bits and sr:
+        return f'{familia} {bits}/{_khz(sr)}'
+    return f'{familia} {_khz(sr)} kHz' if sr else familia
+
+
+def album_quality_map(conn, album_ids):
+    """{album_id: {'calidad': {...} | None, 'n_discos': int}} en 2 consultas por lote."""
+    ids = sorted({int(i) for i in album_ids if i is not None})
+    res = {i: {'calidad': None, 'n_discos': 1} for i in ids}
+    for k in range(0, len(ids), 500):
+        lote = ids[k:k + 500]
+        marcas = ','.join('?' * len(lote))
+        filas = conn.execute(
+            f'''SELECT album_id, {_quality_color_sql('')} AS c, is_dsd, dsd_rate, is_mqa,
+                       bit_depth, COALESCE(NULLIF(sample_rate_real, 0), sample_rate) AS sr, COUNT(*) AS n
+                FROM tracks WHERE album_id IN ({marcas})
+                GROUP BY album_id, c, is_dsd, dsd_rate, is_mqa, bit_depth, sr''', lote).fetchall()
+        grupos = {}
+        for f in filas:
+            grupos.setdefault(f['album_id'], []).append(f)
+        for alb, fs in grupos.items():
+            por_color = {}
+            for f in fs:
+                c = (f['c'] or 'yellow').lower()
+                por_color[c] = por_color.get(c, 0) + f['n']
+            orden = sorted(por_color, key=lambda c: (-por_color[c], -_RANGO_CALIDAD.get(c, 1)))
+            color = orden[0]
+            # resolución más frecuente dentro del color mayoritario (empate → la mayor)
+            f = max((f for f in fs if (f['c'] or 'yellow').lower() == color),
+                    key=lambda f: (f['n'], f['bit_depth'] or 0, f['sr'] or 0))
+            texto = _texto_calidad(color, f['is_dsd'], f['dsd_rate'], f['is_mqa'], f['bit_depth'], f['sr'])
+            mixto = len(orden) > 1
+            res[alb]['calidad'] = {'texto': texto + (' · mixto' if mixto else ''), 'color': color,
+                                   'color2': orden[1] if mixto else None, 'mixto': mixto}
+        for f in conn.execute(
+                f'''SELECT album_id, COUNT(DISTINCT CAST(COALESCE(NULLIF(disc_number, ''), '1') AS INTEGER)) AS n
+                    FROM tracks WHERE album_id IN ({marcas}) GROUP BY album_id''', lote).fetchall():
+            res[f['album_id']]['n_discos'] = max(1, f['n'] or 1)
+    return res
+
+
+def anotar_calidad_albumes(conn, albums, clave_id='id'):
+    """Agrega `calidad` y `n_discos` a cada dict de la lista (in situ) y la devuelve."""
+    mapa = album_quality_map(conn, [a.get(clave_id) for a in albums])
+    for a in albums:
+        q = mapa.get(a.get(clave_id)) or {'calidad': None, 'n_discos': 1}
+        a['calidad'] = q['calidad']
+        a['n_discos'] = q['n_discos']
+    return albums
+
+
 def track_to_json(t):
     """Serialize a track Row/dict with all display fields. led_color comes from DB, never recomputed."""
     d = dict(t)
@@ -7230,6 +7337,7 @@ def home():
             ).fetchone()
             d['album_led'] = led['led_color'] if led else 'yellow'
             recent_albums.append(d)
+        anotar_calidad_albumes(conn, recent_albums)
 
         # ── RichMetaPro data ──────────────────────────────────────────────────
         mood_rows = conn.execute(
@@ -7388,6 +7496,7 @@ def artist(artist_id):
             ).fetchone()
             d['album_led'] = led_row['led_color'] if led_row else 'yellow'
             albums.append(d)
+        anotar_calidad_albumes(conn, albums)
 
         ar_data = dict(ar)
         ar_data['flag'] = nationality_flag(ar_data.get('nationality') or '')
@@ -7546,7 +7655,7 @@ def album(album_id):
         if not alb: return "Album not found", 404
 
         tracks = conn.execute(
-            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER)',
             (album_id,)
         ).fetchall()
 
@@ -7591,8 +7700,18 @@ def album(album_id):
                         td[f'meta_{k}'] = tm[k]
             track_list.append(td)
 
-        disc_numbers = set(t['disc_number'] for t in track_list if t['disc_number'])
-        total_discs  = len(disc_numbers) if disc_numbers else 1
+        # Cabecera por disco: número de disco normalizado (vacío/None → 1) y su resumen
+        discos = {}
+        for td in track_list:
+            try:
+                td['disco'] = int(str(td.get('disc_number') or '1').split('/')[0]) or 1
+            except ValueError:
+                td['disco'] = 1
+            r = discos.setdefault(td['disco'], {'n': td['disco'], 'pistas': 0, 'duracion': 0})
+            r['pistas'] += 1
+            r['duracion'] += td.get('duration') or 0
+        discos = [discos[k] for k in sorted(discos)]
+        total_discs  = len(discos) or 1
 
         # Issue 10: genre fallback — use most common track genre if album_meta lacks it
         if not album_meta.get('genre_primary'):
@@ -7620,9 +7739,11 @@ def album(album_id):
         # Favorites set for this page — per-usuario (Ticket 10 §2.2)
         fav_ids = _user_fav_track_ids(conn, session.get('user_id'))
 
+        calidad = album_quality_map(conn, [album_id])[album_id]['calidad']
         return render_template('album.html', album=alb, tracks=track_list,
                                primary_format=alb.get('primary_format') or 'Unknown',
-                               total_discs=total_discs, multi_disc=total_discs > 1,
+                               album_calidad=calidad,
+                               total_discs=total_discs, multi_disc=total_discs > 1, discos=discos,
                                album_meta=album_meta,
                                artist_nationality=artist_nationality,
                                artist_flag=artist_flag,
@@ -7718,6 +7839,7 @@ def search():
         ).fetchall()
 
         albums_out = [{**dict(a), 'cover_path': clean_db_path(a['cover_path'])} for a in albums]
+        anotar_calidad_albumes(conn, albums_out)
         tracks_out = []
         for t in tracks:
             d = dict(t)
@@ -8016,6 +8138,7 @@ def _paginate(conn, count_sql, count_params, data_sql, data_params, page,
         d['cover_path'] = clean_db_path(d.get('cover_path'))
         d['album_led']  = d.get('album_led') or 'yellow'
         albums.append(d)
+    anotar_calidad_albumes(conn, albums)
     total_pages = max(1, (total + effective_page_size - 1) // effective_page_size)
     return albums, total, total_pages
 
@@ -8861,7 +8984,7 @@ def api_album_tracks(album_id):
         album_artist_id  = alb['artist_id'] if alb else None
         album_name       = alb['name'] if alb else None
         tracks = conn.execute(
-            'SELECT * FROM tracks WHERE album_id=? ORDER BY disc_number, CAST(track_number AS INTEGER)',
+            'SELECT * FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER)',
             (album_id,)
         ).fetchall()
         result = []

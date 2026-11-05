@@ -9,7 +9,7 @@
     <img src="{{ album.cover_path|cover_url }}" alt="{{ album.name }}" class="album-cover-large"
          onerror="this.style.background='linear-gradient(135deg,var(--accent),#0099cc)'">
 
-    <button class="album-play-all-btn" onclick="playAllAlbum()">▶ Reproducir álbum</button>
+    <button class="album-play-all-btn" onclick="playAllAlbum()">▶ {% if multi_disc %}Reproducir todo{% else %}Reproducir álbum{% endif %}</button>
 
     <div class="album-info">
       <div class="album-info-title">{{ album.name }}</div>
@@ -49,6 +49,10 @@
         <span class="album-info-label">Formato</span>
         <span class="album-info-value" style="color:var(--accent)">{{ primary_format }}</span>
       </div>
+      {% if album_calidad %}<div class="album-info-row">
+        <span class="album-info-label">Calidad</span>
+        <span class="album-info-value">{{ album_quality_html({'calidad': album_calidad})|safe }}</span>
+      </div>{% endif %}
       {% if total_discs > 1 %}<div class="album-info-row">
         <span class="album-info-label">Discos</span>
         <span class="album-info-value">{{ total_discs }}</span>
@@ -175,11 +179,19 @@
     </div>
 
     {% for track in tracks %}
+    {% if multi_disc and loop.changed(track.disco) %}
+    {% set dsc = discos|selectattr('n', 'equalto', track.disco)|first %}
+    <div class="album-disc-header" id="disco-{{ track.disco }}">
+      <span class="adh-n">Disco {{ track.disco }}</span>
+      <span class="adh-s">{{ dsc.pistas }} pistas{% if dsc.duracion %} · {{ dsc.duracion|format_duration }}{% endif %}</span>
+      <button class="adh-play" type="button" onclick="playAlbumDisc({{ track.disco }})">▶ Reproducir Disco {{ track.disco }}</button>
+    </div>
+    {% endif %}
     <div class="album-track-row {% if not track.audio_url or not track.duration %}track-ghost{% endif %}">
       <img src="{{ track.cover_path|cover_url or album.cover_path|cover_url }}" class="track-thumb"
            onerror="this.style.opacity='0'">
       <span class="track-number">
-        {% if multi_disc %}{{ track.disc_number or 1 }}-{% endif %}{{ track.track_number or '?' }}
+        {{ track.track_number or '?' }}
       </span>
       <span class="track-title">
         <button class="track-title-btn" onclick="showTrackInfo({{ track.id }})">{{ track.title }}</button>
@@ -216,6 +228,19 @@
   gap: 0.5rem;
 }
 .track-quality { overflow: hidden; }
+.album-disc-header {
+  display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+  padding: 0.9rem 0.25rem 0.45rem; margin-top: 0.4rem;
+  border-bottom: 1px solid var(--border-gold);
+}
+.adh-n { font-family:'Orbitron',system-ui,sans-serif; font-size:0.72rem; font-weight:700; letter-spacing:0.12em; text-transform:uppercase; color:var(--text-gold); }
+.adh-s { flex:1; min-width:0; font-size:0.74rem; color:var(--text-secondary); }
+.adh-play {
+  font-size:0.7rem; font-weight:600; color:var(--accent); background:none; cursor:pointer;
+  border:1px solid var(--border-light); border-radius:999px; padding:0.25rem 0.7rem;
+}
+.adh-play:hover { color:var(--accent-bright); border-color:var(--border-gold); }
+.album-info-value .aci-quality { display:inline-flex; align-items:center; gap:0.3rem; }
 .tq-badge {
   display: inline-block;
   padding: 0.1rem 0.4rem;
@@ -355,6 +380,19 @@
     }
   }
 
+  // Reproducir solo un disco de un álbum multidisco (mismo camino que «Reproducir todo»)
+  async function playAlbumDisc(n) {
+    if (window.primeAudioForGesture) window.primeAudioForGesture();
+    const q = (await ensureAlbumQueue()).filter(t => (parseInt(t.disc_number, 10) || 1) === n);
+    if (!q.length) { console.warn('playAlbumDisc: disco vacío', n); return; }
+    if (window.prependTracksAndPlay) {
+      window.prependTracksAndPlay(q, 0);
+    } else {
+      loadQueue(q);
+      playTrack(0);
+    }
+  }
+
   // Play a single track: prepend it to the top of the queue and start it immediately
   async function playTrackFromAlbum(trackId) {
     if (window.primeAudioForGesture) window.primeAudioForGesture();
@@ -401,6 +439,7 @@
 
   // Expose to window so onclick attributes in HTML can reach them across SPA navigations
   window.playAllAlbum               = playAllAlbum;
+  window.playAlbumDisc              = playAlbumDisc;
   window.playTrackFromAlbum         = playTrackFromAlbum;
   window.addToPlaylistByIdWithFeedback = addToPlaylistByIdWithFeedback;
   window.addToPlaylistById          = addToPlaylistById;

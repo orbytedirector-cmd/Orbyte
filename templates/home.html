@@ -257,15 +257,10 @@
           {% endif %}
         </div>
         <div class="aci-footer">
-          {% if album.primary_format %}
-          <span class="aci-quality">
-          {{ diamond_svg(album.album_led or 'yellow', 'sm')|safe }}
-            <span class="track-format-badge format-{{ album.album_led or 'yellow' }}">{{ album.primary_format }}</span>
-          </span>
-          {% endif %}
+          {{ album_quality_html(album)|safe }}
           <span class="aci-stats">
             {%- if album.year %}{{ album.year }}{% endif -%}
-            {%- if album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
+            {%- if album.n_discos and album.n_discos > 1 %}{% if album.year %} · {% endif %}{{ album.n_discos }} discos{% elif album.track_count %}{% if album.year %} · {% endif %}{{ album.track_count }} pistas{% endif -%}
           </span>
         </div>
       </div>
