@@ -304,6 +304,12 @@ def escribir_tags(ruta, x, ta, rep):
         for viejo in ('TOTALTRACKS', 'TOTALDISCS'):
             if viejo in f.tags:
                 del f.tags[viejo]
+        m = x.get('mqa_escribir')
+        if m:                                   # MQA detectado en el audio (sin tags): Orbyte le pone su LED
+            from . import mqa as mqa_mod
+            f.tags[mqa_mod.TAG_TIPO] = 'MQA Studio' if m.get('studio') else 'MQA'
+            if m.get('sr_original'):
+                f.tags[mqa_mod.TAG_SR] = str(int(m['sr_original']))
         f.save(deleteid3=bool(x.get('quitar_id3')))
     elif ext in ('.mp3', '.dsf', '.aif', '.aiff', '.dff'):
         _tags_id3(ruta, v, ext)

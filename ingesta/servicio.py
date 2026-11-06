@@ -47,6 +47,7 @@ from . import tienda as tienda_mod
 from . import nacionalidades as nacionalidades_mod
 from . import popularidad as popularidad_mod
 from . import salud as salud_mod
+from . import calidad as calidad_mod
 from . import reparar as reparar_mod
 import threading
 import traceback
@@ -100,6 +101,17 @@ def _ingesta_ocupada():
 
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
+
+
+
+def _salud_revisando():
+    p = salud.progreso()
+    return p['activa'] and not p['pausada'] and p['motivo'] == 'Revisando'
+
+
+# Calidad y LED: misma maquinaria que Salud, espera también mientras Salud decodifica (no compiten por el disco).
+verificador = calidad_mod.Verificador(DATOS, almacen.ajustes, lambda: _ingesta_ocupada() or _salud_revisando(),
+                                      salud, almacen.avisar)
 reparador = reparar_mod.Reparador(salud, almacen.ajustes, lambda: bool(descargador.actual),
                                   al_terminar=lambda aid: _revisar_tras_reparar(aid), avisar_fn=almacen.avisar)
 
@@ -1650,6 +1662,131 @@ def api_salud_danadas():
         return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
 
 
+# ─────────────────────────── calidad y LED ───────────────────────────
+
+def _ids_album_orbyte(oid, ruta=None):
+    """El álbum en Orbyte; si ese ID ya no existe (se reindexó), el que está en esa carpeta."""
+    db = almacen.ajustes().get('db_orbyte')
+    con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+    try:
+        if con.execute('SELECT 1 FROM albums WHERE id=?', (oid,)).fetchone():
+            return [oid]
+        if ruta:
+            return [r[0] for r in con.execute('SELECT id FROM albums WHERE path=? OR path=?',
+                                              (ruta.rstrip('/'), ruta.rstrip('/') + '/'))]
+        return []
+    finally:
+        con.close()
+
+
+@app.route('/api/calidad/album/<int:oid>')
+def api_calidad_album(oid):
+    aj = almacen.ajustes()
+    ids = _ids_album_orbyte(oid, request.args.get('ruta'))
+    if not ids:
+        return jsonify(ok=False, error='Ese álbum ya no está en Orbyte con ese ID: ábrelo desde Biblioteca'), 404
+    try:
+        r = calidad_mod.revisar_album(aj.get('db_orbyte'), ids, verificador.det,
+                                      forzar=request.args.get('forzar') == '1')
+    except Exception as e:
+        log.exception('Calidad: álbum %s', oid)
+        return jsonify(ok=False, error=f'No se pudo revisar: {type(e).__name__}: {e}'), 409
+    return jsonify(ok=True, oid=ids[0], **r)
+
+
+@app.route('/api/calidad/album/<int:oid>/aplicar', methods=['POST'])
+def api_calidad_aplicar(oid):
+    """modo «detectado»: corrige las pistas que no corresponden; modo «manual»: {rutas, mqa, studio, sr_original}."""
+    d = request.get_json(silent=True) or {}
+    aj = almacen.ajustes()
+    db = aj.get('db_orbyte')
+    ids = _ids_album_orbyte(oid)
+    if not ids:
+        return jsonify(ok=False, error='Ese álbum ya no está en Orbyte con ese ID: recarga la página'), 404
+    pistas = calidad_mod.revisar_album(db, ids, verificador.det)['pistas']
+    propias = {p['ruta'] for p in pistas}
+    if d.get('modo') == 'manual':
+        rutas = [r for r in (d.get('rutas') or []) if r in propias] or sorted(propias)
+        sr = d.get('sr_original')
+        try:
+            sr = int(sr) if sr not in (None, '', 0, '0') else None
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error='Frecuencia original inválida'), 400
+        decisiones = {r: {'mqa': bool(d.get('mqa')), 'studio': bool(d.get('mqa') and d.get('studio')),
+                          'sr_original': sr if d.get('mqa') else None} for r in rutas}
+    else:
+        decisiones = calidad_mod.decisiones_detectadas(pistas)
+        if d.get('rutas'):
+            decisiones = {k: v for k, v in decisiones.items() if k in set(d['rutas'])}
+    if not decisiones:
+        return jsonify(ok=False, error='No hay pistas que cambiar'), 400
+    registro = []
+    try:
+        res = calidad_mod.aplicar(aj, decisiones, registro.append)
+    except RuntimeError as e:
+        return jsonify(ok=False, error=str(e)), 409
+    verificador.reevaluar(list(decisiones))
+    return jsonify(ok=True, registro=registro[-60:], **res)
+
+
+@app.route('/api/calidad/estado')
+def api_calidad_estado():
+    return jsonify(verificador.progreso())
+
+
+@app.route('/api/calidad/estimar', methods=['POST'])
+def api_calidad_estimar():
+    try:
+        return jsonify(ok=True, **verificador.estimar(request.get_json(silent=True) or {}))
+    except Exception as e:
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+
+
+@app.route('/api/calidad/iniciar', methods=['POST'])
+def api_calidad_iniciar():
+    c = request.get_json(silent=True) or {}
+    if c.get('modo') == 'con_error':
+        c['modo'] = 'pendientes'
+    try:
+        verificador.iniciar(c)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True)
+
+
+@app.route('/api/calidad/control', methods=['POST'])
+def api_calidad_control():
+    accion = (request.get_json(silent=True) or {}).get('accion')
+    if accion == 'pausar':
+        verificador.pausar(True)
+    elif accion == 'reanudar':
+        verificador.pausar(False)
+    elif accion == 'detener':
+        verificador.detener()
+    else:
+        return jsonify(ok=False, error='Acción desconocida'), 400
+    return jsonify(ok=True)
+
+
+@app.route('/api/calidad/diferencias')
+def api_calidad_diferencias():
+    try:
+        return jsonify(ok=True, albumes=verificador.diferencias(request.args.get('ignorados') == '1'),
+                       raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+    except Exception as e:
+        log.exception('Calidad: diferencias')
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+
+
+@app.route('/api/calidad/ignorar', methods=['POST'])
+def api_calidad_ignorar():
+    d = request.get_json(silent=True) or {}
+    if not d.get('carpeta'):
+        return jsonify(ok=False), 400
+    verificador.ignorar(d['carpeta'], bool(d.get('si', True)))
+    return jsonify(ok=True)
+
+
 @app.route('/api/salud/ignorar', methods=['POST'])
 def api_salud_ignorar():
     d = request.get_json(silent=True) or {}
@@ -2563,6 +2700,7 @@ def main():
     procesador.start()
     descargador.start()
     salud.start()
+    verificador.start()
     reparador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)

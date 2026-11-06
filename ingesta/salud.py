@@ -84,8 +84,13 @@ def clasificar(ruta, ok, errores, segundos, duracion):
 
 
 class Salud:
+    ARCHIVO = 'salud.db'         # calidad.Verificador reutiliza esta maquinaria con otra base y otro criterio
+    V = V
+    PROBLEMAS = PROBLEMAS
+    NOMBRE = 'Salud'
+
     def __init__(self, datos, ajustes_fn, ocupado_fn, avisar_fn=None):
-        self.ruta = os.path.join(datos, 'salud.db')
+        self.ruta = os.path.join(datos, self.ARCHIVO)
         self.ajustes_fn, self.ocupado_fn, self.avisar_fn = ajustes_fn, ocupado_fn, avisar_fn
         self._lock = threading.Lock()
         self._despertar = threading.Event()
@@ -131,7 +136,7 @@ class Salud:
         with self._lock, self._con() as c:
             c.execute('INSERT OR REPLACE INTO pistas(ruta, album_id, tamano, mtime, v, estado, errores, segundos, duracion, '
                       'revisado) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                      (ruta, album_id, tamano, mtime, V, estado, json.dumps(errores[:4], ensure_ascii=False),
+                      (ruta, album_id, tamano, mtime, self.V, estado, json.dumps(errores[:4], ensure_ascii=False),
                        segundos, duracion, time.time()))
 
     # ── qué entra en una revisión ──
@@ -183,9 +188,9 @@ class Salud:
         hechas = self._cache({p['ruta'] for p in ps})
         modo = (criterio or {}).get('modo') or 'pendientes'
         if modo == 'pendientes':
-            pend = [p for p in ps if not (hechas.get(p['ruta']) and hechas[p['ruta']]['v'] == V)]
+            pend = [p for p in ps if not (hechas.get(p['ruta']) and hechas[p['ruta']]['v'] == self.V)]
         elif modo == 'con_error':
-            pend = [p for p in ps if hechas.get(p['ruta']) and hechas[p['ruta']]['estado'] in PROBLEMAS]
+            pend = [p for p in ps if hechas.get(p['ruta']) and hechas[p['ruta']]['estado'] in self.PROBLEMAS]
         else:
             pend = ps
         return {'pistas': len(ps), 'por_revisar': len(pend), 'horas_audio': round(sum(p['duracion'] for p in pend) / 3600, 1),
@@ -242,7 +247,7 @@ class Salud:
 
     # ── el trabajo ──
     def start(self):
-        threading.Thread(target=self._bucle, daemon=True, name='salud').start()
+        threading.Thread(target=self._bucle, daemon=True, name=self.ARCHIVO).start()
 
     def _bucle(self):
         while True:
@@ -305,11 +310,11 @@ class Salud:
             self.i += 1
             c = self.cache.get(p['ruta'])
             if self.modo == 'con_error':
-                if not c or c['estado'] not in PROBLEMAS or (c['revisado'] or 0) >= self.inicio:
+                if not c or c['estado'] not in self.PROBLEMAS or (c['revisado'] or 0) >= self.inicio:
                     self._saltar(p)
                     continue
                 return p
-            if c and c['v'] == V and (self.modo == 'pendientes' or (c['revisado'] or 0) >= self.inicio):
+            if c and c['v'] == self.V and (self.modo == 'pendientes' or (c['revisado'] or 0) >= self.inicio):
                 try:
                     st = os.stat(p['ruta'])
                     if c['tamano'] == st.st_size and abs((c['mtime'] or 0) - st.st_mtime) < 1:
@@ -347,7 +352,7 @@ class Salud:
         criterio = json.loads(self.estado().get('criterio') or '{}')
         rutas = {p['ruta'] for p in self.cola}
         cache = self._cache(rutas)
-        malas = [c for c in cache.values() if c['estado'] in PROBLEMAS]
+        malas = [c for c in cache.values() if c['estado'] in self.PROBLEMAS]
         resumen = {'pistas': len(self.cola), 'malas': len(malas)}
         self.poner(activa='0', pausada='0', terminada=time.time(), resumen=json.dumps(resumen))
         self.cola_clave = None

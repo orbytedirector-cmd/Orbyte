@@ -8,6 +8,7 @@
 <div class="filtros" id="pestanas">
   <button class="filtro activo" data-p="discos">Discos por normalizar <b id="n-discos">…</b></button>
   <button class="filtro" data-p="danadas">Pistas dañadas <b id="n-danadas">…</b></button>
+  <button class="filtro" data-p="calidad">Calidad y LED <b id="n-calidad">…</b></button>
 </div>
 
 <section id="p-discos">
@@ -64,6 +65,34 @@
   <div class="filtros" id="f-danadas"></div>
   <div id="l-danadas"></div>
 </section>
+
+<section id="p-calidad" hidden>
+  <div class="s tenue" style="margin-bottom:.8rem">Compara el LED que Orbyte asignó a cada pista con lo que corresponde: busca la firma MQA en el audio (como el DAC; Tidal ya no lo marca en los tags) y revisa bits y frecuencia. Lee solo el inicio de cada pista, con el mismo ritmo y las mismas esperas de la revisión de pistas, y espera mientras esa revisión decodifica.</div>
+  <div class="panel s-panel" id="c-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
+  <div class="panel">
+    <div class="rotulo" style="margin-bottom:.6rem">Nueva verificación · qué parte de la biblioteca</div>
+    <div class="s-form">
+      <div class="campo"><label for="v-texto">Artista o álbum</label>
+        <input type="search" id="v-texto" class="campo-buscar" placeholder="Vacío = todos" autocomplete="off"></div>
+      <div class="campo"><label for="v-letra">Letra</label>
+        <select id="v-letra"><option value="">Todas</option>{% for l in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#' %}<option>{{ l }}</option>{% endfor %}</select></div>
+      <div class="campo"><label for="v-calidad">Calidad</label>
+        <select id="v-calidad"><option value="">Todas</option>{% for c in CALIDADES %}<option>{{ c }}</option>{% endfor %}</select></div>
+      <div class="campo"><label for="v-desde">Agregados desde</label><input type="date" id="v-desde"></div>
+    </div>
+    <div class="campo" style="margin-top:.4rem"><label>Qué pistas</label>
+      <div class="s-modos" role="radiogroup">
+        <label><input type="radio" name="v-modo" value="pendientes" checked> Solo las que faltan por verificar <span class="s tenue">(o cambiaron)</span></label>
+        <label><input type="radio" name="v-modo" value="todas"> Todas otra vez</label>
+      </div></div>
+    <div class="acciones"><button class="btn" id="v-estimar">Calcular</button>
+      <button class="btn oro" id="v-iniciar">Iniciar verificación</button>
+      <span class="s tenue" id="v-estimacion"></span></div>
+  </div>
+  <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Resultados</h2>
+  <div class="filtros" id="f-calidad"></div>
+  <div id="l-calidad"></div>
+</section>
 {% endblock %}
 {% block js %}
 {% include '_unir_discos.html' %}
@@ -83,6 +112,7 @@ document.querySelectorAll('#pestanas [data-p]').forEach(b => b.onclick = () => {
   document.querySelectorAll('#pestanas [data-p]').forEach(x => x.classList.toggle('activo', x === b));
   document.getElementById('p-discos').hidden = b.dataset.p !== 'discos';
   document.getElementById('p-danadas').hidden = b.dataset.p !== 'danadas';
+  document.getElementById('p-calidad').hidden = b.dataset.p !== 'calidad';
   try { localStorage.setItem('salud-pestana', b.dataset.p); } catch (e) {}
 });
 try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySelector(`#pestanas [data-p="${p}"]`)?.click(); } catch (e) {}
@@ -274,5 +304,120 @@ cargarReparaciones();
 setInterval(cargarReparaciones, 6000);
 setInterval(cargarEstado, 4000);
 setInterval(() => { if (est && est.activa && !document.querySelector('#l-danadas details[open]')) cargarDanadas(); }, 30000);
+
+// ── calidad y LED ──
+const LEDC = {yellow: ['CD', 'CD'], white: ['HR', 'HR'], green: ['MQA', 'MQA'], blue: ['MQA Studio', 'MQAS'],
+              magenta: ['MQB', 'MQB'], cyan: ['DSD', 'DSD'], red: ['DSD256', 'DSD'], silver: ['Lossy', 'Lossy']};
+const chipLedC = l => l ? `<span class="chip q-${LEDC[l] ? LEDC[l][1] : ''}"><span class="led"></span>${esc(LEDC[l] ? LEDC[l][0] : l)}</span>` : '<span class="muy-tenue">—</span>';
+let calEst = null, calDif = null, calVerIgn = false, calSel = new Set();
+const criterioC = () => ({texto: document.getElementById('v-texto').value.trim(), letra: document.getElementById('v-letra').value,
+  calidad: document.getElementById('v-calidad').value, desde: document.getElementById('v-desde').value,
+  modo: (document.querySelector('input[name=v-modo]:checked') || {}).value || 'pendientes'});
+async function cargarEstadoC() {
+  try { calEst = await (await fetch('/api/calidad/estado')).json(); } catch (e) { return; }
+  const e = calEst, c = e.criterio || {}, rev = e.revisadas || {};
+  const alcance = [c.texto && `«${c.texto}»`, c.letra && `letra ${c.letra}`, c.calidad, c.desde && `desde ${c.desde}`].filter(Boolean).join(' · ') || 'toda la biblioteca';
+  const nRev = Object.values(rev).reduce((a, n) => a + n, 0);
+  let html;
+  if (e.activa) {
+    const pct = e.total ? Math.floor(100 * e.hechas / e.total) : 0;
+    html = `<div class="s-fila"><div><div class="t">${e.pausada ? '⏸ Pausada' : esc(e.motivo)}</div><div class="s tenue">Alcance: ${esc(alcance)}</div></div>
+      <div class="acciones" style="margin:0">${e.pausada ? '<button class="btn oro" data-cc="reanudar">Reanudar</button>' : '<button class="btn" data-cc="pausar">Pausar</button>'}
+      <button class="btn" data-cc="detener">Detener</button></div></div>
+      ${e.total != null ? `<div class="s-barra"><span style="width:${pct}%"></span></div><div class="s">${e.hechas.toLocaleString('es-CL')} de ${e.total.toLocaleString('es-CL')} pistas · ${pct} %</div>` : ''}
+      ${e.actual ? `<div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(e.actual))}</div>` : ''}`;
+  } else {
+    const r = e.resumen;
+    html = `<div class="s-fila"><div><div class="t">${e.terminada ? 'Última verificación terminada' : 'Sin verificación en curso'}</div>
+      <div class="s tenue">${e.terminada ? `${new Date(e.terminada * 1000).toLocaleString('es-CL')}${r ? ` · ${r.pistas} pistas · ${r.malas} por corregir o en duda` : ''}` : 'Elige abajo qué parte verificar.'}</div></div></div>`;
+  }
+  html += `<div class="s tenue" style="margin-top:.4rem">Verificadas hasta ahora: ${nRev.toLocaleString('es-CL')} pistas ·
+    <span class="ok">${(rev.ok || 0).toLocaleString('es-CL')} corresponden</span> ·
+    <span class="med">${(rev.distinto || 0).toLocaleString('es-CL')} por corregir</span> ·
+    <span class="med">${(rev.duda || 0).toLocaleString('es-CL')} en duda</span> ·
+    <span class="tenue">${(rev.omitida || 0).toLocaleString('es-CL')} no aplica (DSD, con pérdida)</span></div>`;
+  const box = document.getElementById('c-estado');
+  box.innerHTML = html;
+  box.querySelectorAll('[data-cc]').forEach(b => b.onclick = async () => {
+    if (b.dataset.cc === 'detener' && !confirm('¿Detener la verificación? Lo ya verificado queda guardado.')) return;
+    b.disabled = true; await post('/api/calidad/control', {accion: b.dataset.cc}); cargarEstadoC();
+  });
+}
+document.getElementById('v-estimar').onclick = async () => {
+  const el = document.getElementById('v-estimacion'); el.textContent = 'Calculando…';
+  const r = await post('/api/calidad/estimar', criterioC());
+  el.textContent = r.ok ? `${r.por_revisar.toLocaleString('es-CL')} pistas por verificar (de ${r.pistas.toLocaleString('es-CL')}) en ${r.albumes} álbumes` : (r.error || 'No se pudo');
+};
+document.getElementById('v-iniciar').onclick = async () => {
+  if (calEst && calEst.activa && !confirm('Hay una verificación en curso: se reemplaza por esta. Lo ya verificado queda guardado. ¿Seguir?')) return;
+  const r = await post('/api/calidad/iniciar', criterioC());
+  if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+  toast('Verificación iniciada', 'Corre de fondo; puedes cerrar esta página'); cargarEstadoC();
+};
+async function cargarDif() {
+  const r = await (await fetch('/api/calidad/diferencias' + (calVerIgn ? '?ignorados=1' : ''))).json();
+  if (!r.ok) { document.getElementById('l-calidad').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  calDif = r.albumes; raiz = raiz || r.raiz;
+  if (!calVerIgn) document.getElementById('n-calidad').textContent = calDif.length;
+  pintarDif();
+}
+function pintarDif() {
+  const n = calDif.filter(a => a.resumen.distintas).length;
+  document.getElementById('f-calidad').innerHTML = `<button class="filtro ${calVerIgn ? 'activo' : ''}" id="c-ver-ign">Ignorados</button>
+    ${!calVerIgn && n ? `<button class="btn chico oro" id="c-todos" style="margin-left:auto">Aplicar lo detectado en los marcados <b id="c-n-sel">${calSel.size}</b></button>` : ''}`;
+  document.getElementById('c-ver-ign').onclick = () => { calVerIgn = !calVerIgn; calSel.clear(); cargarDif(); };
+  const cont = document.getElementById('l-calidad');
+  if (!calDif.length) { cont.innerHTML = `<div class="sin-problemas">${calVerIgn ? 'No hay álbumes ignorados.' : 'Todo lo verificado tiene el LED que corresponde.'}</div>`; return; }
+  cont.innerHTML = calDif.map((a, i) => {
+    const s = a.resumen;
+    const motivos = [...new Set(a.pistas.flatMap(p => p.motivos || []))].slice(0, 3);
+    return `<div class="panel s-album"><div class="s-fila"><div style="min-width:0;display:flex;gap:.6rem;align-items:flex-start">
+        ${!calVerIgn && s.distintas ? `<input type="checkbox" data-csel="${i}" ${calSel.has(a.album_id) ? 'checked' : ''} aria-label="Marcar ${esc(a.album)}" style="margin-top:.3rem">` : ''}
+        <div style="min-width:0"><div class="t">${esc(a.artista)} — ${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
+        <div class="s">Asignado ${chipLedC(s.asignado)} → Corresponde ${chipLedC(s.esperado)} · ${s.distintas ? `<span class="med">${s.distintas} por corregir</span>` : ''}${s.dudas ? ` <span class="med">${s.dudas} en duda</span>` : ''}</div>
+        ${motivos.map(m => `<div class="s tenue">${esc(m)}</div>`).join('')}
+        <div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(a.carpeta))}</div></div></div>
+      <div class="acciones" style="margin:0">${!calVerIgn && s.distintas ? `<button class="btn chico oro" data-capl="${i}">Aplicar lo detectado</button>` : ''}
+        <a class="btn chico" href="/biblioteca/album/${a.album_id}#calidad-led">Abrir ficha</a>
+        <button class="btn chico" data-cign="${i}">${calVerIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div></div>`;
+  }).join('');
+  cont.querySelectorAll('[data-csel]').forEach(c => c.onchange = () => {
+    const id = calDif[+c.dataset.csel].album_id; c.checked ? calSel.add(id) : calSel.delete(id);
+    const b = document.getElementById('c-n-sel'); if (b) b.textContent = calSel.size;
+  });
+  cont.querySelectorAll('[data-capl]').forEach(b => b.onclick = async () => {
+    const a = calDif[+b.dataset.capl];
+    if (!confirm(`¿Aplicar lo detectado en «${a.album}»?\n\nSe escriben (o quitan) los tags MQA, se reindexa el álbum y se actualiza el LED. El audio no se toca.`)) return;
+    b.disabled = true; b.textContent = 'Aplicando…';
+    const r = await post(`/api/calidad/album/${a.album_id}/aplicar`, {modo: 'detectado'});
+    r && r.ok ? toast('Calidad actualizada', `${a.album}: ${r.cambiadas} pista(s)`) : toast('No se pudo', (r && r.error) || '');
+    cargarDif(); cargarEstadoC();
+  });
+  const todos = document.getElementById('c-todos');
+  if (todos) todos.onclick = async () => {
+    const ids = [...calSel];
+    if (!ids.length) { toast('Marca álbumes', 'Elige en la lista cuáles corregir'); return; }
+    if (!confirm(`¿Aplicar lo detectado en ${ids.length} álbum(es)?\n\nUno por uno: tags MQA, reindexar y LED. El audio no se toca.`)) return;
+    todos.disabled = true;
+    let ok = 0;
+    for (const id of ids) {
+      todos.textContent = `Aplicando ${ok + 1} de ${ids.length}…`;
+      const r = await post(`/api/calidad/album/${id}/aplicar`, {modo: 'detectado'});
+      if (r && r.ok) ok++;
+    }
+    toast('Calidad actualizada', `${ok} de ${ids.length} álbumes`); calSel.clear(); cargarDif(); cargarEstadoC();
+  };
+  cont.querySelectorAll('[data-cign]').forEach(b => b.onclick = async () => {
+    b.disabled = true; await post('/api/calidad/ignorar', {carpeta: calDif[+b.dataset.cign].carpeta, si: !calVerIgn}); cargarDif();
+  });
+}
+cargarEstadoC(); cargarDif();
+let prevCal = null;
+setInterval(async () => {
+  if (document.getElementById('p-calidad').hidden) return;
+  await cargarEstadoC();
+  const sig = calEst && JSON.stringify([calEst.revisadas, calEst.terminada]);
+  if (sig !== prevCal) { prevCal = sig; cargarDif(); }
+}, 5000);
 </script>
 {% endblock %}

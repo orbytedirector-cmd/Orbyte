@@ -39,6 +39,7 @@
 
 {% if lib or lib_error %}{% set lib_api = '/api/biblioteca/%d' % o.id %}{% set lib_abierto = true %}{% include '_editor_biblioteca.html' %}{% endif %}
 {% if lib %}{% include '_pistas_biblioteca.html' %}{% endif %}
+{% if not (a and a.estado in VIVOS) %}{% with cal_oid=o.id %}{% include '_calidad.html' %}{% endwith %}{% endif %}
 {% if portada %}<section class="seccion">{% with pk='b', pid=o.id, artista_q=o.artista, album_q=o.album, ocupado=(a and a.estado in VIVOS) %}{% include '_portada_biblioteca.html' %}{% endwith %}</section>{% endif %}
 {% endblock %}
 {% block js %}
