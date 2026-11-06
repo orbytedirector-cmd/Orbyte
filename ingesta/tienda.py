@@ -565,7 +565,7 @@ def sugerir(g):
         v['mejora'] = None
         if lib and v.get('sr'):
             tag = _tag_lib(lib)
-            if tag in ('DSD', 'MQA'):
+            if tag == 'DSD':
                 v['mejora'] = 'no'
             elif tag == 'Lossy':
                 v['mejora'] = 'si'

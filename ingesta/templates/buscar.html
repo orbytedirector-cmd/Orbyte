@@ -66,7 +66,9 @@
     vs.forEach(v => {
       v.mejora = null;
       if (!lib || !v.sr) return;
-      if (['DSD', 'MQA'].includes(lib.tag)) v.mejora = 'no';
+      // MQA se compara por la resolución del archivo (24/44,1…), igual que al revisar en la ingesta:
+      // un FLAC 24/96 real es mejor que un MQA 24/44,1.
+      if (lib.tag === 'DSD') v.mejora = 'no';
       else if (lib.tag === 'Lossy') v.mejora = 'si';
       else if (lib.sr) {                 // mismo criterio que tienda.comparar_resolucion
         const b = v.bits || 16, bl = lib.bits || 16;
@@ -75,7 +77,7 @@
     });
   }
   function libRes(l) {                    // «16/44,1» como en las versiones (sin bits en MP3/AAC: solo kHz)
-    if (!l || !l.sr || ['DSD', 'MQA', 'Lossy'].includes(l.tag)) return l && l.sr && l.tag === 'Lossy' ? `${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '';
+    if (!l || !l.sr || ['DSD', 'Lossy'].includes(l.tag)) return l && l.sr && l.tag === 'Lossy' ? `${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})} kHz` : '';
     return `${l.bits || 16}/${(l.sr / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1})}`;
   }
   function libTxt(g) {
