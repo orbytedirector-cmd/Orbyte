@@ -101,7 +101,10 @@ def get_led_color(is_dsd, dsd_rate, is_mqa, mqa_type,
     # 06-11-2026: verificado con el iFi ZEN DAC V2 - el color MQA lo da la procedencia
     # (Studio → azul, el resto → verde), no la frecuencia original: un MQA 48 → 96 kHz
     # se ve verde. Antes «original ≠ archivo → magenta» dejaba en magenta pistas que el
-    # DAC muestra azul o verde. El magenta (MQB) no se deduce: se pone a mano en la ingesta.
+    # DAC muestra azul o verde. El magenta (MQB) no se deduce: se marca a mano en la
+    # ingesta (tag MQAENCODER=«MQB» → mqa_type «mqb»).
+    if is_mqa and mqa_type == "mqb":
+        return "magenta"
     if is_mqa and mqa_type == "studio":
         return "blue"
     if is_mqa:
@@ -295,7 +298,8 @@ def extract_metadata(file_path: str) -> dict:
         is_mqa = True
 
     if is_mqa:
-        mqa_type = ("studio" if "studio" in encoder or
+        mqa_type = ("mqb" if "mqb" in tag_vals else
+                    "studio" if "studio" in encoder or
                     "mqa studio" in " ".join(str(v) for v in tags.values()).lower()
                     else "mqa")
 

@@ -13,7 +13,8 @@ Se decodifica el inicio de la pista a enteros de 32 bits alineados arriba (así 
 LED (igual que index_libraryV3.get_led_color): MQA Studio → azul; otro MQA → verde; sin MQA: amarillo hasta 48 kHz,
 blanco arriba (DSD aparte). Verificado contra el iFi ZEN DAC V2 (06-11-2026): el azul/verde lo decide la procedencia
 de la firma, no la frecuencia original (un MQA 48 → 96 kHz se ve verde, y los «magenta» por frecuencia eran Studio).
-El magenta no se deduce: solo se respeta cuando está puesto a mano.
+El magenta (MQB) no se deduce del audio: se marca a mano cuando el DAC lo muestra, y queda coherente en todo:
+tag MQAENCODER=«MQB» → el indexador lo lee como MQA tipo «mqb» → LED magenta, texto «MQB».
 """
 import os
 import re
@@ -91,8 +92,10 @@ def _canales(ruta):
         return None
 
 
-def led(is_mqa, studio, sr, sr_original, is_dsd=False, dsd_rate=None):
+def led(is_mqa, studio, sr, sr_original, is_dsd=False, dsd_rate=None, mqb=False):
     """El LED que pone el indexador (index_libraryV3.get_led_color)."""
+    if is_mqa and mqb:
+        return 'magenta'
     if is_mqa and studio:
         return 'blue'
     if is_mqa:
@@ -106,7 +109,7 @@ def texto(d, sr=None):
     """«MQA Studio · original 96 kHz» / «No es MQA»."""
     if not d or not d.get('mqa'):
         return 'No es MQA'
-    t = 'MQA Studio' if d.get('studio') else 'MQA'
+    t = 'MQB' if d.get('mqb') else 'MQA Studio' if d.get('studio') else 'MQA'
     o = d.get('sr_original')
     return t + (f' · original {o / 1000:g} kHz'.replace('.', ',') if o else '')
 
@@ -122,7 +125,7 @@ def tags_mqa(ruta):
     except Exception:  # noqa: BLE001
         return None
     if f is None or f.tags is None:
-        return {'mqa': False, 'studio': False, 'sr_original': None, 'otros': []}
+        return {'mqa': False, 'studio': False, 'mqb': False, 'sr_original': None, 'otros': []}
     tags = {}
     for k, v in f.tags.items():
         k = str(k).lower()
@@ -139,11 +142,13 @@ def tags_mqa(ruta):
         orig = int(re.sub(r'\D', '', str(orig))) if orig else None
     except ValueError:
         orig = None
-    return {'mqa': es, 'studio': es and ('studio' in encoder or 'mqa studio' in valores), 'sr_original': orig,
+    mqb = es and 'mqb' in valores
+    return {'mqa': es, 'studio': es and not mqb and ('studio' in encoder or 'mqa studio' in valores), 'mqb': mqb,
+            'sr_original': orig,
             'otros': otros, 'en_nombre': 'mqa' in os.path.basename(ruta).lower()}
 
 
-def escribir(ruta, es_mqa, studio=False, sr_original=None):
+def escribir(ruta, es_mqa, studio=False, sr_original=None, mqb=False):
     """Deja los tags MQA de un FLAC como se pide (el audio no se toca). Devuelve una lista de avisos."""
     from mutagen.flac import FLAC
     f = FLAC(ruta)
@@ -157,7 +162,7 @@ def escribir(ruta, es_mqa, studio=False, sr_original=None):
     if 'mqa' in enc.lower():
         del f['encoder']                             # un ENCODER «MQAEncode…» marcaría MQA aunque se quite
     if es_mqa:
-        f[TAG_TIPO] = ['MQA Studio' if studio else 'MQA']
+        f[TAG_TIPO] = ['MQB' if mqb else 'MQA Studio' if studio else 'MQA']
         if sr_original:
             f[TAG_SR] = [str(int(sr_original))]
     else:
