@@ -759,6 +759,38 @@ def _segundos_cue(cp):
     return cp['cuadros'] / 75 if cp.get('cuadros') is not None else cp['inicio']
 
 
+# Mismo nombre que el LED de Orbyte: verde MQA, azul MQA Studio, magenta MQB (frecuencia original ≠ la del archivo).
+MQA_NOMBRE = {'green': 'MQA', 'blue': 'MQA Studio', 'magenta': 'MQB'}
+
+
+def mqa_info(n_mqa, n_studio, n_mqb, bits, sr, sr_original):
+    """{'tipo', 'led', 'bits', 'sr', 'sr_original'} de un álbum MQA (por mayoría de pistas) o None."""
+    if not n_mqa:
+        return None
+    try:
+        sr_original = int(sr_original) if sr_original else None
+    except (TypeError, ValueError):
+        sr_original = None
+    # como index_libraryV3.get_led_color: Studio → azul; frecuencia original distinta a la del archivo → magenta
+    if (n_studio or 0) * 2 >= n_mqa:
+        led = 'blue'
+    elif (n_mqb or 0) * 2 >= n_mqa or (sr_original and sr and sr_original != sr):
+        led = 'magenta'
+    else:
+        led = 'green'
+    return {'tipo': MQA_NOMBRE[led], 'led': led, 'bits': bits or 24, 'sr': sr or None,
+            'sr_original': sr_original if sr_original and sr_original != sr else None}
+
+
+def mqa_texto(m):
+    """«MQA Studio 24/44,1 · original 96 kHz»."""
+    if not m:
+        return ''
+    khz = lambda f: f'{f / 1000:g}'.replace('.', ',')
+    t = f'{m["tipo"]} {m["bits"]}/{khz(m["sr"])}' if m.get('sr') else m['tipo']
+    return t + (f' · original {khz(m["sr_original"])} kHz' if m.get('sr_original') else '')
+
+
 def _tag_existente(row):
     if row['dsd']:
         return 'DSD'
@@ -788,6 +820,9 @@ def biblioteca(db, raiz='/mnt/musica'):
                COUNT(t.id) AS n, MAX(t.sample_rate) AS sr, MAX(t.bit_depth) AS bits,
                SUM(CASE WHEN t.is_dsd=1 THEN 1 ELSE 0 END) AS dsd,
                SUM(CASE WHEN t.is_mqa=1 THEN 1 ELSE 0 END) AS mqa,
+               SUM(CASE WHEN t.is_mqa=1 AND t.led_color='blue' THEN 1 ELSE 0 END) AS mqa_studio,
+               SUM(CASE WHEN t.is_mqa=1 AND t.led_color='magenta' THEN 1 ELSE 0 END) AS mqb,
+               MAX(CASE WHEN t.is_mqa=1 THEN CAST(t.mqa_original_sample_rate AS INTEGER) END) AS mqa_sr,
                SUM(CASE WHEN {lossy_sql} THEN 1 ELSE 0 END) AS lossy
         FROM albums al JOIN artists ar ON ar.id = al.artist_id
         LEFT JOIN tracks t ON t.album_id = al.id
@@ -801,12 +836,18 @@ def biblioteca(db, raiz='/mnt/musica'):
         ruta = carpeta_album(f['path'] or '')
         g = grupos.setdefault(ruta, {'ruta': ruta, 'album': f['name'], 'anio': f['year'],
                                      'artista': f['artista'], 'formato': f['primary_format'],
-                                     'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0, 'bits': 0})
+                                     'pistas': 0, 'tags': Counter(), 'ids': [], 'sr': 0, 'bits': 0,
+                                     '_mqa': [0, 0, 0, 0]})
         g['pistas'] += f['n'] or 0
         g['sr'] = max(g['sr'], f['sr'] or 0)
         g['bits'] = max(g['bits'], f['bits'] or 0)
         g['tags'][_tag_existente(f)] += f['n'] or 1
         g['ids'].append(f['id'])
+        m = g['_mqa']
+        m[0] += f['mqa'] or 0
+        m[1] += f['mqa_studio'] or 0
+        m[2] += f['mqb'] or 0
+        m[3] = max(m[3], f['mqa_sr'] or 0)
         # /mnt/musica/<Letra>/<Artista>/… → (Letra, Artista)
         rel = os.path.relpath(ruta, raiz).split(os.sep) if ruta.startswith(raiz + os.sep) else []
         if len(rel) >= 3 and len(rel[0]) == 1:
@@ -814,6 +855,8 @@ def biblioteca(db, raiz='/mnt/musica'):
     for g in grupos.values():
         g['tag'] = g['tags'].most_common(1)[0][0] if g['tags'] else None
         g['tags'] = dict(g['tags'])
+        n_mqa, n_studio, n_mqb, mqa_sr = g.pop('_mqa')
+        g['mqa'] = mqa_info(n_mqa, n_studio, n_mqb, g['bits'], g['sr'], mqa_sr) if g['tag'] == 'MQA' else None
         g['n_artista'] = _norm(g['artista'])
         g['n_album'] = _norm_album(g['album'])
     datos = {'grupos': list(grupos.values()), 'artistas': artistas, 'nombres': nombres}
@@ -1741,6 +1784,11 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
                         comp = f' — el nuevo tiene MENOR resolución ({res(n_bits, n_sr)} frente a {res(l_bits, l_sr)})'
                     else:
                         comp = f' — resolución distinta ({res(n_bits, n_sr)} frente a {res(l_bits, l_sr)})'
+        g0 = next((g for g in (bib or {}).get('grupos', []) if g['ruta'] == d0['ruta']), {})
+        if g0.get('mqa'):
+            comp += f' (la tuya es {mqa_texto(g0["mqa"])})'
+        if len(duplicados) > 1:
+            comp += f' · tienes {len(duplicados)} ediciones: compáralas abajo'
         problema('decision', 'duplicado',
                  f'Ya está en la biblioteca: {d0["artista"]} — {d0["album"]} [{d0["tag"] or "?"}]{comp}')
 

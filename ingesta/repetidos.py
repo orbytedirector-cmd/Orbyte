@@ -45,7 +45,8 @@ def _formato(e):
         return f'{codec} {k} kbps' if k else codec
     bits = e['bits'] or 16
     if e['mqa']:
-        return f'MQA {bits}/{(e.get("sr_real") or e["sr"] or 44100) / 1000:g}'
+        m = analisis.mqa_info(e['mqa'], e.get('mqa_studio'), e.get('mqb'), bits, e['sr'] or 44100, e.get('mqa_sr'))
+        return analisis.mqa_texto(m)
     codec = (e['codecs'] or 'flac').split(',')[0].upper()
     codec = {'PCM_S16LE': 'WAV', 'PCM_S24LE': 'WAV', 'PCM_S32LE': 'WAV', 'PCM_S16BE': 'AIFF',
              'PCM_S24BE': 'AIFF'}.get(codec, codec)
@@ -101,6 +102,9 @@ def _ediciones(db):
                    MAX(t.sample_rate) AS sr, MAX(CAST(t.bit_depth AS INTEGER)) AS bits, GROUP_CONCAT(DISTINCT t.dsd_rate) AS dsd_txt, MAX(t.channels) AS canales,
                    GROUP_CONCAT(DISTINCT t.channel_layout) AS layouts, MAX(t.sample_rate_real) AS sr_real,
                    SUM(CASE WHEN t.is_dsd=1 THEN 1 ELSE 0 END) AS dsd, SUM(CASE WHEN t.is_mqa=1 THEN 1 ELSE 0 END) AS mqa,
+                   SUM(CASE WHEN t.is_mqa=1 AND t.led_color='blue' THEN 1 ELSE 0 END) AS mqa_studio,
+                   SUM(CASE WHEN t.is_mqa=1 AND t.led_color='magenta' THEN 1 ELSE 0 END) AS mqb,
+                   MAX(CASE WHEN t.is_mqa=1 THEN CAST(t.mqa_original_sample_rate AS INTEGER) END) AS mqa_sr,
                    SUM(CASE WHEN {LOSSY_SQL} THEN 1 ELSE 0 END) AS lossy, MAX(t.bitrate) AS bitrate,
                    GROUP_CONCAT(DISTINCT LOWER(t.codec)) AS codecs
             FROM albums al JOIN artists ar ON ar.id = al.artist_id LEFT JOIN tracks t ON t.album_id = al.id

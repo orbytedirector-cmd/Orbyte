@@ -378,6 +378,8 @@ class Tidal:
         tags = (a.get('mediaMetadata') or {}).get('tags') or []
         hires = 'HIRES_LOSSLESS' in tags or a.get('audioQuality') == 'HI_RES_LOSSLESS'
         lossless = hires or 'LOSSLESS' in tags or a.get('audioQuality') in ('LOSSLESS', 'HI_RES')
+        # Tidal todavía marca algunos álbumes como MQA («HI_RES» antiguo o etiqueta MQA); se informa aparte
+        mqa = 'MQA' in tags or a.get('audioQuality') == 'HI_RES'
         titulo = a.get('title') or ''
         titulo = _con_version(titulo, a.get('version'))
         cover = a.get('cover')
@@ -387,7 +389,7 @@ class Tidal:
                 'duracion': a.get('duration'),
                 # sin Hi-Res, Tidal entrega 16/44.1; con Hi-Res, la frecuencia se averigua aparte (resolucion())
                 'bits': None if hires else (16 if lossless else None), 'sr': None if hires else (44100 if lossless else None),
-                'hires': hires, 'lossless': lossless, 'upc': a.get('upc'), 'sello': a.get('copyright'),
+                'hires': hires, 'lossless': lossless, 'mqa': mqa, 'upc': a.get('upc'), 'sello': a.get('copyright'),
                 'portada': f'https://resources.tidal.com/images/{cover.replace("-", "/")}/320x320.jpg' if cover else None,
                 'tipo': self._tipo(a), 'explicito': bool(a.get('explicit')),
                 'popularidad': a.get('popularity'),
@@ -499,14 +501,16 @@ def _tag_lib(g):
 
 
 def _en_biblioteca(bib, artista, titulo):
+    """Las ediciones que ya tienes de ese álbum (la más parecida primero), con su calidad y, si es MQA, su tipo."""
     if not bib:
-        return None
-    for d in analisis.buscar_duplicados(bib, artista, titulo)[:1]:
+        return []
+    out = []
+    for d in analisis.buscar_duplicados(bib, artista, titulo)[:4]:
         g = next((x for x in bib['grupos'] if x['ruta'] == d['ruta']), {})
-        return {'ruta': d['ruta'], 'album': d['album'], 'tag': d.get('tag'), 'formato': d.get('formato'),
-                'pistas': d.get('pistas'), 'sr': g.get('sr') or None, 'bits': g.get('bits') or None,
-                'similitud': d.get('similitud')}
-    return None
+        out.append({'ruta': d['ruta'], 'album': d['album'], 'tag': d.get('tag'), 'formato': d.get('formato'),
+                    'pistas': d.get('pistas'), 'sr': g.get('sr') or None, 'bits': g.get('bits') or None,
+                    'mqa': g.get('mqa'), 'similitud': d.get('similitud')})
+    return out
 
 
 def agrupar(versiones, bib):
@@ -532,7 +536,8 @@ def agrupar(versiones, bib):
     for g in grupos.values():
         g.pop('_alt')
         g['versiones'].sort(key=lambda v: v['servicio'] != 'qobuz')
-        g['biblioteca'] = _en_biblioteca(bib, g['artista'], g['titulo'])
+        g['biblioteca_todas'] = _en_biblioteca(bib, g['artista'], g['titulo'])
+        g['biblioteca'] = g['biblioteca_todas'][0] if g['biblioteca_todas'] else None
         sugerir(g)
         out.append(g)
     return out
@@ -560,18 +565,32 @@ def sugerir(g):
             g['sugerencia'] = 'Misma resolución en ambos: «Medir master» dice si el master es el mismo'
         elif len(vs) == 1:
             vs[0]['sugerida'] = True
-    lib = g.get('biblioteca')
+    libs = g.get('biblioteca_todas') or ([g['biblioteca']] if g.get('biblioteca') else [])
     for v in vs:
-        v['mejora'] = None
-        if lib and v.get('sr'):
-            tag = _tag_lib(lib)
-            if tag == 'DSD':
-                v['mejora'] = 'no'
-            elif tag == 'Lossy':
-                v['mejora'] = 'si'
-            elif lib.get('sr'):
-                v['mejora'] = comparar_resolucion(v.get('bits'), v['sr'], lib.get('bits'), lib['sr'])
+        v['mejora'] = mejora_frente_a(v, libs) if v.get('sr') else None
     return g
+
+
+def _mejora_una(v, lib):
+    tag = _tag_lib(lib)
+    if tag == 'DSD':
+        return 'no'
+    if tag == 'Lossy':
+        return 'si'
+    if lib.get('sr'):
+        # MQA: por la resolución del archivo (un FLAC 24/96 mejora un MQA 24/44,1); el detalle se muestra aparte
+        return comparar_resolucion(v.get('bits'), v['sr'], lib.get('bits'), lib['sr'])
+    return None
+
+
+def mejora_frente_a(v, libs):
+    """'si' si mejora todas las ediciones que ya tienes; 'igual' si iguala la mejor; 'no' si alguna es mejor."""
+    rs = [r for r in (_mejora_una(v, l) for l in libs) if r]
+    if not rs:
+        return None
+    if 'no' in rs:
+        return 'no'
+    return 'igual' if 'igual' in rs else 'si'
 
 
 def comparar_resolucion(bits, sr, bits_lib, sr_lib):
