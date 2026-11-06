@@ -35,6 +35,9 @@ from . import analisis, rescate, tienda
 log = logging.getLogger('ingesta.reparar')
 
 PAUSA_S = 5
+# Una descarga que se corta o llega dañada («File is corrupt!») se reintenta: suele ser pasajero.
+INTENTOS_DESCARGA = 3
+PAUSA_REINTENTO_S = 20
 # Pista elegida a mano que dura distinto de la vieja: hasta este margen se puede confirmar («Usar igual»);
 # más allá no es la misma pista y se bloquea.
 MAX_DIF_CONFIRMABLE_S = 10.0
@@ -471,6 +474,38 @@ def copiar_tags(vieja, nueva, sufijo=None, respaldo=None):
     return n['title'][0], (' + '.join(fuentes) if fuentes else None)
 
 
+class _FalloDescarga(Fallo):
+    """Falla de la descarga en sí (corte, «File is corrupt!»): se reintenta."""
+
+
+def _bajar_una(it, tmp):
+    pid = str(it['pareja']['id'])
+    destino = tempfile.mkdtemp(prefix='intento-', dir=tmp)
+    nuevo = rescate.bajar_pista('tidal', pid, destino)
+    if not nuevo:
+        raise _FalloDescarga('Tidal no entregó la pista (' + rescate.ultima_salida.get(pid, '') + ')')
+    codec = (tienda.codec(nuevo) or '').lower()
+    if codec != 'flac':
+        raise Fallo(f'llegó en {codec.upper() or "?"}, no en FLAC')
+    ok, errores, _pico, seg = analisis.decodificar(nuevo)
+    if not ok:
+        raise _FalloDescarga('la pista nueva también trae errores: ' + '; '.join(errores[:2]))
+    return nuevo, seg
+
+
+def _bajar_verificada(it, tmp, reg):
+    """Baja la pista y la decodifica; si la descarga falla o llega dañada, reintenta (con pausa creciente)."""
+    for intento in range(1, INTENTOS_DESCARGA + 1):
+        try:
+            return _bajar_una(it, tmp)
+        except _FalloDescarga as e:
+            if intento == INTENTOS_DESCARGA:
+                raise Fallo(f'{e} · {INTENTOS_DESCARGA} intentos')
+            espera = PAUSA_REINTENTO_S * intento
+            reg(f'   … intento {intento} falló ({str(e)[:160]}); se reintenta en {espera} s')
+            time.sleep(espera)
+
+
 def reparar_pista(it, job, aj, reg, salud=None):
     """Baja, verifica, pasa la metadata y reemplaza. Devuelve el título final; Fallo si algo no cuadra."""
     ruta = it['ruta']
@@ -478,15 +513,7 @@ def reparar_pista(it, job, aj, reg, salud=None):
         raise Fallo('la pista vieja ya no está')
     tmp = tempfile.mkdtemp(prefix='reparar-', dir=os.path.dirname(os.path.abspath(salud.ruta)) if salud else None)
     try:
-        nuevo = rescate.bajar_pista('tidal', it['pareja']['id'], tmp)
-        if not nuevo:
-            raise Fallo('Tidal no entregó la pista (' + rescate.ultima_salida.get(str(it['pareja']['id']), '') + ')')
-        codec = (tienda.codec(nuevo) or '').lower()
-        if codec != 'flac':
-            raise Fallo(f'llegó en {codec.upper() or "?"}, no en FLAC')
-        ok, errores, _pico, seg = analisis.decodificar(nuevo)
-        if not ok:
-            raise Fallo('la pista nueva también trae errores: ' + '; '.join(errores[:2]))
+        nuevo, seg = _bajar_verificada(it, tmp, reg)
         ref = it.get('duracion') or (it.get('pareja') or {}).get('duracion')
         margen = MAX_DIF_CONFIRMABLE_S if it.get('acepto_duracion') else rescate.TOLERANCIA_S
         if ref and seg is not None and abs(seg - float(ref)) > margen:
