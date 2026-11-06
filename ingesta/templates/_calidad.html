@@ -1,0 +1,110 @@
+{# Calidad y LED de un álbum que ya está en Orbyte. Uso: {% with cal_oid=<id en Orbyte> %}{% include '_calidad.html' %}{% endwith %} #}
+<section class="seccion" id="calidad-led">
+  <h2 class="rotulo">Calidad y LED <span class="cuenta" id="cl-cuenta"></span></h2>
+  <div class="panel" id="cl-cuerpo"><div class="estado-vivo"><span class="giro"></span>Buscando MQA en el audio de cada pista…</div></div>
+</section>
+<script>
+(() => {
+  let OID = {{ cal_oid|int }};
+  const RUTA = {{ (cal_ruta or '')|tojson }};      // si el ID cambió (reindexado), se busca el álbum por su carpeta
+  const LED = {yellow: ['CD', 'CD'], white: ['HR', 'HR'], green: ['MQA', 'MQA'], blue: ['MQA Studio', 'MQAS'],
+               magenta: ['MQB', 'MQB'], cyan: ['DSD', 'DSD'], red: ['DSD256', 'DSD'], silver: ['Lossy', 'Lossy']};
+  const SR = [44100, 48000, 88200, 96000, 176400, 192000, 352800, 384000];
+  const khz = f => (f / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1});
+  const chipLed = l => l ? `<span class="chip q-${LED[l] ? LED[l][1] : ''}"><span class="led"></span>${esc(LED[l] ? LED[l][0] : l)}</span>` : '<span class="muy-tenue">—</span>';
+  const res = (b, s) => s ? `${b || '?'}/${khz(s)}` : '';
+  const mqaTxt = m => !m || !m.mqa ? 'No es MQA' : `${m.studio ? 'MQA Studio' : 'MQA'}${m.sr_original ? ' · original ' + khz(m.sr_original) + ' kHz' : ''}`;
+  // misma regla que el indexador (index_libraryV3.get_led_color)
+  const ledDe = (esMqa, studio, sr, orig) => esMqa ? (studio ? 'blue' : (orig && +orig !== +sr ? 'magenta' : 'green')) : ((sr || 0) <= 48000 ? 'yellow' : 'white');
+  const cuerpo = document.getElementById('cl-cuerpo');
+  let datos = null, marcadas = new Set(), registro = '';
+
+  async function cargar(forzar) {
+    cuerpo.innerHTML = `<div class="estado-vivo"><span class="giro"></span>${forzar ? 'Volviendo a analizar el audio…' : 'Buscando MQA en el audio de cada pista…'}</div>`;
+    let r;
+    const q = new URLSearchParams({...(forzar ? {forzar: 1} : {}), ...(RUTA ? {ruta: RUTA} : {})});
+    try { r = await (await fetch(`/api/calidad/album/${OID}?${q}`)).json(); }
+    catch (e) { r = {ok: false, error: 'No se pudo conectar'}; }
+    if (!r.ok) { cuerpo.innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
+    datos = r; marcadas = new Set(); if (r.oid) OID = r.oid;
+    pintar();
+  }
+
+  function pintar() {
+    const s = datos.resumen, ps = datos.pistas;
+    document.getElementById('cl-cuenta').textContent = s.distintas ? `${s.distintas} por corregir` : (s.dudas ? `${s.dudas} en duda` : 'corresponde');
+    const filas = ps.map((p, i) => {
+      const a = p.asignado || {}, ar = p.archivo || {}, t = p.tags || {}, d = p.detectado;
+      const est = p.estado === 'ok' ? '<span class="ok">✓ corresponde</span>'
+        : p.estado === 'distinto' ? `<span class="med">⚠ ${p.motivos.map(esc).join('<br>')}</span>`
+        : p.estado === 'duda' ? `<span class="med">? ${p.motivos.map(esc).join('<br>')}</span>`
+        : `<span class="tenue">${p.motivos.map(esc).join('<br>')}</span>`;
+      return `<tr>
+        <td style="width:1%"><input type="checkbox" data-m="${i}" ${marcadas.has(p.ruta) ? 'checked' : ''} aria-label="Elegir ${esc(p.titulo || '')}"></td>
+        <td class="num">${p.disco && +p.disco > 1 ? esc(p.disco) + '-' : ''}${esc(p.numero ?? '')}</td>
+        <td>${esc(p.titulo || '')}</td>
+        <td>${chipLed(a.led)}<div class="s">${esc(res(a.bits, a.sr))}${a.mqa ? ' · ' + esc(mqaTxt({mqa: true, studio: a.studio, sr_original: a.sr_original})) : ''}</div></td>
+        <td class="oculto-movil"><div class="s">${esc(res(ar.bits, ar.sr))}</div><div class="s tenue">${t.mqa ? 'tags: ' + esc(mqaTxt(t)) : 'tags: sin MQA'}</div></td>
+        <td>${d ? (d.error ? `<span class="mal s">${esc(d.error)}</span>` : `<span class="${d.mqa ? 'ok' : 'tenue'}">${esc(mqaTxt(d))}</span>`) : '<span class="muy-tenue">—</span>'}</td>
+        <td>${p.esperado && p.esperado.led ? chipLed(p.esperado.led) : '<span class="muy-tenue">—</span>'}</td>
+        <td class="s">${est}</td></tr>`;
+    }).join('');
+    const nDet = ps.filter(p => p.estado === 'distinto').length;
+    const srOpts = '<option value="">desconocida</option>' + SR.map(f => `<option value="${f}">${khz(f)} kHz</option>`).join('');
+    cuerpo.innerHTML = `
+      <div class="s-fila" style="margin-bottom:.6rem"><div>
+        <div class="t">Asignado ${chipLed(s.asignado)} · Corresponde ${chipLed(s.esperado)}</div>
+        <div class="s tenue">${s.n} pistas · MQA detectado en ${s.mqa_detectado} · se analizan los primeros segundos de cada pista, como hace el DAC</div></div>
+        <div class="acciones" style="margin:0">
+          <button class="btn oro" id="cl-det" ${nDet ? '' : 'disabled'} title="Escribe los tags MQA (o los quita), reindexa el álbum y pone el LED; el audio no se toca">Aplicar lo detectado${nDet ? ` (${nDet})` : ''}</button>
+          <button class="btn" id="cl-otra">Volver a analizar</button></div></div>
+      <div class="tabla-wrap"><table>
+        <tr><th></th><th>#</th><th>Pista</th><th>En Orbyte</th><th class="oculto-movil">Archivo</th><th>Detectado en el audio</th><th>Corresponde</th><th>Estado</th></tr>
+        ${filas}</table></div>
+      <details style="margin-top:.8rem" ${marcadas.size ? 'open' : ''}><summary class="s">Ajuste manual</summary>
+        <div class="s-form" style="margin-top:.6rem">
+          <div class="campo"><label for="cl-tipo">Tipo</label>
+            <select id="cl-tipo"><option value="no">No es MQA</option><option value="mqa">MQA</option><option value="studio">MQA Studio</option></select></div>
+          <div class="campo"><label for="cl-sr">Frecuencia original</label><select id="cl-sr">${srOpts}</select></div>
+          <div class="campo"><label>Pistas</label><div class="s" style="padding-top:.5rem" id="cl-cuales"></div></div>
+        </div>
+        <div class="acciones"><span class="s" id="cl-prev"></span><button class="btn" id="cl-man">Aplicar</button></div>
+      </details>
+      ${registro ? `<pre class="registro" style="margin-top:.8rem">${esc(registro)}</pre>` : ''}`;
+    cuerpo.querySelectorAll('[data-m]').forEach(c => c.onchange = () => {
+      const r = ps[+c.dataset.m].ruta; c.checked ? marcadas.add(r) : marcadas.delete(r); previa();
+    });
+    document.getElementById('cl-otra').onclick = () => cargar(true);
+    document.getElementById('cl-det').onclick = () => aplicar({modo: 'detectado'},
+      `¿Aplicar lo detectado en ${nDet} pista${nDet > 1 ? 's' : ''}?\n\nSe escriben (o quitan) los tags MQA en los archivos, se reindexa el álbum en Orbyte y se actualiza el LED. El audio no se toca. Las pistas en duda no se cambian.`);
+    ['cl-tipo', 'cl-sr'].forEach(id => document.getElementById(id).onchange = previa);
+    document.getElementById('cl-man').onclick = () => {
+      const tipo = document.getElementById('cl-tipo').value, sr = document.getElementById('cl-sr').value;
+      const n = marcadas.size || ps.length;
+      aplicar({modo: 'manual', rutas: [...marcadas], mqa: tipo !== 'no', studio: tipo === 'studio', sr_original: sr ? +sr : null},
+        `¿Dejar ${n} pista${n > 1 ? 's' : ''} como «${document.getElementById('cl-tipo').selectedOptions[0].text}»${sr && tipo !== 'no' ? ' con frecuencia original ' + khz(+sr) + ' kHz' : ''}?\n\nSe escriben los tags en los archivos, se reindexa el álbum y se actualiza el LED.`);
+    };
+    previa();
+  }
+
+  function previa() {
+    const ps = datos.pistas, sel = marcadas.size ? ps.filter(p => marcadas.has(p.ruta)) : ps;
+    const tipo = document.getElementById('cl-tipo').value, sr = document.getElementById('cl-sr').value;
+    const leds = [...new Set(sel.map(p => ledDe(tipo !== 'no', tipo === 'studio', (p.archivo || {}).sr || (p.asignado || {}).sr, sr || null)))];
+    document.getElementById('cl-cuales').textContent = marcadas.size ? `${marcadas.size} marcada${marcadas.size > 1 ? 's' : ''} en la tabla` : 'todas (marca en la tabla para elegir algunas)';
+    document.getElementById('cl-prev').innerHTML = 'LED resultante: ' + leds.map(chipLed).join(' ');
+  }
+
+  async function aplicar(cuerpoPost, pregunta) {
+    if (!confirm(pregunta)) return;
+    cuerpo.querySelectorAll('button').forEach(b => b.disabled = true);
+    const r = await post(`/api/calidad/album/${OID}/aplicar`, cuerpoPost);
+    if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); cuerpo.querySelectorAll('button').forEach(b => b.disabled = false); return; }
+    registro = (r.registro || []).join('\n') + [...(r.avisos || []), ...(r.errores || [])].map(x => '\n⚠ ' + x).join('');
+    toast('Calidad actualizada', `${r.cambiadas} pista${r.cambiadas === 1 ? '' : 's'} con su LED al día`);
+    cargar(false);
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => cargar(false));
+  else cargar(false);
+})();
+</script>

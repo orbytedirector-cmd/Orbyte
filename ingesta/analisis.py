@@ -1296,6 +1296,35 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     if aac:
         problema('aviso', 'aac', 'AAC: se conserva como Lossy (confirma que no exista en FLAC)', aac)
 
+    # ── MQA escondido en el audio (Tidal ya no lo marca en los tags; el DAC sí lo reconoce) ──
+    # Se mira el inicio de 2 pistas; si alguna es MQA, todas. Al ubicar se escriben los tags MQA (el audio no se
+    # toca) para que Orbyte le ponga su LED, y desde ya el audio queda protegido como MQA (no se recodifica).
+    cand = [p for p in legibles if p['codec'] == 'flac' and not p.get('mqa') and p.get('canales') == 2]
+    if cand:
+        from . import mqa as mqa_mod
+
+        def _mqa(p):
+            ant = anteriores.get((p['archivo'], p['tamano'], p.get('mtime')))
+            if ant and isinstance(ant.get('mqa_audio'), dict):
+                return ant['mqa_audio']
+            d = mqa_mod.detectar(os.path.join(ruta, p['archivo']))
+            return {k: d.get(k) for k in ('mqa', 'studio', 'sr_original')}
+        with ThreadPoolExecutor(max_workers=max(1, trabajadores)) as ex:
+            res = list(ex.map(_mqa, cand[:2]))
+            if any(r.get('mqa') for r in res):
+                res += list(ex.map(_mqa, cand[2:]))
+        for p, d in zip(cand, res):
+            p['mqa_audio'] = d
+            if d.get('mqa'):
+                p.update(mqa=True, mqa_tipo='studio' if d.get('studio') else 'mqa',
+                         mqa_sr_original=d.get('sr_original'), clase='MQA', mqa_detectado=True)
+        detectadas = [p for p in cand if p.get('mqa_detectado')]
+        if detectadas:
+            tipos = Counter(mqa_mod.texto(p['mqa_audio']) for p in detectadas)
+            problema('correccion', 'mqa_audio',
+                     f'MQA en el audio sin tags ({", ".join(tipos)}): al ubicar se escriben los tags MQA para que '
+                     'Orbyte le ponga su LED; el audio no se toca', [p['archivo'] for p in detectadas])
+
     clases = Counter(p['clase'] for p in legibles if p.get('clase'))
     if len(clases) > 1:
         problema('aviso', 'mezcla', 'El álbum mezcla calidades: ' +
@@ -1826,6 +1855,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         base = {'origen': p['archivo'], 'codec': p['codec'], 'sr': p.get('sr'), 'bits': p.get('bits'),
                 'duracion_origen': p.get('duracion'), 'dsd': p.get('dsd'), 'lossy': p.get('lossy'),
                 'float': p.get('float'), 'mqa': p.get('mqa'), 'quitar_id3': bool(p.get('id3')),
+                'mqa_escribir': ({'studio': p.get('mqa_tipo') == 'studio', 'sr_original': p.get('mqa_sr_original')}
+                                 if p.get('mqa_detectado') else None),
                 'errores_aceptados': bool(p.get('error_completo')),
                 'portada_disco': None}
         if p.get('imagen_cue'):
