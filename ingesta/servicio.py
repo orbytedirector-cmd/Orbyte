@@ -1712,8 +1712,11 @@ def api_calidad_aplicar(oid):
             sr = int(sr) if sr not in (None, '', 0, '0') else None
         except (TypeError, ValueError):
             return jsonify(ok=False, error='Frecuencia original inválida'), 400
-        decisiones = {r: {'mqa': bool(d.get('mqa')), 'studio': bool(d.get('mqa') and d.get('studio')),
-                          'sr_original': sr if d.get('mqa') else None} for r in rutas}
+        if d.get('magenta'):          # LED magenta a mano (MQB visto en el DAC): no se tocan los tags
+            decisiones = {r: {'mqa': False, 'studio': False, 'sr_original': None, 'led': 'magenta'} for r in rutas}
+        else:
+            decisiones = {r: {'mqa': bool(d.get('mqa')), 'studio': bool(d.get('mqa') and d.get('studio')),
+                              'sr_original': sr if d.get('mqa') else None} for r in rutas}
     else:
         decisiones = calidad_mod.decisiones_detectadas(pistas)
         if d.get('rutas'):
@@ -2701,6 +2704,7 @@ def main():
     descargador.start()
     salud.start()
     verificador.start()
+    threading.Thread(target=verificador.actualizar_criterio, name='calidad-criterio', daemon=True).start()
     reparador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)

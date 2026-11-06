@@ -28,7 +28,8 @@ from . import mqa, salud as salud_mod
 
 log = logging.getLogger('ingesta.calidad')
 
-V = 'c1'                    # versión del criterio de la verificación
+V = 'c2'                    # versión del criterio (c2: LED por la firma; sin magenta por frecuencia)
+DV = 'c1'                   # versión de la detección en caché (la firma no cambió: no se vuelve a decodificar)
 ESTADOS = ('ok', 'distinto', 'duda', 'falta', 'omitida')
 _COLS = ('t.id, t.file_path, t.album_id, t.title, t.track_number, t.disc_number, t.sample_rate, t.bit_depth, '
          't.is_mqa, t.mqa_type, t.mqa_original_sample_rate, t.led_color, t.is_dsd, t.dsd_rate, t.codec, '
@@ -75,7 +76,7 @@ class Detecciones:
         if not forzar:
             c = self._con()
             try:
-                r = c.execute('SELECT resultado FROM deteccion WHERE clave=? AND v=?', (clave, V)).fetchone()
+                r = c.execute('SELECT resultado FROM deteccion WHERE clave=? AND v=?', (clave, DV)).fetchone()
             finally:
                 c.close()
             if r:
@@ -86,7 +87,7 @@ class Detecciones:
             try:
                 with c:
                     c.execute('INSERT OR REPLACE INTO deteccion(clave, v, resultado, cuando) VALUES(?,?,?,?)',
-                              (clave, V, json.dumps(d), time.time()))
+                              (clave, DV, json.dumps(d), time.time()))
             finally:
                 c.close()
         return d
@@ -123,18 +124,18 @@ def evaluar(fila, det_cache, forzar=False, prefijo=None):
     t = out['tags'] or {}
     if det.get('mqa'):
         esp = {'mqa': True, 'studio': bool(det.get('studio')), 'sr_original': det.get('sr_original')}
-    elif t.get('mqa'):
-        # los tags dicen MQA pero el audio no trae la firma (en los primeros segundos): no se decide solo
-        esp = {'mqa': True, 'studio': bool(t.get('studio')), 'sr_original': t.get('sr_original')}
-        out['estado'] = 'duda'
-        out['motivos'].append(f'los tags dicen MQA, pero no se encontró la firma en los primeros {mqa.SEGUNDOS} s '
-                              'del audio')
     else:
+        # sin firma en el audio el DAC lo muestra como PCM normal aunque los tags digan MQA (verificado con el iFi)
         esp = {'mqa': False, 'studio': False, 'sr_original': None}
     esp['led'] = mqa.led(esp['mqa'], esp['studio'], sr, esp['sr_original'])
     out['esperado'] = esp
-    if out['estado'] == 'duda':
-        return out
+    if asignado['led'] == 'magenta' and not det.get('mqa') and not t.get('mqa'):
+        # el magenta no se deduce del audio: puesto a mano (p. ej. visto en el DAC) se respeta
+        esp['led'] = 'magenta'
+        out['nota'] = 'magenta puesto a mano: el audio no trae firma MQA, se respeta'
+    if t.get('mqa') and not det.get('mqa'):
+        out['motivos'].append(f'los tags dicen MQA, pero el audio no trae la firma (el DAC lo muestra como '
+                              f'{mqa.LED_NOMBRE.get(esp["led"], esp["led"])})')
     if arch.get('sr') and arch['sr'] != fila['sample_rate']:
         out['motivos'].append(f'Orbyte tiene {fila["sample_rate"]} Hz y el archivo {arch["sr"]} Hz')
     if arch.get('bits') and asignado['bits'] and arch['bits'] != asignado['bits']:
@@ -142,11 +143,12 @@ def evaluar(fila, det_cache, forzar=False, prefijo=None):
     if esp['mqa'] and not asignado['mqa']:
         out['motivos'].append(f'el audio es {mqa.texto(det)} y Orbyte no lo tiene como MQA')
     elif asignado['mqa'] and not esp['mqa']:
-        out['motivos'].append('Orbyte lo tiene como MQA y ni el audio ni los tags lo son')
+        if not t.get('mqa'):
+            out['motivos'].append('Orbyte lo tiene como MQA y ni el audio ni los tags lo son')
     elif esp['mqa']:
         if esp['studio'] != asignado['studio']:
             out['motivos'].append('es MQA Studio' if esp['studio'] else 'no es MQA Studio')
-        if esp['sr_original'] and esp['sr_original'] != asignado['sr_original']:
+        if esp['sr_original'] and esp['sr_original'] != asignado['sr_original'] and esp['sr_original'] != sr:
             out['motivos'].append(f'frecuencia original {esp["sr_original"]} Hz (Orbyte: '
                                   f'{asignado["sr_original"] or "—"})')
     if (asignado['led'] or '') != esp['led']:
@@ -214,6 +216,9 @@ def aplicar(aj, decisiones, reg):
             if not f:
                 errores.append(f'{os.path.basename(ruta)}: no está en Orbyte')
                 continue
+            if d.get('led') == 'magenta':
+                reg(f'· {os.path.basename(ruta)}: LED magenta a mano (los tags no se tocan)')
+                continue
             if not ruta.lower().endswith('.flac'):
                 errores.append(f'{os.path.basename(ruta)}: no es FLAC (los tags MQA solo se escriben en FLAC)')
                 continue
@@ -249,6 +254,8 @@ def aplicar(aj, decisiones, reg):
                 for f in nuevas:
                     led = mqa.led(bool(f['is_mqa']), (f['mqa_type'] or '') == 'studio', f['sample_rate'],
                                   f['mqa_original_sample_rate'], f['is_dsd'], f['dsd_rate'])
+                    if (decisiones.get(f['file_path']) or {}).get('led') == 'magenta':
+                        led = 'magenta'
                     con.execute('UPDATE tracks SET led_color=? WHERE id=?', (led, f['id']))
                     cambiadas += 1
         finally:
@@ -267,6 +274,8 @@ def decisiones_detectadas(pistas):
             continue
         e = p['esperado']
         out[p['ruta']] = {'mqa': e['mqa'], 'studio': e.get('studio'), 'sr_original': e.get('sr_original')}
+        if e.get('led') == 'magenta':
+            out[p['ruta']]['led'] = 'magenta'
     return out
 
 
@@ -306,6 +315,19 @@ class Verificador(salud_mod.Salud):
             tam = mt = None
         self._guardar(ruta, p['album_id'], tam, mt, r['estado'], [r], None, p['duracion'])
         self._contar(p)
+
+    def actualizar_criterio(self):
+        """Al cambiar el criterio (V): re-evalúa lo ya verificado con el criterio anterior. La detección sale
+        de la caché (DV), así que no se vuelve a decodificar audio: solo se leen tags y cabeceras."""
+        try:
+            with self._con() as c:
+                rutas = [r[0] for r in c.execute('SELECT ruta FROM pistas WHERE v IS NOT ? ORDER BY ruta', (self.V,))]
+            for k in range(0, len(rutas), 200):
+                self.reevaluar(rutas[k:k + 200])
+            if rutas:
+                log.info('Calidad y LED: %d pistas re-evaluadas con el criterio %s', len(rutas), self.V)
+        except Exception:  # noqa: BLE001
+            log.exception('Calidad y LED: re-evaluar con el criterio nuevo')
 
     def reevaluar(self, rutas):
         """Tras aplicar: vuelve a evaluar esas pistas (la detección sale de la caché)."""

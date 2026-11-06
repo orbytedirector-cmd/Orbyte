@@ -98,14 +98,12 @@ COMPRESSION_MODE = {
 
 def get_led_color(is_dsd, dsd_rate, is_mqa, mqa_type,
                   sample_rate, mqa_original_sample_rate) -> str:
+    # 06-11-2026: verificado con el iFi ZEN DAC V2 - el color MQA lo da la procedencia
+    # (Studio → azul, el resto → verde), no la frecuencia original: un MQA 48 → 96 kHz
+    # se ve verde. Antes «original ≠ archivo → magenta» dejaba en magenta pistas que el
+    # DAC muestra azul o verde. El magenta (MQB) no se deduce: se pone a mano en la ingesta.
     if is_mqa and mqa_type == "studio":
         return "blue"
-    if is_mqa and mqa_original_sample_rate:
-        try:
-            if int(mqa_original_sample_rate) != sample_rate:
-                return "magenta"
-        except (ValueError, TypeError):
-            pass
     if is_mqa:
         return "green"
     if is_dsd:
