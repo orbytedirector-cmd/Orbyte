@@ -60,7 +60,8 @@ def buscar_en_pcm(datos):
     i, k, bits = mejor
     orsf = int(bits[i + 3:i + 7], 2)
     procedencia = int(bits[i + 29:i + 34], 2)
-    return {'mqa': True, 'studio': procedencia > 8, 'sr_original': _frecuencia_original(orsf), 'bit': 16 + k}
+    return {'mqa': True, 'studio': procedencia > 8, 'sr_original': _frecuencia_original(orsf), 'bit': 16 + k,
+            'cod_procedencia': procedencia, 'cod_frecuencia': orsf}
 
 
 def detectar(ruta, segundos=SEGUNDOS, prefijo=None):
