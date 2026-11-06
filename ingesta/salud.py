@@ -102,8 +102,8 @@ def confirmar(ruta, prefijo=None):
         return True, CONFIRMADA
     ok, _e, _p, _s = analisis.decodificar(ruta, prefijo=prefijo)
     if ok:
-        return False, 'falla de lectura pasajera: una segunda decodificación salió limpia'
-    return True, 'confirmado: los errores se repiten en una segunda decodificación'
+        return False, 'falla de lectura pasajera: sin huella MD5; una segunda decodificación salió limpia'
+    return True, 'confirmado: sin huella MD5 que comparar; los errores se repiten en una segunda decodificación'
 
 
 def clasificar(ruta, ok, errores, segundos, duracion):
