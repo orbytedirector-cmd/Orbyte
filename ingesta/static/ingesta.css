@@ -89,6 +89,8 @@ button, input, select { font: inherit; color: inherit; }
 .q-HR { color: var(--led-hr); border-color: rgba(240,240,240,.3); }
 .q-DSD { color: var(--led-dsd); border-color: rgba(0,212,255,.35); }
 .q-MQA { color: var(--led-mqa); border-color: rgba(0,230,118,.35); }
+.q-MQAS { color: #2979ff; border-color: rgba(41,121,255,.4); }   /* MQA Studio (LED azul) */
+.q-MQB { color: #e040fb; border-color: rgba(224,64,251,.4); }    /* MQB: frecuencia original ≠ archivo (magenta) */
 .q-Lossy { color: var(--led-lossy); border-color: rgba(138,151,168,.4); }
 .e-copiando, .e-en_cola { color: var(--texto-2); }
 .e-analizando { color: var(--oro-claro); border-color: var(--borde-oro); }
