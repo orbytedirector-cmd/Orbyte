@@ -518,9 +518,10 @@ def _bajar_una(it, tmp):
     ok, errores, _pico, seg = analisis.decodificar(nuevo)
     if not ok:
         raise _FalloDescarga('la pista nueva también trae errores: ' + '; '.join(errores[:2]))
-    if salud_mod.huella_flac(nuevo) is False:
+    h = salud_mod.huella_flac(nuevo)
+    if h is False:
         raise _FalloDescarga('la pista nueva no coincide con su propia huella MD5')
-    return nuevo, seg
+    return nuevo, seg, ('coincide con su huella MD5' if h else 'sin huella MD5 que comparar')
 
 
 def _bajar_verificada(it, tmp, reg):
@@ -544,11 +545,13 @@ def reparar_pista(it, job, aj, reg, salud=None):
     _vieja_confirmada(ruta, salud, reg)
     tmp = tempfile.mkdtemp(prefix='reparar-', dir=os.path.dirname(os.path.abspath(salud.ruta)) if salud else None)
     try:
-        nuevo, seg = _bajar_verificada(it, tmp, reg)
+        nuevo, seg, huella = _bajar_verificada(it, tmp, reg)
         ref = it.get('duracion') or (it.get('pareja') or {}).get('duracion')
         margen = MAX_DIF_CONFIRMABLE_S if it.get('acepto_duracion') else rescate.TOLERANCIA_S
         if ref and seg is not None and abs(seg - float(ref)) > margen:
             raise Fallo(f'dura {seg:.0f} s y la vieja {float(ref):.0f} s: no es la misma pista')
+        dur = f'dura {seg:.1f} s' + (f' (la vieja {float(ref):.1f} s)' if ref else '') if seg is not None else ''
+        reg(f'   · la nueva: decodificada completa sin errores · {huella}{" · " + dur if dur else ""}')
         b, s = calidad_archivo(nuevo)
         album_q = (job.get('bits_album'), job.get('sr_album'))
         distinta = bool(album_q[1]) and (b, s) != album_q
@@ -571,6 +574,7 @@ def reparar_pista(it, job, aj, reg, salud=None):
         if salud:
             st = os.stat(ruta)
             salud._guardar(ruta, None, st.st_size, st.st_mtime, 'ok', ['reparada con la pista de Tidal'], seg, ref)
+            reg('   · Salud: queda sana (deja de figurar en Dañadas / Con errores)')
         return titulo
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
