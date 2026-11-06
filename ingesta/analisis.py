@@ -759,7 +759,7 @@ def _segundos_cue(cp):
     return cp['cuadros'] / 75 if cp.get('cuadros') is not None else cp['inicio']
 
 
-# Mismo nombre que el LED de Orbyte: verde MQA, azul MQA Studio, magenta MQB (frecuencia original ≠ la del archivo).
+# Mismo nombre que el LED de Orbyte: verde MQA, azul MQA Studio, magenta MQB (solo puesto a mano).
 MQA_NOMBRE = {'green': 'MQA', 'blue': 'MQA Studio', 'magenta': 'MQB'}
 
 
@@ -771,10 +771,10 @@ def mqa_info(n_mqa, n_studio, n_mqb, bits, sr, sr_original):
         sr_original = int(sr_original) if sr_original else None
     except (TypeError, ValueError):
         sr_original = None
-    # como index_libraryV3.get_led_color: Studio → azul; frecuencia original distinta a la del archivo → magenta
+    # el LED que tiene Orbyte (por mayoría): Studio → azul; magenta solo si está puesto así; el resto → verde
     if (n_studio or 0) * 2 >= n_mqa:
         led = 'blue'
-    elif (n_mqb or 0) * 2 >= n_mqa or (sr_original and sr and sr_original != sr):
+    elif (n_mqb or 0) * 2 >= n_mqa:
         led = 'magenta'
     else:
         led = 'green'

@@ -375,6 +375,7 @@ function pintarDif() {
         ${!calVerIgn && s.distintas ? `<input type="checkbox" data-csel="${i}" ${calSel.has(a.album_id) ? 'checked' : ''} aria-label="Marcar ${esc(a.album)}" style="margin-top:.3rem">` : ''}
         <div style="min-width:0"><div class="t">${esc(a.artista)} — ${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(a.anio)})</span>` : ''}</div>
         <div class="s">Asignado ${chipLedC(s.asignado)} → Corresponde ${chipLedC(s.esperado)} · ${s.distintas ? `<span class="med">${s.distintas} por corregir</span>` : ''}${s.dudas ? ` <span class="med">${s.dudas} en duda</span>` : ''}</div>
+        ${s.distintas && s.asignado && s.asignado === s.esperado ? '<div class="s ok">LED correcto · faltan los datos MQA en Orbyte y en los tags (el LED no cambia)</div>' : ''}
         ${motivos.map(m => `<div class="s tenue">${esc(m)}</div>`).join('')}
         <div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(a.carpeta))}</div></div></div>
       <div class="acciones" style="margin:0">${!calVerIgn && s.distintas ? `<button class="btn chico oro" data-capl="${i}">Aplicar lo detectado</button>` : ''}

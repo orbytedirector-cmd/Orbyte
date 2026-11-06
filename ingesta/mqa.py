@@ -10,8 +10,10 @@ Se decodifica el inicio de la pista a enteros de 32 bits alineados arriba (así 
 24 bits) y se busca la palabra de sincronía 0xbe0498c88 (36 bits). Detrás vienen la frecuencia original
 (4 bits, de la muestra +3 a la +6) y la procedencia (5 bits, de la +29 a la +33): > 8 = MQA Studio.
 
-LED (igual que index_libraryV3.get_led_color): MQA Studio → azul; MQA con frecuencia original distinta a la del
-archivo → magenta (MQB); otro MQA → verde; sin MQA: amarillo hasta 48 kHz, blanco arriba (DSD aparte).
+LED (igual que index_libraryV3.get_led_color): MQA Studio → azul; otro MQA → verde; sin MQA: amarillo hasta 48 kHz,
+blanco arriba (DSD aparte). Verificado contra el iFi ZEN DAC V2 (06-11-2026): el azul/verde lo decide la procedencia
+de la firma, no la frecuencia original (un MQA 48 → 96 kHz se ve verde, y los «magenta» por frecuencia eran Studio).
+El magenta no se deduce: solo se respeta cuando está puesto a mano.
 """
 import os
 import re
@@ -93,12 +95,6 @@ def led(is_mqa, studio, sr, sr_original, is_dsd=False, dsd_rate=None):
     """El LED que pone el indexador (index_libraryV3.get_led_color)."""
     if is_mqa and studio:
         return 'blue'
-    if is_mqa and sr_original:
-        try:
-            if int(sr_original) != int(sr or 0):
-                return 'magenta'
-        except (TypeError, ValueError):
-            pass
     if is_mqa:
         return 'green'
     if is_dsd:
