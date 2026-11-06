@@ -1712,8 +1712,8 @@ def api_calidad_aplicar(oid):
             sr = int(sr) if sr not in (None, '', 0, '0') else None
         except (TypeError, ValueError):
             return jsonify(ok=False, error='Frecuencia original inválida'), 400
-        if d.get('magenta'):          # LED magenta a mano (MQB visto en el DAC): no se tocan los tags
-            decisiones = {r: {'mqa': False, 'studio': False, 'sr_original': None, 'led': 'magenta'} for r in rutas}
+        if d.get('mqb'):              # MQB (magenta) visto en el DAC: tags «MQB» + Orbyte + LED, todo coherente
+            decisiones = {r: {'mqa': True, 'studio': False, 'mqb': True, 'sr_original': sr} for r in rutas}
         else:
             decisiones = {r: {'mqa': bool(d.get('mqa')), 'studio': bool(d.get('mqa') and d.get('studio')),
                               'sr_original': sr if d.get('mqa') else None} for r in rutas}

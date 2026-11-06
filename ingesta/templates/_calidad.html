@@ -13,7 +13,7 @@
   const khz = f => (f / 1000).toLocaleString('es-CL', {maximumFractionDigits: 1});
   const chipLed = l => l ? `<span class="chip q-${LED[l] ? LED[l][1] : ''}"><span class="led"></span>${esc(LED[l] ? LED[l][0] : l)}</span>` : '<span class="muy-tenue">—</span>';
   const res = (b, s) => s ? `${b || '?'}/${khz(s)}` : '';
-  const mqaTxt = m => !m || !m.mqa ? 'No es MQA' : `${m.studio ? 'MQA Studio' : 'MQA'}${m.sr_original ? ' · original ' + khz(m.sr_original) + ' kHz' : ''}`;
+  const mqaTxt = m => !m || !m.mqa ? 'No es MQA' : `${m.mqb ? 'MQB' : m.studio ? 'MQA Studio' : 'MQA'}${m.sr_original ? ' · original ' + khz(m.sr_original) + ' kHz' : ''}`;
   // misma regla que el indexador (index_libraryV3.get_led_color): Studio azul, MQA verde; el magenta solo a mano
   const ledDe = (esMqa, studio, sr) => esMqa ? (studio ? 'blue' : 'green') : ((sr || 0) <= 48000 ? 'yellow' : 'white');
   const cuerpo = document.getElementById('cl-cuerpo');
@@ -43,7 +43,7 @@
         <td style="width:1%"><input type="checkbox" data-m="${i}" ${marcadas.has(p.ruta) ? 'checked' : ''} aria-label="Elegir ${esc(p.titulo || '')}"></td>
         <td class="num">${p.disco && +p.disco > 1 ? esc(p.disco) + '-' : ''}${esc(p.numero ?? '')}</td>
         <td>${esc(p.titulo || '')}</td>
-        <td>${chipLed(a.led)}<div class="s">${esc(res(a.bits, a.sr))}${a.mqa ? ' · ' + esc(mqaTxt({mqa: true, studio: a.studio, sr_original: a.sr_original})) : ''}</div></td>
+        <td>${chipLed(a.led)}<div class="s">${esc(res(a.bits, a.sr))}${a.mqa ? ' · ' + esc(mqaTxt({mqa: true, studio: a.studio, mqb: a.mqb, sr_original: a.sr_original})) : ''}</div></td>
         <td class="oculto-movil"><div class="s">${esc(res(ar.bits, ar.sr))}</div><div class="s tenue">${t.mqa ? 'tags: ' + esc(mqaTxt(t)) : 'tags: sin MQA'}</div></td>
         <td>${d ? (d.error ? `<span class="mal s">${esc(d.error)}</span>` : `<span class="${d.mqa ? 'ok' : 'tenue'}">${esc(mqaTxt(d))}</span>`) : '<span class="muy-tenue">—</span>'}</td>
         <td>${p.esperado && p.esperado.led ? chipLed(p.esperado.led) : '<span class="muy-tenue">—</span>'}</td>
@@ -64,7 +64,7 @@
       <details style="margin-top:.8rem" ${marcadas.size ? 'open' : ''}><summary class="s">Ajuste manual</summary>
         <div class="s-form" style="margin-top:.6rem">
           <div class="campo"><label for="cl-tipo">Tipo</label>
-            <select id="cl-tipo"><option value="no">No es MQA</option><option value="mqa">MQA</option><option value="studio">MQA Studio</option><option value="magenta">LED magenta (MQB, a mano)</option></select></div>
+            <select id="cl-tipo"><option value="no">No es MQA</option><option value="mqa">MQA</option><option value="studio">MQA Studio</option><option value="mqb">MQB (LED magenta)</option></select></div>
           <div class="campo"><label for="cl-sr">Frecuencia original</label><select id="cl-sr">${srOpts}</select></div>
           <div class="campo"><label>Pistas</label><div class="s" style="padding-top:.5rem" id="cl-cuales"></div></div>
         </div>
@@ -81,12 +81,7 @@
     document.getElementById('cl-man').onclick = () => {
       const tipo = document.getElementById('cl-tipo').value, sr = document.getElementById('cl-sr').value;
       const n = marcadas.size || ps.length;
-      if (tipo === 'magenta') {
-        aplicar({modo: 'manual', rutas: [...marcadas], magenta: true},
-          `¿Poner el LED magenta en ${n} pista${n > 1 ? 's' : ''}?\n\nSolo cambia el LED en Orbyte (los tags no se tocan). Úsalo cuando tu DAC lo muestra magenta.`);
-        return;
-      }
-      aplicar({modo: 'manual', rutas: [...marcadas], mqa: tipo !== 'no', studio: tipo === 'studio', sr_original: sr ? +sr : null},
+      aplicar({modo: 'manual', rutas: [...marcadas], mqa: tipo !== 'no', studio: tipo === 'studio', mqb: tipo === 'mqb', sr_original: sr ? +sr : null},
         `¿Dejar ${n} pista${n > 1 ? 's' : ''} como «${document.getElementById('cl-tipo').selectedOptions[0].text}»${sr && tipo !== 'no' ? ' con frecuencia original ' + khz(+sr) + ' kHz' : ''}?\n\nSe escriben los tags en los archivos, se reindexa el álbum y se actualiza el LED.`);
     };
     previa();
@@ -95,7 +90,7 @@
   function previa() {
     const ps = datos.pistas, sel = marcadas.size ? ps.filter(p => marcadas.has(p.ruta)) : ps;
     const tipo = document.getElementById('cl-tipo').value, sr = document.getElementById('cl-sr').value;
-    const leds = tipo === 'magenta' ? ['magenta'] : [...new Set(sel.map(p => ledDe(tipo !== 'no', tipo === 'studio', (p.archivo || {}).sr || (p.asignado || {}).sr)))];
+    const leds = tipo === 'mqb' ? ['magenta'] : [...new Set(sel.map(p => ledDe(tipo !== 'no', tipo === 'studio', (p.archivo || {}).sr || (p.asignado || {}).sr)))];
     document.getElementById('cl-cuales').textContent = marcadas.size ? `${marcadas.size} marcada${marcadas.size > 1 ? 's' : ''} en la tabla` : 'todas (marca en la tabla para elegir algunas)';
     document.getElementById('cl-prev').innerHTML = 'LED resultante: ' + leds.map(chipLed).join(' ');
   }

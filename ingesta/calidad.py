@@ -28,7 +28,7 @@ from . import mqa, salud as salud_mod
 
 log = logging.getLogger('ingesta.calidad')
 
-V = 'c2'                    # versión del criterio (c2: LED por la firma; sin magenta por frecuencia)
+V = 'c3'                    # versión del criterio (c2: LED por la firma; c3: MQB coherente en tags y Orbyte)
 DV = 'c1'                   # versión de la detección en caché (la firma no cambió: no se vuelve a decodificar)
 ESTADOS = ('ok', 'distinto', 'duda', 'falta', 'omitida')
 _COLS = ('t.id, t.file_path, t.album_id, t.title, t.track_number, t.disc_number, t.sample_rate, t.bit_depth, '
@@ -97,6 +97,7 @@ def evaluar(fila, det_cache, forzar=False, prefijo=None):
     """Asignado (Orbyte) vs archivo vs detectado → estado, LED que corresponde y por qué."""
     ruta = fila['file_path']
     asignado = {'led': fila['led_color'], 'mqa': bool(fila['is_mqa']), 'studio': (fila['mqa_type'] or '') == 'studio',
+                'mqb': bool(fila['is_mqa']) and (fila['mqa_type'] or '') == 'mqb',
                 'sr_original': _int(fila['mqa_original_sample_rate']), 'sr': fila['sample_rate'],
                 'bits': _int(fila['bit_depth'])}
     out = {'ruta': ruta, 'id': fila['id'], 'titulo': fila['title'], 'numero': fila['track_number'],
@@ -122,30 +123,44 @@ def evaluar(fila, det_cache, forzar=False, prefijo=None):
     out['detectado'] = det
     sr = arch.get('sr') or fila['sample_rate']
     t = out['tags'] or {}
-    if det.get('mqa'):
-        esp = {'mqa': True, 'studio': bool(det.get('studio')), 'sr_original': det.get('sr_original')}
+    # MQB (magenta) no se deduce del audio: se respeta cuando está marcado a mano (tags «MQB»), o cuando Orbyte lo
+    # tiene en magenta sin firma MQA en el audio (puesto antes de existir la marca: se propone dejarlo coherente).
+    mqb = bool(t.get('mqb')) or (asignado['led'] == 'magenta' and not det.get('mqa') and not t.get('mqa'))
+    if mqb:
+        esp = {'mqa': True, 'studio': False, 'mqb': True,
+               'sr_original': t.get('sr_original') or asignado['sr_original'] or det.get('sr_original')}
+        out['nota'] = 'MQB (magenta) marcado a mano: el LED magenta no se deduce del audio'
+    elif det.get('mqa'):
+        esp = {'mqa': True, 'studio': bool(det.get('studio')), 'mqb': False, 'sr_original': det.get('sr_original')}
     else:
         # sin firma en el audio el DAC lo muestra como PCM normal aunque los tags digan MQA (verificado con el iFi)
-        esp = {'mqa': False, 'studio': False, 'sr_original': None}
-    esp['led'] = mqa.led(esp['mqa'], esp['studio'], sr, esp['sr_original'])
+        esp = {'mqa': False, 'studio': False, 'mqb': False, 'sr_original': None}
+    esp['led'] = mqa.led(esp['mqa'], esp['studio'], sr, esp['sr_original'], mqb=esp['mqb'])
     out['esperado'] = esp
-    if asignado['led'] == 'magenta' and not det.get('mqa') and not t.get('mqa'):
-        # el magenta no se deduce del audio: puesto a mano (p. ej. visto en el DAC) se respeta
-        esp['led'] = 'magenta'
-        out['nota'] = 'magenta puesto a mano: el audio no trae firma MQA, se respeta'
-    if t.get('mqa') and not det.get('mqa'):
+    if mqb:
+        if not t.get('mqb'):
+            out['motivos'].append('MQB: falta la marca en los tags del archivo')
+        if not asignado['mqb']:
+            out['motivos'].append('MQB: Orbyte no lo tiene registrado como MQB')
+    elif t.get('mqa') and not det.get('mqa'):
         out['motivos'].append(f'los tags dicen MQA, pero el audio no trae la firma (el DAC lo muestra como '
                               f'{mqa.LED_NOMBRE.get(esp["led"], esp["led"])})')
     if arch.get('sr') and arch['sr'] != fila['sample_rate']:
         out['motivos'].append(f'Orbyte tiene {fila["sample_rate"]} Hz y el archivo {arch["sr"]} Hz')
     if arch.get('bits') and asignado['bits'] and arch['bits'] != asignado['bits']:
         out['motivos'].append(f'Orbyte tiene {asignado["bits"]} bits y el archivo {arch["bits"]}')
-    if esp['mqa'] and not asignado['mqa']:
+    if esp['mqa'] and not mqb:
+        # los tags son lo que lee el indexador: si no coinciden, un reindexado perdería el MQA o el Studio
+        if not t.get('mqa'):
+            out['motivos'].append('los tags del archivo no dicen MQA (al reindexar se perdería)')
+        elif bool(t.get('studio')) != esp['studio'] or t.get('mqb'):
+            out['motivos'].append(f'los tags dicen {mqa.texto(t)}')
+    if esp['mqa'] and not asignado['mqa'] and not mqb:
         out['motivos'].append(f'el audio es {mqa.texto(det)} y Orbyte no lo tiene como MQA')
     elif asignado['mqa'] and not esp['mqa']:
         if not t.get('mqa'):
             out['motivos'].append('Orbyte lo tiene como MQA y ni el audio ni los tags lo son')
-    elif esp['mqa']:
+    elif esp['mqa'] and not mqb:
         if esp['studio'] != asignado['studio']:
             out['motivos'].append('es MQA Studio' if esp['studio'] else 'no es MQA Studio')
         if esp['sr_original'] and esp['sr_original'] != asignado['sr_original'] and esp['sr_original'] != sr:
@@ -216,18 +231,16 @@ def aplicar(aj, decisiones, reg):
             if not f:
                 errores.append(f'{os.path.basename(ruta)}: no está en Orbyte')
                 continue
-            if d.get('led') == 'magenta':
-                reg(f'· {os.path.basename(ruta)}: LED magenta a mano (los tags no se tocan)')
-                continue
             if not ruta.lower().endswith('.flac'):
                 errores.append(f'{os.path.basename(ruta)}: no es FLAC (los tags MQA solo se escriben en FLAC)')
                 continue
             try:
-                for a in mqa.escribir(ruta, bool(d.get('mqa')), bool(d.get('studio')), _int(d.get('sr_original'))):
+                for a in mqa.escribir(ruta, bool(d.get('mqa')), bool(d.get('studio')), _int(d.get('sr_original')),
+                                      mqb=bool(d.get('mqa') and d.get('mqb'))):
                     avisos.append(f'{os.path.basename(ruta)}: {a}')
                 reg(f'· {os.path.basename(ruta)}: '
-                    + (mqa.texto({'mqa': True, 'studio': d.get('studio'), 'sr_original': _int(d.get('sr_original'))})
-                       if d.get('mqa') else 'sin MQA'))
+                    + (mqa.texto({'mqa': True, 'studio': d.get('studio'), 'mqb': d.get('mqb'),
+                                  'sr_original': _int(d.get('sr_original'))}) if d.get('mqa') else 'sin MQA'))
                 carpetas.add(f['album_id'])
             except Exception as e:  # noqa: BLE001
                 errores.append(f'{os.path.basename(ruta)}: {type(e).__name__}: {e}')
@@ -253,9 +266,8 @@ def aplicar(aj, decisiones, reg):
             with con:
                 for f in nuevas:
                     led = mqa.led(bool(f['is_mqa']), (f['mqa_type'] or '') == 'studio', f['sample_rate'],
-                                  f['mqa_original_sample_rate'], f['is_dsd'], f['dsd_rate'])
-                    if (decisiones.get(f['file_path']) or {}).get('led') == 'magenta':
-                        led = 'magenta'
+                                  f['mqa_original_sample_rate'], f['is_dsd'], f['dsd_rate'],
+                                  mqb=(f['mqa_type'] or '') == 'mqb')
                     con.execute('UPDATE tracks SET led_color=? WHERE id=?', (led, f['id']))
                     cambiadas += 1
         finally:
@@ -273,9 +285,8 @@ def decisiones_detectadas(pistas):
         if p['estado'] != 'distinto' or not p.get('esperado'):
             continue
         e = p['esperado']
-        out[p['ruta']] = {'mqa': e['mqa'], 'studio': e.get('studio'), 'sr_original': e.get('sr_original')}
-        if e.get('led') == 'magenta':
-            out[p['ruta']]['led'] = 'magenta'
+        out[p['ruta']] = {'mqa': e['mqa'], 'studio': e.get('studio'), 'mqb': e.get('mqb'),
+                          'sr_original': e.get('sr_original')}
     return out
 
 
