@@ -28,6 +28,7 @@ import os
 import re
 import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -62,6 +63,47 @@ def calidad_de(t):
     if (t.get('compression_mode') or '') == 'Lossy' or (t.get('codec') or '').lower() in LOSSY:
         return 'Lossy'
     return 'HR' if (t.get('sample_rate') or 0) > 48000 else 'CD'
+
+
+CONFIRMADA = 'confirmado: el audio no coincide con la huella MD5 del FLAC'
+PASAJERA = 'falla de lectura pasajera: el audio coincide con su huella MD5'
+
+
+def huella_flac(ruta, prefijo=None):
+    """¿El audio decodificado coincide con la huella MD5 que el FLAC guarda de su audio original?
+    True / False; None si no se puede saber (no es FLAC, sin huella o profundidad rara)."""
+    try:
+        from mutagen.flac import FLAC
+        info = FLAC(ruta).info
+        md5, bits = info.md5_signature, info.bits_per_sample
+    except Exception:  # noqa: BLE001
+        return None
+    if not md5 or bits not in (16, 24):
+        return None
+    cmd = list(prefijo or []) + ['ffmpeg', '-nostdin', '-v', 'quiet'] + (['-threads', '1'] if prefijo else []) + \
+        ['-i', ruta, '-map', '0:a:0', '-c:a', f'pcm_s{bits}le', '-f', 'md5', '-']
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except Exception:  # noqa: BLE001
+        return None
+    salida = (r.stdout or '').strip()
+    if not salida.startswith('MD5='):
+        return False if r.returncode else None
+    return salida[4:].lower() == f'{md5:032x}'
+
+
+def confirmar(ruta, prefijo=None):
+    """Segunda opinión sobre una pista con errores. → (True dañada | False sana | None sin saber, nota).
+    FLAC con huella: se compara contra ella. Sin huella: otra decodificación; solo cuenta si los errores se repiten."""
+    h = huella_flac(ruta, prefijo)
+    if h is True:
+        return False, PASAJERA
+    if h is False:
+        return True, CONFIRMADA
+    ok, _e, _p, _s = analisis.decodificar(ruta, prefijo=prefijo)
+    if ok:
+        return False, 'falla de lectura pasajera: una segunda decodificación salió limpia'
+    return True, 'confirmado: los errores se repiten en una segunda decodificación'
 
 
 def clasificar(ruta, ok, errores, segundos, duracion):
@@ -340,6 +382,13 @@ class Salud:
             return
         ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
         estado, notas = clasificar(ruta, ok, errores, seg, p['duracion'])
+        if estado in ('danada', 'errores'):
+            # solo las pocas con errores pagan una pasada más: ¿el daño está en el archivo o fue la lectura?
+            danada, nota = confirmar(ruta, _prefijo())
+            if danada is False:
+                estado, notas = 'ok', [nota]
+            else:
+                notas = [nota] + list(notas)          # primero: se guardan solo las 4 primeras
         self._guardar(ruta, p['album_id'], st.st_size, st.st_mtime, estado, notas, seg, p['duracion'])
         self._contar(p)
 
