@@ -31,6 +31,7 @@ import threading
 import time
 
 from . import analisis, rescate, tienda
+from . import salud as salud_mod
 
 log = logging.getLogger('ingesta.reparar')
 
@@ -478,6 +479,33 @@ class _FalloDescarga(Fallo):
     """Falla de la descarga en sí (corte, «File is corrupt!»): se reintenta."""
 
 
+class _Sana(Exception):
+    """La pista vieja resultó estar bien: no se reemplaza."""
+
+
+def _vieja_confirmada(ruta, salud, reg):
+    """Antes de reemplazar: ¿consta que la vieja está dañada? Si Salud ya lo confirmó con la huella y el archivo no
+    cambió desde entonces, basta. Si no (revisada antes de la confirmación, o el archivo cambió), se confirma ahora."""
+    if not salud:
+        return
+    with salud._con() as c:
+        f = c.execute('SELECT album_id, tamano, mtime, errores, duracion FROM pistas WHERE ruta=?', (ruta,)).fetchone()
+    st = os.stat(ruta)
+    try:
+        notas = json.loads(f['errores'] or '[]') if f else []
+    except ValueError:
+        notas = []
+    igual = bool(f) and f['tamano'] == st.st_size and abs((f['mtime'] or 0) - st.st_mtime) < 1
+    if igual and any(str(n).startswith('confirmado') for n in notas):
+        return
+    danada, nota = salud_mod.confirmar(ruta, salud_mod._prefijo())
+    if danada is False:
+        salud._guardar(ruta, f['album_id'] if f else None, st.st_size, st.st_mtime, 'ok', [nota], None,
+                       f['duracion'] if f else None)
+        raise _Sana(nota)
+    reg(f'   · la vieja: {nota}')
+
+
 def _bajar_una(it, tmp):
     pid = str(it['pareja']['id'])
     destino = tempfile.mkdtemp(prefix='intento-', dir=tmp)
@@ -490,6 +518,8 @@ def _bajar_una(it, tmp):
     ok, errores, _pico, seg = analisis.decodificar(nuevo)
     if not ok:
         raise _FalloDescarga('la pista nueva también trae errores: ' + '; '.join(errores[:2]))
+    if salud_mod.huella_flac(nuevo) is False:
+        raise _FalloDescarga('la pista nueva no coincide con su propia huella MD5')
     return nuevo, seg
 
 
@@ -511,6 +541,7 @@ def reparar_pista(it, job, aj, reg, salud=None):
     ruta = it['ruta']
     if not os.path.isfile(ruta):
         raise Fallo('la pista vieja ya no está')
+    _vieja_confirmada(ruta, salud, reg)
     tmp = tempfile.mkdtemp(prefix='reparar-', dir=os.path.dirname(os.path.abspath(salud.ruta)) if salud else None)
     try:
         nuevo, seg = _bajar_verificada(it, tmp, reg)
@@ -670,7 +701,7 @@ class Reparador:
         ed = trabajo.get('edicion') or {}
         reg(f'Reparar {len(trabajo["pistas"])} pista(s) con Tidal · edición «{ed.get("titulo")}»'
             f'{" (" + str(ed.get("anio")) + ")" if ed.get("anio") else ""} · {ed.get("como") or ""}')
-        bien, mal = 0, 0
+        bien, mal, sanas = 0, 0, 0
         for i, it in enumerate(trabajo['pistas']):
             if i:
                 time.sleep(PAUSA_S)
@@ -679,6 +710,9 @@ class Reparador:
             try:
                 reparar_pista(it, trabajo, aj, reg, self.salud)
                 bien += 1
+            except _Sana as e:
+                sanas += 1
+                reg(f'   = no se reemplazó: la vieja está sana ({e})')
             except Fallo as e:
                 mal += 1
                 reg(f'   ✗ no se reemplazó: {e}')
@@ -687,14 +721,16 @@ class Reparador:
                 log.exception('Reparar %s', it['ruta'])
                 reg(f'   ✗ error: {type(e).__name__}: {e} (la pista vieja quedó como estaba)')
         estado = 'hecho' if not mal else ('parcial' if bien else 'error')
-        reg(f'Listo: {bien} reemplazada(s){f", {mal} sin reemplazar" if mal else ""}')
+        reg(f'Listo: {bien} reemplazada(s){f", {sanas} estaba(n) sana(s)" if sanas else ""}'
+            f'{f", {mal} sin reemplazar" if mal else ""}')
         with self.salud._con() as c:
             c.execute('UPDATE reparaciones SET estado=?, terminado=? WHERE id=?', (estado, time.time(), jid))
         self.actual = None
         if self.avisar_fn:
             self.avisar_fn('ok' if not mal else 'revision', f'Reparar pistas: {r["titulo"]}',
-                           f'{bien} reemplazada(s)' + (f', {mal} sin reemplazar' if mal else ''), r['aid'])
-        if self.al_terminar and r['aid'] and bien:
+                           f'{bien} reemplazada(s)' + (f', {sanas} sana(s)' if sanas else '')
+                           + (f', {mal} sin reemplazar' if mal else ''), r['aid'])
+        if self.al_terminar and r['aid'] and (bien or sanas):
             try:
                 self.al_terminar(r['aid'])               # el álbum de la Bandeja se vuelve a revisar
             except Exception:  # noqa: BLE001
