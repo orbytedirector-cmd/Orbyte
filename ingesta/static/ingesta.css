@@ -571,3 +571,9 @@ tr.p-editor td { background: var(--card-2); }
 .as-donde { font-size: .72rem; color: var(--oro); opacity: .85; }
 .as-x { align-self: flex-start; background: none; border: 0; color: var(--texto-2); font-size: 1.1rem; cursor: pointer; padding: 0 .2rem; }
 @media (prefers-reduced-motion: reduce) { .ahora-suena, .as-ecual i { animation: none; } }
+
+/* Calidad y LED: filtros por tipo de cambio (marcar en bloque) */
+.c-grupos { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-top: .5rem; }
+.c-grupos .filtro { display: inline-flex; align-items: center; gap: .35rem; }
+.c-grupos .filtro .chip { margin: 0; }
+.c-registro { flex-basis: 100%; margin-top: .6rem; max-height: 14rem; overflow: auto; }

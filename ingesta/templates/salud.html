@@ -309,7 +309,22 @@ setInterval(() => { if (est && est.activa && !document.querySelector('#l-danadas
 const LEDC = {yellow: ['CD', 'CD'], white: ['HR', 'HR'], green: ['MQA', 'MQA'], blue: ['MQA Studio', 'MQAS'],
               magenta: ['MQB', 'MQB'], cyan: ['DSD', 'DSD'], red: ['DSD256', 'DSD'], silver: ['Lossy', 'Lossy']};
 const chipLedC = l => l ? `<span class="chip q-${LEDC[l] ? LEDC[l][1] : ''}"><span class="led"></span>${esc(LEDC[l] ? LEDC[l][0] : l)}</span>` : '<span class="muy-tenue">—</span>';
-let calEst = null, calDif = null, calVerIgn = false, calSel = new Set();
+let calEst = null, calDif = null, calVerIgn = false, calSel = new Set(), calFiltro = '', calRegistro = '';
+// Grupo de un álbum según el cambio que propone (para filtrar y marcar en bloque):
+// 'datos' = el LED no cambia (solo faltan los datos MQA); 'a>b' = cambia de LED a a b; 'otros' = mezcla.
+function grupoCal(a) {
+  const ks = new Set(a.pistas.filter(p => p.estado === 'distinto').map(p => {
+    const de = (p.asignado || {}).led || '?', a2 = (p.esperado || {}).led || '?';
+    return de === a2 ? 'datos' : `${de}>${a2}`;
+  }));
+  return ks.size === 1 ? [...ks][0] : (ks.size ? 'otros' : '');
+}
+function etiquetaGrupo(k) {
+  if (k === 'datos') return '<span class="ok">Solo faltan datos</span> <span class="tenue">(el LED no cambia)</span>';
+  if (k === 'otros') return 'Varios cambios';
+  const [de, a] = k.split('>');
+  return `${chipLedC(de)} → ${chipLedC(a)}`;
+}
 const criterioC = () => ({texto: document.getElementById('v-texto').value.trim(), letra: document.getElementById('v-letra').value,
   calidad: document.getElementById('v-calidad').value, desde: document.getElementById('v-desde').value,
   modo: (document.querySelector('input[name=v-modo]:checked') || {}).value || 'pendientes'});
@@ -363,12 +378,29 @@ async function cargarDif() {
 }
 function pintarDif() {
   const n = calDif.filter(a => a.resumen.distintas).length;
+  // grupos con su cantidad (solo álbumes con algo por corregir)
+  const cuenta = {};
+  calDif.forEach(a => { a._g = grupoCal(a); if (a._g && a.resumen.distintas) cuenta[a._g] = (cuenta[a._g] || 0) + 1; });
+  const orden = Object.keys(cuenta).sort((x, y) => (x === 'datos' ? -1 : y === 'datos' ? 1 : x === 'otros' ? 1 : y === 'otros' ? -1 : cuenta[y] - cuenta[x]));
+  if (calFiltro && !cuenta[calFiltro]) calFiltro = '';
+  const visibles = calDif.map((a, i) => [a, i]).filter(([a]) => calVerIgn || !calFiltro || a._g === calFiltro);
+  const marcables = visibles.filter(([a]) => a.resumen.distintas).map(([a]) => a.album_id);
+  const todosMarcados = marcables.length && marcables.every(id => calSel.has(id));
   document.getElementById('f-calidad').innerHTML = `<button class="filtro ${calVerIgn ? 'activo' : ''}" id="c-ver-ign">Ignorados</button>
-    ${!calVerIgn && n ? `<button class="btn chico oro" id="c-todos" style="margin-left:auto">Aplicar lo detectado en los marcados <b id="c-n-sel">${calSel.size}</b></button>` : ''}`;
-  document.getElementById('c-ver-ign').onclick = () => { calVerIgn = !calVerIgn; calSel.clear(); cargarDif(); };
+    ${!calVerIgn && n ? `<button class="btn chico oro" id="c-todos" style="margin-left:auto">Aplicar lo detectado en los marcados <b id="c-n-sel">${calSel.size}</b></button>` : ''}
+    ${!calVerIgn && orden.length ? `<div class="c-grupos">
+      <button class="filtro ${!calFiltro ? 'activo' : ''}" data-cg="">Todos <b>${n}</b></button>
+      ${orden.map(k => `<button class="filtro ${calFiltro === k ? 'activo' : ''}" data-cg="${esc(k)}">${etiquetaGrupo(k)} <b>${cuenta[k]}</b></button>`).join('')}
+      ${marcables.length ? `<button class="btn chico" id="c-marcar">${todosMarcados ? 'Desmarcar' : 'Marcar'} ${calFiltro ? 'los del filtro' : 'todos'} (${marcables.length})</button>` : ''}
+    </div>` : ''}
+    ${calRegistro ? `<pre class="registro c-registro">${esc(calRegistro)}</pre>` : ''}`;
+  document.getElementById('c-ver-ign').onclick = () => { calVerIgn = !calVerIgn; calSel.clear(); calFiltro = ''; cargarDif(); };
+  document.querySelectorAll('[data-cg]').forEach(b => b.onclick = () => { calFiltro = b.dataset.cg; pintarDif(); });
+  const marcar = document.getElementById('c-marcar');
+  if (marcar) marcar.onclick = () => { marcables.forEach(id => todosMarcados ? calSel.delete(id) : calSel.add(id)); pintarDif(); };
   const cont = document.getElementById('l-calidad');
   if (!calDif.length) { cont.innerHTML = `<div class="sin-problemas">${calVerIgn ? 'No hay álbumes ignorados.' : 'Todo lo verificado tiene el LED que corresponde.'}</div>`; return; }
-  cont.innerHTML = calDif.map((a, i) => {
+  cont.innerHTML = visibles.map(([a, i]) => {
     const s = a.resumen;
     const motivos = [...new Set(a.pistas.flatMap(p => p.motivos || []))].slice(0, 3);
     return `<div class="panel s-album"><div class="s-fila"><div style="min-width:0;display:flex;gap:.6rem;align-items:flex-start">
@@ -386,6 +418,8 @@ function pintarDif() {
   cont.querySelectorAll('[data-csel]').forEach(c => c.onchange = () => {
     const id = calDif[+c.dataset.csel].album_id; c.checked ? calSel.add(id) : calSel.delete(id);
     const b = document.getElementById('c-n-sel'); if (b) b.textContent = calSel.size;
+    const m = document.getElementById('c-marcar');
+    if (m) { const todos = marcables.every(x => calSel.has(x)); m.textContent = `${todos ? 'Desmarcar' : 'Marcar'} ${calFiltro ? 'los del filtro' : 'todos'} (${marcables.length})`; m.onclick = () => { marcables.forEach(x => todos ? calSel.delete(x) : calSel.add(x)); pintarDif(); }; }
   });
   cont.querySelectorAll('[data-capl]').forEach(b => b.onclick = async () => {
     const a = calDif[+b.dataset.capl];
@@ -399,15 +433,24 @@ function pintarDif() {
   if (todos) todos.onclick = async () => {
     const ids = [...calSel];
     if (!ids.length) { toast('Marca álbumes', 'Elige en la lista cuáles corregir'); return; }
-    if (!confirm(`¿Aplicar lo detectado en ${ids.length} álbum(es)?\n\nUno por uno: tags MQA, reindexar y LED. El audio no se toca.`)) return;
+    if (!confirm(`¿Aplicar lo detectado en ${ids.length} álbum(es)?\n\nUno por uno: tags MQA, reindexar y LED. El audio no se toca. Las pistas en duda no se cambian.`)) return;
     todos.disabled = true;
-    let ok = 0;
+    const nombre = id => { const a = calDif.find(x => x.album_id === id); return a ? `${a.artista} — ${a.album}` : `álbum ${id}`; };
+    let ok = 0, pistas = 0, k = 0;
+    const fallos = [];
     for (const id of ids) {
-      todos.textContent = `Aplicando ${ok + 1} de ${ids.length}…`;
-      const r = await post(`/api/calidad/album/${id}/aplicar`, {modo: 'detectado'});
-      if (r && r.ok) ok++;
+      todos.textContent = `Aplicando ${++k} de ${ids.length}…`;
+      let r;
+      try { r = await post(`/api/calidad/album/${id}/aplicar`, {modo: 'detectado'}); } catch (e) { r = {ok: false, error: 'sin conexión'}; }
+      if (r && r.ok) {
+        ok++; pistas += r.cambiadas || 0;
+        if ((r.errores || []).length) fallos.push(`${nombre(id)}: ${(r.errores || []).join('; ')}`);
+      } else fallos.push(`${nombre(id)}: ${(r && r.error) || 'no se pudo'}`);
     }
-    toast('Calidad actualizada', `${ok} de ${ids.length} álbumes`); calSel.clear(); cargarDif(); cargarEstadoC();
+    calRegistro = `Aplicado en bloque ${new Date().toLocaleString('es-CL')}: ${ok} de ${ids.length} álbumes · ${pistas} pistas con su LED al día`
+      + (fallos.length ? `\n${fallos.length} con problemas:\n` + fallos.map(f => '⚠ ' + f).join('\n') : '\nSin problemas.');
+    toast('Calidad actualizada', `${ok} de ${ids.length} álbumes${fallos.length ? ` · ${fallos.length} con problemas (ver registro)` : ''}`);
+    calSel.clear(); cargarDif(); cargarEstadoC();
   };
   cont.querySelectorAll('[data-cplay]').forEach(b => b.onclick = () => enDesktop({album_id: calDif[+b.dataset.cplay].album_id}, b));
   cont.querySelectorAll('[data-cign]').forEach(b => b.onclick = async () => {
