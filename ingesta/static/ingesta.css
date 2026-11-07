@@ -539,3 +539,9 @@ tr.p-editor td { background: var(--card-2); }
 .s-album summary { cursor: pointer; color: var(--texto-2); }
 .modal select { width: 100%; background: #0a0a0a; border: 1px solid var(--borde-2); border-radius: 8px;
   padding: .55rem .7rem; color: var(--texto); }
+
+/* ▶ En Desktop: elegir el Desktop cuando hay más de uno abierto */
+.elegir-desk { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 70; padding: 1rem; }
+.elegir-desk .panel { display: flex; flex-direction: column; gap: .5rem; min-width: min(320px, 100%); }
+.elegir-desk .btn { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; }
+.cl-play { padding: .15rem .45rem; line-height: 1; }

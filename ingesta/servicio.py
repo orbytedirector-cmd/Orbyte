@@ -1694,6 +1694,47 @@ def api_calidad_album(oid):
     return jsonify(ok=True, oid=ids[0], **r)
 
 
+# ─────────────────────────── ▶ En Desktop ───────────────────────────
+
+def _token_interno():
+    """Token compartido con Orbyte (mismo repo): lo crea la ingesta si falta."""
+    ruta = os.path.join(REPO, '.token_interno')
+    if not os.path.exists(ruta):
+        fd = os.open(ruta, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            f.write(secrets.token_hex(32))
+    with open(ruta) as f:
+        return f.read().strip()
+
+
+@app.route('/api/desktop/reproducir', methods=['POST'])
+def api_desktop_reproducir():
+    """{album_id (Orbyte), track_id?, cliente_id?} → Orbyte le manda la cola al Desktop abierto."""
+    import urllib.error
+    import urllib.request
+    d = request.get_json(silent=True) or {}
+    cuerpo = json.dumps({k: d.get(k) for k in ('album_id', 'track_id', 'cliente_id')}).encode()
+    req = urllib.request.Request('http://127.0.0.1:5001/api/interno/desk/reproducir', data=cuerpo, method='POST',
+                                 headers={'Content-Type': 'application/json', 'X-Orbyte-Interno': _token_interno()})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            res = json.loads(r.read() or b'{}')
+    except urllib.error.HTTPError as e:
+        try:
+            res = json.loads(e.read() or b'{}')
+        except ValueError:
+            res = {}
+        if e.code == 403:
+            res = {'message': 'Orbyte no aceptó la orden: reinicia orbyte.service para que lea el token nuevo'}
+        return jsonify(ok=False, error=res.get('message') or f'Orbyte respondió {e.code}')
+    except Exception as e:  # noqa: BLE001
+        return jsonify(ok=False, error=f'No se pudo hablar con Orbyte: {e}')
+    if res.get('status') == 'elegir':
+        return jsonify(ok=False, elegir=res.get('desktops') or [])
+    return jsonify(ok=res.get('status') == 'ok', error=res.get('message'), **{k: res.get(k) for k in
+                                                                              ('desktop', 'salida', 'pista', 'pistas')})
+
+
 @app.route('/api/calidad/album/<int:oid>/aplicar', methods=['POST'])
 def api_calidad_aplicar(oid):
     """modo «detectado»: corrige las pistas que no corresponden; modo «manual»: {rutas, mqa, studio, sr_original}."""
@@ -2704,6 +2745,10 @@ def main():
     descargador.start()
     salud.start()
     verificador.start()
+    try:
+        _token_interno()          # que exista antes de reiniciar Orbyte
+    except OSError:
+        log.exception('token interno')
     threading.Thread(target=verificador.actualizar_criterio, name='calidad-criterio', daemon=True).start()
     reparador.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
