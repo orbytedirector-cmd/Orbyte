@@ -2704,7 +2704,7 @@ def procesar_album(album_path: Path, mode: str = MODE_FULL, pbar_global=None) ->
 def descubrir_albums(base: Path) -> List[Path]:
     albums = []
     for root, dirs, files in os.walk(base):
-        dirs.sort()
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))  # .orbyte-compat24 y demás internas
         if any(f.lower().endswith(SUPPORTED) for f in files):
             albums.append(Path(root))
     return sorted(albums)
@@ -2737,7 +2737,7 @@ def descubrir_albums(base: Path) -> List[Path]:
     """
     albums = []
     for root, dirs, files in os.walk(base):
-        dirs.sort()   # orden determinístico
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))   # orden determinístico; sin carpetas internas (.orbyte-compat24)
         root_path = Path(root)
         if any(f.lower().endswith(SUPPORTED) for f in files):
             albums.append(root_path)

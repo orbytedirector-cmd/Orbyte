@@ -43,6 +43,7 @@ import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección),
 import estadisticas     # estadísticas de uso para el administrador (solo lectura)
 import estadisticas_ia  # «Resumen IA» de esas estadísticas
 import login_seguro as _ls  # límite de intentos, recuperar contraseña, versión de sesión
+from ingesta import compat24  # FLAC de 32 bits: copia 24 bit para los clientes que no los abren
 import versiones as _versiones  # versiones de un álbum (una carta en la discografía)
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -10245,7 +10246,30 @@ def audio_file(filepath):
     return "File not found", 404
 
 
+def _flac32_compatible(absolute_path):
+    """FLAC de 32 bits (07-11-2026): casi ningún cliente los abre (iPhone, Android, navegador,
+    renderers de cast). Salvo que el cliente avise que sí (?flac32=1: Desktop con libFLAC), se
+    manda la copia 24 bit que arma la ingesta (ingesta/compat24.py); si todavía no está, se crea
+    ahora (unos segundos). Si falla, se manda el original como antes."""
+    if not absolute_path.lower().endswith('.flac') or request.args.get('flac32') == '1':
+        return absolute_path
+    try:
+        if not compat24.es_flac32(absolute_path):
+            return absolute_path
+        copia = compat24.copia_valida(absolute_path, MUSIC_ROOT)
+        if not copia:
+            app.logger.info(f"[flac32] sin copia 24 bit todavía, se crea ahora: {absolute_path}")
+            copia = compat24.crear(absolute_path, MUSIC_ROOT, timeout=600)
+        if request.headers.get('Range', 'bytes=0-').startswith('bytes=0-'):
+            app.logger.info(f"[flac32] copia 24 bit en vez del original: {os.path.basename(absolute_path)}")
+        return copia
+    except Exception as e:  # noqa: BLE001
+        app.logger.warning(f"[flac32] no se pudo usar la copia 24 bit de {absolute_path}: {e}")
+        return absolute_path
+
+
 def _serve_audio(absolute_path):
+    absolute_path = _flac32_compatible(absolute_path)
     file_size = os.path.getsize(absolute_path)
     rh = request.headers.get('Range')
     if rh:

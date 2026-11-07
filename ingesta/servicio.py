@@ -37,6 +37,7 @@ from . import ajustar as ajustar_mod
 from . import titulos as titulos_mod
 from concurrent.futures import ThreadPoolExecutor
 from . import recursos
+from . import compat24
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
@@ -1652,6 +1653,28 @@ def api_salud_ajustes():
     return jsonify(ok=True)
 
 
+# FLAC de 32 bits: copias 24 bit para los clientes que no los abren (ingesta/compat24.py, 07-11-2026)
+compat = compat24.Compat24(almacen.ajustes)
+
+
+@app.route('/api/salud/compat24')
+def api_salud_compat24():
+    aj = almacen.ajustes()
+    try:
+        r = compat24.estado(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
+    except Exception as e:
+        log.exception('Salud: compat24')
+        return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
+    return jsonify(ok=True, **r, trabajando=compat.actual, revisando=compat.revisando, hechas=compat.hechas,
+                   error=compat.ultimo_error, raiz=aj.get('biblioteca') or '/mnt/musica')
+
+
+@app.route('/api/salud/compat24/ahora', methods=['POST'])
+def api_salud_compat24_ahora():
+    compat.ahora()
+    return jsonify(ok=True)
+
+
 @app.route('/api/salud/danadas')
 def api_salud_danadas():
     try:
@@ -2766,5 +2789,6 @@ def main():
         log.exception('token interno')
     threading.Thread(target=verificador.actualizar_criterio, name='calidad-criterio', daemon=True).start()
     reparador.start()
+    compat.start()
     log.info('Orbyte Ingesta en el puerto %s · datos en %s', PUERTO, DATOS)
     app.run(host='0.0.0.0', port=PUERTO, threaded=True, debug=False, use_reloader=False)
