@@ -9,6 +9,7 @@
   <button class="filtro activo" data-p="discos">Discos por normalizar <b id="n-discos">…</b></button>
   <button class="filtro" data-p="danadas">Pistas dañadas <b id="n-danadas">…</b></button>
   <button class="filtro" data-p="calidad">Calidad y LED <b id="n-calidad">…</b></button>
+  <button class="filtro" data-p="flac32">FLAC 32 bit <b id="n-flac32">…</b></button>
 </div>
 
 <section id="p-discos">
@@ -93,6 +94,12 @@
   <div class="filtros" id="f-calidad"></div>
   <div id="l-calidad"></div>
 </section>
+<section id="p-flac32" hidden>
+  <div class="s tenue" style="margin-bottom:.8rem">Los FLAC de 32 bits casi nadie los abre: ni el iPhone, ni Android, ni el navegador, ni los equipos de cast. El original no se toca: la ingesta crea una copia FLAC 24 bit con la misma frecuencia (lo que se pierde queda bajo −144 dB) y Orbyte la manda a esos clientes. Orbyte Desktop recibe el original de 32 bits tal cual y se lo entrega al DAC bit a bit. Las copias se crean solas, de a una y con prioridad baja, apenas entra algo nuevo; si alguien reproduce una antes, se crea en ese momento.</div>
+  <div class="panel s-panel" id="f32-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
+  <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Álbumes</h2>
+  <div id="l-flac32"></div>
+</section>
 {% endblock %}
 {% block js %}
 {% include '_unir_discos.html' %}
@@ -113,6 +120,7 @@ document.querySelectorAll('#pestanas [data-p]').forEach(b => b.onclick = () => {
   document.getElementById('p-discos').hidden = b.dataset.p !== 'discos';
   document.getElementById('p-danadas').hidden = b.dataset.p !== 'danadas';
   document.getElementById('p-calidad').hidden = b.dataset.p !== 'calidad';
+  document.getElementById('p-flac32').hidden = b.dataset.p !== 'flac32';
   try { localStorage.setItem('salud-pestana', b.dataset.p); } catch (e) {}
 });
 try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySelector(`#pestanas [data-p="${p}"]`)?.click(); } catch (e) {}
@@ -465,5 +473,42 @@ setInterval(async () => {
   const sig = calEst && JSON.stringify([calEst.revisadas, calEst.terminada]);
   if (sig !== prevCal) { prevCal = sig; cargarDif(); }
 }, 5000);
+
+// ── FLAC 32 bit: copias 24 bit (ingesta/compat24.py) ──
+let f32 = null;
+async function cargarFlac32() {
+  let r;
+  try { r = await (await fetch('/api/salud/compat24')).json(); } catch (e) { return; }
+  const est = document.getElementById('f32-estado');
+  if (!r.ok) { est.innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
+  f32 = r;
+  const total = r.listas + r.pendientes;
+  document.getElementById('n-flac32').textContent = total;
+  const pct = total ? Math.floor(100 * r.listas / total) : 100;
+  let linea;
+  if (r.trabajando) linea = `<div class="estado-vivo"><span class="giro"></span>Creando la copia de <span class="mono">${esc(relR(r.trabajando))}</span></div>`;
+  else if (r.revisando) linea = `<div class="estado-vivo"><span class="giro"></span>Revisando la biblioteca…</div>`;
+  else if (r.pendientes) linea = `<div class="s">${r.pendientes} copia${r.pendientes === 1 ? '' : 's'} por crear · la ingesta las hace sola (revisa cada 15 min)</div>`;
+  else linea = `<div class="s">${total ? 'Todas las pistas de 32 bits tienen su copia 24 bit.' : 'No hay FLAC de 32 bits en la biblioteca.'}</div>`;
+  est.innerHTML = `<div class="s-fila"><div><div class="t">${r.listas} de ${total} copias listas</div>${linea}</div>
+      <div class="acciones" style="margin:0">${r.pendientes && !r.trabajando && !r.revisando ? '<button class="btn oro" id="f32-ahora">Crear las que faltan ahora</button>' : ''}</div></div>
+    ${total ? `<div class="s-barra"><span style="width:${pct}%"></span></div>` : ''}
+    ${r.error ? `<div class="s" style="color:var(--error)">Último error: ${esc(r.error)}</div>` : ''}`;
+  const b = document.getElementById('f32-ahora');
+  if (b) b.onclick = async () => { b.disabled = true; await post('/api/salud/compat24/ahora', {}); setTimeout(cargarFlac32, 1500); };
+  const cont = document.getElementById('l-flac32');
+  if (!r.albumes.length) { cont.innerHTML = '<div class="sin-problemas">No hay FLAC de 32 bits en la biblioteca.</div>'; return; }
+  cont.innerHTML = `<div class="tabla-wrap"><table>
+    <tr><th>Álbum</th><th>Copias 24 bit</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
+    ${r.albumes.map((a, i) => `<tr>
+      <td><div class="t">${esc(a.album)}</div><div class="s">${esc(a.artista)}</div></td>
+      <td><div class="s">${a.listas === a.pistas ? '✓ ' : ''}${a.listas} de ${a.pistas}</div></td>
+      <td class="oculto-movil"><div class="s mono muy-tenue">${esc(relR(a.carpeta))}</div></td>
+      <td>${a.album_id ? `<button class="btn chico" data-f32play="${i}" title="Desktop recibe el original de 32 bits">▶ En Desktop</button>` : ''}</td></tr>`).join('')}
+  </table></div>`;
+  cont.querySelectorAll('[data-f32play]').forEach(b => b.onclick = () => enDesktop({album_id: f32.albumes[+b.dataset.f32play].album_id}, b));
+}
+cargarFlac32();
+setInterval(() => { if (!document.getElementById('p-flac32').hidden || (f32 && (f32.trabajando || f32.revisando))) cargarFlac32(); }, 5000);
 </script>
 {% endblock %}
