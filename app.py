@@ -1473,7 +1473,8 @@ def _require_login():
     if ep in ('login', 'signup', 'recuperar_clave_web', 'static', 'service_worker', 'collab_join', 'collab_codigo', 'cast_audio', 'cast_cover', 'cover_file',
               'tv_pantalla', 'tv_estado', 'tv_qr',
               'api_v1_tvapp_hola', 'api_v1_tvapp_orden', 'api_v1_tvapp_respuesta',
-              'descargas_orbyte_ipa') or request.path.startswith('/static/'):
+              'descargas_orbyte_ipa', 'api_interno_desk_reproducir') or request.path.startswith('/static/'):
+        # api_interno_desk_reproducir: la ingesta (mismo servidor); se valida con .token_interno
         # descargas_orbyte_ipa: la baja SideStore, sin sesión; se valida con
         # el enlace_token de apk/ios.json (cambia en cada publicación).
         # tv_*: Ticket C-07 — página de solo lectura para la tele; se valida
@@ -12206,6 +12207,66 @@ def _desk_cola_desde_mini(ses, ids, index, data):
     ses['cola'], ses['indice'] = [p['id'] for p in pistas], index
     ses['version'] += 1
     return {'status': 'ok', 'desktop': True, 'queue': _desk_cola_publica(ses)}
+
+
+# ── Ingesta → Desktop: «▶ En Desktop» desde Salud / Calidad y LED (pedido de Niko, 06-11-2026) ──
+# La ingesta corre en este mismo servidor; se autentica con un token compartido en un archivo del repo
+# (.token_interno, 0600, fuera de git). Solo desde el propio equipo: Funnel también llega como 127.0.0.1,
+# por eso además del origen se exige el token.
+_TOKEN_INTERNO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.token_interno')
+
+
+def _token_interno():
+    try:
+        with open(_TOKEN_INTERNO) as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
+@app.route('/api/interno/desk/reproducir', methods=['POST'])
+def api_interno_desk_reproducir():
+    """Body: {album_id, track_id?, cliente_id?} → el Desktop abierto (salida vinculada) reproduce el álbum desde
+    esa pista. Varios Desktop y ninguno elegido → {status: 'elegir', desktops: [...]}."""
+    tok = _token_interno()
+    if (request.remote_addr not in ('127.0.0.1', '::1') or not tok
+            or not hmac.compare_digest(request.headers.get('X-Orbyte-Interno', ''), tok)):
+        return jsonify({'status': 'error', 'message': 'No autorizado'}), 403
+    d = request.get_json(silent=True) or {}
+    try:
+        album_id = int(d.get('album_id'))
+        track_id = int(d['track_id']) if d.get('track_id') else None
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Parámetros inválidos'}), 400
+    cid = str(d.get('cliente_id') or '')
+    ahora = time.time()
+    with _desk_lock:
+        vivas = [s for s in _desk_sesiones.values()
+                 if s.get('target_id') is not None and ahora - (s.get('latido') or 0) < 40]
+    if cid:
+        vivas = [s for s in vivas if s['cliente_id'] == cid]
+    if not vivas:
+        return jsonify({'status': 'error', 'message': 'No hay ningún Orbyte Desktop abierto con su salida de audio '
+                                                       'vinculada a un equipo (Configuración → Audio)'}), 404
+    if len(vivas) > 1:
+        return jsonify({'status': 'elegir', 'desktops': [
+            {'cliente_id': s['cliente_id'], 'nombre': s.get('nombre'), 'salida': s.get('salida')} for s in vivas]})
+    conn = get_db_connection()
+    try:
+        ids = [r[0] for r in conn.execute(
+            'SELECT id FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), '
+            'CAST(track_number AS INTEGER), file_path', (album_id,))]
+    finally:
+        conn.close()
+    if not ids:
+        return jsonify({'status': 'error', 'message': 'El álbum no tiene pistas en Orbyte'}), 404
+    index = ids.index(track_id) if track_id in ids else 0
+    ses = vivas[0]
+    r = _desk_cola_desde_mini(ses, ids, index, {'play': True, 'shuffle': False})
+    if r.get('status') != 'ok':
+        return jsonify(r), 400
+    return jsonify({'status': 'ok', 'desktop': ses.get('nombre'), 'salida': ses.get('salida'),
+                    'pista': index + 1, 'pistas': len(ids)})
 
 
 @app.route('/api/v1/desk/estado', methods=['POST'])

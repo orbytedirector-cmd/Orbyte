@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261105">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261106">
 </head>
 <body>
 <header class="cab">
@@ -51,6 +51,28 @@ function toast(titulo, texto) {
   const t = document.createElement('div'); t.className = 'toast';
   t.innerHTML = `<b>${esc(titulo)}</b>${texto ? `<span class="tenue">${esc(texto)}</span>` : ''}`;
   document.getElementById('toasts').appendChild(t); setTimeout(() => t.remove(), 7000);
+}
+// ▶ En Desktop: Orbyte le manda el álbum (desde una pista) al Desktop abierto. datos: {album_id, track_id?}
+async function enDesktop(datos, boton) {
+  if (boton) boton.disabled = true;
+  let r;
+  try { r = await post('/api/desktop/reproducir', datos); } catch (e) { r = {ok: false, error: 'No se pudo conectar'}; }
+  if (boton) boton.disabled = false;
+  if (r.elegir && r.elegir.length) { elegirDesktop(r.elegir, cid => enDesktop({...datos, cliente_id: cid}, boton)); return; }
+  if (!r.ok) { toast('No se pudo reproducir en Desktop', r.error || ''); return; }
+  toast(`▶ Sonando en ${r.desktop || 'Desktop'}`, `${r.salida ? r.salida + ' · ' : ''}pista ${r.pista} de ${r.pistas}`);
+}
+function elegirDesktop(lista, elegido) {
+  const fondo = document.createElement('div'); fondo.className = 'elegir-desk';
+  fondo.innerHTML = `<div class="panel"><div class="t">¿En qué Orbyte Desktop?</div>
+    ${lista.map((d, i) => `<button class="btn" data-d="${i}">${esc(d.nombre || 'Desktop')}<span class="tenue s">${esc(d.salida || '')}</span></button>`).join('')}
+    <button class="btn chico" data-x>Cancelar</button></div>`;
+  fondo.onclick = e => {
+    const b = e.target.closest('[data-d]');
+    if (b) elegido(lista[+b.dataset.d].cliente_id);
+    if (b || e.target === fondo || e.target.closest('[data-x]')) fondo.remove();
+  };
+  document.body.appendChild(fondo);
 }
 // Campana: cuenta de no leídos + toast con lo nuevo
 (function () {

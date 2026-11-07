@@ -41,6 +41,7 @@
         : `<span class="tenue">${p.motivos.map(esc).join('<br>')}</span>`;
       return `<tr>
         <td style="width:1%"><input type="checkbox" data-m="${i}" ${marcadas.has(p.ruta) ? 'checked' : ''} aria-label="Elegir ${esc(p.titulo || '')}"></td>
+        <td style="width:1%"><button class="btn chico cl-play" data-play="${i}" title="Reproducir en Desktop desde esta pista" aria-label="Reproducir ${esc(p.titulo || '')} en Desktop">▶</button></td>
         <td class="num">${p.disco && +p.disco > 1 ? esc(p.disco) + '-' : ''}${esc(p.numero ?? '')}</td>
         <td>${esc(p.titulo || '')}</td>
         <td>${chipLed(a.led)}<div class="s">${esc(res(a.bits, a.sr))}${a.mqa ? ' · ' + esc(mqaTxt({mqa: true, studio: a.studio, mqb: a.mqb, sr_original: a.sr_original})) : ''}</div></td>
@@ -57,9 +58,10 @@
         <div class="s tenue">${s.n} pistas · MQA detectado en ${s.mqa_detectado} · se analizan los primeros segundos de cada pista, como hace el DAC</div></div>
         <div class="acciones" style="margin:0">
           <button class="btn oro" id="cl-det" ${nDet ? '' : 'disabled'} title="Escribe los tags MQA (o los quita), reindexa el álbum y pone el LED; el audio no se toca">Aplicar lo detectado${nDet ? ` (${nDet})` : ''}</button>
+          <button class="btn" id="cl-desk" title="Reproducir el álbum en Orbyte Desktop">▶ En Desktop</button>
           <button class="btn" id="cl-otra">Volver a analizar</button></div></div>
       <div class="tabla-wrap"><table>
-        <tr><th></th><th>#</th><th>Pista</th><th>En Orbyte</th><th class="oculto-movil">Archivo</th><th>Detectado en el audio</th><th>Corresponde</th><th>Estado</th></tr>
+        <tr><th></th><th></th><th>#</th><th>Pista</th><th>En Orbyte</th><th class="oculto-movil">Archivo</th><th>Detectado en el audio</th><th>Corresponde</th><th>Estado</th></tr>
         ${filas}</table></div>
       <details style="margin-top:.8rem" ${marcadas.size ? 'open' : ''}><summary class="s">Ajuste manual</summary>
         <div class="s-form" style="margin-top:.6rem">
@@ -75,6 +77,8 @@
       const r = ps[+c.dataset.m].ruta; c.checked ? marcadas.add(r) : marcadas.delete(r); previa();
     });
     document.getElementById('cl-otra').onclick = () => cargar(true);
+    document.getElementById('cl-desk').onclick = e => enDesktop({album_id: OID}, e.currentTarget);
+    cuerpo.querySelectorAll('[data-play]').forEach(b => b.onclick = () => enDesktop({album_id: OID, track_id: ps[+b.dataset.play].id}, b));
     document.getElementById('cl-det').onclick = () => aplicar({modo: 'detectado'},
       `¿Aplicar lo detectado en ${nDet} pista${nDet > 1 ? 's' : ''}?\n\nSe escriben (o quitan) los tags MQA en los archivos, se reindexa el álbum en Orbyte y se actualiza el LED. El audio no se toca. Las pistas en duda no se cambian.`);
     ['cl-tipo', 'cl-sr'].forEach(id => document.getElementById(id).onchange = previa);

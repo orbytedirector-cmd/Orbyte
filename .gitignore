@@ -7,6 +7,7 @@ venv/
 *.patch
 *.diff
 .secret_key
+.token_interno
 .env
 logs/
 apk/

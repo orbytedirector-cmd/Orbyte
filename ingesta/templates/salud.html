@@ -380,6 +380,7 @@ function pintarDif() {
         <div class="s mono muy-tenue" style="word-break:break-all">${esc(relR(a.carpeta))}</div></div></div>
       <div class="acciones" style="margin:0">${!calVerIgn && s.distintas ? `<button class="btn chico oro" data-capl="${i}">Aplicar lo detectado</button>` : ''}
         <a class="btn chico" href="/biblioteca/album/${a.album_id}#calidad-led">Abrir ficha</a>
+        <button class="btn chico" data-cplay="${i}" title="Reproducir el álbum en Orbyte Desktop">▶ En Desktop</button>
         <button class="btn chico" data-cign="${i}">${calVerIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div></div>`;
   }).join('');
   cont.querySelectorAll('[data-csel]').forEach(c => c.onchange = () => {
@@ -408,6 +409,7 @@ function pintarDif() {
     }
     toast('Calidad actualizada', `${ok} de ${ids.length} álbumes`); calSel.clear(); cargarDif(); cargarEstadoC();
   };
+  cont.querySelectorAll('[data-cplay]').forEach(b => b.onclick = () => enDesktop({album_id: calDif[+b.dataset.cplay].album_id}, b));
   cont.querySelectorAll('[data-cign]').forEach(b => b.onclick = async () => {
     b.disabled = true; await post('/api/calidad/ignorar', {carpeta: calDif[+b.dataset.cign].carpeta, si: !calVerIgn}); cargarDif();
   });
