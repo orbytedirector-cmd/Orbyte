@@ -12265,8 +12265,18 @@ def api_interno_desk_reproducir():
     r = _desk_cola_desde_mini(ses, ids, index, {'play': True, 'shuffle': False})
     if r.get('status') != 'ok':
         return jsonify(r), 400
+    conn = get_db_connection()
+    try:
+        p = (_desk_pistas(conn, [ids[index]]) or [{}])[0]
+    finally:
+        conn.close()
+    # lo que se mandó a sonar, para el aviso «Ahora suena» de la ingesta
     return jsonify({'status': 'ok', 'desktop': ses.get('nombre'), 'salida': ses.get('salida'),
-                    'pista': index + 1, 'pistas': len(ids)})
+                    'pista': index + 1, 'pistas': len(ids), 'album_id': album_id,
+                    'titulo': p.get('title'), 'artista': p.get('artist_name') or p.get('artist'),
+                    'album': p.get('album_name'), 'numero': p.get('track_number'), 'disco': p.get('disc_number'),
+                    'formato': p.get('format_display'), 'led': p.get('format_color'),
+                    'duracion': p.get('duration_fmt')})
 
 
 @app.route('/api/v1/desk/estado', methods=['POST'])

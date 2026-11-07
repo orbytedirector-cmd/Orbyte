@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261106">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261106b">
 </head>
 <body>
 <header class="cab">
@@ -60,7 +60,29 @@ async function enDesktop(datos, boton) {
   if (boton) boton.disabled = false;
   if (r.elegir && r.elegir.length) { elegirDesktop(r.elegir, cid => enDesktop({...datos, cliente_id: cid}, boton)); return; }
   if (!r.ok) { toast('No se pudo reproducir en Desktop', r.error || ''); return; }
-  toast(`▶ Sonando en ${r.desktop || 'Desktop'}`, `${r.salida ? r.salida + ' · ' : ''}pista ${r.pista} de ${r.pistas}`);
+  ahoraSuena(r);
+}
+// Aviso «Ahora suena»: portada, pista, álbum, calidad y dónde (al estilo del reproductor de Orbyte)
+const LED_CHIP = {yellow: 'CD', white: 'HR', green: 'MQA', blue: 'MQAS', magenta: 'MQB', cyan: 'DSD', red: 'DSD', silver: 'Lossy'};
+function ahoraSuena(r) {
+  document.querySelectorAll('.ahora-suena').forEach(x => x.remove());
+  const t = document.createElement('div'); t.className = 'ahora-suena'; t.setAttribute('role', 'status');
+  const n = (r.disco && +r.disco > 1 ? r.disco + '-' : '') + (r.numero ?? r.pista);
+  t.innerHTML = `
+    <div class="as-portada">${r.album_id ? `<img src="/api/desktop/portada/${r.album_id}" alt="" onerror="this.remove()">` : ''}<span class="as-ecual"><i></i><i></i><i></i></span></div>
+    <div class="as-txt">
+      <div class="rotulo">Ahora suena</div>
+      <div class="as-titulo">${esc(r.titulo || 'Pista ' + r.pista)}</div>
+      <div class="as-sub"><span class="as-artista">${esc(r.artista || '')}</span>${r.album ? ' · ' + esc(r.album) : ''}</div>
+      <div class="as-meta">${r.formato ? `<span class="chip q-${LED_CHIP[r.led] || ''}"><span class="led"></span>${esc(r.formato)}</span>` : ''}
+        <span class="tenue">#${esc(n)} · ${r.pista} de ${r.pistas}${r.duracion ? ' · ' + esc(r.duracion) : ''}</span></div>
+      <div class="as-donde">▶ ${esc(r.desktop || 'Orbyte Desktop')}${r.salida ? ' · ' + esc(r.salida) : ''}</div>
+    </div>
+    <button class="as-x" aria-label="Cerrar">×</button>`;
+  t.querySelector('.as-x').onclick = () => t.remove();
+  document.body.appendChild(t);
+  setTimeout(() => t.classList.add('fuera'), 9000);
+  setTimeout(() => t.remove(), 9600);
 }
 function elegirDesktop(lista, elegido) {
   const fondo = document.createElement('div'); fondo.className = 'elegir-desk';

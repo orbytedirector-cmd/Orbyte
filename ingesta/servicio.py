@@ -1731,8 +1731,23 @@ def api_desktop_reproducir():
         return jsonify(ok=False, error=f'No se pudo hablar con Orbyte: {e}')
     if res.get('status') == 'elegir':
         return jsonify(ok=False, elegir=res.get('desktops') or [])
-    return jsonify(ok=res.get('status') == 'ok', error=res.get('message'), **{k: res.get(k) for k in
-                                                                              ('desktop', 'salida', 'pista', 'pistas')})
+    return jsonify(ok=res.get('status') == 'ok', error=res.get('message'), **{k: res.get(k) for k in (
+        'desktop', 'salida', 'pista', 'pistas', 'album_id', 'titulo', 'artista', 'album', 'numero', 'disco',
+        'formato', 'led', 'duracion')})
+
+
+@app.route('/api/desktop/portada/<int:album_id>')
+def api_desktop_portada(album_id):
+    """Portada (miniatura) de un álbum de Orbyte, para el aviso «Ahora suena»."""
+    con = sqlite3.connect(f'file:{almacen.ajustes()["db_orbyte"]}?mode=ro', uri=True, timeout=10)
+    try:
+        fila = con.execute('SELECT path, cover_path FROM albums WHERE id=?', (album_id,)).fetchone()
+    finally:
+        con.close()
+    if not fila or not fila[1] or not os.path.isfile(fila[1]) \
+            or not fila[1].lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+        abort(404)
+    return send_file(_miniatura(fila[1]) or fila[1], max_age=3600)
 
 
 @app.route('/api/calidad/album/<int:oid>/aplicar', methods=['POST'])
