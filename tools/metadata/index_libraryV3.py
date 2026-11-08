@@ -203,6 +203,10 @@ def _tags_mutagen(file_path: str) -> dict:
             out[destino] = v
     return out
 
+_TAGS_URL = {"url", "www", "website", "purl", "source", "wwwaudiofile", "wwwaudiosource",
+             "wwwcommercialinfo", "wwwpublisher", "wwwartist"}
+
+
 def extract_metadata(file_path: str) -> dict:
     cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
            "-show_format", "-show_streams", file_path]
@@ -290,7 +294,11 @@ def extract_metadata(file_path: str) -> dict:
     mqa_orig_sr = tags.get("originalsamplerate")
 
     encoder   = tags.get("encoder", "").lower()
-    tag_vals  = " ".join(str(v) for v in tags.values()).lower()
+    # Las URLs no dicen nada del audio: un tag URL de la tienda con «…MQA…» marcaba MQA un álbum que
+    # se descargó en 24/96 PCM (Metallica Remastered 2021, 07-11-2026). Mismo criterio en
+    # ingesta/mqa.py (valores_para_mqa).
+    tag_vals  = " ".join(str(v) for k, v in tags.items()
+                         if k not in _TAGS_URL and "://" not in str(v)).lower()
 
     if ("mqaencode" in encoder or "mqaencoder" in tags or mqa_orig_sr or
             "mqa" in tag_vals or "tidal masters" in tag_vals or
@@ -300,7 +308,7 @@ def extract_metadata(file_path: str) -> dict:
     if is_mqa:
         mqa_type = ("mqb" if "mqb" in tag_vals else
                     "studio" if "studio" in encoder or
-                    "mqa studio" in " ".join(str(v) for v in tags.values()).lower()
+                    "mqa studio" in tag_vals
                     else "mqa")
 
     # ── sample_rate_real ─────────────────────────────────────

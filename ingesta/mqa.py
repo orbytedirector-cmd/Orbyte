@@ -116,6 +116,16 @@ def texto(d, sr=None):
 
 # ── tags ──
 
+# Las URLs no dicen nada del audio (un tag URL de la tienda con «…MQA…»): mismo criterio que
+# index_libraryV3.extract_metadata (_TAGS_URL).
+_TAGS_URL = {'url', 'www', 'website', 'purl', 'source', 'wwwaudiofile', 'wwwaudiosource',
+             'wwwcommercialinfo', 'wwwpublisher', 'wwwartist'}
+
+
+def _es_url(k, v):
+    return str(k).lower() in _TAGS_URL or '://' in str(v)
+
+
 def tags_mqa(ruta):
     """Lo que dicen hoy los tags (mismo criterio que index_libraryV3): {'mqa', 'studio', 'sr_original', 'otros'}.
     `otros`: tags que no escribe Orbyte pero hacen que el indexador lo vea como MQA (p. ej. un comentario «MQA»)."""
@@ -133,10 +143,10 @@ def tags_mqa(ruta):
         tags[k] = ' '.join(str(x) for x in vals)
     encoder = tags.get('encoder', '').lower()
     orig = tags.get('originalsamplerate') or tags.get('mqaoriginalsamplerate')
-    valores = ' '.join(tags.values()).lower()
+    valores = ' '.join(v for k, v in tags.items() if not _es_url(k, v)).lower()
     es = bool('mqaencode' in encoder or 'mqaencoder' in tags or orig or 'mqa' in valores
               or 'tidal masters' in valores or 'mqa' in os.path.basename(ruta).lower())
-    otros = [k for k, v in tags.items() if k not in _TAGS_MQA and k != 'encoder'
+    otros = [k for k, v in tags.items() if k not in _TAGS_MQA and k != 'encoder' and not _es_url(k, v)
              and ('mqa' in v.lower() or 'tidal masters' in v.lower())]
     try:
         orig = int(re.sub(r'\D', '', str(orig))) if orig else None
@@ -168,6 +178,8 @@ def escribir(ruta, es_mqa, studio=False, sr_original=None, mqb=False):
     else:
         for k in list(f.tags.keys()):
             vals = f.tags[k]
+            if any(_es_url(k, v) for v in vals):
+                continue                             # una URL con «MQA» no cuenta (ver _TAGS_URL)
             if any('mqa' in str(v).lower() or 'tidal masters' in str(v).lower() for v in vals):
                 if k.lower() in ('comment', 'description', 'encoded_by', 'encodedby', 'encodersettings'):
                     del f.tags[k]
