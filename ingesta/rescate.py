@@ -20,6 +20,16 @@ from . import analisis
 from . import tienda
 
 TOLERANCIA_S = 2.0
+TOLERANCIA_REL = 0.003     # 0,3 % de la duración: en una pista larga, 2 s fijos son demasiado poco
+
+
+def tolerancia(duracion):
+    """Diferencia de duración aceptable entre la pista vieja y la nueva: 2 s, o el 0,3 % si es más (08-11-2026:
+    «Illumination Theory» de Dream Theater, 22 min, 1338 s la vieja y 1336 s la de Tidal, se rechazaba)."""
+    try:
+        return max(TOLERANCIA_S, TOLERANCIA_REL * float(duracion or 0))
+    except (TypeError, ValueError):
+        return TOLERANCIA_S
 
 
 # ─────────────────────────── qué hay en la carpeta ───────────────────────────
@@ -107,7 +117,7 @@ def _parecido(a, b):
 
 
 def _dur_ok(f, p):
-    return not f.get('duracion') or not p.get('duracion') or abs(float(f['duracion']) - float(p['duracion'])) <= TOLERANCIA_S
+    return not f.get('duracion') or not p.get('duracion') or abs(float(f['duracion']) - float(p['duracion'])) <= tolerancia(f['duracion'])
 
 
 def emparejar(f, pistas):
