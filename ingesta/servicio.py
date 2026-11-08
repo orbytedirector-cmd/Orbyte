@@ -38,6 +38,7 @@ from . import titulos as titulos_mod
 from concurrent.futures import ThreadPoolExecutor
 from . import recursos
 from . import compat24
+from . import caratulas as caratulas_mod
 from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
@@ -1667,6 +1668,30 @@ def api_salud_compat24():
         return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
     return jsonify(ok=True, **r, trabajando=compat.actual, revisando=compat.revisando, hechas=compat.hechas,
                    error=compat.ultimo_error, raiz=aj.get('biblioteca') or '/mnt/musica')
+
+
+# Sin carátula (ingesta/caratulas.py, 08-11-2026)
+caratulas = caratulas_mod.Caratulas(almacen.ajustes, os.path.join(DATOS, 'caratulas.json'))
+
+
+@app.route('/api/salud/caratulas')
+def api_salud_caratulas():
+    caratulas.si_hace_falta()
+    r = caratulas.resultado() or {}
+    return jsonify(ok=True, albumes=r.get('albumes') or [], revisados=r.get('revisados'), cuando=r.get('cuando'),
+                   revisando=caratulas.revisando, avance=caratulas.avance, error=caratulas.error,
+                   chica_px=caratulas_mod.CHICA_PX)
+
+
+@app.route('/api/salud/caratulas/revisar', methods=['POST'])
+def api_salud_caratulas_revisar():
+    return jsonify(ok=True, iniciada=caratulas.iniciar())
+
+
+@app.route('/api/salud/caratulas/<int:oid>/quitar', methods=['POST'])
+def api_salud_caratulas_quitar(oid):
+    caratulas.quitar(oid)
+    return jsonify(ok=True)
 
 
 @app.route('/api/salud/compat24/ahora', methods=['POST'])
