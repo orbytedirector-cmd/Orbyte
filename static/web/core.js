@@ -502,7 +502,7 @@
     root.querySelector(".adv-link").onclick = () => ORB.openAdvanced();
     let timer = null, seq = 0;
     const state = (txt) => { body.innerHTML = `<div class="search-state">${txt}</div>`; };
-    state("Buscá artistas, álbumes o canciones en tu biblioteca.");
+    state("Busca artistas, álbumes o canciones en tu biblioteca.");
     const run = async (q) => {
       const my = ++seq;
       state("Buscando…");
@@ -541,7 +541,7 @@
       const q = input.value.trim();
       clear.classList.toggle("hidden", !input.value);
       clearTimeout(timer);
-      if (q.length < 2) { seq++; state("Buscá artistas, álbumes o canciones en tu biblioteca."); return; }
+      if (q.length < 2) { seq++; state("Busca artistas, álbumes o canciones en tu biblioteca."); return; }
       timer = setTimeout(() => run(q), 300);
     };
     input.onkeydown = (e) => { if (e.key === "Enter") { input.blur(); const q = input.value.trim(); if (q.length >= 2) { clearTimeout(timer); run(q); } } };
@@ -565,7 +565,7 @@
     const countFilters = () => Object.values(st.applied).reduce((n, a) => n + a.length, 0);
     const intro = () => {
       v.scroll.innerHTML = "";
-      const box = el("div", "adv-intro", '<div class="ico">☰</div><div>Combiná género, mood, era, popularidad y más para encontrar exactamente lo que buscás.</div>');
+      const box = el("div", "adv-intro", '<div class="ico">☰</div><div>Combina género, mood, era, popularidad y más para encontrar exactamente lo que buscas.</div>');
       const b = el("button", "orbitron-big-btn", "Elegir filtros"); b.style.maxWidth = "260px"; b.style.margin = "18px auto 0";
       b.onclick = openFilters; box.appendChild(b); v.scroll.appendChild(box);
     };

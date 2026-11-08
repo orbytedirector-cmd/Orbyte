@@ -191,7 +191,7 @@ def main():
         print('Ningún dispositivo anunció el servicio AVTransport por SSDP.')
         print('No es necesariamente un callejón sin salida: algunos MusicCast solo')
         print('anuncian AVTransport cuando están ENCENDIDOS y con la entrada de red')
-        print('activa (no en standby) — probá con el receiver prendido en una entrada')
+        print('activa (no en standby) — prueba con el receiver prendido en una entrada')
         print('de red/streaming antes de descartar esta vía.')
 
 

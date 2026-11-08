@@ -10,9 +10,9 @@ streaming: "acá está el archivo" (SetAVTransportURI) y "reproducí" (Play).
 
 IMPORTANTE — este script se ejecuta EN el server (importa app.py directo
 para reusar la lógica real de tokens/DB, no la reinventa), pero el
-renderer necesita poder alcanzar al server por la URL que le pasás en
+renderer necesita poder alcanzar al server por la URL que le pasas en
 --server-host: si el server está en el 3er piso y tiene varias IPs/interfaces,
-usá la IP LAN real (la misma que usás para entrar a Orbyte desde el celu),
+usa la IP LAN real (la misma que usas para entrar a Orbyte desde el celu),
 NUNCA localhost/127.0.0.1 — el receiver no es la misma máquina.
 
 USO:
@@ -29,7 +29,7 @@ c.row_factory = sqlite3.Row
 r = c.execute('SELECT id, title, artist, file_path FROM tracks LIMIT 5').fetchall()
 for x in r: print(dict(x))
 "
-(ajustá 'music.db' si tu DB_PATH es otro — revisá app.py si no estás seguro)
+(ajusta 'music.db' si tu DB_PATH es otro — revisa app.py si no estás seguro)
 """
 
 import argparse
@@ -159,7 +159,7 @@ def main():
     print(f'Pista:          {track["artist"]} — {track["title"]}')
     print(f'Archivo:        {file_path}  ({file_size/1024/1024:.1f} MB, {mime})')
     print(f'URL firmada:    {media_url}')
-    print(f'                (probála sola en el navegador si querés confirmar que baja bien el audio)')
+    print(f'                (pruébala sola en el navegador si quieres confirmar que baja bien el audio)')
     print(f'Control URL:    {args.control_url}')
     print()
 
@@ -170,18 +170,18 @@ def main():
         print(f'  Respuesta: {body[:800]}')
         print('\n❌ El renderer rechazó la pista antes de intentar reproducirla. Motivos típicos:')
         print('   - No le gustó el protocolInfo/metadata del DIDL (más común con DSD)')
-        print('   - No puede alcanzar --server-host (probá pegar la URL firmada en un navegador aparte)')
-        print('   - El token venció (tienen 10 minutos) — volvé a correr el script')
+        print('   - No puede alcanzar --server-host (prueba pegar la URL firmada en un navegador aparte)')
+        print('   - El token venció (tienen 10 minutos) — vuelve a correr el script')
         sys.exit(1)
 
     print('→ Play…')
     status, body = play(args.control_url)
     print(f'  HTTP {status}')
     if status == 200:
-        print('\n✅ Comando aceptado — debería estar sonando. Confirmame si escuchás algo y con qué calidad/formato lo muestra el receiver.')
+        print('\n✅ Comando aceptado — debería estar sonando. Confírmame si escuchas algo y con qué calidad/formato lo muestra el receiver.')
     else:
         print(f'  Respuesta: {body[:800]}')
-        print('\n⚠️  SetAVTransportURI se aceptó pero Play falló — probá play manual desde el propio receiver/app MusicCast.')
+        print('\n⚠️  SetAVTransportURI se aceptó pero Play falló — prueba play manual desde el propio receiver/app MusicCast.')
 
 
 if __name__ == '__main__':

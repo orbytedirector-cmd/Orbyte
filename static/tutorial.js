@@ -164,7 +164,7 @@
     {
       id: 'filters',
       title: '🎛️ Secciones de filtro',
-      body: 'Más abajo en Inicio podés filtrar tu biblioteca por Mood (estado de ánimo), Momento del día ideal, Era musical (década), Tema lírico, Género y subgéneros, e Idioma de la interpretación.',
+      body: 'Más abajo en Inicio puedes filtrar tu biblioteca por Mood (estado de ánimo), Momento del día ideal, Era musical (década), Tema lírico, Género y subgéneros, e Idioma de la interpretación.',
       targets: [
         { selector: '.mood-explorer-grid', label: 'Mood (estado de ánimo)' },
         { selector: '.momento-grid', label: 'Momento del día ideal' },

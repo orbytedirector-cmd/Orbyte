@@ -175,23 +175,23 @@ MAX_QUEUE_ITEMS = 40
 
 SPEAK_SLOW_ERROR = (
     "Orbitron está tardando más de lo normal en armar la lista. "
-    "Probá de nuevo en un momento."
+    "Prueba de nuevo en un momento."
 )
 SPEAK_CONNECT_ERROR = (
-    "No pude conectarme con Orbyte. Fijate que el servidor esté prendido "
-    "y probá de nuevo."
+    "No pude conectarme con Orbyte. Revisa que el servidor esté prendido "
+    "y prueba de nuevo."
 )
 SPEAK_AUTH_ERROR = (
-    "Orbyte no aceptó la clave de Alexa. En el servidor revisá con clave alexa estado."
+    "Orbyte no aceptó la clave de Alexa. En el servidor revisa con clave alexa estado."
 )
 SPEAK_NO_RESULTS = (
-    "No encontré nada para esa búsqueda en tu biblioteca. Probá pedirlo de otra forma."
+    "No encontré nada para esa búsqueda en tu biblioteca. Prueba pedirlo de otra forma."
 )
 SPEAK_GENERIC_ERROR = (
-    "Tuve un problema para conectarme con Orbyte. Fijate que el servidor esté prendido "
-    "y probá de nuevo."
+    "Tuve un problema para conectarme con Orbyte. Revisa que el servidor esté prendido "
+    "y prueba de nuevo."
 )
-SPEAK_WELCOME = "¿Qué querés escuchar?"
+SPEAK_WELCOME = "¿Qué quieres escuchar?"
 SPEAK_NO_MORE_TRACKS = "No hay más pistas en la cola. Pedime otra playlist cuando quieras."
 SPEAK_NO_PREVIOUS = "No tengo una pista anterior a la que volver."
 
@@ -597,8 +597,8 @@ class PlayMusicIntentHandler(AbstractRequestHandler):
         if not raw_query:
             return (
                 handler_input.response_builder
-                .speak("No te escuché bien. ¿Qué querés escuchar?")
-                .ask("¿Qué querés escuchar?")
+                .speak("No te escuché bien. ¿Qué quieres escuchar?")
+                .ask("¿Qué quieres escuchar?")
                 .response
             )
 
