@@ -288,6 +288,7 @@ input.mono { font-family: var(--mono); font-size: .86rem; }
 .carpetas button:hover { background: var(--elev); }
 .carpetas svg { width: 18px; height: 18px; color: var(--oro); flex: none; }
 .carpetas .nada { padding: 1.5rem; text-align: center; color: var(--texto-3); font-size: .88rem; }
+.modal-cab, .modal-pie { flex: none; }
 .modal-pie { display: flex; justify-content: space-between; gap: .5rem; padding: .8rem 1rem; border-top: 1px solid var(--borde); align-items: center; flex-wrap: wrap; }
 
 /* ── avisos ── */

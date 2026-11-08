@@ -51,8 +51,10 @@
 <div class="modal-fondo" id="pl-previa" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="pl-prev-tit" style="width:min(640px,100%)">
     <div class="modal-cab"><div class="rotulo" id="pl-prev-tit">¿Usar esta carátula?</div></div>
-    <div style="padding:1rem;text-align:center">
-      <img id="pl-prev-img" alt="" style="max-width:100%;max-height:60vh;border-radius:8px;border:1px solid var(--borde)">
+    <!-- la imagen se achica para que «Cancelar / Usar esta carátula» siempre quede a la vista (08-11-2026: con
+         carátulas altas el pie quedaba fuera del modal, que no pasa de 80vh) -->
+    <div style="padding:1rem;text-align:center;flex:1;min-height:0;overflow:auto">
+      <img id="pl-prev-img" alt="" style="max-width:100%;max-height:calc(min(80vh, 720px) - 11rem);border-radius:8px;border:1px solid var(--borde)">
       <div class="s tenue" id="pl-prev-info" style="margin-top:.5rem"></div>
     </div>
     <div class="modal-pie"><span class="tenue" style="font-size:.8rem">Reemplaza Cover.jpg y se incrusta en todas las pistas</span>
