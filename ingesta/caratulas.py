@@ -103,6 +103,42 @@ class Caratulas:
         except (OSError, ValueError):
             return None
 
+    def vigentes(self):
+        """El último resultado, sin los álbumes que ya se arreglaron por otro lado (ficha de Biblioteca, reproceso
+        en Bandeja, que además cambia el id): se vuelve a mirar solo lo que está en la lista, que es poco."""
+        with self._lock:
+            r = self.resultado()
+            if not r or not r.get('albumes'):
+                return r
+            db = self._ajustes().get('db_orbyte')
+            try:
+                con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
+                try:
+                    ids = [a['id'] for a in r['albumes']]
+                    filas = {i: c for i, c in con.execute(
+                        f"SELECT id, cover_path FROM albums WHERE id IN ({','.join('?' * len(ids))})", ids)}
+                finally:
+                    con.close()
+            except Exception as e:  # noqa: BLE001
+                log.warning('Carátulas: no se pudo revisar la lista: %s', e)
+                return r
+            nuevos = []
+            for a in r['albumes']:
+                if a['id'] not in filas:
+                    continue                            # ya no existe (reprocesado con otro id, o borrado)
+                cover = filas[a['id']]
+                if cover and os.path.isfile(cover):
+                    dim = _dimensiones(cover)
+                    if dim and min(dim) < CHICA_PX:
+                        a = dict(a, caso='chica', ancho=dim[0], alto=dim[1], candidata=None)
+                    else:
+                        continue                        # ya tiene una carátula buena
+                nuevos.append(a)
+            if len(nuevos) != len(r['albumes']) or nuevos != r['albumes']:
+                r['albumes'] = nuevos
+                self._guardar(r)
+            return r
+
     def quitar(self, oid):
         """Saca un álbum de la lista (ya se arregló) sin esperar a la próxima revisión."""
         with self._lock:

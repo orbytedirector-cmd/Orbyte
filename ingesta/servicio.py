@@ -1677,7 +1677,7 @@ caratulas = caratulas_mod.Caratulas(almacen.ajustes, os.path.join(DATOS, 'caratu
 @app.route('/api/salud/caratulas')
 def api_salud_caratulas():
     caratulas.si_hace_falta()
-    r = caratulas.resultado() or {}
+    r = (None if caratulas.revisando else caratulas.vigentes()) or caratulas.resultado() or {}
     return jsonify(ok=True, albumes=r.get('albumes') or [], revisados=r.get('revisados'), cuando=r.get('cuando'),
                    revisando=caratulas.revisando, avance=caratulas.avance, error=caratulas.error,
                    chica_px=caratulas_mod.CHICA_PX)
