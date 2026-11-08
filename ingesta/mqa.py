@@ -122,8 +122,16 @@ _TAGS_URL = {'url', 'www', 'website', 'purl', 'source', 'wwwaudiofile', 'wwwaudi
              'wwwcommercialinfo', 'wwwpublisher', 'wwwartist'}
 
 
+def _es_letra(k):
+    """Tags de letra: su texto no dice nada del audio. La letra de «Cry War (End of the World Demo)» de Kreator
+    trae «MQBob» y el indexador la marcaba MQB (magenta) aunque es MQA normal (el iFi: verde) — 07-11-2026."""
+    k = str(k).lower()
+    return 'lyric' in k or k.startswith(('uslt', 'sylt')) or k == '©lyr'
+
+
 def _es_url(k, v):
-    return str(k).lower() in _TAGS_URL or '://' in str(v)
+    """Tags que no cuentan para decidir MQA/MQB por los tags: URLs y letras (nombre histórico)."""
+    return str(k).lower() in _TAGS_URL or '://' in str(v) or _es_letra(k)
 
 
 def tags_mqa(ruta):
@@ -179,7 +187,7 @@ def escribir(ruta, es_mqa, studio=False, sr_original=None, mqb=False):
         for k in list(f.tags.keys()):
             vals = f.tags[k]
             if any(_es_url(k, v) for v in vals):
-                continue                             # una URL con «MQA» no cuenta (ver _TAGS_URL)
+                continue                             # una URL o la letra con «MQA» no cuentan (_es_url)
             if any('mqa' in str(v).lower() or 'tidal masters' in str(v).lower() for v in vals):
                 if k.lower() in ('comment', 'description', 'encoded_by', 'encodedby', 'encodersettings'):
                     del f.tags[k]

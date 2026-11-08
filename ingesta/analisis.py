@@ -540,7 +540,7 @@ def analizar_pista(ruta, base):
     # ── MQA: mismo criterio que index_libraryV3 ──
     encoder = str(crudo.get('encoder') or '').lower()
     orig_sr = crudo.get('originalsamplerate') or crudo.get('mqaoriginalsamplerate')
-    valores = ' '.join(str(v) for k, v in crudo.items() if not mqa_tags_url(k, v)).lower()   # sin URLs
+    valores = ' '.join(str(v) for k, v in crudo.items() if not mqa_tags_url(k, v)).lower()   # sin URLs ni letras
     es_mqa = bool('mqaencode' in encoder or 'mqaencoder' in crudo or orig_sr
                   or 'mqa' in valores or 'tidal masters' in valores
                   or 'mqa' in Path(ruta).name.lower())
