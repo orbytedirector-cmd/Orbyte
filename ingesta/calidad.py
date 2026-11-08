@@ -28,7 +28,7 @@ from . import mqa, salud as salud_mod
 
 log = logging.getLogger('ingesta.calidad')
 
-V = 'c3'                    # versión del criterio (c2: LED por la firma; c3: MQB coherente en tags y Orbyte)
+V = 'c4'                    # versión del criterio (c2: LED por la firma; c3: MQB coherente en tags y Orbyte; c4: firmas MQA validadas, mqa.validar)
 DV = 'c1'                   # versión de la detección en caché (la firma no cambió: no se vuelve a decodificar)
 ESTADOS = ('ok', 'distinto', 'duda', 'falta', 'omitida')
 _COLS = ('t.id, t.file_path, t.album_id, t.title, t.track_number, t.disc_number, t.sample_rate, t.bit_depth, '
@@ -119,9 +119,10 @@ def evaluar(fila, det_cache, forzar=False, prefijo=None):
     if not arch.get('flac'):
         out.update(estado='omitida', motivos=['no es FLAC: el MQA solo se detecta en FLAC'])
         return out
-    det = det_cache.obtener(ruta, arch, forzar=forzar, prefijo=prefijo)
-    out['detectado'] = det
     sr = arch.get('sr') or fila['sample_rate']
+    # la validación se aplica también a lo que viene de la caché (sin volver a decodificar el audio)
+    det = mqa.validar(det_cache.obtener(ruta, arch, forzar=forzar, prefijo=prefijo), sr)
+    out['detectado'] = det
     t = out['tags'] or {}
     # MQB (magenta) no se deduce del audio: se respeta cuando está marcado a mano (tags «MQB»), o cuando Orbyte lo
     # tiene en magenta sin firma MQA en el audio (puesto antes de existir la marca: se propone dejarlo coherente).
