@@ -42,9 +42,9 @@ def _frecuencia_original(c):
 
 # Validación de la firma (08-11-2026). Antes bastaba con encontrar la sincronía UNA vez: el ruido de una pista puede
 # calzar por casualidad (Fleet Foxes «Cassius»: proc=20, «original 48» en 96 kHz; Mercyful Fate «Legend of the Headless
-# Rider»: proc=0, bit 18, «original 176,4» en 192 kHz — el iFi: blanco en las dos). En ~900 álbumes MQA reales: la
-# firma siempre en el bit 16, procedencia 2 o 9, frecuencia original ≥ la del archivo y de su misma familia; y un DAC
-# reconoce el MQA aunque se salte al medio de la pista, así que la sincronía se repite a lo largo del audio.
+# Rider»: proc=0, bit 18, «original 176,4» en 192 kHz — el iFi: blanco en las dos). En las MQA reales: procedencia
+# 2 o 9, la sincronía se repite 28-42 veces en 20 s (un DAC reconoce el MQA aunque se salte al medio de la pista) y la
+# frecuencia original es ≥ la del archivo y de su misma familia. El bit varía (16 o 17), no sirve para descartar.
 PROCEDENCIAS_VALIDAS = range(1, 16)       # vistas en reales: 2 (MQA) y 9 (Studio); falsas: 0 y 20
 REPETICIONES_MIN = 2                      # en los SEGUNDOS analizados
 
@@ -55,9 +55,9 @@ def validar(d, sr=None):
     if not d or not d.get('mqa'):
         return d
     motivo = None
-    if d.get('bit', 16) != 16:
-        motivo = f"firma en el bit {d.get('bit')} (las MQA reales la llevan en el 16)"
-    elif d.get('cod_procedencia') is not None and d['cod_procedencia'] not in PROCEDENCIAS_VALIDAS:
+    # (Sin regla de bit: las MQA reales también la llevan en el bit 17 — Alanis Morissette, «Supposed Former
+    # Infatuation Junkie», pistas 3 y 7: bit 17 y el iFi azul, 08-11-2026.)
+    if d.get('cod_procedencia') is not None and d['cod_procedencia'] not in PROCEDENCIAS_VALIDAS:
         motivo = f"procedencia {d['cod_procedencia']} no válida"
     elif d.get('repeticiones') is not None and d['repeticiones'] < REPETICIONES_MIN:
         motivo = f"la firma aparece {d['repeticiones']} vez (una MQA real la repite)"

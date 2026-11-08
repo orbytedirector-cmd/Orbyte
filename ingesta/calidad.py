@@ -28,7 +28,7 @@ from . import mqa, salud as salud_mod
 
 log = logging.getLogger('ingesta.calidad')
 
-V = 'c4'                    # versión del criterio (c2: LED por la firma; c3: MQB coherente en tags y Orbyte; c4: firmas MQA validadas, mqa.validar)
+V = 'c5'                    # versión del criterio (c2: LED por la firma; c3: MQB coherente en tags y Orbyte; c4: firmas MQA validadas, mqa.validar; c5: sin la regla del bit 16)
 DV = 'c1'                   # versión de la detección en caché (la firma no cambió: no se vuelve a decodificar)
 ESTADOS = ('ok', 'distinto', 'duda', 'falta', 'omitida')
 _COLS = ('t.id, t.file_path, t.album_id, t.title, t.track_number, t.disc_number, t.sample_rate, t.bit_depth, '
