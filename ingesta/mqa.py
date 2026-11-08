@@ -40,8 +40,42 @@ def _frecuencia_original(c):
     return base * mult * (2 if mult > 16 else 1)
 
 
-def buscar_en_pcm(datos):
-    """`datos`: PCM s32le estéreo intercalado. → {'mqa', 'studio', 'sr_original', 'bit'} o {'mqa': False}."""
+# Validación de la firma (08-11-2026). Antes bastaba con encontrar la sincronía UNA vez: el ruido de una pista puede
+# calzar por casualidad (Fleet Foxes «Cassius»: proc=20, «original 48» en 96 kHz; Mercyful Fate «Legend of the Headless
+# Rider»: proc=0, bit 18, «original 176,4» en 192 kHz — el iFi: blanco en las dos). En ~900 álbumes MQA reales: la
+# firma siempre en el bit 16, procedencia 2 o 9, frecuencia original ≥ la del archivo y de su misma familia; y un DAC
+# reconoce el MQA aunque se salte al medio de la pista, así que la sincronía se repite a lo largo del audio.
+PROCEDENCIAS_VALIDAS = range(1, 16)       # vistas en reales: 2 (MQA) y 9 (Studio); falsas: 0 y 20
+REPETICIONES_MIN = 2                      # en los SEGUNDOS analizados
+
+
+def validar(d, sr=None):
+    """Descarta una firma que no puede ser MQA real. `d`: resultado de buscar_en_pcm (también los de caché, que no
+    traen «repeticiones»: esa regla se aplica solo si está). → `d` tal cual o {'mqa': False, 'descartado': …}."""
+    if not d or not d.get('mqa'):
+        return d
+    motivo = None
+    if d.get('bit', 16) != 16:
+        motivo = f"firma en el bit {d.get('bit')} (las MQA reales la llevan en el 16)"
+    elif d.get('cod_procedencia') is not None and d['cod_procedencia'] not in PROCEDENCIAS_VALIDAS:
+        motivo = f"procedencia {d['cod_procedencia']} no válida"
+    elif d.get('repeticiones') is not None and d['repeticiones'] < REPETICIONES_MIN:
+        motivo = f"la firma aparece {d['repeticiones']} vez (una MQA real la repite)"
+    elif sr and d.get('sr_original'):
+        o = d['sr_original']
+        if o < sr:
+            motivo = f'original {o / 1000:g} kHz menor que el archivo ({sr / 1000:g} kHz)'
+        elif (o % 44100 == 0) != (sr % 44100 == 0):
+            motivo = f'original {o / 1000:g} kHz de otra familia que el archivo ({sr / 1000:g} kHz)'
+    if not motivo:
+        return d
+    return {'mqa': False, 'descartado': motivo,
+            'firma': {k: d.get(k) for k in ('bit', 'cod_procedencia', 'cod_frecuencia', 'sr_original', 'repeticiones')}}
+
+
+def buscar_en_pcm(datos, sr=None):
+    """`datos`: PCM s32le estéreo intercalado; `sr`: frecuencia del archivo (para validar).
+    → {'mqa', 'studio', 'sr_original', 'bit', 'repeticiones'} o {'mqa': False[, 'descartado']}."""
     izq, der = datos[2::8], datos[6::8]                  # byte de los bits 16..23 de cada canal
     n = min(len(izq), len(der))
     if n < 64:
@@ -63,8 +97,9 @@ def buscar_en_pcm(datos):
     i, k, bits = mejor
     orsf = int(bits[i + 3:i + 7], 2)
     procedencia = int(bits[i + 29:i + 34], 2)
-    return {'mqa': True, 'studio': procedencia > 8, 'sr_original': _frecuencia_original(orsf), 'bit': 16 + k,
-            'cod_procedencia': procedencia, 'cod_frecuencia': orsf}
+    return validar({'mqa': True, 'studio': procedencia > 8, 'sr_original': _frecuencia_original(orsf), 'bit': 16 + k,
+                    'cod_procedencia': procedencia, 'cod_frecuencia': orsf,
+                    'repeticiones': bits.count(SINCRONIA.encode())}, sr)
 
 
 def detectar(ruta, segundos=SEGUNDOS, prefijo=None):
@@ -77,19 +112,22 @@ def detectar(ruta, segundos=SEGUNDOS, prefijo=None):
         return {'mqa': False, 'error': f'{type(e).__name__}: {e}'}
     if r.returncode != 0 and not r.stdout:
         return {'mqa': False, 'error': (r.stderr.decode('utf-8', 'replace').strip().splitlines() or ['ffmpeg falló'])[-1]}
-    canales = _canales(ruta)
+    canales, sr = _canales(ruta)
     if canales and canales != 2:
         return {'mqa': False, 'nota': f'{canales} canales (MQA es estéreo)'}
-    return buscar_en_pcm(r.stdout)
+    return buscar_en_pcm(r.stdout, sr)
 
 
 def _canales(ruta):
+    """(canales, frecuencia) del primer stream de audio; (None, None) si no se pudo leer."""
     try:
-        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries', 'stream=channels',
-                            '-of', 'default=nw=1:nk=1', ruta], capture_output=True, text=True, timeout=30)
-        return int((r.stdout or '0').strip() or 0)
+        r = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'a:0', '-show_entries',
+                            'stream=channels,sample_rate', '-of', 'default=nw=1', ruta],
+                           capture_output=True, text=True, timeout=30)
+        v = dict(l.split('=', 1) for l in r.stdout.splitlines() if '=' in l)
+        return int(v.get('channels') or 0) or None, int(v.get('sample_rate') or 0) or None
     except Exception:  # noqa: BLE001
-        return None
+        return None, None
 
 
 def led(is_mqa, studio, sr, sr_original, is_dsd=False, dsd_rate=None, mqb=False):

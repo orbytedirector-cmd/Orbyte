@@ -46,7 +46,7 @@
         <td>${esc(p.titulo || '')}</td>
         <td>${chipLed(a.led)}<div class="s">${esc(res(a.bits, a.sr))}${a.mqa ? ' · ' + esc(mqaTxt({mqa: true, studio: a.studio, mqb: a.mqb, sr_original: a.sr_original})) : ''}</div></td>
         <td class="oculto-movil"><div class="s">${esc(res(ar.bits, ar.sr))}</div><div class="s tenue">${t.mqa ? 'tags: ' + esc(mqaTxt(t)) : 'tags: sin MQA'}</div></td>
-        <td>${d ? (d.error ? `<span class="mal s">${esc(d.error)}</span>` : `<span class="${d.mqa ? 'ok' : 'tenue'}">${esc(mqaTxt(d))}</span>`) : '<span class="muy-tenue">—</span>'}</td>
+        <td>${d ? (d.error ? `<span class="mal s">${esc(d.error)}</span>` : `<span class="${d.mqa ? 'ok' : 'tenue'}">${esc(mqaTxt(d))}</span>` + (d.descartado ? `<div class="s muy-tenue" title="Firma MQA que no puede ser real (mqa.validar)">firma descartada: ${esc(d.descartado)}</div>` : '')) : '<span class="muy-tenue">—</span>'}</td>
         <td>${p.esperado && p.esperado.led ? chipLed(p.esperado.led) : '<span class="muy-tenue">—</span>'}</td>
         <td class="s">${est}</td></tr>`;
     }).join('');

@@ -57,8 +57,13 @@ def fila(f):
         regla = '—'
     elif det.get('mqa'):
         d = (f"{'Studio' if det['studio'] else 'MQA'} orig {_khz(det['sr_original'])} "
-             f"proc={det['cod_procedencia']} cod_f={det['cod_frecuencia']} bit{det['bit']}")
+             f"proc={det['cod_procedencia']} cod_f={det['cod_frecuencia']} bit{det['bit']} rep={det.get('repeticiones')}")
         regla = mqa.led(True, det['studio'], f['sample_rate'], det['sr_original'])
+    elif det.get('descartado'):
+        fi = det.get('firma') or {}
+        d = (f"firma descartada: {det['descartado']} (proc={fi.get('cod_procedencia')} bit{fi.get('bit')} "
+             f"rep={fi.get('repeticiones')})")
+        regla = mqa.led(False, False, f['sample_rate'], None)
     else:
         d = 'no es MQA'
         regla = mqa.led(False, False, f['sample_rate'], None)
