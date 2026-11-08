@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import dsd
+from .mqa import _es_url as mqa_tags_url
 from . import sacd
 from . import edicion as edicion_mod
 from . import genero_auto
@@ -539,7 +540,7 @@ def analizar_pista(ruta, base):
     # ── MQA: mismo criterio que index_libraryV3 ──
     encoder = str(crudo.get('encoder') or '').lower()
     orig_sr = crudo.get('originalsamplerate') or crudo.get('mqaoriginalsamplerate')
-    valores = ' '.join(str(v) for v in crudo.values()).lower()
+    valores = ' '.join(str(v) for k, v in crudo.items() if not mqa_tags_url(k, v)).lower()   # sin URLs
     es_mqa = bool('mqaencode' in encoder or 'mqaencoder' in crudo or orig_sr
                   or 'mqa' in valores or 'tidal masters' in valores
                   or 'mqa' in Path(ruta).name.lower())
