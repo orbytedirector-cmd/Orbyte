@@ -17,6 +17,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -52,6 +54,25 @@ def _streaminfo(ruta):
         return None
     v = int.from_bytes(cab[18:26], 'big')     # 20 frecuencia · 3 canales-1 · 5 bits-1 · 36 muestras
     return ((v >> 36) & 0x1F) + 1, v & ((1 << 36) - 1)
+
+
+def _bloque_y_frecuencia(ruta):
+    """(tamaño máximo de bloque, frecuencia) del STREAMINFO, o (None, None)."""
+    try:
+        with open(ruta, 'rb') as f:
+            cab = f.read(10)
+            off = 0
+            if cab[:3] == b'ID3' and len(cab) == 10:
+                for b in cab[6:10]:
+                    off = (off << 7) | (b & 0x7F)
+                off += 10
+            f.seek(off)
+            cab = f.read(42)
+        if len(cab) < 42 or cab[:4] != b'fLaC':
+            return None, None
+        return int.from_bytes(cab[10:12], 'big'), int.from_bytes(cab[18:21], 'big') >> 4
+    except OSError:
+        return None, None
 
 
 def bits_flac(ruta):
@@ -109,6 +130,59 @@ def copia_valida(original, biblioteca='/mnt/musica'):
     return None
 
 
+def _original_danado(ruta, errores_ffmpeg, rate):
+    """¿El original tiene frames que no se pueden leer? Lo decide `flac -t` (libFLAC, verifica CRC y MD5) si
+    está instalado; si no, que ffmpeg haya avisado errores de lectura. Devuelve (sí/no, ' en el seg. X')."""
+    if shutil.which('flac'):
+        try:
+            r = subprocess.run(['flac', '-t', ruta], capture_output=True, timeout=900)
+        except (OSError, subprocess.TimeoutExpired):
+            return bool(errores_ffmpeg), ''
+        if r.returncode == 0:
+            return False, ''
+        m = re.search(r'after processing (\d+) samples', r.stderr.decode(errors='replace'))
+        return True, (f' en el seg. {int(m.group(1)) / rate:.1f}' if m and rate else '')
+    return bool(errores_ffmpeg), ''
+
+
+def _leer_json(ruta):
+    try:
+        with open(ruta, encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def detalle(original, biblioteca='/mnt/musica'):
+    """(nota de la copia si la hay, error del último intento fallido si sigue vigente)."""
+    flac, meta, _ = _rutas(original, biblioteca)
+    m = _leer_json(meta) or {}
+    fallo = fallo_vigente(original, biblioteca)
+    return m.get('nota'), (fallo or {}).get('error')
+
+
+def fallo_vigente(original, biblioteca='/mnt/musica'):
+    """El último intento fallido, si el original no cambió desde entonces (no tiene sentido reintentar)."""
+    f = _leer_json(_rutas(original, biblioteca)[0][:-5] + '.fallo.json')
+    try:
+        firma = _firma(original)
+    except OSError:
+        return None
+    return f if f and all(f.get(k) == firma[k] for k in firma) else None
+
+
+def _anotar_fallo(original, biblioteca, error):
+    try:
+        f = _firma(original)
+        f.update(error=str(error)[:500], cuando=time.strftime('%Y-%m-%d %H:%M:%S'))
+        ruta = _rutas(original, biblioteca)[0][:-5] + '.fallo.json'
+        os.makedirs(os.path.dirname(ruta), exist_ok=True)
+        with open(ruta, 'w', encoding='utf-8') as fh:
+            json.dump(f, fh, ensure_ascii=False)
+    except OSError:
+        pass
+
+
 def crear(original, biblioteca='/mnt/musica', nice=0, timeout=1800):
     """Crea (o reusa) la copia 24 bit. Devuelve su ruta. Levanta RuntimeError si no se pudo."""
     hecha = copia_valida(original, biblioteca)
@@ -153,16 +227,32 @@ def _crear(original, biblioteca, flac, meta, nice, timeout):
         raise RuntimeError('ffmpeg: ' + (r.stderr.decode(errors='replace').strip()[-300:] or f'código {r.returncode}'))
     bits = bits_flac(tmp)
     mo, mc = _muestras(original), _muestras(tmp)
+    errores = r.stderr.decode(errors='replace').strip()
+    nota = None
+    if bits == _BITS_COPIA and mo and mc and mo != mc:
+        # Original dañado (visto en 6 de 79 pistas, 07-11-2026): un frame con el CRC malo a mitad de la
+        # pista; `flac -t` aborta ahí y ffmpeg lo salta y sigue, así que a la copia le faltan esos 1-2
+        # bloques (6-12 ms). La copia es lo más completo que se puede sacar del original: se acepta, con
+        # nota, solo si ffmpeg avisó el error de lectura y lo que falta no pasa de unos pocos bloques.
+        bloque, rate = _bloque_y_frecuencia(original)
+        falta = mo - mc
+        danado, donde = _original_danado(original, errores, rate)
+        if danado and bloque and 0 < falta <= 4 * bloque:
+            nota = (f'original dañado{donde}: no se pueden leer {falta} muestras '
+                    f'({1000 * falta / (rate or 1):.0f} ms); la copia lleva todo lo demás')
+            mo = mc
     if bits != _BITS_COPIA or not mo or mo != mc:
         _borrar(tmp)
-        raise RuntimeError(f'la copia no quedó bien (bits {bits}, muestras {mc} de {mo})')
+        raise RuntimeError(f'la copia no quedó bien (bits {bits}, muestras {mc} de {mo})'
+                           + (f' · ffmpeg: {errores[-200:]}' if errores else ''))
     os.replace(tmp, flac)
-    firma.update(tam_copia=os.path.getsize(flac), bits=bits, muestras=mo,
+    firma.update(tam_copia=os.path.getsize(flac), bits=bits, muestras=mo, nota=nota,
                  creada=time.strftime('%Y-%m-%d %H:%M:%S'), segundos=round(time.monotonic() - t0, 1))
     with open(meta + '.tmp', 'w', encoding='utf-8') as f:
         json.dump(firma, f, ensure_ascii=False)
     os.replace(meta + '.tmp', meta)
-    log.info('Copia 24 bit lista (%.0f s): %s', time.monotonic() - t0, original)
+    _borrar(_rutas(original, biblioteca)[0][:-5] + '.fallo.json')
+    log.info('Copia 24 bit lista (%.0f s)%s: %s', time.monotonic() - t0, f' — {nota}' if nota else '', original)
     return flac
 
 
@@ -196,18 +286,24 @@ def pistas_32(db, con_album=False):
 def estado(db, biblioteca='/mnt/musica'):
     """Resumen para Salud: por álbum (carpeta), cuántas pistas de 32 bits tienen su copia."""
     albumes = {}
-    listas = pendientes = 0
+    listas = pendientes = fallidas = 0
     for _id, ruta, album_id, album, artista in pistas_32(db, con_album=True):
         carpeta = os.path.dirname(ruta)
         a = albumes.setdefault(carpeta, {'carpeta': carpeta, 'album_id': album_id, 'album': album or os.path.basename(carpeta),
-                                         'artista': artista or '', 'pistas': 0, 'listas': 0})
+                                         'artista': artista or '', 'pistas': 0, 'listas': 0, 'avisos': []})
         a['pistas'] += 1
+        nota, error = detalle(ruta, biblioteca)
         if copia_valida(ruta, biblioteca):
             a['listas'] += 1
             listas += 1
+            if nota:
+                a['avisos'].append({'pista': os.path.basename(ruta), 'texto': nota, 'tipo': 'nota'})
         else:
             pendientes += 1
-    return {'listas': listas, 'pendientes': pendientes,
+            if error:
+                fallidas += 1
+                a['avisos'].append({'pista': os.path.basename(ruta), 'texto': error, 'tipo': 'error'})
+    return {'listas': listas, 'pendientes': pendientes, 'fallidas': fallidas,
             'albumes': sorted(albumes.values(), key=lambda a: a['carpeta'].lower())}
 
 
@@ -223,11 +319,14 @@ class Compat24:
         self.ultimo_error = None
         self.hechas = 0
         self.revisando = False
+        self._forzar = False
 
     def start(self):
         threading.Thread(target=self._bucle, name='compat24', daemon=True).start()
 
     def ahora(self):
+        """«Crear las que faltan ahora»: también reintenta las que fallaron."""
+        self._forzar = True
         self._despertar.set()
 
     def _bucle(self):
@@ -252,9 +351,12 @@ class Compat24:
         db, bib = aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica'
         if not db or not os.path.isdir(bib):
             return
+        forzar, self._forzar = self._forzar, False
         for _id, ruta in pistas_32(db):
             if not os.path.isfile(ruta) or copia_valida(ruta, bib) or not es_flac32(ruta):
                 continue
+            if not forzar and fallo_vigente(ruta, bib):
+                continue                      # ya falló y el original no cambió: no se reintenta solo
             self.actual = ruta
             try:
                 crear(ruta, bib, nice=15)
@@ -262,6 +364,7 @@ class Compat24:
                 self.ultimo_error = None
             except Exception as e:  # noqa: BLE001
                 self.ultimo_error = f'{os.path.basename(ruta)}: {e}'
+                _anotar_fallo(ruta, bib, e)
                 log.warning('Compat24: %s', self.ultimo_error)
             finally:
                 self.actual = None
