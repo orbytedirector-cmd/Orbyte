@@ -483,17 +483,19 @@ async function cargarFlac32() {
   if (!r.ok) { est.innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
   f32 = r;
   const total = r.listas + r.pendientes;
+  const danados = r.albumes.reduce((n, a) => n + a.avisos.filter(v => v.tipo === 'nota').length, 0);
   document.getElementById('n-flac32').textContent = total;
   const pct = total ? Math.floor(100 * r.listas / total) : 100;
   let linea;
   if (r.trabajando) linea = `<div class="estado-vivo"><span class="giro"></span>Creando la copia de <span class="mono">${esc(relR(r.trabajando))}</span></div>`;
   else if (r.revisando) linea = `<div class="estado-vivo"><span class="giro"></span>Revisando la biblioteca…</div>`;
-  else if (r.pendientes) linea = `<div class="s">${r.pendientes} copia${r.pendientes === 1 ? '' : 's'} por crear · la ingesta las hace sola (revisa cada 15 min)</div>`;
+  else if (r.pendientes > r.fallidas) linea = `<div class="s">${r.pendientes - r.fallidas} copia${r.pendientes - r.fallidas === 1 ? '' : 's'} por crear · la ingesta las hace sola (revisa cada 15 min)</div>`;
+  else if (r.fallidas) linea = `<div class="s">${r.fallidas} no se pudo crear (detalle abajo) · no se reintenta sola mientras el original no cambie; «Crear las que faltan ahora» la reintenta</div>`;
   else linea = `<div class="s">${total ? 'Todas las pistas de 32 bits tienen su copia 24 bit.' : 'No hay FLAC de 32 bits en la biblioteca.'}</div>`;
   est.innerHTML = `<div class="s-fila"><div><div class="t">${r.listas} de ${total} copias listas</div>${linea}</div>
       <div class="acciones" style="margin:0">${r.pendientes && !r.trabajando && !r.revisando ? '<button class="btn oro" id="f32-ahora">Crear las que faltan ahora</button>' : ''}</div></div>
     ${total ? `<div class="s-barra"><span style="width:${pct}%"></span></div>` : ''}
-    ${r.error ? `<div class="s" style="color:var(--error)">Último error: ${esc(r.error)}</div>` : ''}`;
+    ${danados ? `<div class="s" style="color:var(--decision)">⚠ ${danados} original${danados === 1 ? '' : 'es'} con frames dañados: la copia lleva todo lo que se puede leer (detalle abajo). Conviene reemplazar esos archivos.</div>` : ''}`;
   const b = document.getElementById('f32-ahora');
   if (b) b.onclick = async () => { b.disabled = true; await post('/api/salud/compat24/ahora', {}); setTimeout(cargarFlac32, 1500); };
   const cont = document.getElementById('l-flac32');
@@ -501,7 +503,8 @@ async function cargarFlac32() {
   cont.innerHTML = `<div class="tabla-wrap"><table>
     <tr><th>Álbum</th><th>Copias 24 bit</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
     ${r.albumes.map((a, i) => `<tr>
-      <td><div class="t">${esc(a.album)}</div><div class="s">${esc(a.artista)}</div></td>
+      <td><div class="t">${esc(a.album)}</div><div class="s">${esc(a.artista)}</div>
+        ${a.avisos.map(v => `<div class="s" style="margin-top:.3rem;color:${v.tipo === 'error' ? 'var(--error)' : 'var(--decision)'}">⚠ ${esc(v.pista)}: ${esc(v.texto)}</div>`).join('')}</td>
       <td><div class="s">${a.listas === a.pistas ? '✓ ' : ''}${a.listas} de ${a.pistas}</div></td>
       <td class="oculto-movil"><div class="s mono muy-tenue">${esc(relR(a.carpeta))}</div></td>
       <td>${a.album_id ? `<button class="btn chico" data-f32play="${i}" title="Desktop recibe el original de 32 bits">▶ En Desktop</button>` : ''}</td></tr>`).join('')}
