@@ -367,7 +367,7 @@ def _item(r, carpeta, db, pistas_t, elegida, album_q):
         if abs(dif) > MAX_DIF_CONFIRMABLE_S:
             it.update(reparable=False, motivo=f'dura {abs(dif):.0f} s {"más" if dif > 0 else "menos"} que la vieja: '
                                               'no es la misma pista')
-        elif abs(dif) > rescate.TOLERANCIA_S:
+        elif abs(dif) > rescate.tolerancia(ref):
             it['confirmar_duracion'] = True
     try:
         tb, ts, aq = calidad_tidal(p['id'])
@@ -547,7 +547,7 @@ def reparar_pista(it, job, aj, reg, salud=None):
     try:
         nuevo, seg, huella = _bajar_verificada(it, tmp, reg)
         ref = it.get('duracion') or (it.get('pareja') or {}).get('duracion')
-        margen = MAX_DIF_CONFIRMABLE_S if it.get('acepto_duracion') else rescate.TOLERANCIA_S
+        margen = MAX_DIF_CONFIRMABLE_S if it.get('acepto_duracion') else rescate.tolerancia(ref)
         if ref and seg is not None and abs(seg - float(ref)) > margen:
             raise Fallo(f'dura {seg:.0f} s y la vieja {float(ref):.0f} s: no es la misma pista')
         dur = f'dura {seg:.1f} s' + (f' (la vieja {float(ref):.1f} s)' if ref else '') if seg is not None else ''
