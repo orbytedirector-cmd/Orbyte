@@ -207,6 +207,11 @@ _TAGS_URL = {"url", "www", "website", "purl", "source", "wwwaudiofile", "wwwaudi
              "wwwcommercialinfo", "wwwpublisher", "wwwartist"}
 
 
+def _es_letra(k: str) -> bool:
+    k = str(k).lower()
+    return "lyric" in k or k.startswith(("uslt", "sylt")) or k == "©lyr"
+
+
 def extract_metadata(file_path: str) -> dict:
     cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
            "-show_format", "-show_streams", file_path]
@@ -297,8 +302,9 @@ def extract_metadata(file_path: str) -> dict:
     # Las URLs no dicen nada del audio: un tag URL de la tienda con «…MQA…» marcaba MQA un álbum que
     # se descargó en 24/96 PCM (Metallica Remastered 2021, 07-11-2026). Mismo criterio en
     # ingesta/mqa.py (valores_para_mqa).
+    # Tampoco la letra: la de «Cry War (End of the World Demo)» (Kreator) dice «MQBob» y la marcaba MQB.
     tag_vals  = " ".join(str(v) for k, v in tags.items()
-                         if k not in _TAGS_URL and "://" not in str(v)).lower()
+                         if k not in _TAGS_URL and "://" not in str(v) and not _es_letra(k)).lower()
 
     if ("mqaencode" in encoder or "mqaencoder" in tags or mqa_orig_sr or
             "mqa" in tag_vals or "tidal masters" in tag_vals or
