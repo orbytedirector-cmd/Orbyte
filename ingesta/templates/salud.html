@@ -10,6 +10,7 @@
   <button class="filtro" data-p="danadas">Pistas dañadas <b id="n-danadas">…</b></button>
   <button class="filtro" data-p="calidad">Calidad y LED <b id="n-calidad">…</b></button>
   <button class="filtro" data-p="flac32">FLAC 32 bit <b id="n-flac32">…</b></button>
+  <button class="filtro" data-p="caratulas">Sin carátula <b id="n-caratulas">…</b></button>
 </div>
 
 <section id="p-discos">
@@ -100,6 +101,12 @@
   <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Álbumes</h2>
   <div id="l-flac32"></div>
 </section>
+<section id="p-caratulas" hidden>
+  <div class="s tenue" style="margin-bottom:.8rem">Álbumes que Orbyte muestra sin carátula, o con una que ya no existe o que se ve pixelada. Si en la carpeta o en las pistas hay una imagen, se puede usar de un clic; si no, «Abrir ficha» lleva al editor de carátula con la búsqueda en línea ya lanzada. Al aplicar, se guarda <span class="mono">Cover.jpg</span>, se incrusta en las pistas y Orbyte se actualiza.</div>
+  <div class="panel s-panel" id="car-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
+  <div class="c-grupos" id="car-filtros" style="margin:1rem 0 .6rem"></div>
+  <div id="l-caratulas"></div>
+</section>
 {% endblock %}
 {% block js %}
 {% include '_unir_discos.html' %}
@@ -121,6 +128,7 @@ document.querySelectorAll('#pestanas [data-p]').forEach(b => b.onclick = () => {
   document.getElementById('p-danadas').hidden = b.dataset.p !== 'danadas';
   document.getElementById('p-calidad').hidden = b.dataset.p !== 'calidad';
   document.getElementById('p-flac32').hidden = b.dataset.p !== 'flac32';
+  document.getElementById('p-caratulas').hidden = b.dataset.p !== 'caratulas';
   try { localStorage.setItem('salud-pestana', b.dataset.p); } catch (e) {}
 });
 try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySelector(`#pestanas [data-p="${p}"]`)?.click(); } catch (e) {}
@@ -513,5 +521,87 @@ async function cargarFlac32() {
 }
 cargarFlac32();
 setInterval(() => { if (!document.getElementById('p-flac32').hidden || (f32 && (f32.trabajando || f32.revisando))) cargarFlac32(); }, 5000);
+
+// ── Sin carátula (ingesta/caratulas.py) ──
+const CAR_CASOS = {
+  sin: {t: 'Sin carátula', c: 'var(--error)', d: 'no hay imagen en la carpeta ni en las pistas'},
+  sin_asignar: {t: 'Hay imagen sin asignar', c: 'var(--oro)', d: 'Orbyte no la usa'},
+  rota: {t: 'Carátula rota', c: 'var(--error)', d: 'Orbyte apunta a un archivo que ya no existe'},
+  chica: {t: 'Carátula chica', c: 'var(--decision)', d: 'se ve pixelada'},
+};
+let car = null, carFiltro = '';
+function carImg(a, mini = true) {
+  const q = mini ? '&mini=1' : '';
+  if (a.caso === 'chica') return `/portada/b/${a.id}/img?actual=1${q}`;
+  const c = a.candidata;
+  if (!c) return '';
+  return c.tipo === 'incrustada' ? `/portada/b/${a.id}/img?incrustada=${encodeURIComponent(c.pista)}${q}`
+                                 : `/portada/b/${a.id}/img?r=${encodeURIComponent(c.archivo)}${q}`;
+}
+function carUsable(a) { return (a.caso === 'sin_asignar' || a.caso === 'rota') && a.candidata; }
+async function carUsar(a, boton) {
+  const c = a.candidata;
+  const cuerpo = c.tipo === 'incrustada' ? {tipo: 'incrustada', pista: c.pista} : {tipo: 'archivo', archivo: c.archivo};
+  if (boton) { boton.disabled = true; boton.textContent = 'En cola…'; }
+  let r;
+  try { r = await post(`/api/portada/b/${a.id}`, cuerpo); } catch (e) { r = {ok: false, error: String(e)}; }
+  if (r && r.ok !== false) { await post(`/api/salud/caratulas/${a.id}/quitar`, {}); return true; }
+  if (boton) { boton.disabled = false; boton.textContent = 'Usar esta'; boton.title = (r && r.error) || 'No se pudo'; }
+  return false;
+}
+async function cargarCaratulas() {
+  let r;
+  try { r = await (await fetch('/api/salud/caratulas')).json(); } catch (e) { return; }
+  car = r;
+  const lista = r.albumes || [];
+  const urgentes = lista.filter(a => a.caso !== 'chica').length;
+  document.getElementById('n-caratulas').textContent = r.cuando ? urgentes : '…';
+  const est = document.getElementById('car-estado');
+  const cuenta = k => lista.filter(a => a.caso === k).length;
+  const usables = lista.filter(carUsable);
+  let linea;
+  if (r.revisando) linea = `<div class="estado-vivo"><span class="giro"></span>Revisando la biblioteca${r.avance ? ` · ${r.avance[0]} de ${r.avance[1]} álbumes` : '…'}</div>`;
+  else if (r.cuando) linea = `<div class="s tenue">Revisados ${r.revisados} álbumes · ${new Date(r.cuando * 1000).toLocaleString('es-CL')} · se revisa sola una vez al día</div>`;
+  else linea = `<div class="s tenue">Todavía no se revisa la biblioteca.</div>`;
+  est.innerHTML = `<div class="s-fila"><div><div class="t">${r.cuando ? `${urgentes} álbum${urgentes === 1 ? '' : 'es'} sin carátula usable` : 'Sin carátula'}${cuenta('chica') ? ` · ${cuenta('chica')} con carátula chica (menos de ${r.chica_px} px)` : ''}</div>${linea}
+      ${r.error ? `<div class="s" style="color:var(--error)">${esc(r.error)}</div>` : ''}</div>
+    <div class="acciones" style="margin:0">
+      ${usables.length && !r.revisando ? `<button class="btn oro" id="car-todas">Usar todas las encontradas (${usables.length})</button>` : ''}
+      ${!r.revisando ? '<button class="btn" id="car-revisar">Revisar ahora</button>' : ''}</div></div>`;
+  const bRev = document.getElementById('car-revisar');
+  if (bRev) bRev.onclick = async () => { bRev.disabled = true; await post('/api/salud/caratulas/revisar', {}); setTimeout(cargarCaratulas, 800); };
+  const bTodas = document.getElementById('car-todas');
+  if (bTodas) bTodas.onclick = async () => {
+    bTodas.disabled = true;
+    let ok = 0;
+    for (const [n, a] of usables.entries()) { bTodas.textContent = `Usando ${n + 1} de ${usables.length}…`; if (await carUsar(a)) ok++; }
+    bTodas.textContent = `${ok} en cola`;
+    setTimeout(cargarCaratulas, 1200);
+  };
+  document.getElementById('car-filtros').innerHTML = !lista.length ? '' :
+    [['', 'Todos', lista.length], ...Object.keys(CAR_CASOS).map(k => [k, CAR_CASOS[k].t, cuenta(k)])]
+      .filter(([k, , n]) => !k || n)
+      .map(([k, t, n]) => `<button class="filtro ${carFiltro === k ? 'activo' : ''}" data-cf="${k}">${t} <b>${n}</b></button>`).join('');
+  document.querySelectorAll('[data-cf]').forEach(b => b.onclick = () => { carFiltro = b.dataset.cf; cargarCaratulas(); });
+  const cont = document.getElementById('l-caratulas');
+  const ver = lista.filter(a => !carFiltro || a.caso === carFiltro);
+  if (!r.cuando) { cont.innerHTML = ''; return; }
+  if (!ver.length) { cont.innerHTML = '<div class="sin-problemas">Todos los álbumes tienen su carátula.</div>'; return; }
+  cont.innerHTML = `<div class="tabla-wrap"><table>
+    <tr><th style="width:56px"></th><th>Álbum</th><th>Caso</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
+    ${ver.map((a, i) => { const k = CAR_CASOS[a.caso] || {t: a.caso, c: 'var(--aviso)', d: ''}; const img = carImg(a);
+      const det = a.caso === 'chica' ? `${a.ancho}×${a.alto} px` : (a.candidata ? (a.candidata.tipo === 'incrustada' ? 'incrustada en las pistas' : esc(a.candidata.archivo) + (a.candidata.ancho ? ` · ${a.candidata.ancho}×${a.candidata.alto} px` : '')) : k.d);
+      return `<tr>
+      <td>${img ? `<img src="${img}" alt="" loading="lazy" style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid var(--borde);cursor:zoom-in" data-cgrande="${i}">` : '<div style="width:48px;height:48px;border-radius:6px;border:1px dashed var(--borde)"></div>'}</td>
+      <td><div class="t">${esc(a.album)}${a.anio ? ` <span class="tenue">(${esc(String(a.anio))})</span>` : ''}</div><div class="s">${esc(a.artista)}</div></td>
+      <td><div class="s" style="color:${k.c}">${k.t}</div><div class="s muy-tenue">${det}</div></td>
+      <td class="oculto-movil"><div class="s mono muy-tenue">${esc(relR(a.ruta))}</div></td>
+      <td style="white-space:nowrap">${carUsable(a) ? `<button class="btn chico oro" data-cusar="${i}">Usar esta</button> ` : ''}<a class="btn chico" href="/biblioteca/album/${a.id}?buscar=1#portada-lib">Abrir ficha</a></td></tr>`; }).join('')}
+  </table></div>`;
+  cont.querySelectorAll('[data-cusar]').forEach(b => b.onclick = async () => { if (await carUsar(ver[+b.dataset.cusar], b)) { b.textContent = 'En cola ✓'; setTimeout(cargarCaratulas, 1200); } });
+  cont.querySelectorAll('[data-cgrande]').forEach(im => im.onclick = () => window.open(carImg(ver[+im.dataset.cgrande], false), '_blank'));
+}
+cargarCaratulas();
+setInterval(() => { if (!document.getElementById('p-caratulas').hidden || (car && car.revisando)) cargarCaratulas(); }, 5000);
 </script>
 {% endblock %}

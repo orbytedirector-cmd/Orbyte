@@ -108,6 +108,11 @@
     });
   }
   $('pl-buscar').onclick = () => { modal.hidden = false; buscar(); };
+  // desde Salud · Sin carátula: la ficha se abre con la búsqueda en línea ya lanzada
+  if (new URLSearchParams(location.search).get('buscar') && !$('pl-buscar').disabled) {
+    document.getElementById('portada-lib').scrollIntoView({block: 'center'});
+    $('pl-buscar').click();
+  }
   $('pl-buscar-ya').onclick = buscar;
   $('pl-cerrar').onclick = () => modal.hidden = true;
   modal.onclick = e => { if (e.target === modal) modal.hidden = true; };
