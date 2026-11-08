@@ -1223,7 +1223,7 @@ function toggleNormalize() {
         let warned = false;
         try { warned = localStorage.getItem('orbyte_normalize_warned') === '1'; } catch (e) {}
         if (!warned) {
-            alert('Con Normalizar activo, la reproducción se silencia si bloqueás la pantalla o cambiás de app (restricción de iOS/Android para audio procesado, no un error de Orbyte). Dejá la app en primer plano mientras la uses.');
+            alert('Con Normalizar activo, la reproducción se silencia si bloqueas la pantalla o cambias de app (restricción de iOS/Android para audio procesado, no un error de Orbyte). Deja la app en primer plano mientras la uses.');
             try { localStorage.setItem('orbyte_normalize_warned', '1'); } catch (e) {}
         }
     }

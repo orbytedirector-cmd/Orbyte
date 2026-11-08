@@ -406,7 +406,7 @@
   }
 
   async function castRemoveTarget(targetId) {
-    if (!confirm('¿Quitar este dispositivo de la lista? (lo podés volver a agregar buscando de nuevo)')) return;
+    if (!confirm('¿Quitar este dispositivo de la lista? (lo puedes volver a agregar buscando de nuevo)')) return;
     if (window._castTarget && window._castTarget.id === targetId) castStop();
     try {
       await fetch(`/api/admin/cast/targets/${targetId}`, { method: 'DELETE' });

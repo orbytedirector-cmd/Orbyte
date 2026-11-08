@@ -441,10 +441,10 @@ dos, según si el usuario nombró artistas o no:
 canciones por cada uno de esos artistas — las que vos consideres más relevantes/icónicas/representativas \
 de ESE artista puntual, según tu conocimiento (ej: para "Metallica" -> "Master of Puppets", "Enter \
 Sandman", "One", etc.). La clave de cada entrada tiene que ser EXACTAMENTE el mismo string que pusiste en \
-"artists" para ese artista. Dejá "artistas_sugeridos" como lista vacía.
+"artists" para ese artista. Deja "artistas_sugeridos" como lista vacía.
   * Si "artists" está VACÍO: llená "artistas_sugeridos" con 5 a 10 nombres de artistas reales y concretos \
 que vos consideres que mejor calzan con TODA la intención combinada del pedido a la vez (género + idioma + \
-década/era + mood + tema juntos, no un artista que solo cumpla uno de esos aspectos por separado). Dejá \
+década/era + mood + tema juntos, no un artista que solo cumpla uno de esos aspectos por separado). Deja \
 "pistas_sugeridas_por_artista" como objeto vacío ({{}}).
   * Si no tenés una sugerencia de calidad y precisa para el caso que corresponda, dejá el campo vacío \
 ({{}} o []) en vez de forzar algo genérico o dudoso — una sugerencia de baja calidad es peor que ninguna.
@@ -2638,7 +2638,7 @@ def _try_direct_request(conn, raw_query, entities, prior_entities, track_to_json
                 t0 = group[0]
                 options.append('«%s» de %s' % (t0.get('title'), t0.get('artist_name') or '?'))
             question = ('Encontré más de una canción con ese nombre: '
-                        + _direct_options_text(options) + '. ¿Cuál querés?')
+                        + _direct_options_text(options) + '. ¿Cuál quieres?')
             first = list(by_artist.values())[0]
             return {'pool': first[:1], 'status': 'needs_clarification', 'question': question,
                     'filters_applied': {'modo_directo': 'pista', 'ambiguo': True}}
@@ -2671,7 +2671,7 @@ def _try_direct_request(conn, raw_query, entities, prior_entities, track_to_json
             options.append('«%s» de %s%s' % (r0['name'], r0['artist_name'] or '?', year))
         _best, first_tracks = _pick_best_album(conn, list(by_artist.values())[0], track_to_json_fn,
                                                build_adv_filters_fn, dedupe_condition_fn, led_quality_rank_fn)
-        question = 'Encontré más de un álbum con ese nombre: ' + _direct_options_text(options) + '. ¿Cuál querés?'
+        question = 'Encontré más de un álbum con ese nombre: ' + _direct_options_text(options) + '. ¿Cuál quieres?'
         return {'pool': first_tracks or [], 'status': 'needs_clarification', 'question': question,
                 'filters_applied': {'modo_directo': 'album', 'ambiguo': True}}
 

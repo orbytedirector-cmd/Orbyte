@@ -65,10 +65,10 @@
     const firstAlbumId = list[0] && list[0].album_id;
     const sameAlbum = firstAlbumId && list.every((t) => t && t.album_id === firstAlbumId);
     if (sameAlbum) {
-      notify('Como invitado no podés agregar el álbum completo de una — te llevamos a su ficha para que sumes las pistas que quieras, una por una.');
+      notify('Como invitado no puedes agregar el álbum completo de una vez — te llevamos a su ficha para que sumes las pistas que quieras, una por una.');
       window.location.href = `/album/${firstAlbumId}`;
     } else {
-      notify('Como invitado solo podés agregar canciones de a una — entrá a cada pista o álbum y agregalas individualmente.');
+      notify('Como invitado solo puedes agregar canciones de a una — entra a cada pista o álbum y agrégalas individualmente.');
     }
   }
 
@@ -87,7 +87,7 @@
   };
 
   window.toggleFavorite = function () {
-    notify('Los favoritos son de las cuentas de usuario — como invitado de la playlist colaborativa no podés usarlos.');
+    notify('Los favoritos son de las cuentas de usuario — como invitado de la playlist colaborativa no puedes usarlos.');
   };
 
   // ── Delegado: pedirle al anfitrión que cargue lo último agregado ────────

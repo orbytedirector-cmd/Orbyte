@@ -203,7 +203,7 @@
       <span class="favorite-artist-pill">${g}
         <button type="button" data-genre="${g}" class="genre-remove">✕</button>
       </span>
-    `).join('') || '<span class="auth-hint">Ninguno todavía — buscá arriba para agregar.</span>';
+    `).join('') || '<span class="auth-hint">Ninguno todavía — busca arriba para agregar.</span>';
   }
 
   document.getElementById('selected-genre-list').addEventListener('click', async (e) => {
@@ -254,7 +254,7 @@
   document.getElementById('artist-search-results').addEventListener('click', async (e) => {
     const btn = e.target.closest('.artist-search-result');
     if (!btn || !btn.dataset.artistId) return;
-    if (profile.favorite_artists.length >= 5) { showStatus('Ya tenés 5 bandas favoritas — quitá una primero.'); return; }
+    if (profile.favorite_artists.length >= 5) { showStatus('Ya tienes 5 bandas favoritas — quita una primero.'); return; }
     const res = await fetch('/api/v1/profile/favorite-artists', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({artist_id: parseInt(btn.dataset.artistId, 10)})

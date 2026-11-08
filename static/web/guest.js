@@ -65,7 +65,7 @@
     const espera = esperaRestante();
     const sub = espera > 0
       ? `Usaste tus ${me.max_tracks} pistas · <b style="color:var(--accent-bright)">Cupo nuevo en ${fmtEspera(espera)}</b>`
-      : `Tocá <b style="color:var(--accent-bright)">+</b> en una pista para sumarla · Agregadas ${me.used} · Restantes ${me.remaining}`;
+      : `Toca <b style="color:var(--accent-bright)">+</b> en una pista para sumarla · Agregadas ${me.used} · Restantes ${me.remaining}`;
     q.innerHTML = `<div class="star">✦</div><div class="txt"><div class="title">Playlist colaborativa</div>
       <div class="subtitle">${sub}</div></div>
       <div class="num">${me.remaining}</div>`;
@@ -102,7 +102,7 @@
     catch (e) { r = { status: "error", message: e.message }; }
     G.busy.delete(t.id);
     if (r.status === "ok") {
-      G.inSession.set(t.id, Object.assign({}, t, { added_by: G.me ? G.me.name : "vos", dispatched: false }));
+      G.inSession.set(t.id, Object.assign({}, t, { added_by: G.me ? G.me.name : "tú", dispatched: false }));
       if (G.me) {
         G.me.remaining = r.remaining; G.me.used = r.used != null ? r.used : G.me.used + 1;
         G.me.blocked_seconds = r.blocked_seconds || 0; G.meAt = Date.now();
@@ -126,7 +126,7 @@
     } else if (r.status === "expired") {
       sessionEnded();
     } else {
-      ORB.toast(r.message || "No se pudo agregar. Probá de nuevo.");
+      ORB.toast(r.message || "No se pudo agregar. Prueba de nuevo.");
     }
   }
 
@@ -207,7 +207,7 @@
       root.appendChild(sec);
     }
     const mine = el("div", "cfg-section", `<div class="cfg-header">Tus pistas (${me.mine.length})</div>`);
-    if (!me.mine.length) mine.appendChild(el("div", "cfg-sub", "Todavía no agregaste nada. Buscá una canción o explorá el Inicio y tocá +."));
+    if (!me.mine.length) mine.appendChild(el("div", "cfg-sub", "Todavía no agregaste nada. Busca una canción o explora el Inicio y toca +."));
     me.mine.slice().reverse().forEach((t) => mine.appendChild(ORB.makeTrackRow(t, { right: stateChip(t) })));
     root.appendChild(mine);
     const others = (me.session_tracks || []).filter((t) => !me.mine.some((m) => m.id === t.id));
@@ -260,7 +260,7 @@
   function byLabel(t) {
     if (t.added_by_avatar && t.added_by_avatar.type === "infinito") return "Elegida por el modo infinito";
     if (t.added_by_host || (t.added_by_avatar && t.added_by_avatar.badge === "admin")) return "Anfitrión · Admin";
-    return G.me && t.added_by === G.me.name ? "Vos la agregaste" : "Invitado";
+    return G.me && t.added_by === G.me.name ? "Tú la agregaste" : "Invitado";
   }
   function paintMini() {
     const bar = document.getElementById("guest-mini"); if (!bar) return;
@@ -410,7 +410,7 @@
     };
     sh.body.appendChild(save);
     const out = el("button", "prof-logout", "Salir de la playlist colaborativa");
-    out.onclick = async () => { if (await ORB.confirm("¿Salir?", "Vas a dejar de poder agregar pistas desde este teléfono. Si volvés a escanear el QR, retomás donde estabas.", "Salir", "Cancelar")) location.href = "/colab/salir"; };
+    out.onclick = async () => { if (await ORB.confirm("¿Salir?", "Vas a dejar de poder agregar pistas desde este teléfono. Si vuelves a escanear el QR, retomas donde estabas.", "Salir", "Cancelar")) location.href = "/colab/salir"; };
     sh.body.appendChild(out);
   }
 

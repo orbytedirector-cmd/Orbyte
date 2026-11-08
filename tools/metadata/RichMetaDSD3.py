@@ -2906,7 +2906,7 @@ def main_batch(base: Path, mode: str = MODE_FULL, workers: int = MAX_WORKERS):
     if not LANGDETECT_OK:
         print(f"  ⚠️  langdetect NO disponible — el idioma se está determinando")
         print(f"      con el diccionario de 5 palabras clave, no con análisis real.")
-        print(f"      Corré 'pip install langdetect' en este entorno y reintentá.")
+        print(f"      Corre 'pip install langdetect' en este entorno y reintenta.")
     print(f"{'='*60}")
 
     all_albums = descubrir_albums(base)

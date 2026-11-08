@@ -536,7 +536,7 @@ def _send_account_approved_email(to_addr):
         to_addr, '¡Tu cuenta en Orbyte fue aprobada!',
         _email_wrapper('Cuenta aprobada ✓', f'''
             <p>Buenas noticias — tu cuenta <strong style="color:#EFEFEF;">{to_addr}</strong> fue aprobada.</p>
-            <p>Ya podés iniciar sesión y empezar a escuchar.</p>
+            <p>Ya puedes iniciar sesión y empezar a escuchar.</p>
             <p style="text-align:center;margin:28px 0 8px;">
               <a href="{login_url}" style="background:#C8920A;color:#000000;text-decoration:none;
                  padding:12px 28px;border-radius:8px;font-weight:700;display:inline-block;
@@ -551,7 +551,7 @@ def _send_account_rejected_email(to_addr):
         _email_wrapper('Solicitud no aprobada', f'''
             <p>Tu solicitud de cuenta <strong style="color:#EFEFEF;">{to_addr}</strong> no fue aprobada
             por el administrador.</p>
-            <p>Si creés que se trata de un error, respondé este correo para contactar al administrador.</p>
+            <p>Si crees que se trata de un error, responde este correo para contactar al administrador.</p>
         ''')
     )
 
@@ -5936,7 +5936,7 @@ def _collab_try_add(conn, session_id, participant_id, track_id, confirm_album):
         if album_count >= COLLAB_ALBUM_WARNING_THRESHOLD:
             return {'status': 'album_warning',
                     'message': f"Ya agregaste {album_count} pistas de este álbum — "
-                               f"probá sumar variedad, tu cupo de pistas es limitado."}
+                               f"prueba sumar variedad, tu cupo de pistas es limitado."}
 
     ahora = _utcnow_iso()
     conn.execute(
@@ -6101,7 +6101,7 @@ def admin_collab_permiso(participant_id):
 @admin_required
 def admin_collab_qr():
     if not _QRCODE_AVAILABLE:
-        return ("Falta instalar la librería qrcode — corré: pip install qrcode[pil]", 501)
+        return ("Falta instalar la librería qrcode — corre: pip install qrcode[pil]", 501)
     conn = get_db_connection()
     try:
         sess = _collab_active_session(conn)
@@ -6834,7 +6834,7 @@ def api_collab_solicitar_pull():
             'SELECT can_pull FROM collab_participants WHERE id=?', (session['collab_participant_id'],)
         ).fetchone()
         if not row or not row['can_pull']:
-            return jsonify({'status': 'error', 'message': 'No tenés permiso para actualizar la cola.'}), 403
+            return jsonify({'status': 'error', 'message': 'No tienes permiso para actualizar la cola.'}), 403
         if _collab_auto_carga(sess):   # Ticket C-06
             return jsonify({'status': 'error', 'message': 'La cola se recarga sola (Recarga automática activada).'}), 409
         conn.execute(
@@ -10837,7 +10837,7 @@ def api_admin_cast_play():
             FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
             WHERE t.id=?''', (track_id,)).fetchone()
         if not target:
-            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}), 404
+            return jsonify({'status': 'error', 'message': 'Dispositivo no encontrado — vuelve a buscar'}), 404
         if not track:
             return jsonify({'status': 'error', 'message': 'Pista no encontrada'}), 404
 
@@ -11246,7 +11246,7 @@ def _cast_reproducir_sin_lock(target_id, track_id, base, user_id):
             FROM tracks t LEFT JOIN albums al ON t.album_id = al.id
             WHERE t.id=?''', (track_id,)).fetchone()
         if not target:
-            return {'status': 'error', 'message': 'Dispositivo no encontrado — volvé a buscar'}, 404
+            return {'status': 'error', 'message': 'Dispositivo no encontrado — vuelve a buscar'}, 404
         if not track:
             return {'status': 'error', 'message': 'Pista no encontrada'}, 404
 
