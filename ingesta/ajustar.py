@@ -256,9 +256,15 @@ def propuesta(actual, cambios):
         # sin número de pista no se inventa un «00 - …»: el archivo conserva su nombre
         p['nuevo'] = os.path.join(os.path.dirname(x['clave']), nuevo) if p['numero'] and (
             p['titulo'] != x['titulo'] or p['numero'] != x['numero'] or discos_cambian) else x['clave']
-    nums = [(p['disco'], p['numero']) for p in pistas if p['numero']]
-    if len(set(nums)) != len(nums):
-        raise FalloAjuste('Hay números de pista repetidos en el mismo disco')
+    vistos, repetidos = {}, []
+    for p in pistas:
+        if p['numero']:
+            k = (p['disco'], p['numero'])
+            if k in vistos:
+                repetidos.append(f'disco {k[0]} n.º {k[1]}: «{vistos[k]}» y «{p["titulo"]}»')
+            vistos.setdefault(k, p['titulo'])
+    if repetidos:
+        raise FalloAjuste('Números de pista repetidos en el mismo disco: ' + '; '.join(repetidos[:4]))
     nuevos = [p['nuevo'].lower() for p in pistas]
     if len(set(nuevos)) != len(nuevos):
         raise FalloAjuste('Dos pistas quedarían con el mismo nombre de archivo (¿número repetido?)')
