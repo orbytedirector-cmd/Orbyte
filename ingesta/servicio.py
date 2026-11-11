@@ -412,7 +412,9 @@ def api_cambios(aid):
         pistas = {}
         for k, v in (d['pistas'] or {}).items():
             v = {kk: str(vv).strip()[:300] for kk, vv in (v or {}).items()
-                 if kk in ('titulo', 'artista', 'numero') and str(vv or '').strip()}
+                 if kk in ('titulo', 'artista', 'numero', 'disco') and str(vv or '').strip()}
+            if 'disco' in v and not (v['disco'].isdigit() and 1 <= int(v['disco']) <= 30):
+                return jsonify(ok=False, error=f'Número de disco inválido: {v["disco"]}'), 400
             if v:
                 pistas[str(k)[:500]] = v
         c['pistas'] = pistas
@@ -1909,6 +1911,11 @@ def api_salud_sanear_estado():
     return jsonify(ok=True, **saneador.estado())
 
 
+def _forzable(m):
+    return bool(m.get('forzable', m.get('tramos') and not m.get('fatal') and m.get('bits') in (16, 24, 32))) \
+        and not m.get('saneada')
+
+
 @app.route('/api/salud/sanear', methods=['POST'])
 def api_salud_sanear():
     """Sanear FLAC con cuadros dañados (solo los que se midieron como saneables: menos de 1 s en total)."""
@@ -1917,9 +1924,12 @@ def api_salud_sanear():
         return jsonify(ok=False, error='Nada seleccionado'), 400
     if not procesador.biblioteca_lista():
         return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    forzar = bool((request.get_json(silent=True) or {}).get('forzar'))
     med = salud.medidas(rutas)
-    ok = [r for r in rutas if (med.get(r) or {}).get('saneable')]
-    saneador.sanear(ok)
+    # forzar: también las de más de 1 s (lo decide Niko, pista por pista); nunca las ilegibles o de otros bits
+    ok = [r for r in rutas if (med.get(r) or {}).get('saneable')
+          or forzar and _forzable(med.get(r) or {})]
+    saneador.sanear(ok, forzar=forzar)
     return jsonify(ok=True, en_cola=len(ok), saltadas=len(rutas) - len(ok))
 
 

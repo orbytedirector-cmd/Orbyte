@@ -232,6 +232,10 @@ td a:hover { color: var(--oro-claro); }
 .registro { background: #050505; border: 1px solid var(--borde); border-radius: var(--radio); padding: .8rem 1rem; max-height: 340px;
             overflow: auto; font-family: var(--mono); font-size: .76rem; color: var(--texto-2); white-space: pre-wrap; word-break: break-word; }
 .tabla-tags input { padding: .35rem .5rem; font-size: .85rem; }
+.tabla-tags .celda-disco { width: 84px; white-space: nowrap; }
+.tabla-tags .celda-disco input { width: 2.6rem; text-align: center; }
+.disco-abajo { margin-left: .25rem; padding: .2rem .4rem; border: 1px solid var(--borde); border-radius: 6px; background: none; color: var(--texto-2); cursor: pointer; font-size: .8rem; }
+.disco-abajo:hover { border-color: var(--oro); color: var(--oro); }
 .miniaturas.elegibles figure[data-car] { cursor: pointer; }
 .miniaturas.elegibles figure[data-car]:hover img { border-color: var(--borde-oro); }
 .miniaturas.grandes figure { max-width: 150px; cursor: pointer; }

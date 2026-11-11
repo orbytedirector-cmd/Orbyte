@@ -205,7 +205,9 @@ def _resumen(d):
                        for a, b, m in d.malas[:50]],
             'fatal': d.fatal, 'avisos': d.avisos,
             'saneable': bool(d.malas) and not d.fatal and bool(d.ancho)
-                        and perdidas * 1000 / d.sr <= SANEAR_MAX_MS}
+                        and perdidas * 1000 / d.sr <= SANEAR_MAX_MS,
+            # más de SANEAR_MAX_MS: se puede sanear igual si se pide (Niko decide; 11-11-2026)
+            'forzable': bool(d.malas) and not d.fatal and bool(d.ancho)}
 
 
 def medir(ruta):
@@ -346,8 +348,9 @@ def _copiar_metadata(origen, destino):
     n.save()
 
 
-def sanear(ruta, tmpdir=None):
-    """Sanea `ruta` en su lugar (el original va a .orbyte-respaldo/). → dict con lo que se hizo."""
+def sanear(ruta, tmpdir=None, forzar=False):
+    """Sanea `ruta` en su lugar (el original va a .orbyte-respaldo/). → dict con lo que se hizo.
+    `forzar`: aunque se pierda más de SANEAR_MAX_MS."""
     med = _Decodificar(ruta)
     if not med.ancho:
         raise ValueError(f'{med.bits} bits: solo se sanean FLAC de 16, 24 o 32 bits')
@@ -362,7 +365,7 @@ def sanear(ruta, tmpdir=None):
             res = _resumen(d)
             if not d.malas:
                 raise RuntimeError('no tiene cuadros dañados que sanear')
-            if not res['saneable']:
+            if not res['saneable'] and not forzar:
                 raise RuntimeError(f'pierde {res["ms"]} ms: es mucho para sanear, conviene reemplazarla')
             total = d.total or d.siguiente
             f.truncate(total * d.canales * d.ancho)        # el final cortado queda como hueco (se rellena)
@@ -395,7 +398,7 @@ def sanear(ruta, tmpdir=None):
         finally:
             if nuevo and os.path.exists(nuevo):
                 os.remove(nuevo)
-        res.update(respaldo=respaldo, ok=True)
+        res.update(respaldo=respaldo, ok=True, forzada=forzar and not res['saneable'])
         return res
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -407,7 +410,10 @@ if __name__ == '__main__':
         if accion == 'medir':
             out = medir(ruta)
         elif accion == 'sanear':
-            out = sanear(ruta, sys.argv[3] if len(sys.argv) > 3 else None)
+            extra = sys.argv[3:]
+            forzar = '--forzar' in extra
+            extra = [x for x in extra if x != '--forzar']
+            out = sanear(ruta, extra[0] if extra else None, forzar=forzar)
         else:
             raise SystemExit(f'acción desconocida: {accion}')
     except Exception as e:  # noqa: BLE001

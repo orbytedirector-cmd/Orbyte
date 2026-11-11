@@ -14,13 +14,13 @@
       </div>
       <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
         <input type="text" data-tag="genero_secundario" value="{{ (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
-      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
+      <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Con varios discos, los nombres quedan «2-01 - Título» en la misma carpeta. Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
       <div id="auto-panel-lib" class="auto-panel" hidden></div>
       <div class="tabla-wrap"><table class="tabla-tags">
         <tr><th>Disco</th><th>#</th><th>Título</th><th>Artista</th></tr>
         {% for x in lib.plan %}
         <tr data-lib-clave="{{ x.clave }}">
-          <td class="num">{{ x.disco }}</td>
+          <td class="celda-disco"><input type="text" data-campo="disco" inputmode="numeric" maxlength="2" value="{{ x.disco or 1 }}" data-orig="{{ x.disco or 1 }}"><button type="button" class="disco-abajo" data-disco-abajo title="Este disco desde esta pista hacia abajo">↓</button></td>
           <td style="width:70px"><input type="text" data-campo="numero" inputmode="numeric" value="{{ x.numero or '' }}" data-orig="{{ x.numero or '' }}"></td>
           <td><input type="text" data-campo="titulo" value="{{ x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"><div class="s mono tenue">{{ x.clave }}</div></td>
           <td><input type="text" data-campo="artista" value="{{ x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
@@ -28,6 +28,7 @@
         {% endfor %}
       </table></div>
       <div class="acciones"><button class="btn" id="auto-lib" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+        <button class="btn" id="separar-lib" title="Ordena por nombre de archivo y propone el disco donde se reinicia la numeración; revisa la columna Disco antes de guardar">Separar en discos</button>
         <button class="btn oro" id="guardar-lib">Guardar en la biblioteca</button></div>
     </div>
     {% endif %}
@@ -59,6 +60,9 @@
       el.title = si ? `Antes: ${c.antes || '(vacío)'}` : '';
     }
   }
+  document.addEventListener('DOMContentLoaded', () =>      // editorDiscos está en base.html (se carga después)
+    editorDiscos(raiz.querySelector('.tabla-tags'), document.getElementById('separar-lib'),
+                 {fila: 'tr[data-lib-clave]', clave: tr => tr.dataset.libClave, disco: '[data-campo="disco"]', numero: '[data-campo="numero"]'}));
   const ac = document.getElementById('auto-lib');
   ac.onclick = async () => {
     ac.disabled = true; ac.textContent = 'Revisando…';

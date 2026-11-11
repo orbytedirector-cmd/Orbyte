@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261108">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261111">
 </head>
 <body>
 <header class="cab">
@@ -45,6 +45,44 @@ const CSRF = document.querySelector('meta[name=csrf]').content;
 function post(url, datos) {
   return fetch(url, {method: 'POST', headers: {'X-CSRF': CSRF, 'Content-Type': 'application/json'},
                      body: JSON.stringify(datos || {})}).then(r => r.json());
+}
+// Editor de tags · columna Disco (dos discos en una sola carpeta): «Separar en discos» ordena las filas por nombre
+// de archivo y propone un disco nuevo cada vez que la numeración se reinicia; «↓» copia el disco de una fila a
+// todas las de abajo. Nada se guarda hasta «Guardar».
+function editorDiscos(tabla, boton, o) {
+  if (!tabla || !boton) return;
+  const filas = () => [...tabla.querySelectorAll(o.fila)].filter(tr => tr.querySelector(o.disco));
+  const num = tr => parseInt((tr.querySelector(o.numero) || {}).value, 10) || 0;
+  const marcar = (tr, d) => { const i = tr.querySelector(o.disco); if (i.value.trim() !== String(d)) { i.value = d; i.classList.add('auto'); } };
+  const vistos = new Set();
+  const repetida = filas().some(tr => { const k = tr.querySelector(o.disco).value.trim() + '|' + num(tr);
+    if (!num(tr)) return false; if (vistos.has(k)) return true; vistos.add(k); return false; });
+  if (repetida) { boton.classList.add('oro'); boton.title = 'Hay números de pista repetidos en el mismo disco: ' + boton.title; }
+  boton.onclick = () => {
+    // en orden de archivo, cada vez que la numeración vuelve a empezar es un disco nuevo; solo si cada tramo
+    // sube de a uno desde un número bajo (si los nombres no separan los discos, no se adivina)
+    const fs = filas().sort((a, b) => o.clave(a).localeCompare(o.clave(b), 'es', {numeric: true}));
+    const tramos = [];
+    let prev = 0;
+    fs.forEach(tr => { const n = num(tr); if (!tramos.length || (n && prev && n <= prev)) tramos.push([]); tramos[tramos.length - 1].push(tr); if (n) prev = n; });
+    const limpio = tramos.length > 1 && tramos.every(t => { const ns = t.map(num).filter(Boolean);
+      return ns.length && ns[0] <= 2 && ns.every((n, k) => !k || n > ns[k - 1]); });
+    if (!limpio) {
+      toast('No se puede deducir por los nombres', 'Escribe el disco en la primera pista de cada uno y usa ↓, o pon el número en cada pista.');
+      return;
+    }
+    fs.forEach(tr => tr.parentNode.appendChild(tr));
+    tramos.forEach((t, k) => t.forEach(tr => marcar(tr, k + 1)));
+    toast(`Propuesta: ${tramos.length} discos`, 'Ordenado por archivo. Revisa la columna Disco (↓ copia el disco hacia abajo) y guarda.');
+  };
+  tabla.addEventListener('click', e => {
+    const b = e.target.closest('[data-disco-abajo]');
+    if (!b) return;
+    const tr = b.closest('tr'), v = tr.querySelector(o.disco).value.trim();
+    if (!/^\d+$/.test(v)) { toast('Disco inválido', 'Escribe un número en esa fila'); return; }
+    let desde = false;
+    filas().forEach(f => { if (f === tr) desde = true; if (desde) marcar(f, v); });
+  });
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function toast(titulo, texto) {

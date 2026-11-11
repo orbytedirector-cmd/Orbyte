@@ -735,8 +735,8 @@ class Saneador:
                 ya.add(self.actual)
             for r in rutas:
                 if (accion, r) not in ya:
-                    if accion == 'sanear':
-                        self._cola.insert(sum(1 for a, _ in self._cola if a == 'sanear'), (accion, r))
+                    if accion in ('sanear', 'forzar'):
+                        self._cola.insert(sum(1 for a, _ in self._cola if a != 'medir'), (accion, r))
                     else:
                         self._cola.append((accion, r))
         self._ev.set()
@@ -744,17 +744,17 @@ class Saneador:
     def medir(self, rutas):
         self._poner('medir', rutas)
 
-    def sanear(self, rutas):
-        self._poner('sanear', rutas)
+    def sanear(self, rutas, forzar=False):
+        self._poner('forzar' if forzar else 'sanear', rutas)
 
     def estado(self):
         with self._lock:
             return {'actual': self.actual, 'medir': sum(1 for a, _ in self._cola if a == 'medir'),
-                    'sanear': [r for a, r in self._cola if a == 'sanear'], 'ultimos': self.ultimos[-30:]}
+                    'sanear': [r for a, r in self._cola if a != 'medir'], 'ultimos': self.ultimos[-30:]}
 
-    def _correr(self, accion, ruta):
+    def _correr(self, accion, ruta, *extra):
         os.makedirs(self.tmp, exist_ok=True)
-        cmd = _prefijo() + [sys.executable, '-m', 'ingesta.sanear', accion, ruta, self.tmp]
+        cmd = _prefijo() + [sys.executable, '-m', 'ingesta.sanear', accion, ruta, self.tmp, *extra]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, cwd=self.repo, errors='replace')
         try:
             return json.loads(r.stdout.strip().splitlines()[-1])
@@ -779,7 +779,7 @@ class Saneador:
                         m = {'fatal': m['error'], 'saneable': False}
                     self.salud.guardar_medida(ruta, m)
                 else:
-                    self._sanear(ruta)
+                    self._sanear(ruta, forzar=accion == 'forzar')
             except Exception:  # noqa: BLE001
                 log.exception('Sanear: %s %s', accion, ruta)
             finally:
@@ -787,8 +787,8 @@ class Saneador:
                     self.actual = None
                 time.sleep(1)
 
-    def _sanear(self, ruta):
-        r = self._correr('sanear', ruta)
+    def _sanear(self, ruta, forzar=False):
+        r = self._correr('sanear', ruta, *(['--forzar'] if forzar else []))
         nombre = os.path.basename(ruta)
         if not r.get('ok'):
             log.warning('Sanear: %s: %s', ruta, r.get('error'))
