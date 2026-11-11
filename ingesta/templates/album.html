@@ -303,7 +303,8 @@
         {% for x in r.plan or [] %}
         {% set o = (cam.pistas or {}).get(x.clave) or {} %}
         <tr data-clave="{{ x.clave }}">
-          <td class="num">{{ x.disco }}</td>
+          {% if '#' in x.clave %}<td class="num">{{ x.disco }}</td>
+          {% else %}<td class="celda-disco"><input type="text" class="p-disco" inputmode="numeric" maxlength="2" value="{{ x.disco }}" data-auto="{{ x.disco if not o.disco else '' }}"><button type="button" class="disco-abajo" data-disco-abajo title="Este disco desde esta pista hacia abajo">↓</button></td>{% endif %}
           <td style="width:70px"><input type="text" class="p-numero" inputmode="numeric" value="{{ o.numero or x.numero or '' }}"></td>
           <td><input type="text" class="p-titulo" value="{{ o.titulo or x.titulo or '' }}" data-orig="{{ x.titulo or '' }}"></td>
           <td><input type="text" class="p-artista" value="{{ o.artista or x.artista or '' }}" data-orig="{{ x.artista or '' }}"></td>
@@ -311,6 +312,7 @@
         {% endfor %}
       </table></div>
       <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+        <button class="btn" id="separar-discos" title="Ordena por nombre de archivo y propone el disco donde se reinicia la numeración; revisa la columna Disco antes de guardar">Separar en discos</button>
         <button class="btn oro" id="guardar-tags">Guardar y volver a revisar</button>
         {% if cam.tags or cam.pistas %}<button class="btn" id="borrar-tags">Deshacer mis cambios</button>{% endif %}</div>
     </div>
@@ -627,10 +629,16 @@ if (gt) gt.onclick = () => {
     if (t.value.trim() && t.value.trim() !== t.dataset.orig) o.titulo = t.value.trim();
     if (ar.value.trim() && ar.value.trim() !== ar.dataset.orig) o.artista = ar.value.trim();
     if (n.value.trim() && n.value.trim() !== n.defaultValue) o.numero = n.value.trim();
+    const dsc = tr.querySelector('.p-disco');           // disco a mano: solo si difiere de lo detectado
+    if (dsc && dsc.value.trim() && (dsc.value.trim() !== dsc.dataset.auto)) o.disco = dsc.value.trim();
     if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
   });
   gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
 };
+document.addEventListener('DOMContentLoaded', () => {   // editorDiscos está en base.html (se carga después)
+  const t = document.querySelector('#tags .tabla-tags'), b = document.getElementById('separar-discos');
+  if (t && b) editorDiscos(t, b, {fila: 'tr[data-clave]', clave: tr => tr.dataset.clave, disco: '.p-disco', numero: '.p-numero'});
+});
 // ✦ Autocorregir: llena el formulario con la propuesta (antes → después) y se puede desmarcar por grupo
 const CAMPO_TAG = {artista: 't-artista', album: 't-album', genero: 't-genero', genero_secundario: 't-genero2'};
 const CAMPO_PISTA = {titulo: '.p-titulo', artista: '.p-artista', numero: '.p-numero'};

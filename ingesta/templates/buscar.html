@@ -50,16 +50,42 @@
             <span class="chip">${v.aac ? 'AAC 320' : 'FLAC ' + esc(res(v))}</span>
             ${v.mqa ? '<span class="chip q-MQA" title="Tidal marca este álbum como MQA (sobre 48 kHz lo que llega es FLAC estándar, no MQA)"><span class="led"></span>marcado MQA</span>' : ''}`;
   }
-  function rango(v) { return [v.bits || v.lossless || v.servicio === 'qobuz' ? 1 : 0, v.bits || 0, v.sr || 0]; }
-  function cmp(a, b) { for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; }
+  // a igual resolución, la marcada MQA en Tidal (sobre 48 kHz la marca no cuenta: llega FLAC estándar)
+  const marcaMqa = v => !!v.mqa && v.servicio === 'tidal' && (v.sr || 0) <= 48000;
+  function rango(v) { return [v.bits || v.lossless || v.servicio === 'qobuz' ? 1 : 0, v.bits || 0, v.sr || 0, marcaMqa(v) ? 1 : 0]; }
+  function cmp(a, b) { for (let i = 0; i < 4; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; }
+  // Ediciones del mismo álbum (otro UPC: remaster, deluxe, otro país…): si la mejor es una marcada MQA, esa tiene
+  // prioridad sobre las de igual resolución y se avisa en todas.
+  const tituloBase = t => (t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  function familias(gs) {
+    const fam = new Map();
+    gs.forEach(g => { g.mqaFam = null; const k = tituloBase(g.artista) + '|' + tituloBase(g.titulo); fam.set(k, [...(fam.get(k) || []), g]); });
+    for (const lista of fam.values()) {
+      if (lista.length < 2) continue;
+      const vs = lista.flatMap(g => g.versiones.map(v => [g, v]));
+      if (vs.some(([, v]) => !v.resolucion_exacta)) continue;
+      const mejor = vs.reduce((m, [, v]) => cmp(rango(v), m) > 0 ? rango(v) : m, [0, 0, 0, 0]);
+      const top = vs.filter(([, v]) => cmp(rango(v), mejor) === 0);
+      if (!mejor[3] || !top.length) continue;
+      const elegido = top[0][0];
+      lista.forEach(g => g.mqaFam = {n: lista.length, es: g === elegido, res: `${top[0][1].bits || 16}/${khz(top[0][1].sr || 44100)}`});
+    }
+  }
+  function mqaFamTxt(g) {
+    const f = g.mqaFam;
+    if (!f) return '';
+    return f.es ? `<div class="t-nota"><span class="chip q-MQA"><span class="led"></span>MQA</span> De las ${f.n} ediciones de este álbum, esta viene marcada MQA: tiene prioridad sobre las de igual resolución</div>`
+      : `<div class="muy-tenue t-nota">Hay otra edición de este álbum marcada MQA (${esc(f.res)}): tiene prioridad sobre esta si la resolución es la misma</div>`;
+  }
   function sugerir(g) {                    // mismo criterio que el servidor (tienda.sugerir)
     const vs = g.versiones;
     vs.forEach(v => { v.sugerida = false; v.misma_calidad = false; });
     if (vs.some(v => !v.resolucion_exacta)) { g.sugerencia = 'Averiguando la resolución exacta de Tidal…'; }
     else {
-      const mejor = vs.reduce((m, v) => cmp(rango(v), m) > 0 ? rango(v) : m, [0, 0, 0]);
+      const mejor = vs.reduce((m, v) => cmp(rango(v), m) > 0 ? rango(v) : m, [0, 0, 0, 0]);
       const top = vs.filter(v => cmp(rango(v), mejor) === 0);
-      if (top.length === 1 && vs.length > 1) { top[0].sugerida = true; g.sugerencia = `Mejor calidad en ${NOMBRE[top[0].servicio]}`; }
+      if (top.length === 1 && vs.length > 1) { top[0].sugerida = true; g.sugerencia = `Mejor calidad en ${NOMBRE[top[0].servicio]}${marcaMqa(top[0]) ? ' (marcada MQA)' : ''}`; }
       else if (top.length > 1) { top.forEach(v => v.misma_calidad = true); g.sugerencia = 'Misma resolución en ambos: «Medir master» dice si el master es el mismo'; }
       else { vs[0].sugerida = true; g.sugerencia = null; }
     }
@@ -154,7 +180,7 @@
         <div class="portada" ${g.portada ? `style="background-image:url('${esc(g.portada)}')"` : ''}></div>
         <div class="t-cab-txt"><div class="tenue">${esc(g.artista)}</div>
           <div class="t-titulo">${esc(g.titulo)}${g.anio ? ` <span class="tenue">(${esc(g.anio)})</span>` : ''}</div>
-          <div class="muy-tenue t-nota">${[g.n_pistas ? g.n_pistas + ' pistas' : '', g.versiones.length === 1 ? 'solo en ' + NOMBRE[g.versiones[0].servicio] : ''].filter(Boolean).join(' · ')}</div></div>
+          <div class="muy-tenue t-nota">${[g.n_pistas ? g.n_pistas + ' pistas' : '', g.versiones.length === 1 ? 'solo en ' + NOMBRE[g.versiones[0].servicio] : ''].filter(Boolean).join(' · ')}</div>${mqaFamTxt(g)}</div>
         ${libTxt(g)}
       </div>
       <div class="t-vers">${vers}</div>
@@ -202,7 +228,7 @@
     const mejora = g.versiones.some(v => v.mejora === 'si');
     return `<tr data-i="${i}" data-falta="${l ? 0 : 1}" data-mejora="${mejora ? 1 : 0}">
       <td><input type="checkbox" data-elegir="${i}" aria-label="Elegir ${esc(g.titulo)}" ${sel ? 'checked' : ''}></td>
-      <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div>${popTxt(g)}</td>
+      <td><div class="t-fila-tit">${esc(g.titulo)}</div><div class="muy-tenue t-nota">${[g.anio, g.n_pistas ? g.n_pistas + ' pistas' : ''].filter(Boolean).map(esc).join(' · ')}</div>${popTxt(g)}${mqaFamTxt(g)}</td>
       <td>${l ? `${libsDe(g).map(chipLib).join('<br>')}${mejora ? ' <span class="ok t-nota">se puede mejorar</span>' : ''}` : '<span class="muy-tenue">No lo tienes</span>'}</td>
       ${celda('qobuz')}${celda('tidal')}</tr>`;
   }
@@ -213,6 +239,7 @@
     const avisos = Object.entries(datos.errores || {}).map(([s, e]) => `<div class="flash error">${NOMBRE[s]}: ${esc(e)}</div>`).join('');
     $('t-avisos').innerHTML = avisos;
     const gs = datos.grupos;
+    familias(gs);
     if (!gs.length) { r.innerHTML = '<div class="vacio"><p>Sin resultados.</p></div>'; $('t-barra').hidden = true; return; }
     if (modo === 'album') {
       r.innerHTML = gs.map(grupoAlbum).join('');

@@ -240,12 +240,22 @@ def propuesta(actual, cambios):
             if not str(o['numero']).strip().isdigit():
                 raise FalloAjuste(f'Número de pista inválido: {o["numero"]}')
             p['numero'] = int(str(o['numero']).strip())
-        p['cambio'] = any(p.get(k) != x.get(k) for k in ('titulo', 'artista', 'numero'))
-        nuevo = nombre_pista(p['disco'], p['numero'], p['titulo'], x['ext'], actual['n_discos'])
+        if str(o.get('disco') or '').strip():
+            # disco a mano (pedido de Niko, 11-11-2026): dos discos en una sola carpeta
+            if not str(o['disco']).strip().isdigit() or not 1 <= int(str(o['disco']).strip()) <= 30:
+                raise FalloAjuste(f'Número de disco inválido: {o["disco"]}')
+            p['disco'] = int(str(o['disco']).strip())
+        pistas.append(p)
+    discos = {_n_disco(p['disco']) for p in pistas}
+    n_discos = len(discos)
+    discos_cambian = any(_n_disco(p['disco']) != _n_disco(x['disco']) for p, x in zip(pistas, actual['plan']))
+    for p, x in zip(pistas, actual['plan']):
+        p['disco'] = _n_disco(p['disco'])
+        p['cambio'] = discos_cambian or any(p.get(k) != x.get(k) for k in ('titulo', 'artista', 'numero'))
+        nuevo = nombre_pista(p['disco'], p['numero'], p['titulo'], x['ext'], n_discos)
         # sin número de pista no se inventa un «00 - …»: el archivo conserva su nombre
         p['nuevo'] = os.path.join(os.path.dirname(x['clave']), nuevo) if p['numero'] and (
-            p['titulo'] != x['titulo'] or p['numero'] != x['numero']) else x['clave']
-        pistas.append(p)
+            p['titulo'] != x['titulo'] or p['numero'] != x['numero'] or discos_cambian) else x['clave']
     nums = [(p['disco'], p['numero']) for p in pistas if p['numero']]
     if len(set(nums)) != len(nums):
         raise FalloAjuste('Hay números de pista repetidos en el mismo disco')
@@ -253,8 +263,17 @@ def propuesta(actual, cambios):
     if len(set(nuevos)) != len(nuevos):
         raise FalloAjuste('Dos pistas quedarían con el mismo nombre de archivo (¿número repetido?)')
     album_cambia = any(ta.get(k) != ta0.get(k) for k in ('artista', 'album', 'genero', 'anio', 'genero_secundario'))
-    return {'tags_album': ta, 'pistas': pistas, 'album_cambia': album_cambia,
-            'carpeta_cambia': any(ta.get(k) != ta0.get(k) for k in ('artista', 'album', 'anio'))}
+    if discos_cambian:
+        ta['total_discos'] = n_discos
+    return {'tags_album': ta, 'pistas': pistas, 'album_cambia': album_cambia, 'discos_cambian': discos_cambian,
+            'n_discos': n_discos, 'carpeta_cambia': any(ta.get(k) != ta0.get(k) for k in ('artista', 'album', 'anio'))}
+
+
+def _n_disco(v):
+    try:
+        return max(1, int(str(v).split('/')[0]))
+    except (TypeError, ValueError):
+        return 1
 
 
 def _carpeta_nueva(ruta, ta, ta0, aj):
@@ -317,16 +336,20 @@ def aplicar(ruta, cambios, aj, reg):
 
         # 1) tags, archivo por archivo (los que no cambian quedan intactos)
         reg(f'Escribiendo tags en {len(tocadas)} archivo(s)')
-        total = max([p['numero'] or 0 for p in prop['pistas']] + [len(prop['pistas'])]) \
-            if actual['n_discos'] == 1 else None
+        n_discos = prop['n_discos']
+        total = max([p['numero'] or 0 for p in prop['pistas']] + [len(prop['pistas'])]) if n_discos == 1 else None
+        por_disco = {}                                   # total de pistas de cada disco (varios discos)
+        for d in {p['disco'] for p in prop['pistas']}:
+            del_d = [p for p in prop['pistas'] if p['disco'] == d]
+            por_disco[d] = max([p['numero'] or 0 for p in del_d] + [len(del_d)])
         base_ta = {'artista': ta['artista'], 'album': ta['album'], 'genero': ta['genero'] or None,
-                   'total_discos': ta.get('total_discos') or actual['n_discos'],
+                   'total_discos': n_discos if prop['discos_cambian'] else (ta.get('total_discos') or n_discos),
                    'genero_secundario': ta.get('genero_secundario') or None}
         if ta.get('anio') != ta0.get('anio'):
             base_ta['fecha'] = str(ta['anio'])                       # si el año no cambia, la fecha queda como está
         for p in tocadas:
             x = {'titulo': p['titulo'], 'artista': p['artista'] or ta['artista'], 'numero': p['numero'],
-                 'disco': p['disco'], 'total_pistas': total}
+                 'disco': p['disco'], 'total_pistas': total if total else (por_disco.get(p['disco']) or None)}
             procesar.escribir_tags(os.path.join(ruta, p['clave']), x, base_ta, {})
             if ta0.get('genero_secundario') and not ta.get('genero_secundario'):
                 _quitar_secundarios(os.path.join(ruta, p['clave']))

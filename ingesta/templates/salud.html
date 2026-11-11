@@ -127,7 +127,11 @@ function medidaTxt(p) {
   if (m.fatal && !m.ms) return ` <div class="s tenue">No se pudo medir: ${esc(m.fatal)}</div>`;
   if (!m.tramos) return ` <div class="s tenue">libFLAC la lee sin cuadros dañados${m.fatal ? ` (${esc(m.fatal)})` : ''}</div>`;
   const donde = m.puntos.slice(0, 4).map(x => mmss(x.en_s)).join(', ') + (m.tramos > 4 ? '…' : '');
-  return ` <div class="s"><span class="${m.saneable ? 'med' : 'mal'}">Pierde ${msTxt(m.ms)} en ${m.tramos} punto${m.tramos > 1 ? 's' : ''} (${donde})</span>${m.saneable ? ' · se puede sanear' : ' · es mucho para sanear: mejor reemplazarla'}</div>`;
+  const forzable = m.forzable ?? (!m.fatal && [16, 24, 32].includes(m.bits));
+  const enCola = sanEst && (sanEst.sanear || []).includes(p.ruta);
+  return ` <div class="s"><span class="${m.saneable ? 'med' : 'mal'}">Pierde ${msTxt(m.ms)} en ${m.tramos} punto${m.tramos > 1 ? 's' : ''} (${donde})</span>${m.saneable ? ' · se puede sanear'
+    : ` · es mucho para sanear sin preguntar: conviene reemplazarla${forzable ? (enCola ? ' · <span class="med">en cola para sanear</span>'
+      : ` <button class="btn chico" data-forzar="${esc(p.ruta)}" title="Rellena igual los ${msTxt(m.ms)}; el original queda en .orbyte-respaldo">Sanear igual</button>`) : ''}`}</div>`;
 }
 const mmss = s => { s = Math.round(s || 0); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 const hms = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60);
@@ -157,6 +161,8 @@ function accionCaso(c, i) {
   if (c.tipo === 'separados') return `<button class="btn chico oro" data-unir="${i}">⧉ Unir como discos</button>`;
   if (c.tipo === 'faltantes') return `<a class="btn chico" href="${buscarUrl(c.artista, c.titulo)}">Buscar el álbum completo</a>
     <a class="btn chico" href="/biblioteca/album/${m.id}">Abrir ficha</a>`;
+  if (c.tipo === 'numeracion') return `<a class="btn chico oro" href="/biblioteca/album/${m.id}#tags-lib" title="En «Editar tags»: «Separar en discos» propone el disco de cada pista">Separar en discos</a>
+    <a class="btn chico" href="/biblioteca/album/${m.id}">↻ Abrir y reprocesar</a>`;
   return `<a class="btn chico oro" href="/biblioteca/album/${m.id}">${c.tipo === 'subcarpetas' ? '↻ Reprocesar los discos' : '↻ Abrir y reprocesar'}</a>`;
 }
 function pintarDiscos() {
@@ -341,6 +347,14 @@ function pintarDanadas() {
     toast(`${r.en_cola} pista${r.en_cola === 1 ? '' : 's'} en cola para sanear`, 'Una a la vez y con prioridad mínima: se van actualizando solas');
     vigilarSanear();
   };
+  cont.querySelectorAll('[data-forzar]').forEach(b => b.onclick = async () => {
+    if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = '¿Seguro? Sanear igual'; return; }
+    b.disabled = true; b.textContent = 'Encargando…';
+    const r = await post('/api/salud/sanear', {rutas: [b.dataset.forzar], forzar: true});
+    if (!r.ok || !r.en_cola) { toast('No se pudo', r.error || 'Esa pista no se puede sanear'); b.disabled = false; b.textContent = 'Sanear igual'; return; }
+    toast('En cola para sanear', 'Se va a actualizar sola al terminar');
+    vigilarSanear();
+  });
   cont.querySelectorAll('[data-san]').forEach(b => b.onclick = () => sanear([lista[+b.dataset.san]], b));
   const bs = document.getElementById('san-todas');
   if (bs) bs.onclick = () => sanear(lista.filter(a => a.saneables), bs);

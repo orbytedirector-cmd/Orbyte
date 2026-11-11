@@ -1483,8 +1483,13 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         if caras and not d_car and (d_tag or 1) != 1:
             unificadas.append(p['archivo'])
             d_tag = 1
-        p['disco'] = d_car or d_tag or 1
-        if d_car and d_tag and d_car != d_tag:
+        # sin carpeta «CD 2» ni tag de disco: el nombre «2-05 Título» también dice el disco
+        d_nom = None if d_car or d_tag or caras else _desde_nombre_archivo(p['archivo'].split('/')[-1])[0]
+        p['disco'] = d_car or d_tag or d_nom or 1
+        d_man = _num((ov_pistas.get(p['archivo']) or {}).get('disco'))
+        if d_man:                       # disco puesto a mano en «Editar tags» (manda sobre todo lo demás)
+            p['disco'] = d_man
+        elif d_car and d_tag and d_car != d_tag:
             p.setdefault('notas', []).append(f'tag de disco {d_tag}, carpeta {d_car}')
     if unificadas:
         problema('correccion', 'vinilo_un_disco', 'Caras de vinilo (A1, B1…): un solo disco con numeración corrida',

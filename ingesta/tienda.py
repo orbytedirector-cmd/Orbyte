@@ -563,9 +563,14 @@ def estado():
 # ─────────────────────────── búsqueda: agrupar versiones y comparar con la biblioteca ───────────────────────────
 
 def _rango(v):
-    """Para comparar calidad: lossless primero, luego bits y frecuencia."""
+    """Para comparar calidad: lossless primero, luego bits y frecuencia; a igual resolución, la marcada MQA (pedido de
+    Niko, 11-11-2026: sobre 48 kHz Tidal entrega FLAC estándar, así que ahí la marca no cuenta)."""
     return (1 if (v.get('bits') or v.get('lossless') or v['servicio'] == 'qobuz') else 0,
-            v.get('bits') or 0, v.get('sr') or 0)
+            v.get('bits') or 0, v.get('sr') or 0, 1 if _marca_mqa(v) else 0)
+
+
+def _marca_mqa(v):
+    return bool(v.get('mqa')) and v['servicio'] == 'tidal' and (v.get('sr') or 0) <= 48000
 
 
 def _clave(v):
@@ -637,7 +642,8 @@ def sugerir(g):
         top = [v for v in vs if _rango(v) == mejor]
         if len(top) == 1 and len(vs) > 1:
             top[0]['sugerida'] = True
-            g['sugerencia'] = f'Mejor calidad en {top[0]["servicio"].capitalize()}'
+            g['sugerencia'] = f'Mejor calidad en {top[0]["servicio"].capitalize()}' + \
+                (' (marcada MQA)' if _marca_mqa(top[0]) else '')
         elif len(top) > 1:
             for v in top:
                 v['misma_calidad'] = True
