@@ -29,12 +29,14 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-from . import analisis, dsd
+from . import analisis, dsd, tags_mp3
+from . import sanear as sanear_mod
 
 log = logging.getLogger('ingesta.salud')
 
@@ -147,7 +149,8 @@ class Salud:
                     v TEXT, estado TEXT, errores TEXT, segundos REAL, duracion REAL, revisado REAL);
                 CREATE INDEX IF NOT EXISTS pistas_estado ON pistas(estado);
                 CREATE TABLE IF NOT EXISTS ignorados(album TEXT PRIMARY KEY, desde REAL);
-                CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);''')
+                CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);
+                CREATE TABLE IF NOT EXISTS medidas(ruta TEXT PRIMARY KEY, tamano INTEGER, mtime REAL, datos TEXT);''')
 
     # ── base propia ──
     @contextlib.contextmanager
@@ -438,6 +441,77 @@ class Salud:
                 (base, base[:-1] + '0'))]
         return [r for r in filas if os.path.isfile(r)]
 
+    # ── medir y sanear FLAC con cuadros dañados (sanear.py) ──
+    def medidas(self, rutas):
+        """{ruta: medida} de las que ya se midieron (y no cambiaron); las que faltan se encargan a `saneador`."""
+        out, faltan = {}, []
+        if not rutas:
+            return out
+        with self._con() as c:
+            filas = {}
+            for k in range(0, len(rutas), 500):
+                parte = rutas[k:k + 500]
+                for r in c.execute(f'SELECT ruta, tamano, mtime, datos FROM medidas WHERE ruta IN '
+                                   f'({",".join("?" * len(parte))})', parte):
+                    filas[r['ruta']] = r
+        for ruta in rutas:
+            r = filas.get(ruta)
+            try:
+                st = os.stat(ruta)
+            except OSError:
+                continue
+            if r and r['tamano'] == st.st_size and abs((r['mtime'] or 0) - st.st_mtime) < 1:
+                out[ruta] = json.loads(r['datos'])
+            else:
+                faltan.append(ruta)
+        if faltan and getattr(self, 'saneador', None):
+            self.saneador.medir(faltan)
+            for ruta in faltan:
+                out[ruta] = {'midiendo': True}
+        return out
+
+    def guardar_medida(self, ruta, datos):
+        st = os.stat(ruta)
+        with self._lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO medidas(ruta, tamano, mtime, datos) VALUES(?, ?, ?, ?)',
+                      (ruta, st.st_size, st.st_mtime, json.dumps(datos, ensure_ascii=False)))
+
+    def reparar_tags(self, rutas):
+        """«Reparar tags»: reescribe la letra/comentario con BOM malo y vuelve a decodificar. → [{ruta, ok, texto}]"""
+        out = []
+        with self._con() as c:
+            filas = {r['ruta']: dict(r) for r in c.execute(
+                f'SELECT ruta, album_id, estado, errores, duracion FROM pistas WHERE ruta IN '
+                f'({",".join("?" * len(rutas))})', rutas)} if rutas else {}
+        for ruta in rutas:
+            f = filas.get(ruta)
+            if not f or not ruta.lower().endswith('.mp3') or not tags_mp3.solo_tags(json.loads(f['errores'] or '[]')):
+                out.append({'ruta': ruta, 'ok': False, 'texto': 'no es un caso de solo tags'})
+                continue
+            try:
+                r = tags_mp3.reparar(ruta)
+            except Exception as e:  # noqa: BLE001
+                log.exception('Salud: reparar tags %s', ruta)
+                out.append({'ruta': ruta, 'ok': False, 'texto': f'no se pudo escribir: {e}'})
+                continue
+            ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
+            estado, notas = clasificar(ruta, ok, errores, seg, f['duracion'])
+            if estado == 'ok':
+                notas = [f'tags reparados: {r["rescatados"]} cuadro(s) reescrito(s) en UTF-8'
+                         + (f', {r["quitados"]} sin texto quitado(s)' if r['quitados'] else '')]
+            st = os.stat(ruta)
+            self._guardar(ruta, f['album_id'], st.st_size, st.st_mtime, estado, notas, seg, f['duracion'])
+            log.info('Salud: tags de %s: %s → %s', ruta, r, estado)
+            out.append({'ruta': ruta, 'ok': estado == 'ok', 'texto': notas[0] if notas else estado})
+        return out
+
+    def olvidar(self, rutas):
+        """Saca pistas de la lista de Salud (ya no están en Orbyte)."""
+        with self._con() as c:
+            for k in range(0, len(rutas), 500):
+                parte = rutas[k:k + 500]
+                c.execute(f'DELETE FROM pistas WHERE ruta IN ({",".join("?" * len(parte))})', parte)
+
     def ignorar(self, album, si=True):
         with self._lock, self._con() as c:
             if si:
@@ -491,12 +565,23 @@ class Salud:
                                                'album': a['name'], 'anio': a['year'], 'pistas': [],
                                                'danada': 0, 'errores': 0, 'falta': 0})
             g[f['estado']] += 1
-            g['pistas'].append({'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'estado': f['estado'],
-                                'errores': json.loads(f['errores'] or '[]')[:2], 'disco': t.get('disc_number'),
+            errs = json.loads(f['errores'] or '[]')
+            tags = f['estado'] == 'errores' and f['ruta'].lower().endswith('.mp3') and tags_mp3.solo_tags(errs)
+            g['tags'] = g.get('tags', 0) + (1 if tags else 0)
+            g['pistas'].append({'solo_tags': tags,'archivo': os.path.basename(f['ruta']), 'ruta': f['ruta'], 'estado': f['estado'],
+                                'errores': errs[:2], 'disco': t.get('disc_number'),
                                 'numero': t.get('track_number'), 'titulo': t.get('title'),
                                 'segundos': f['segundos'], 'duracion': f['duracion']})
         out = list(por_album.values())
+        medidas = self.medidas([p['ruta'] for g in out for p in g['pistas'] if p['ruta'].lower().endswith('.flac')
+                                and p['estado'] in ('errores', 'danada')])
         for g in out:
+            g['saneables'] = 0
+            for p in g['pistas']:
+                m = medidas.get(p['ruta'])
+                if m is not None:
+                    p['medida'] = m
+                    g['saneables'] += 1 if m.get('saneable') else 0
             g['pistas'].sort(key=lambda p: (_int(p['disco']), _int(p['numero'])))
         out.sort(key=lambda g: (-(g['danada'] + g['falta']), -g['errores'], (g['artista'] or '').lower(), g['album'] or ''))
         return out
@@ -627,3 +712,102 @@ def discos_por_normalizar(db, biblioteca):
     casos.sort(key=lambda c: (analisis._norm(c['artista']), analisis._norm(c['titulo'])))
     _CACHE.update(clave=clave, datos=casos)
     return casos
+
+
+class Saneador:
+    """Un hilo, una pista a la vez y con prioridad mínima: mide (dónde están los cuadros malos y cuántos ms se
+    pierden) y sanea a pedido. Medir y sanear corren como proceso aparte (python -m ingesta.sanear)."""
+
+    def __init__(self, salud, datos, repo):
+        self.salud, self.tmp, self.repo = salud, os.path.join(datos, 'sanear-tmp'), repo
+        self._cola = []             # [(accion, ruta)]
+        self._lock = threading.Lock()
+        self._ev = threading.Event()
+        self.actual = None
+        self.ultimos = []           # resultados de sanear recientes (para la página)
+        salud.saneador = self
+        threading.Thread(target=self._bucle, name='saneador', daemon=True).start()
+
+    def _poner(self, accion, rutas):
+        with self._lock:
+            ya = set(self._cola)
+            if self.actual:
+                ya.add(self.actual)
+            for r in rutas:
+                if (accion, r) not in ya:
+                    if accion == 'sanear':
+                        self._cola.insert(sum(1 for a, _ in self._cola if a == 'sanear'), (accion, r))
+                    else:
+                        self._cola.append((accion, r))
+        self._ev.set()
+
+    def medir(self, rutas):
+        self._poner('medir', rutas)
+
+    def sanear(self, rutas):
+        self._poner('sanear', rutas)
+
+    def estado(self):
+        with self._lock:
+            return {'actual': self.actual, 'medir': sum(1 for a, _ in self._cola if a == 'medir'),
+                    'sanear': [r for a, r in self._cola if a == 'sanear'], 'ultimos': self.ultimos[-30:]}
+
+    def _correr(self, accion, ruta):
+        os.makedirs(self.tmp, exist_ok=True)
+        cmd = _prefijo() + [sys.executable, '-m', 'ingesta.sanear', accion, ruta, self.tmp]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200, cwd=self.repo, errors='replace')
+        try:
+            return json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return {'ok': False, 'error': (r.stderr or 'sin respuesta').strip()[-300:]}
+
+    def _bucle(self):
+        while True:
+            self._ev.wait(30)
+            with self._lock:
+                if not self._cola:
+                    self._ev.clear()
+                    continue
+                self.actual = self._cola.pop(0)
+            accion, ruta = self.actual
+            try:
+                if not os.path.isfile(ruta):
+                    continue
+                if accion == 'medir':
+                    m = self._correr('medir', ruta)
+                    if 'error' in m and 'ms' not in m:
+                        m = {'fatal': m['error'], 'saneable': False}
+                    self.salud.guardar_medida(ruta, m)
+                else:
+                    self._sanear(ruta)
+            except Exception:  # noqa: BLE001
+                log.exception('Sanear: %s %s', accion, ruta)
+            finally:
+                with self._lock:
+                    self.actual = None
+                time.sleep(1)
+
+    def _sanear(self, ruta):
+        r = self._correr('sanear', ruta)
+        nombre = os.path.basename(ruta)
+        if not r.get('ok'):
+            log.warning('Sanear: %s: %s', ruta, r.get('error'))
+            self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': False, 'texto': r.get('error')})
+            return
+        ms = r['ms'] or 0
+        ms_txt = f'{ms / 1000:.1f} s'.replace('.', ',') if ms >= 1000 else f'{ms:g} ms'.replace('.', ',')
+        nota = (f'saneada: {ms_txt} en {r["tramos"]} punto{"s" if r["tramos"] != 1 else ""} rellenados; el '
+                f'original quedó en {sanear_mod.RESPALDO}/')
+        log.info('Sanear: %s → %s', ruta, nota)
+        with self.salud._con() as c:
+            f = c.execute('SELECT album_id, duracion FROM pistas WHERE ruta=?', (ruta,)).fetchone()
+        dur = f['duracion'] if f else None
+        ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
+        estado, notas = clasificar(ruta, ok, errores, seg, dur)
+        st = os.stat(ruta)
+        self.salud._guardar(ruta, f['album_id'] if f else None, st.st_size, st.st_mtime, estado,
+                            [nota] if estado == 'ok' else [nota] + list(notas), seg, dur)
+        self.salud.guardar_medida(ruta, dict(r, saneable=False, saneada=True))
+        self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': estado == 'ok',
+                             'texto': nota if estado == 'ok' else f'{nota}, pero ffmpeg todavía avisa: '
+                                                                    f'{"; ".join(errores[:2])}'})

@@ -42,11 +42,11 @@
     r.pistas.forEach(p => { st.sel[p.ruta] = {on: !!(p.reparable && p.pareja && p.igual && !p.confirmar_duracion), acepto: false, aceptoDur: false}; });
     pintar();
   }
-  // Búsqueda manual: texto libre o enlace de Tidal del álbum o de la pista.
+  // Búsqueda manual: texto libre, enlace de Tidal del álbum o de la pista, ISRC o código de barras.
   function buscador(valor) {
     return `<div class="campo" style="margin:0 0 .7rem"><label for="r-q">Buscar en Tidal</label>
-      <div class="ayuda">Texto (artista y álbum) o el enlace de Tidal del álbum o de la pista.</div>
-      <div class="fila-in"><input type="text" id="r-q" value="${esc(valor)}" placeholder="B.B. King Lucille · https://tidal.com/browse/track/…" style="flex:1;min-width:0">
+      <div class="ayuda">Texto (artista y álbum), el enlace de Tidal del álbum o de la pista, el ISRC de la pista (USSM12209515) o el código de barras del álbum (UPC/EAN). Los códigos están en los tags (ISRC, BARCODE/UPC) o en la contratapa del disco.</div>
+      <div class="fila-in"><input type="text" id="r-q" value="${esc(valor)}" placeholder="B.B. King Lucille · enlace de Tidal · ISRC · código de barras" style="flex:1;min-width:0">
         <button class="btn chico" id="r-buscar" type="button">Buscar</button>
         ${st.busqueda ? '<button class="btn chico" id="r-auto" type="button" title="Volver a la búsqueda automática">Automática</button>' : ''}</div></div>`;
   }

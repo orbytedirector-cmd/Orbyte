@@ -9,7 +9,7 @@
 
 <form class="t-form" id="t-form">
   <label for="t-q" class="oculto-lector">Buscar</label>
-  <input type="search" id="t-q" value="{{ q }}" placeholder="Álbum o artista" autocomplete="off">
+  <input type="search" id="t-q" value="{{ q }}" placeholder="Álbum, artista, ISRC o código de barras" autocomplete="off">
   <div class="t-modo" role="group" aria-label="Buscar por">
     <button type="button" data-modo="album" class="{{ 'activo' if modo != 'artista' }}">Álbum</button>
     <button type="button" data-modo="artista" class="{{ 'activo' if modo == 'artista' }}">Artista</button>

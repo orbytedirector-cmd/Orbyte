@@ -402,6 +402,85 @@ class Tidal:
         d = self._get('search', query=q, types='ALBUMS', limit=limite)
         return [self._album(a) for a in (d.get('albums') or {}).get('items', [])]
 
+    # ── por código: catálogo v2 (openapi.tidal.com), con la misma sesión; si no responde, la búsqueda v1 ──
+    OPENAPI = 'https://openapi.tidal.com/v2/'
+
+    def _get_v2(self, ep, **params):
+        params.setdefault('countryCode', self._pais())
+        url = self.OPENAPI + ep + '?' + urllib.parse.urlencode(params)
+        try:
+            return _http(url, {'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.api+json'})
+        except urllib.error.HTTPError as e:
+            if e.code == 401:
+                self._refrescar()
+                return _http(url, {'Authorization': f'Bearer {self.token}', 'Accept': 'application/vnd.api+json'})
+            raise
+
+    @staticmethod
+    def _variantes_upc(upc):
+        d = re.sub(r'\D', '', str(upc or ''))
+        if not d:
+            return []
+        base = d.lstrip('0') or '0'
+        return list(dict.fromkeys([d] + [base.zfill(n) for n in (12, 13, 14) if len(base) <= n]))
+
+    def albumes_por_upc(self, upc):
+        """Ediciones de Tidal con ese código de barras (UPC/EAN, con o sin ceros a la izquierda)."""
+        ids = []
+        for v in self._variantes_upc(upc):
+            try:
+                d = self._get_v2('albums', **{'filter[barcodeId]': v})
+            except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+                continue
+            ids += [str(x['id']) for x in d.get('data') or [] if str(x.get('id')) not in ids]
+            if ids:
+                break
+        out = []
+        for i in ids[:6]:
+            try:
+                out.append(self._album(self._get(f'albums/{i}')))
+            except urllib.error.HTTPError:
+                continue
+        if not out:                                      # sin catálogo v2: la búsqueda v1, solo los del mismo código
+            base = re.sub(r'\D', '', str(upc or '')).lstrip('0')
+            try:
+                out = [v for v in self.buscar_albumes(base, limite=20)
+                       if re.sub(r'\D', '', str(v.get('upc') or '')).lstrip('0') == base]
+            except urllib.error.HTTPError:
+                pass
+        return out
+
+    def pistas_por_isrc(self, isrc):
+        """[(id de pista, álbum)] de Tidal con ese ISRC (la misma grabación; puede estar en varias ediciones)."""
+        isrc = re.sub(r'[^A-Za-z0-9]', '', str(isrc or '')).upper()
+        if len(isrc) != 12:
+            return []
+        ids = []
+        try:
+            d = self._get_v2('tracks', **{'filter[isrc]': isrc})
+            ids = [str(x['id']) for x in d.get('data') or []]
+        except (urllib.error.HTTPError, urllib.error.URLError, ValueError):
+            pass
+        if not ids:                                      # la búsqueda v1 también encuentra por ISRC
+            try:
+                d = self._get('search', query=isrc, types='TRACKS', limit=10)
+                ids = [str(t['id']) for t in (d.get('tracks') or {}).get('items', [])
+                       if (t.get('isrc') or '').upper() == isrc]
+            except urllib.error.HTTPError:
+                pass
+        out, vistos = [], set()
+        for i in ids[:8]:
+            try:
+                t = self._get(f'tracks/{i}')
+                aid = str((t.get('album') or {}).get('id') or '')
+                if not aid or aid in vistos:
+                    continue
+                vistos.add(aid)
+                out.append((str(t['id']), self._album(self._get(f'albums/{aid}'))))
+            except urllib.error.HTTPError:
+                continue
+        return out
+
     def buscar_artista(self, q):
         d = self._get('search', query=q, types='ARTISTS', limit=5)
         artistas = (d.get('artists') or {}).get('items', [])
@@ -615,7 +694,13 @@ def buscar(texto, modo, bib):
                 if s == 'tidal':
                     tidal_artista = getattr(c, 'artista_id', None)
             else:
-                vs = c.buscar_albumes(texto)
+                vs = []
+                q = (texto or '').strip().replace(' ', '')
+                if s == 'tidal' and re.fullmatch(r'[A-Za-z]{2}-?[A-Za-z0-9]{3}-?\d{2}-?\d{5}', q):
+                    vs = [a for _t, a in c.pistas_por_isrc(q.replace('-', ''))]          # ISRC de una pista
+                elif s == 'tidal' and re.fullmatch(r'\d{8,14}', q):
+                    vs = c.albumes_por_upc(q)                                           # código de barras
+                vs = vs or c.buscar_albumes(texto)
             versiones += vs
         except FalloTienda as e:
             olvidar(s)

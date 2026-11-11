@@ -103,6 +103,7 @@ def _ingesta_ocupada():
 
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
+saneador = salud_mod.Saneador(salud, DATOS, REPO)
 
 
 
@@ -1901,6 +1902,63 @@ def api_salud_ignorar():
         return jsonify(ok=False), 400
     salud.ignorar(d['carpeta'], bool(d.get('si', True)))
     return jsonify(ok=True)
+
+
+@app.route('/api/salud/sanear')
+def api_salud_sanear_estado():
+    return jsonify(ok=True, **saneador.estado())
+
+
+@app.route('/api/salud/sanear', methods=['POST'])
+def api_salud_sanear():
+    """Sanear FLAC con cuadros dañados (solo los que se midieron como saneables: menos de 1 s en total)."""
+    rutas = [r for r in (request.get_json(silent=True) or {}).get('rutas') or [] if isinstance(r, str)]
+    if not rutas:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    med = salud.medidas(rutas)
+    ok = [r for r in rutas if (med.get(r) or {}).get('saneable')]
+    saneador.sanear(ok)
+    return jsonify(ok=True, en_cola=len(ok), saltadas=len(rutas) - len(ok))
+
+
+@app.route('/api/salud/tags/reparar', methods=['POST'])
+def api_salud_tags_reparar():
+    """«Reparar tags» de los MP3 cuyo único error es la letra/comentario con BOM malo (el audio no se toca)."""
+    rutas = [r for r in (request.get_json(silent=True) or {}).get('rutas') or [] if isinstance(r, str)]
+    if not rutas:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    r = salud.reparar_tags(rutas[:200])
+    return jsonify(ok=True, resultado=r, reparadas=sum(1 for x in r if x['ok']))
+
+
+@app.route('/api/salud/sin-archivo/quitar', methods=['POST'])
+def api_salud_sin_archivo_quitar():
+    """«Sin archivo» de Salud: quita esas filas de music.db (lo que apuntaba a ellas pasa a la pista equivalente)."""
+    rutas = [r for r in (request.get_json(silent=True) or {}).get('rutas') or [] if isinstance(r, str)]
+    if not rutas:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    if procesador.actual:
+        return jsonify(ok=False, error='Hay un álbum procesándose: espera a que termine'), 409
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    if not _unificando.acquire(blocking=False):
+        return jsonify(ok=False, error='Hay otra operación sobre la base en curso'), 409
+    lineas = []
+    try:
+        r = fantasmas_mod.limpiar_pistas(almacen.ajustes()['db_orbyte'], lineas.append, rutas=rutas)
+    except Exception as e:  # noqa: BLE001
+        log.exception('Salud: quitar filas sin archivo')
+        return jsonify(ok=False, error=f'No se pudo: {e}'), 409
+    finally:
+        _unificando.release()
+    for x in lineas:
+        log.info('Salud: %s', x)
+    salud.olvidar([x for x in rutas if not os.path.exists(x)])
+    return jsonify(ok=True, registro=lineas, **r)
 
 
 # ─────────────────────────── reparar solo las pistas dañadas ───────────────────────────
