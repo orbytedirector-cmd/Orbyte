@@ -144,6 +144,19 @@ def corregir_album(db, ruta, aid, reg):
         con.close()
 
 
+def limpiar_sin_archivo(db, ruta, reg):
+    """El indexador (--update) agrega y relee, pero no quita las filas de archivos que ya no están (una pista que se
+    renombró, un .cue de imagen ya cortada): se quitan aquí, y lo que apuntaba a ellas pasa a la pista equivalente."""
+    from . import fantasmas
+    try:
+        r = fantasmas.limpiar_pistas(db, reg, carpeta=ruta)
+        if r['borradas']:
+            reg(f'   {r["borradas"]} fila{"s" if r["borradas"] > 1 else ""} sin archivo quitada'
+                f'{"s" if r["borradas"] > 1 else ""} de Orbyte')
+    except Exception as e:  # noqa: BLE001
+        reg(f'   ⚠ No se pudieron quitar las filas sin archivo: {e}')
+
+
 def album_id(db, ruta):
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     try:
@@ -168,6 +181,7 @@ def correr(ruta, aj, reg, richmeta_completo=False, letras=True):
     # --update: si el álbum ya estaba (otra pasada de metadata), se vuelven a leer sus archivos conservando los IDs
     _correr('index', ['index_libraryV3.py', '--update', '--album', ruta, '--db', db, '--root', raiz, '--quiet'],
             reg, aj, limite('index', n_pistas))
+    limpiar_sin_archivo(db, ruta, reg)
     aid = album_id(db, ruta)
     if not aid:
         raise RuntimeError('El indexador terminó pero el álbum no aparece en music.db')

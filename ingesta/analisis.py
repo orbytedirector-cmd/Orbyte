@@ -755,6 +755,30 @@ def _es_dst(p):
     return (p.get('codec') or '').lower() == 'dst'
 
 
+def _cue_de_imagen_ya_cortada(refs, cpistas, pistas_carpeta):
+    """¿El cue nombra solo un archivo único (imagen) que ya no está, y las pistas separadas sí están en la carpeta?
+    Se exige que ningún archivo del cue exista, que haya al menos tantas pistas sueltas como pistas del cue y que
+    la mayoría de los títulos del cue calcen con los tags o los nombres de esas pistas."""
+    if any(r['archivo'] for r in refs) or not any(r['pistas'] > 1 for r in refs):
+        return False
+    sueltas = [p for p in pistas_carpeta if not p['archivo'].lower().endswith('.cue')]
+    if len(sueltas) < len(cpistas):
+        return False
+    nombres = set()
+    for p in sueltas:
+        nombres.add(_norm((p.get('tags') or {}).get('titulo')))
+        st = Path(p['archivo']).stem
+        nombres.add(_norm(st))
+        nombres.add(_norm(re.sub(r'^\s*\d{1,3}\s*[-._)]*\s*', '', st)))      # «03 - Titulo»
+        nombres.add(_norm(st.split(' - ')[-1]))                              # «03 - Artista - Titulo»
+    nombres.discard('')
+    titulos = [_norm(cp.get('title')) for cp in cpistas if _norm(cp.get('title'))]
+    if not titulos:
+        return len(sueltas) == len(cpistas)
+    calzan = sum(1 for t in titulos if t in nombres)
+    return calzan >= max(1, int(len(titulos) * 0.6 + 0.999))
+
+
 def _segundos_cue(cp):
     """Inicio exacto de una pista del cue (cuadros de 1/75 s), sin el redondeo de la vista."""
     return cp['cuadros'] / 75 if cp.get('cuadros') is not None else cp['inicio']
@@ -1175,6 +1199,14 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             problema('aviso', 'cue_ignorado', f'El cue {os.path.basename(cue)} nombra archivos que no están '
                                               f'({len(faltan)} de {len(refs)}); como es de una pista por archivo, '
                                               f'no hace falta y se ignora')
+            info_cues.pop()
+            continue
+        if faltan and _cue_de_imagen_ya_cortada(refs, cpistas, [p for p in pistas if p['carpeta'] in carpetas_cue]):
+            # el cue era del archivo único original («El leon.flac») y las pistas ya están separadas en la carpeta:
+            # no hace falta; al procesar no se lleva (copiar_extras no copia .cue)
+            problema('aviso', 'cue_sobrante', f'El cue {os.path.basename(cue)} es del archivo único original '
+                                              f'({", ".join(faltan)}), que ya está separado en pistas; no hace '
+                                              f'falta y se borra al procesar')
             info_cues.pop()
             continue
         if faltan:

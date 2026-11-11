@@ -126,7 +126,7 @@ def _tags(ruta):
         import mutagen
         f = mutagen.File(ruta, easy=True)
         t = (f.tags or {}) if f is not None else {}
-        return {k: (t.get(k) or [None])[0] for k in ('artist', 'albumartist', 'album', 'barcode', 'upc')}
+        return {k: (t.get(k) or [None])[0] for k in ('artist', 'albumartist', 'album', 'barcode', 'upc', 'ean', 'isrc')}
     except Exception:  # noqa: BLE001
         return {}
 
@@ -197,7 +197,7 @@ def _datos_busqueda(rutas, carpeta, db):
     t = _tags(rutas[0])
     artista = _valido(t.get('albumartist')) or _valido(t.get('artist'))
     album = _valido(t.get('album'))
-    upc = t.get('barcode') or t.get('upc')
+    upc = t.get('barcode') or t.get('upc') or t.get('ean')
     fuentes = []
     if artista or album:
         fuentes.append('tags de la pista')
@@ -216,8 +216,8 @@ def _datos_busqueda(rutas, carpeta, db):
             artista, usada = _valido(tv.get('albumartist')) or _valido(tv.get('artist')), True
         if not album and _valido(tv.get('album')):
             album, usada = _valido(tv['album']), True
-        if not upc and (tv.get('barcode') or tv.get('upc')):
-            upc, usada = tv.get('barcode') or tv.get('upc'), True
+        if not upc and (tv.get('barcode') or tv.get('upc') or tv.get('ean')):
+            upc, usada = tv.get('barcode') or tv.get('upc') or tv.get('ean'), True
         if usada:
             fuentes.append('pistas sanas del álbum')
     if not artista or not album:
@@ -243,9 +243,39 @@ def _ficha(ruta, db):
     return f, bd
 
 
+_ISRC_RE = re.compile(r'^[A-Z]{2}-?[A-Z0-9]{3}-?\d{2}-?\d{5}$', re.I)
+_UPC_RE = re.compile(r'^\d{8,14}$')
+
+
+def _isrcs(rutas, carpeta, db, maximo=4):
+    """{isrc: ruta dañada o None} para buscar la edición: primero los de las pistas dañadas (tags o Orbyte), después
+    los de algunas pistas sanas del álbum (también identifican la edición)."""
+    out = {}
+    for r in rutas:
+        i = (_tags(r).get('isrc') or _bd_pista(db, r).get('isrc') or '').strip().upper()
+        if i and i not in out:
+            out[i] = r
+    for a in sorted(tienda._audios(carpeta)):
+        if len(out) >= maximo:
+            break
+        if os.path.realpath(a) in rutas:
+            continue
+        i = (_tags(a).get('isrc') or '').strip().upper()
+        if i and i not in out:
+            out[i] = None
+    return out
+
+
 def _ediciones_de(busqueda):
-    """Búsqueda manual: texto libre o enlace de Tidal (álbum o pista). → (ediciones, id de pista del enlace)."""
+    """Búsqueda manual: texto libre, enlace de Tidal (álbum o pista), ISRC o código de barras.
+    → (ediciones, id de pista del enlace o del ISRC)."""
     c = tienda.cliente('tidal')
+    q = (busqueda or '').strip()
+    if _ISRC_RE.match(q):
+        pares = c.pistas_por_isrc(q.replace('-', ''))
+        return [dict(a, como='mismo ISRC') for _t, a in pares], (pares[0][0] if pares else None)
+    if _UPC_RE.match(q.replace(' ', '')):
+        return [dict(v, como='mismo código de barras') for v in c.albumes_por_upc(q.replace(' ', ''))], None
     m = _TIDAL_URL_RE.search(busqueda or '')
     if m:
         tipo, i = m.group(1).lower(), m.group(2)
@@ -259,9 +289,31 @@ def _ediciones_de(busqueda):
     return [dict(v, como='búsqueda manual') for v in c.buscar_albumes(busqueda, limite=25)], None
 
 
-def _ediciones(artista, album, n_pistas, upc=None):
+def _ediciones(artista, album, n_pistas, upc=None, isrcs=None):
+    """Ediciones candidatas: primero las del mismo código de barras y las de los mismos ISRC (búsqueda directa por
+    código: encuentra la edición aunque el título en Tidal sea distinto), después la búsqueda por artista y título.
+    Cada edición hallada por el ISRC de una pista dañada trae `pista_isrc` {ruta: id de pista de Tidal}."""
     c = tienda.cliente('tidal')
-    cands = c.buscar_albumes(f'{artista} {album}', limite=25)
+    por_codigo = []
+    if upc:
+        try:
+            por_codigo += [dict(v, como='mismo código de barras') for v in c.albumes_por_upc(upc)]
+        except Exception as e:  # noqa: BLE001
+            log.warning('Reparar: búsqueda por código de barras %s: %s', upc, e)
+    for isrc, ruta in (isrcs or {}).items():
+        try:
+            pares = c.pistas_por_isrc(isrc)
+        except Exception as e:  # noqa: BLE001
+            log.warning('Reparar: búsqueda por ISRC %s: %s', isrc, e)
+            continue
+        for tid, a in pares:
+            ya = next((v for v in por_codigo if v['id'] == a['id']), None)
+            if not ya:
+                ya = dict(a, como='mismo ISRC', pista_isrc={})
+                por_codigo.append(ya)
+            if ruta:
+                ya.setdefault('pista_isrc', {})[ruta] = tid
+    cands = c.buscar_albumes(f'{artista} {album}', limite=25) if artista and album else []
     if not any(v.get('n_pistas') == n_pistas and rescate._parecido(v.get('titulo'), album) >= 0.9 for v in cands):
         try:
             _n, disco = c.buscar_artista(artista)
@@ -275,9 +327,15 @@ def _ediciones(artista, album, n_pistas, upc=None):
         mismo_upc = bool(upc) and str(v.get('upc') or '').lstrip('0') == upc
         if mismo_upc or (rescate._parecido(v.get('titulo'), album) >= 0.85 and rescate._parecido(v.get('artista'), artista) >= 0.8):
             salida.append(dict(v, como='mismo código de barras' if mismo_upc else 'mismo artista y título'))
+    vistos = {v['id'] for v in por_codigo}
+    salida = [v for v in salida if v['id'] not in vistos]
     salida.sort(key=lambda v: (v['como'] != 'mismo código de barras', abs((v.get('n_pistas') or 0) - (n_pistas or 0)),
                                not v.get('hires')))
-    return salida
+    # por código primero: el código de barras manda; entre los ISRC, la edición con más pistas en común y con el
+    # mismo número de pistas
+    por_codigo.sort(key=lambda v: (v['como'] != 'mismo código de barras', -len(v.get('pista_isrc') or {}),
+                                   abs((v.get('n_pistas') or 0) - (n_pistas or 0)), not v.get('hires')))
+    return por_codigo + salida
 
 
 def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
@@ -304,10 +362,9 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
         tienda.preparar_tidal()                         # sesión PKCE renovada (la búsqueda también la usa)
         if busqueda:
             eds, pista_enlace = _ediciones_de(busqueda)
-        elif artista and album:
-            eds = _ediciones(artista, album, n_pistas, upc)
         else:
-            eds = []
+            isrcs = _isrcs(rutas, carpeta, db)
+            eds = _ediciones(artista, album, n_pistas, upc, isrcs) if (artista and album) or upc or isrcs else []
     except Fallo:
         raise
     except Exception as e:  # noqa: BLE001
@@ -328,7 +385,8 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
     pistas_t = tienda.cliente('tidal').pistas(ed['id'])
     if pista_enlace and len(rutas) == 1 and rutas[0] not in elegir and str(ed['id']) == str(eds[0]['id']):
         elegir[rutas[0]] = pista_enlace
-    items = [_item(r, carpeta, db, pistas_t, elegir.get(r), album_q) for r in rutas]
+    por_isrc = ed.get('pista_isrc') or {}             # la misma grabación (ISRC) en esa edición
+    items = [_item(r, carpeta, db, pistas_t, elegir.get(r), album_q, por_isrc.get(r)) for r in rutas]
     campos = ('id', 'titulo', 'artista', 'anio', 'n_pistas', 'hires', 'como', 'portada')
     return dict(base, aviso=None,
                 edicion={k: ed.get(k) for k in campos + ('url',)},
@@ -337,7 +395,7 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
                 pistas=items)
 
 
-def _item(r, carpeta, db, pistas_t, elegida, album_q):
+def _item(r, carpeta, db, pistas_t, elegida, album_q, por_isrc=None):
     f, bd = _ficha(r, db)
     b, s = calidad_archivo(r)
     it = {'ruta': r, 'archivo': os.path.relpath(r, carpeta), 'titulo': f.get('titulo'), 'disco': f.get('disco'),
@@ -355,7 +413,11 @@ def _item(r, carpeta, db, pistas_t, elegida, album_q):
         p = next((x for x in pistas_t if str(x['id']) == str(elegida)), None)
         it['manual'] = True
     else:
-        p = rescate.emparejar(f, pistas_t)
+        p = next((x for x in pistas_t if str(x['id']) == str(por_isrc)), None) if por_isrc else None
+        if p:
+            it['como'] = 'mismo ISRC'
+        else:
+            p = rescate.emparejar(f, pistas_t)
     if not p:
         it.update(reparable=False, motivo='esa pista no está en la edición elegida' if elegida
                   else 'no hay una pista segura en esa edición: elígela')
@@ -599,6 +661,8 @@ def _orbyte(ruta, aj, bits, sr, reg):
                                    aj.get('biblioteca') or '/mnt/musica', '--quiet'], reg, aj, metadata.LIMITE_S['index'])
     except Exception as e:  # noqa: BLE001
         reg(f'   ⚠ Orbyte no releyó el álbum ({e}); se verá al correr la metadata')
+    else:
+        metadata.limpiar_sin_archivo(db, fila[1], reg)
     con = sqlite3.connect(db, timeout=60)
     try:
         with con:                                       # el indexador no toca el LED (campo curado): FLAC PCM
