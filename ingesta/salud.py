@@ -374,14 +374,15 @@ class Salud:
         self.hechas += 1
         self.restante_audio -= p['duracion']
 
-    def _revisar(self, p):
+    def _revisar(self, p, contar=True):
         ruta = p['ruta']
         try:
             st = os.stat(ruta)
         except OSError:
             self._guardar(ruta, p['album_id'], None, None, 'falta', ['el archivo no está en la biblioteca'], None,
                           p['duracion'])
-            self._contar(p)
+            if contar:
+                self._contar(p)
             return
         ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
         estado, notas = clasificar(ruta, ok, errores, seg, p['duracion'])
@@ -393,7 +394,8 @@ class Salud:
             else:
                 notas = [nota] + list(notas)          # primero: se guardan solo las 4 primeras
         self._guardar(ruta, p['album_id'], st.st_size, st.st_mtime, estado, notas, seg, p['duracion'])
-        self._contar(p)
+        if contar:
+            self._contar(p)
 
     def _contar(self, p):
         with self._lock:
@@ -470,6 +472,56 @@ class Salud:
                 out[ruta] = {'midiendo': True}
         return out
 
+    @staticmethod
+    def _cambio(f):
+        """¿El archivo ya no es el que se revisó?"""
+        try:
+            st = os.stat(f['ruta'])
+        except OSError:
+            return False                      # sigue sin estar: el resultado («falta») vale
+        if f['estado'] == 'falta' or f['tamano'] is None:
+            return True                       # volvió a aparecer
+        return f['tamano'] != st.st_size or abs((f['mtime'] or 0) - st.st_mtime) >= 1
+
+    def revisar_una(self, ruta):
+        """«Volver a revisar» (11-11-2026): la misma revisión que el ciclo, para una pista, ya.
+        Sin re-escanear la biblioteca. La duración se toma de music.db (la pista pudo cambiar)."""
+        with self._con() as c:
+            f = c.execute('SELECT album_id, duracion FROM pistas WHERE ruta=?', (ruta,)).fetchone()
+        album_id, dur = (f['album_id'], f['duracion']) if f else (None, None)
+        try:
+            con = sqlite3.connect(f'file:{self._db_orbyte()}?mode=ro', uri=True, timeout=30)
+            try:
+                r = con.execute('SELECT album_id, duration FROM tracks WHERE file_path=?', (ruta,)).fetchone()
+            finally:
+                con.close()
+            if r:
+                album_id, dur = r[0], (r[1] or dur)
+        except sqlite3.Error:
+            pass
+        p = {'ruta': ruta, 'album_id': album_id, 'duracion': dur or 0}
+        self._revisar(p, contar=False)
+        with self._con() as c:
+            e = c.execute('SELECT estado FROM pistas WHERE ruta=?', (ruta,)).fetchone()
+        estado = e['estado'] if e else None
+        log.info('Salud: vuelta a revisar %s → %s', ruta, estado)
+        if estado == 'ok':
+            self._quitar_ignorado_si_sano(ruta)
+        return estado
+
+    def _quitar_ignorado_si_sano(self, ruta):
+        """Si el álbum estaba ignorado y ya no le queda nada malo, sale de Ignorados solo."""
+        carpeta = analisis.carpeta_album(os.path.dirname(ruta))
+        with self._con() as c:
+            if not c.execute('SELECT 1 FROM ignorados WHERE album=?', (carpeta,)).fetchone():
+                return
+            quedan = c.execute(
+                f'SELECT COUNT(*) FROM pistas WHERE estado IN ({",".join("?" * len(PROBLEMAS))}) '
+                f'AND (ruta LIKE ? ESCAPE \'\\\')', (*PROBLEMAS, _like_prefijo(carpeta))).fetchone()[0]
+        if not quedan:
+            self.ignorar(carpeta, False)
+            log.info('Salud: %s quedó sano y salió de Ignorados', carpeta)
+
     def guardar_medida(self, ruta, datos):
         st = os.stat(ruta)
         with self._lock, self._con() as c:
@@ -527,7 +579,7 @@ class Salud:
         """Álbumes con pistas dañadas, con errores o que faltan (solo pistas que siguen en music.db)."""
         with self._con() as c:
             filas = [dict(r) for r in c.execute(
-                f'SELECT ruta, album_id, estado, errores, segundos, duracion FROM pistas WHERE estado IN '
+                f'SELECT ruta, album_id, tamano, mtime, estado, errores, segundos, duracion FROM pistas WHERE estado IN '
                 f'({",".join("?" * len(PROBLEMAS))})', PROBLEMAS)]
             ign = {r['album'] for r in c.execute('SELECT album FROM ignorados')}
         if not filas:
@@ -553,9 +605,15 @@ class Salud:
         finally:
             con.close()
         por_album = {}
+        cambiadas = []
         for f in filas:
             t = vigentes.get(f['ruta'])
             if not t or t['album_id'] not in albumes:
+                continue
+            # Reemplazada desde que se revisó (otro tamaño u otra fecha; o volvió a aparecer
+            # una que faltaba): no se muestra el resultado viejo, se revisa de nuevo ya.
+            if self._cambio(f):
+                cambiadas.append(f['ruta'])
                 continue
             a = albumes[t['album_id']]
             carpeta = analisis.carpeta_album(a['path'])      # «Álbum/CD 2» se muestra como «Álbum»
@@ -572,6 +630,8 @@ class Salud:
                                 'errores': errs[:2], 'disco': t.get('disc_number'),
                                 'numero': t.get('track_number'), 'titulo': t.get('title'),
                                 'segundos': f['segundos'], 'duracion': f['duracion']})
+        if cambiadas and getattr(self, 'saneador', None):
+            self.saneador.revisar(cambiadas)
         out = list(por_album.values())
         medidas = self.medidas([p['ruta'] for g in out for p in g['pistas'] if p['ruta'].lower().endswith('.flac')
                                 and p['estado'] in ('errores', 'danada')])
@@ -736,7 +796,7 @@ class Saneador:
             for r in rutas:
                 if (accion, r) not in ya:
                     if accion in ('sanear', 'forzar'):
-                        self._cola.insert(sum(1 for a, _ in self._cola if a != 'medir'), (accion, r))
+                        self._cola.insert(sum(1 for a, _ in self._cola if a not in ('medir', 'revisar')), (accion, r))
                     else:
                         self._cola.append((accion, r))
         self._ev.set()
@@ -744,13 +804,27 @@ class Saneador:
     def medir(self, rutas):
         self._poner('medir', rutas)
 
+    def revisar(self, rutas):
+        """«Volver a revisar»: antes que las mediciones (es lo que el usuario está mirando)."""
+        with self._lock:
+            ya = set(self._cola) | ({self.actual} if self.actual else set())
+            pos = sum(1 for a, _ in self._cola if a != 'medir')
+            for r in rutas:
+                if ('revisar', r) not in ya:
+                    self._cola.insert(pos, ('revisar', r))
+                    pos += 1
+        self._ev.set()
+
     def sanear(self, rutas, forzar=False):
         self._poner('forzar' if forzar else 'sanear', rutas)
 
     def estado(self):
         with self._lock:
             return {'actual': self.actual, 'medir': sum(1 for a, _ in self._cola if a == 'medir'),
-                    'sanear': [r for a, r in self._cola if a != 'medir'], 'ultimos': self.ultimos[-30:]}
+                    'sanear': [r for a, r in self._cola if a in ('sanear', 'forzar')],
+                    'revisar': [r for a, r in self._cola if a == 'revisar'] + (
+                        [self.actual[1]] if self.actual and self.actual[0] == 'revisar' else []),
+                    'ultimos': self.ultimos[-30:]}
 
     def _correr(self, accion, ruta, *extra):
         os.makedirs(self.tmp, exist_ok=True)
@@ -771,6 +845,9 @@ class Saneador:
                 self.actual = self._cola.pop(0)
             accion, ruta = self.actual
             try:
+                if accion == 'revisar':
+                    self.salud.revisar_una(ruta)
+                    continue
                 if not os.path.isfile(ruta):
                     continue
                 if accion == 'medir':
@@ -811,3 +888,9 @@ class Saneador:
         self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': estado == 'ok',
                              'texto': nota if estado == 'ok' else f'{nota}, pero ffmpeg todavía avisa: '
                                                                     f'{"; ".join(errores[:2])}'})
+
+
+def _like_prefijo(carpeta):
+    """Patrón LIKE para «todo lo que está dentro de `carpeta`» (escapa % y _)."""
+    c = carpeta.rstrip('/').replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+    return c + '/%'

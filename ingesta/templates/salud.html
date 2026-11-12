@@ -274,7 +274,7 @@ function vigilarSanear() {
       sanPrevio = n;
     }
     await cargarDanadas();
-    if (sanEst.actual || sanEst.medir || sanEst.sanear.length) vigilarSanear();
+    if (sanEst.actual || sanEst.medir || sanEst.sanear.length || (sanEst.revisar || []).length) vigilarSanear();
   }, 5000);
 }
 async function cargarDanadas() {
@@ -283,6 +283,7 @@ async function cargarDanadas() {
   if (!r.ok) { document.getElementById('l-danadas').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
   danadas = r.albumes; raiz = r.raiz;
   if (!verIgn) document.getElementById('n-danadas').textContent = danadas.length;
+  if (r.revisando) { sanEst = Object.assign(sanEst || {sanear: [], ultimos: []}, {revisar: Array(r.revisando).fill('')}); vigilarSanear(); }
   pintarDanadas();
 }
 function pintarDanadas() {
@@ -304,7 +305,11 @@ function pintarDanadas() {
       ${nMid ? `<div class="s med">Midiendo ${nMid} pista${nMid > 1 ? 's' : ''}…</div>` : ''}
       ${sanEst && sanEst.actual && sanEst.actual[0] === 'sanear' ? `<div class="s med">Saneando ${esc(sanEst.actual[1].split('/').pop())}${sanEst.sanear.length ? ` · ${sanEst.sanear.length} en cola` : ''}</div>` : ''}</div>
       <div class="acciones" style="margin:0">${nSan ? `<button class="btn chico oro" id="san-todas">Sanear todas las de menos de 1 s (${nSan})</button>` : ''}</div></div></div>` : '';
-  cont.innerHTML = sanPanel + (nTags && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nTags} MP3 con la letra incrustada mal escrita</div>
+  const nRev = sanEst && sanEst.revisar ? sanEst.revisar.length : 0;
+  const revPanel = `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nRev ? `Revisando ${nRev} pista${nRev > 1 ? 's' : ''}…` : 'Volver a revisar'}</div>
+      <div class="s tenue">Las pistas reemplazadas (otro tamaño u otra fecha) se vuelven a revisar solas al abrir esta lista. Para forzarlo, «Volver a revisar» en cada álbum, o todo lo que se ve con el filtro actual. No re-escanea la biblioteca.</div></div>
+      <div class="acciones" style="margin:0"><button class="btn chico" id="revisar-todo"${lista.length ? '' : ' disabled'}>Volver a revisar todo lo de la lista (${lista.reduce((n, a) => n + a.pistas.length, 0)})</button></div></div></div>`;
+  cont.innerHTML = revPanel + sanPanel + (nTags && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nTags} MP3 con la letra incrustada mal escrita</div>
       <div class="s tenue">El audio está bien: solo el tag de la letra (o un comentario) trae la marca UTF-16 mala. «Reparar tags» lo reescribe en UTF-8 con el mismo texto, sin tocar el audio.</div></div>
       <div class="acciones" style="margin:0"><button class="btn chico oro" id="tags-todas">Reparar los tags de todas (${nTags})</button></div></div></div>` : '')
     + lista.map((a, i) => `<div class="panel s-album">
@@ -316,6 +321,7 @@ function pintarDanadas() {
         ${a.pistas.some(p => p.estado !== 'falta' && !p.solo_tags) ? `<button class="btn chico oro" data-rep="${i}" title="Baja de Tidal solo las pistas dañadas y las reemplaza con su misma metadata">Reparar pistas dañadas</button>` : ''}
         ${a.falta ? `<button class="btn chico" data-sinarch="${i}" title="Quita de Orbyte las filas de archivos que ya no están; playlists y favoritos pasan a la pista equivalente del álbum">Quitar ${a.falta === 1 ? 'la fila' : `las ${a.falta} filas`} sin archivo</button>` : ''}
         <a class="btn chico" href="${buscarUrl(a.artista, a.album)}">Re-descargar el álbum</a>
+        <button class="btn chico" data-revisar="${i}" title="Vuelve a revisar solo estas pistas (por ejemplo, después de reemplazarlas); no re-escanea la biblioteca">Volver a revisar</button>
         <a class="btn chico" href="/biblioteca/album/${a.album_id}">Abrir ficha</a>
         <button class="btn chico" data-ign="${i}">${verIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div>
     <details><summary class="s">Ver pistas (${a.pistas.length})</summary>
@@ -347,6 +353,16 @@ function pintarDanadas() {
     toast(`${r.en_cola} pista${r.en_cola === 1 ? '' : 's'} en cola para sanear`, 'Una a la vez y con prioridad mínima: se van actualizando solas');
     vigilarSanear();
   };
+  const revisar = async (albumes, b) => {
+    b.disabled = true; b.textContent = 'Encargando…';
+    const r = await post('/api/salud/revisar', {rutas: albumes.flatMap(a => a.pistas.map(p => p.ruta))});
+    if (!r.ok) { toast('No se pudo', r.error); b.disabled = false; b.textContent = 'Volver a revisar'; return; }
+    toast(`${r.en_cola} pista${r.en_cola === 1 ? '' : 's'} en cola para revisar`, 'Una a la vez y con prioridad mínima: las que estén bien salen solas de la lista');
+    vigilarSanear();
+  };
+  cont.querySelectorAll('[data-revisar]').forEach(b => b.onclick = () => revisar([lista[+b.dataset.revisar]], b));
+  const brt = document.getElementById('revisar-todo');
+  if (brt) brt.onclick = () => revisar(lista, brt);
   cont.querySelectorAll('[data-forzar]').forEach(b => b.onclick = async () => {
     if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = '¿Seguro? Sanear igual'; return; }
     b.disabled = true; b.textContent = 'Encargando…';
@@ -410,7 +426,7 @@ window.alEncolarReparacion = cargarReparaciones;
 cargarDiscos();
 cargarEstado();
 fetch('/api/salud/sanear').then(r => r.json()).then(r => { sanEst = r; sanPrevio = (r.ultimos || []).length;
-  if (r.actual || r.medir || r.sanear.length) vigilarSanear(); }).catch(() => {});
+  if (r.actual || r.medir || r.sanear.length || (r.revisar || []).length) vigilarSanear(); }).catch(() => {});
 cargarDanadas();
 cargarReparaciones();
 setInterval(cargarReparaciones, 6000);
