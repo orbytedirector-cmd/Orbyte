@@ -104,6 +104,11 @@ def _ingesta_ocupada():
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
 saneador = salud_mod.Saneador(salud, DATOS, REPO)
+try:            # los que se juntaron antes de que hubiera límite (llegaron a 274 / 78 GB)
+    if almacen.ajustes().get('db_orbyte'):
+        artistas_mod.podar_respaldos(almacen.ajustes()['db_orbyte'], log.info)
+except Exception:  # noqa: BLE001
+    log.exception('No se pudieron podar los respaldos de la base')
 
 
 
@@ -1932,6 +1937,35 @@ def api_salud_sanear():
           or forzar and _forzable(med.get(r) or {})]
     saneador.sanear(ok, forzar=forzar)
     return jsonify(ok=True, en_cola=len(ok), saltadas=len(rutas) - len(ok))
+
+
+@app.route('/api/salud/espacio')
+def api_salud_espacio():
+    """Lo que ocupa lo que la ingesta guarda por las dudas: respaldos de music.db y originales de Sanear."""
+    db = _db_orbyte()
+    try:
+        bytes_db = os.path.getsize(db) if db else None
+    except OSError:
+        bytes_db = None
+    resp = artistas_mod.respaldos(db) if db else []
+    orig = salud.originales()
+    return jsonify(ok=True, db=db, bytes_db=bytes_db, respaldos=resp, conservar=artistas_mod.RESPALDOS_A_CONSERVAR,
+                   bytes_respaldos=sum(r['bytes'] for r in resp), originales=orig,
+                   bytes_originales=sum(o['bytes'] for o in orig), raiz=almacen.ajustes().get('biblioteca') or '')
+
+
+@app.route('/api/salud/espacio/originales/borrar', methods=['POST'])
+def api_salud_borrar_originales():
+    """«Borrar los originales ya saneados»: todos, o los de `respaldos` (rutas dentro de .orbyte-respaldo/)."""
+    d = request.get_json(silent=True) or {}
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    lista = d.get('respaldos')
+    if lista is not None and not (isinstance(lista, list) and all(isinstance(r, str) for r in lista)):
+        return jsonify(ok=False, error='Lista inválida'), 400
+    if not d.get('todos') and not lista:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    return jsonify(ok=True, **salud.borrar_originales(None if d.get('todos') else lista))
 
 
 @app.route('/api/salud/revisar', methods=['POST'])
