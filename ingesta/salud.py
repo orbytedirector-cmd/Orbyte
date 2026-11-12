@@ -789,6 +789,9 @@ class Saneador:
         self.rev_total = 0          # pistas encargadas en la tanda actual
         self.rev_hechas = 0
         self.rev_desde = None       # cuándo empezó la pista que se está revisando
+        self.san_total = 0          # Sanear: pistas encargadas en la tanda actual
+        self.san_hechas = 0
+        self.desde = None           # cuándo empezó lo que se está haciendo (sanear o medir)
         salud.saneador = self
         threading.Thread(target=self._bucle, name='saneador', daemon=True).start()
 
@@ -823,6 +826,12 @@ class Saneador:
         self._ev.set()
 
     def sanear(self, rutas, forzar=False):
+        with self._lock:
+            if not any(a in ('sanear', 'forzar') for a, _ in self._cola) and not (
+                    self.actual and self.actual[0] in ('sanear', 'forzar')):
+                self.san_total = self.san_hechas = 0          # tanda nueva
+            ya = set(self._cola) | ({self.actual} if self.actual else set())
+            self.san_total += sum(1 for r in rutas if ('forzar' if forzar else 'sanear', r) not in ya)
         self._poner('forzar' if forzar else 'sanear', rutas)
 
     def estado(self):
@@ -835,7 +844,10 @@ class Saneador:
                     'revisadas': self.revisadas[-40:], 'rev_total': self.rev_total, 'rev_hechas': self.rev_hechas,
                     'rev_actual': self.actual[1] if self.actual and self.actual[0] == 'revisar' else None,
                     'rev_seg': round(time.time() - self.rev_desde) if self.rev_desde and self.actual
-                    and self.actual[0] == 'revisar' else None}
+                    and self.actual[0] == 'revisar' else None,
+                    'san_total': self.san_total, 'san_hechas': self.san_hechas,
+                    'accion': self.actual[0] if self.actual else None,
+                    'seg': round(time.time() - self.desde) if self.desde and self.actual else None}
 
     def _correr(self, accion, ruta, *extra):
         os.makedirs(self.tmp, exist_ok=True)
@@ -874,12 +886,17 @@ class Saneador:
                 if not os.path.isfile(ruta):
                     continue
                 if accion == 'medir':
+                    self.desde = time.time()
                     m = self._correr('medir', ruta)
                     if 'error' in m and 'ms' not in m:
                         m = {'fatal': m['error'], 'saneable': False}
                     self.salud.guardar_medida(ruta, m)
                 else:
-                    self._sanear(ruta, forzar=accion == 'forzar')
+                    self.desde = time.time()
+                    try:
+                        self._sanear(ruta, forzar=accion == 'forzar')
+                    finally:
+                        self.san_hechas += 1
             except Exception:  # noqa: BLE001
                 log.exception('Sanear: %s %s', accion, ruta)
             finally:
@@ -892,7 +909,8 @@ class Saneador:
         nombre = os.path.basename(ruta)
         if not r.get('ok'):
             log.warning('Sanear: %s: %s', ruta, r.get('error'))
-            self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': False, 'texto': r.get('error')})
+            self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': False, 'texto': r.get('error'),
+                                 'album': self._album_de(ruta), 'seg': self._seg(), 'cuando': int(time.time())})
             return
         ms = r['ms'] or 0
         ms_txt = f'{ms / 1000:.1f} s'.replace('.', ',') if ms >= 1000 else f'{ms:g} ms'.replace('.', ',')
@@ -910,7 +928,17 @@ class Saneador:
         self.salud.guardar_medida(ruta, dict(r, saneable=False, saneada=True))
         self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': estado == 'ok',
                              'texto': nota if estado == 'ok' else f'{nota}, pero ffmpeg todavía avisa: '
-                                                                    f'{"; ".join(errores[:2])}'})
+                                                                    f'{"; ".join(errores[:2])}',
+                             'ms': r.get('ms'), 'tramos': r.get('tramos'), 'album': self._album_de(ruta),
+                             'seg': self._seg(), 'cuando': int(time.time())})
+        del self.ultimos[:-200]
+
+    def _seg(self):
+        return round(time.time() - self.desde) if self.desde else None
+
+    @staticmethod
+    def _album_de(ruta):
+        return os.path.basename(analisis.carpeta_album(os.path.dirname(ruta)))
 
 
 def _like_prefijo(carpeta):

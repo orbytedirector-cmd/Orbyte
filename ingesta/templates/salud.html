@@ -262,7 +262,7 @@ document.getElementById('guardar-ritmo').onclick = async () => {
 };
 
 // ── resultados ──
-let revAbierto = false;
+let revAbierto = false, sanAbierto = false;
 let sanEst = null, abiertosDan = new Set(), sanTimer = null, sanPrevio = 0;
 function vigilarSanear() {
   if (sanTimer) return;
@@ -280,6 +280,7 @@ function vigilarSanear() {
 }
 async function cargarDanadas() {
   const rd = document.getElementById('rev-detalle'); if (rd) revAbierto = rd.open;
+  const sd = document.getElementById('san-detalle'); if (sd) sanAbierto = sd.open;
   document.querySelectorAll('#l-danadas details[data-c]').forEach(d => d.open ? abiertosDan.add(d.dataset.c) : abiertosDan.delete(d.dataset.c));
   const r = await (await fetch('/api/salud/danadas' + (verIgn ? '?ignorados=1' : ''))).json();
   if (!r.ok) { document.getElementById('l-danadas').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
@@ -301,10 +302,18 @@ function pintarDanadas() {
   const nTags = lista.reduce((n, a) => n + (a.tags || 0), 0);
   const nSan = lista.reduce((n, a) => n + (a.saneables || 0), 0);
   const nMid = lista.reduce((n, a) => n + a.pistas.filter(p => p.medida && p.medida.midiendo).length, 0);
-  const sanPanel = (nSan || nMid || (sanEst && (sanEst.actual || sanEst.sanear.length))) && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">FLAC con cuadros dañados</div>
-      <div class="s tenue">Sanear rellena cada cuadro dañado continuando la forma de onda de ambos lados (pasa desapercibido y ningún dispositivo se traba), con los mismos bits, frecuencia, tags y carátula. Solo si se pierde menos de 1 s en total; el original queda en «.orbyte-respaldo» dentro de la carpeta del álbum.</div>
-      ${nMid ? `<div class="s med">Midiendo ${nMid} pista${nMid > 1 ? 's' : ''}…</div>` : ''}
-      ${sanEst && sanEst.actual && sanEst.actual[0] === 'sanear' ? `<div class="s med">Saneando ${esc(sanEst.actual[1].split('/').pop())}${sanEst.sanear.length ? ` · ${sanEst.sanear.length} en cola` : ''}</div>` : ''}</div>
+  const sTot = sanEst && sanEst.san_total || 0, sHechas = sanEst && sanEst.san_hechas || 0;
+  const saneando = !!(sanEst && sanEst.actual && ['sanear', 'forzar'].includes(sanEst.actual[0]));
+  const midiendoAhora = !!(sanEst && sanEst.actual && sanEst.actual[0] === 'medir');
+  const saneadas = (sanEst && sanEst.ultimos || []).slice(-12).reverse();
+  const sOk = (sanEst && sanEst.ultimos || []).slice(-(sHechas || 0)).filter(x => x.ok).length;
+  const sanPanel = (nSan || nMid || sTot || saneando || (sanEst && sanEst.sanear && sanEst.sanear.length)) && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div style="min-width:0"><div class="t">${saneando ? `Saneando ${Math.min(sHechas + 1, sTot || 1)} de ${sTot || 1}…` : (sTot ? `Saneo terminado: ${sHechas} de ${sTot}` : 'FLAC con cuadros dañados')}</div>
+      ${saneando ? `<div class="s med">${esc(sanEst.actual[1].split('/').slice(-2).join(' / '))}${sanEst.seg != null ? ` · ${sanEst.seg} s` : ''}</div>` : ''}
+      ${sTot ? `<div class="s tenue">${sOk} saneadas y verificadas · ${sHechas - sOk} con problema (ver abajo). Cada una se decodifica, se rellena, se vuelve a codificar y se verifica antes de reemplazar el original.</div>`
+        : `<div class="s tenue">Sanear rellena cada cuadro dañado continuando la forma de onda de ambos lados (pasa desapercibido y ningún dispositivo se traba), con los mismos bits, frecuencia, tags y carátula. Solo si se pierde menos de 1 s en total; el original queda en «.orbyte-respaldo» dentro de la carpeta del álbum.</div>`}
+      ${nMid ? `<div class="s med">Midiendo ${nMid} pista${nMid > 1 ? 's' : ''}…${midiendoAhora ? ` ahora: ${esc(sanEst.actual[1].split('/').pop())}${sanEst.seg != null ? ` · ${sanEst.seg} s` : ''}` : ''}</div>` : ''}
+      ${saneadas.length ? `<details id="san-detalle" style="margin-top:.4rem"${saneando || sanAbierto ? ' open' : ''}><summary class="s">Últimas saneadas (${saneadas.length})</summary><table class="tabla"><tr><th>Álbum</th><th>Pista</th><th>Resultado</th><th>Tiempo</th></tr>
+        ${saneadas.map(x => `<tr><td>${esc(x.album || '')}</td><td>${esc(x.archivo)}</td><td><span class="${x.ok ? 'ok' : 'mal'}">${x.ok ? 'saneada ✓' : 'no se pudo'}</span><div class="s tenue">${esc(x.texto || '')}</div></td><td class="num">${x.seg != null ? x.seg + ' s' : '—'}</td></tr>`).join('')}</table></details>` : ''}</div>
       <div class="acciones" style="margin:0">${nSan ? `<button class="btn chico oro" id="san-todas">Sanear todas las de menos de 1 s (${nSan})</button>` : ''}</div></div></div>` : '';
   const nRev = sanEst && sanEst.revisar ? sanEst.revisar.length : 0;
   const ESTADO_REV = {ok: ['ok', 'bien · sale de la lista'], errores: ['med', 'sigue con errores'],
@@ -320,7 +329,7 @@ function pintarDanadas() {
         ${revisadas.map(x => { const e = ESTADO_REV[x.estado] || ['tenue', x.estado || '—']; return `<tr><td>${esc(x.album)}</td><td>${esc(x.archivo)}</td><td><span class="${e[0]}">${e[1]}</span>${x.nota && x.estado !== 'ok' ? `<div class="s tenue">${esc(x.nota)}</div>` : ''}</td><td class="num">${x.seg} s</td></tr>`; }).join('')}</table></details>` : ''}</div>
       <div class="acciones" style="margin:0"><button class="btn chico" id="revisar-todo"${lista.length ? '' : ' disabled'}>Volver a revisar todo lo de la lista (${lista.reduce((n, a) => n + a.pistas.length, 0)})</button></div></div></div>`;
   if (!lista.length) {   // sin nada en la lista: igual se ve cómo terminó la revisión
-    cont.innerHTML = (tot || nRev ? revPanel : '') + `<div class="sin-problemas">${verIgn ? 'No hay álbumes ignorados.' : 'Ninguna pista con problemas entre las revisadas.'}</div>`;
+    cont.innerHTML = (tot || nRev ? revPanel : '') + (sTot && !verIgn ? sanPanel : '') + `<div class="sin-problemas">${verIgn ? 'No hay álbumes ignorados.' : 'Ninguna pista con problemas entre las revisadas.'}</div>`;
     return;
   }
   cont.innerHTML = revPanel + sanPanel + (nTags && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nTags} MP3 con la letra incrustada mal escrita</div>
