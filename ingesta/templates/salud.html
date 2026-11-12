@@ -262,6 +262,7 @@ document.getElementById('guardar-ritmo').onclick = async () => {
 };
 
 // ── resultados ──
+let revAbierto = false;
 let sanEst = null, abiertosDan = new Set(), sanTimer = null, sanPrevio = 0;
 function vigilarSanear() {
   if (sanTimer) return;
@@ -278,6 +279,7 @@ function vigilarSanear() {
   }, 5000);
 }
 async function cargarDanadas() {
+  const rd = document.getElementById('rev-detalle'); if (rd) revAbierto = rd.open;
   document.querySelectorAll('#l-danadas details[data-c]').forEach(d => d.open ? abiertosDan.add(d.dataset.c) : abiertosDan.delete(d.dataset.c));
   const r = await (await fetch('/api/salud/danadas' + (verIgn ? '?ignorados=1' : ''))).json();
   if (!r.ok) { document.getElementById('l-danadas').innerHTML = `<div class="flash error">${esc(r.error)}</div>`; return; }
@@ -297,7 +299,6 @@ function pintarDanadas() {
   const lista = danadas.filter(a => pasa(a, fDan));
   const cont = document.getElementById('l-danadas');
   const nTags = lista.reduce((n, a) => n + (a.tags || 0), 0);
-  if (!lista.length) { cont.innerHTML = `<div class="sin-problemas">${verIgn ? 'No hay álbumes ignorados.' : 'Ninguna pista con problemas entre las revisadas.'}</div>`; return; }
   const nSan = lista.reduce((n, a) => n + (a.saneables || 0), 0);
   const nMid = lista.reduce((n, a) => n + a.pistas.filter(p => p.medida && p.medida.midiendo).length, 0);
   const sanPanel = (nSan || nMid || (sanEst && (sanEst.actual || sanEst.sanear.length))) && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">FLAC con cuadros dañados</div>
@@ -306,9 +307,22 @@ function pintarDanadas() {
       ${sanEst && sanEst.actual && sanEst.actual[0] === 'sanear' ? `<div class="s med">Saneando ${esc(sanEst.actual[1].split('/').pop())}${sanEst.sanear.length ? ` · ${sanEst.sanear.length} en cola` : ''}</div>` : ''}</div>
       <div class="acciones" style="margin:0">${nSan ? `<button class="btn chico oro" id="san-todas">Sanear todas las de menos de 1 s (${nSan})</button>` : ''}</div></div></div>` : '';
   const nRev = sanEst && sanEst.revisar ? sanEst.revisar.length : 0;
-  const revPanel = `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nRev ? `Revisando ${nRev} pista${nRev > 1 ? 's' : ''}…` : 'Volver a revisar'}</div>
-      <div class="s tenue">Las pistas reemplazadas (otro tamaño u otra fecha) se vuelven a revisar solas al abrir esta lista. Para forzarlo, «Volver a revisar» en cada álbum, o todo lo que se ve con el filtro actual. No re-escanea la biblioteca.</div></div>
+  const ESTADO_REV = {ok: ['ok', 'bien · sale de la lista'], errores: ['med', 'sigue con errores'],
+                      danada: ['mal', 'sigue dañada'], falta: ['mal', 'el archivo no está']};
+  const revisadas = (sanEst && sanEst.revisadas || []).slice(-12).reverse();
+  const tot = sanEst && sanEst.rev_total || 0, hechas = sanEst && sanEst.rev_hechas || 0;
+  const bien = (sanEst && sanEst.revisadas || []).slice(-(hechas || 0)).filter(x => x.estado === 'ok').length;
+  const revPanel = `<div class="panel s-album"><div class="s-fila"><div style="min-width:0"><div class="t">${nRev ? `Revisando ${Math.min(hechas + 1, tot || nRev)} de ${tot || nRev}…` : (tot ? `Revisión terminada: ${hechas} de ${tot}` : 'Volver a revisar')}</div>
+      ${nRev && sanEst.rev_actual ? `<div class="s med">${esc(sanEst.rev_actual.split('/').slice(-2).join(' / '))}${sanEst.rev_seg != null ? ` · ${sanEst.rev_seg} s` : ''}</div>` : ''}
+      ${tot ? `<div class="s tenue">${bien} quedaron bien y salieron de la lista · ${hechas - bien} siguen con problemas. Cada pista se decodifica completa (las con errores, dos veces para confirmar), con prioridad mínima.</div>`
+            : `<div class="s tenue">Las pistas reemplazadas (otro tamaño u otra fecha) se vuelven a revisar solas al abrir esta lista. Para forzarlo, «Volver a revisar» en cada álbum, o todo lo que se ve con el filtro actual. No re-escanea la biblioteca.</div>`}
+      ${revisadas.length ? `<details id="rev-detalle" style="margin-top:.4rem"${nRev || revAbierto ? ' open' : ''}><summary class="s">Últimas revisadas (${revisadas.length})</summary><table class="tabla"><tr><th>Álbum</th><th>Pista</th><th>Resultado</th><th>Tiempo</th></tr>
+        ${revisadas.map(x => { const e = ESTADO_REV[x.estado] || ['tenue', x.estado || '—']; return `<tr><td>${esc(x.album)}</td><td>${esc(x.archivo)}</td><td><span class="${e[0]}">${e[1]}</span>${x.nota && x.estado !== 'ok' ? `<div class="s tenue">${esc(x.nota)}</div>` : ''}</td><td class="num">${x.seg} s</td></tr>`; }).join('')}</table></details>` : ''}</div>
       <div class="acciones" style="margin:0"><button class="btn chico" id="revisar-todo"${lista.length ? '' : ' disabled'}>Volver a revisar todo lo de la lista (${lista.reduce((n, a) => n + a.pistas.length, 0)})</button></div></div></div>`;
+  if (!lista.length) {   // sin nada en la lista: igual se ve cómo terminó la revisión
+    cont.innerHTML = (tot || nRev ? revPanel : '') + `<div class="sin-problemas">${verIgn ? 'No hay álbumes ignorados.' : 'Ninguna pista con problemas entre las revisadas.'}</div>`;
+    return;
+  }
   cont.innerHTML = revPanel + sanPanel + (nTags && !verIgn ? `<div class="panel s-album"><div class="s-fila"><div><div class="t">${nTags} MP3 con la letra incrustada mal escrita</div>
       <div class="s tenue">El audio está bien: solo el tag de la letra (o un comentario) trae la marca UTF-16 mala. «Reparar tags» lo reescribe en UTF-8 con el mismo texto, sin tocar el audio.</div></div>
       <div class="acciones" style="margin:0"><button class="btn chico oro" id="tags-todas">Reparar los tags de todas (${nTags})</button></div></div></div>` : '')
@@ -324,7 +338,7 @@ function pintarDanadas() {
         <button class="btn chico" data-revisar="${i}" title="Vuelve a revisar solo estas pistas (por ejemplo, después de reemplazarlas); no re-escanea la biblioteca">Volver a revisar</button>
         <a class="btn chico" href="/biblioteca/album/${a.album_id}">Abrir ficha</a>
         <button class="btn chico" data-ign="${i}">${verIgn ? 'Dejar de ignorar' : 'Ignorar'}</button></div></div>
-    <details><summary class="s">Ver pistas (${a.pistas.length})</summary>
+    <details class="pistas-album"><summary class="s">Ver pistas (${a.pistas.length})</summary>
       <div class="tabla-wrap"><table>${a.pistas.map(p => `<tr><td class="num">${p.disco > 1 ? p.disco + '-' : ''}${esc(p.numero ?? '')}</td>
         <td>${esc(p.titulo || p.archivo)}<div class="s mono muy-tenue">${esc(p.archivo)}</div></td>
         <td>${p.solo_tags ? `<span class="tenue">⚠ Solo la letra incrustada (el audio está bien)</span>` : `<span class="${ESTADOS[p.estado][1]}">⚠ ${ESTADOS[p.estado][0]}</span>`}${p.estado === 'danada' && p.segundos != null && p.duracion ? ` <span class="s tenue">(se lee hasta ${mmss(p.segundos)} de ${mmss(p.duracion)})</span>` : ''}${medidaTxt(p)}
@@ -374,7 +388,7 @@ function pintarDanadas() {
   cont.querySelectorAll('[data-san]').forEach(b => b.onclick = () => sanear([lista[+b.dataset.san]], b));
   const bs = document.getElementById('san-todas');
   if (bs) bs.onclick = () => sanear(lista.filter(a => a.saneables), bs);
-  cont.querySelectorAll('details').forEach((d, k) => { d.dataset.c = lista[k] ? lista[k].carpeta : ''; if (abiertosDan.has(d.dataset.c)) d.open = true; });
+  cont.querySelectorAll('details.pistas-album').forEach((d, k) => { d.dataset.c = lista[k] ? lista[k].carpeta : ''; if (abiertosDan.has(d.dataset.c)) d.open = true; });
   if (nMid) vigilarSanear();
   cont.querySelectorAll('[data-tags]').forEach(b => b.onclick = () => repararTags([lista[+b.dataset.tags]], b));
   const bt = document.getElementById('tags-todas');
