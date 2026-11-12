@@ -364,6 +364,9 @@ input.auto { border-color: var(--oro) !important; background: rgba(200,146,10,.1
                       border: 1px solid var(--borde-2); border-radius: 6px; }
 .giro.mini { display: inline-block; width: 12px; height: 12px; vertical-align: -2px; border-width: 2px; }
 .modal-cuerpo { padding: 1rem; overflow-y: auto; display: flex; flex-direction: column; gap: .7rem; font-size: .92rem; }
+/* el cuerpo es el que se desplaza: sus bloques no se encogen (una lista con su propio scroll quedaba en 0 px
+   cuando el contenido no cabía; p. ej. «Agregar otro álbum» al unir 5+ discos) */
+.modal-cuerpo > * { flex-shrink: 0; }
 .modal-cuerpo .campo input { width: 100%; padding: .55rem .7rem; font-family: var(--mono); font-size: 1rem; letter-spacing: .08em;
                              background: var(--elev); color: var(--texto); border: 1px solid var(--borde-2); border-radius: 8px; }
 .lista-conf { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
