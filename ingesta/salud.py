@@ -150,7 +150,17 @@ class Salud:
                 CREATE INDEX IF NOT EXISTS pistas_estado ON pistas(estado);
                 CREATE TABLE IF NOT EXISTS ignorados(album TEXT PRIMARY KEY, desde REAL);
                 CREATE TABLE IF NOT EXISTS estado(clave TEXT PRIMARY KEY, valor TEXT);
-                CREATE TABLE IF NOT EXISTS medidas(ruta TEXT PRIMARY KEY, tamano INTEGER, mtime REAL, datos TEXT);''')
+                CREATE TABLE IF NOT EXISTS medidas(ruta TEXT PRIMARY KEY, tamano INTEGER, mtime REAL, datos TEXT);
+                CREATE TABLE IF NOT EXISTS originales(respaldo TEXT PRIMARY KEY, ruta TEXT, cuando REAL);''')
+            # los saneos de antes de esta tabla: el respaldo quedó anotado en la medida
+            for f in c.execute("SELECT ruta, datos FROM medidas WHERE datos LIKE '%\"saneada\": true%'"):
+                try:
+                    r = json.loads(f['datos']).get('respaldo')
+                except ValueError:
+                    r = None
+                if r:
+                    c.execute('INSERT OR IGNORE INTO originales(respaldo, ruta, cuando) VALUES(?, ?, ?)',
+                              (r, f['ruta'], None))
 
     # ── base propia ──
     @contextlib.contextmanager
@@ -557,6 +567,81 @@ class Salud:
             out.append({'ruta': ruta, 'ok': estado == 'ok', 'texto': notas[0] if notas else estado})
         return out
 
+    # ── originales que dejó Sanear en <álbum>/.orbyte-respaldo/ ──
+    def registrar_original(self, ruta, respaldo):
+        if not self._es_original(respaldo):
+            return
+        with self._lock, self._con() as c:
+            c.execute('INSERT OR REPLACE INTO originales(respaldo, ruta, cuando) VALUES(?, ?, ?)',
+                      (respaldo, ruta, time.time()))
+
+    @staticmethod
+    def _es_original(p):
+        """Solo se borra lo que está dentro de una carpeta .orbyte-respaldo (nunca una pista de la biblioteca)."""
+        return os.path.basename(os.path.dirname(p)) == sanear_mod.RESPALDO
+
+    def originales(self):
+        """[{respaldo, ruta, archivo, album, bytes, cuando}] de los que todavía existen (los demás se olvidan:
+        p. ej. el álbum se reemplazó y la carpeta entera se fue)."""
+        with self._con() as c:
+            filas = [dict(f) for f in c.execute('SELECT * FROM originales ORDER BY cuando DESC, ruta')]
+        out, idos = [], []
+        for f in filas:
+            if not self._es_original(f['respaldo']):
+                idos.append(f['respaldo'])
+                continue
+            try:
+                st = os.stat(f['respaldo'])
+            except OSError:
+                idos.append(f['respaldo'])
+                continue
+            out.append({'respaldo': f['respaldo'], 'ruta': f['ruta'], 'archivo': os.path.basename(f['ruta']),
+                        'album': os.path.basename(analisis.carpeta_album(os.path.dirname(f['ruta']))),
+                        'bytes': st.st_size, 'cuando': int(f['cuando'] or st.st_mtime)})
+        if idos and self._biblioteca_montada(filas[0]['ruta']):
+            with self._lock, self._con() as c:
+                c.executemany('DELETE FROM originales WHERE respaldo=?', [(r,) for r in idos])
+        return out
+
+    @staticmethod
+    def _biblioteca_montada(ruta):
+        """Que falte el archivo con la biblioteca desmontada no quiere decir que se borró."""
+        d = os.path.dirname(ruta)
+        while d and not os.path.isdir(d):
+            nd = os.path.dirname(d)
+            if nd == d:
+                return False
+            d = nd
+        return d not in ('', '/') and os.path.isdir(d) and bool(os.listdir(d))
+
+    def borrar_originales(self, respaldos=None):
+        """Borra los originales que dejó Sanear (todos, o los de la lista) y la carpeta .orbyte-respaldo si quedó
+        vacía. → {borrados, bytes, errores}"""
+        lista = self.originales()
+        if respaldos is not None:
+            pedidos = set(respaldos)
+            lista = [o for o in lista if o['respaldo'] in pedidos]
+        borrados, libres, errores = [], 0, []
+        for o in lista:
+            p = o['respaldo']
+            if not self._es_original(p):
+                errores.append(f'{o["archivo"]}: no está en {sanear_mod.RESPALDO}/, no se toca')
+                continue
+            try:
+                os.remove(p)
+            except OSError as e:
+                errores.append(f'{o["archivo"]}: {e}')
+                continue
+            borrados.append(p)
+            libres += o['bytes']
+            with contextlib.suppress(OSError):
+                os.rmdir(os.path.dirname(p))           # solo si quedó vacía
+        if borrados:
+            with self._lock, self._con() as c:
+                c.executemany('DELETE FROM originales WHERE respaldo=?', [(r,) for r in borrados])
+            log.info('Salud: %d originales saneados borrados (%.0f MB)', len(borrados), libres / 1048576)
+        return {'borrados': len(borrados), 'bytes': libres, 'errores': errores}
+
     def olvidar(self, rutas):
         """Saca pistas de la lista de Salud (ya no están en Orbyte)."""
         with self._con() as c:
@@ -917,6 +1002,8 @@ class Saneador:
         nota = (f'saneada: {ms_txt} en {r["tramos"]} punto{"s" if r["tramos"] != 1 else ""} rellenados; el '
                 f'original quedó en {sanear_mod.RESPALDO}/')
         log.info('Sanear: %s → %s', ruta, nota)
+        if r.get('respaldo'):
+            self.salud.registrar_original(ruta, r['respaldo'])
         with self.salud._con() as c:
             f = c.execute('SELECT album_id, duracion FROM pistas WHERE ruta=?', (ruta,)).fetchone()
         dur = f['duracion'] if f else None

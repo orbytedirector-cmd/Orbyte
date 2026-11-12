@@ -31,6 +31,14 @@ SEG_POR_PISTA = {'index': 10, 'richmeta': 60, 'import': 10}
 SIN_SALIDA_S = 1800      # un script que no escribe nada en 30 min se da por colgado (aunque no haya llegado al límite)
 
 
+def _recorrer(ruta):
+    """os.walk sin las carpetas con punto (.orbyte-respaldo de Sanear, .orbyte-compat24): no son pistas del álbum,
+    igual que para el indexador (index_libraryV3)."""
+    for r, dirs, fs in os.walk(ruta):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        yield r, dirs, fs
+
+
 def limite(paso, n_pistas):
     return max(LIMITE_S[paso], SEG_POR_PISTA.get(paso, 0) * (n_pistas or 0))
 
@@ -114,7 +122,7 @@ def _correr(nombre, args, reg, aj, limite):
 def corregir_album(db, ruta, aid, reg):
     """El indexador crea el álbum con los tags de la primera pista que lee y después nunca le cambia el nombre.
     Si quedó «Unknown Album» / «Unknown Artist» (tags ilegibles en esa pasada), se corrige con los tags actuales."""
-    pista = next((os.path.join(r, f) for r, _, fs in sorted(os.walk(ruta)) for f in sorted(fs)
+    pista = next((os.path.join(r, f) for r, _, fs in sorted(_recorrer(ruta)) for f in sorted(fs)
                   if os.path.splitext(f)[1].lower() in analisis.AUDIO_EXT), None)
     if not pista:
         return
@@ -176,7 +184,7 @@ def correr(ruta, aj, reg, richmeta_completo=False, letras=True):
         raise RuntimeError(f'Al Python de los scripts ({prueba["python"]}) le faltan módulos: '
                            f'{", ".join(prueba["faltan"]) or prueba.get("error")}')
     reg('Etapa 3: metadata')
-    n_pistas = sum(1 for _r, _d, fs in os.walk(ruta) for f in fs
+    n_pistas = sum(1 for _r, _d, fs in _recorrer(ruta) for f in fs
                    if os.path.splitext(f)[1].lower() in analisis.AUDIO_EXT and not f.startswith('._'))
     # --update: si el álbum ya estaba (otra pasada de metadata), se vuelven a leer sus archivos conservando los IDs
     _correr('index', ['index_libraryV3.py', '--update', '--album', ruta, '--db', db, '--root', raiz, '--quiet'],
@@ -224,7 +232,7 @@ def validar(db, ruta, aid):
 
     n_archivos = 0
     for raiz, dirs, archivos in os.walk(ruta):
-        dirs[:] = [d for d in dirs if d != 'Extras']
+        dirs[:] = [d for d in dirs if d != 'Extras' and not d.startswith('.')]
         n_archivos += sum(1 for a in archivos if os.path.splitext(a)[1].lower() in analisis.AUDIO_EXT)
     errores, advertencias = [], []
     n = len(pistas)

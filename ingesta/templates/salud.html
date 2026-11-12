@@ -11,6 +11,7 @@
   <button class="filtro" data-p="calidad">Calidad y LED <b id="n-calidad">…</b></button>
   <button class="filtro" data-p="flac32">FLAC 32 bit <b id="n-flac32">…</b></button>
   <button class="filtro" data-p="caratulas">Sin carátula <b id="n-caratulas">…</b></button>
+  <button class="filtro" data-p="espacio">Espacio <b id="n-espacio">…</b></button>
 </div>
 
 <section id="p-discos">
@@ -107,6 +108,11 @@
   <div class="c-grupos" id="car-filtros" style="margin:1rem 0 .6rem"></div>
   <div id="l-caratulas"></div>
 </section>
+<section id="p-espacio" hidden>
+  <div class="s tenue" style="margin-bottom:.8rem">Lo que la ingesta guarda por las dudas. Antes de reemplazar, unificar o limpiar, hace una copia completa de <span class="mono">music.db</span> y conserva solo las más recientes. Sanear deja el original de cada pista en <span class="mono">.orbyte-respaldo/</span>, dentro de la carpeta del álbum, hasta que lo borres aquí.</div>
+  <div class="panel s-panel" id="esp-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
+  <div id="l-espacio"></div>
+</section>
 {% endblock %}
 {% block js %}
 {% include '_unir_discos.html' %}
@@ -144,6 +150,8 @@ document.querySelectorAll('#pestanas [data-p]').forEach(b => b.onclick = () => {
   document.getElementById('p-calidad').hidden = b.dataset.p !== 'calidad';
   document.getElementById('p-flac32').hidden = b.dataset.p !== 'flac32';
   document.getElementById('p-caratulas').hidden = b.dataset.p !== 'caratulas';
+  document.getElementById('p-espacio').hidden = b.dataset.p !== 'espacio';
+  if (b.dataset.p === 'espacio') cargarEspacio();
   try { localStorage.setItem('salud-pestana', b.dataset.p); } catch (e) {}
 });
 try { const p = localStorage.getItem('salud-pestana'); if (p) document.querySelector(`#pestanas [data-p="${p}"]`)?.click(); } catch (e) {}
@@ -738,5 +746,61 @@ async function cargarCaratulas() {
 }
 cargarCaratulas();
 setInterval(() => { if (!document.getElementById('p-caratulas').hidden || (car && car.revisando)) cargarCaratulas(); }, 5000);
+// ── Espacio: respaldos de music.db y originales de Sanear ──
+const tamTxt = b => b == null ? '—' : b >= 1073741824 ? `${(b / 1073741824).toFixed(1).replace('.', ',')} GB`
+  : `${Math.round(b / 1048576).toLocaleString('es-CL')} MB`;
+let esp = null, espSel = new Set();
+async function cargarEspacio() {
+  let r;
+  try { r = await (await fetch('/api/salud/espacio')).json(); } catch (e) { return; }
+  if (!r.ok) return;
+  esp = r;
+  const vivos = new Set(r.originales.map(o => o.respaldo));
+  espSel = new Set([...espSel].filter(x => vivos.has(x)));
+  document.getElementById('n-espacio').textContent = tamTxt(r.bytes_respaldos + r.bytes_originales);
+  const nO = r.originales.length;
+  document.getElementById('esp-estado').innerHTML = `<div class="s-fila"><div style="min-width:0">
+      <div class="t">${tamTxt(r.bytes_respaldos + r.bytes_originales)} en respaldos</div>
+      <div class="s">Respaldos de la base: ${r.respaldos.length} · ${tamTxt(r.bytes_respaldos)} <span class="tenue">(se conservan los ${r.conservar} más recientes; <span class="mono">music.db</span> pesa ${tamTxt(r.bytes_db)})</span></div>
+      <div class="s">Originales de Sanear: ${nO} pista${nO === 1 ? '' : 's'} · ${tamTxt(r.bytes_originales)}</div></div>
+      <div class="acciones" style="margin:0">${nO ? `<button class="btn chico" id="esp-todos">Borrar los originales ya saneados (${nO} · ${tamTxt(r.bytes_originales)})</button>` : ''}</div></div>
+    <div class="s" id="esp-msg"></div>`;
+  const bTodos = document.getElementById('esp-todos');
+  if (bTodos) bTodos.onclick = () => espBorrar(bTodos, {todos: true}, `¿Seguro? Borrar los ${nO} originales`);
+  const cont = document.getElementById('l-espacio');
+  const fecha = t => new Date(t * 1000).toLocaleString('es-CL');
+  cont.innerHTML = `<h2 class="rotulo" style="margin:1.4rem 0 .6rem">Respaldos de la base</h2>
+    ${r.respaldos.length ? `<div class="tabla-wrap"><table><tr><th>Archivo</th><th>Fecha</th><th>Tamaño</th></tr>
+      ${r.respaldos.map(x => `<tr><td><div class="s mono">${esc(x.archivo)}</div></td><td><div class="s">${fecha(x.cuando)}</div></td><td><div class="s">${tamTxt(x.bytes)}</div></td></tr>`).join('')}
+    </table></div>` : '<div class="sin-problemas">No hay respaldos de la base.</div>'}
+    <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Originales de Sanear</h2>
+    ${nO ? `<div class="acciones" style="margin:0 0 .6rem"><button class="btn chico" id="esp-marcar">${espSel.size === nO ? 'Desmarcar' : 'Marcar'} todos</button>
+      <button class="btn chico" id="esp-sel"${espSel.size ? '' : ' disabled'}>Borrar los marcados (${espSel.size})</button></div>
+    <div class="tabla-wrap"><table><tr><th style="width:1%"></th><th>Pista</th><th>Saneada</th><th>Tamaño</th><th class="oculto-movil">Original</th></tr>
+      ${r.originales.map((o, i) => `<tr><td><input type="checkbox" data-esp="${i}"${espSel.has(o.respaldo) ? ' checked' : ''}></td>
+        <td><div class="t">${esc(o.archivo)}</div><div class="s">${esc(o.album)}</div></td>
+        <td><div class="s">${fecha(o.cuando)}</div></td><td><div class="s">${tamTxt(o.bytes)}</div></td>
+        <td class="oculto-movil"><div class="s mono muy-tenue">${esc(relR(o.respaldo))}</div></td></tr>`).join('')}
+    </table></div>` : '<div class="sin-problemas">No hay originales guardados por Sanear.</div>'}`;
+  cont.querySelectorAll('[data-esp]').forEach(c => c.onchange = () => {
+    const k = r.originales[+c.dataset.esp].respaldo; c.checked ? espSel.add(k) : espSel.delete(k); cargarEspacio(); });
+  const bM = document.getElementById('esp-marcar');
+  if (bM) bM.onclick = () => { espSel = espSel.size === nO ? new Set() : new Set(r.originales.map(o => o.respaldo)); cargarEspacio(); };
+  const bS = document.getElementById('esp-sel');
+  if (bS) bS.onclick = () => espBorrar(bS, {respaldos: [...espSel]}, `¿Seguro? Borrar ${espSel.size}`);
+}
+async function espBorrar(b, datos, pregunta) {
+  if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = pregunta; return; }
+  b.disabled = true; b.textContent = 'Borrando…';
+  let r;
+  try { r = await post('/api/salud/espacio/originales/borrar', datos); } catch (e) { r = {ok: false, error: String(e)}; }
+  espSel = new Set();
+  await cargarEspacio();
+  const m = document.getElementById('esp-msg');
+  if (m) m.innerHTML = r.ok ? `<span class="ok">✓ ${r.borrados} borrado${r.borrados === 1 ? '' : 's'} · ${tamTxt(r.bytes)} liberados</span>`
+    + (r.errores.length ? `<div style="color:var(--error)">${r.errores.map(esc).join('<br>')}</div>` : '')
+    : `<span style="color:var(--error)">${esc(r.error || 'No se pudo borrar')}</span>`;
+}
+cargarEspacio();
 </script>
 {% endblock %}

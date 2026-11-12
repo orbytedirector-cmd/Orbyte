@@ -7,6 +7,7 @@ Orbyte Ingesta — artistas duplicados en music.db («Vilma Palma E Vampiros» /
                    → tags de los archivos → base (álbumes, pistas, datos, favoritos, Descubrir) → registro
 """
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -115,6 +116,46 @@ def nombre_oficial(cliente, variantes):
 
 # ─────────────────────────── unificar ───────────────────────────
 
+RESPALDOS_A_CONSERVAR = 5        # copias completas de music.db (~300 MB cada una): llegaron a ser 274 / 78 GB
+_RESPALDO_RE = re.compile(r'\.bak-\d{8}-\d{6}$')
+
+
+def respaldos(db):
+    """Respaldos de la base (music.db.bak-AAAAMMDD-HHMMSS), el más nuevo primero → [{ruta, archivo, bytes, cuando}]."""
+    carpeta, base = os.path.split(os.path.abspath(db))
+    out = []
+    try:
+        nombres = os.listdir(carpeta)
+    except OSError:
+        return out
+    for n in nombres:
+        if n.startswith(base + '.bak-') and _RESPALDO_RE.search(n):
+            p = os.path.join(carpeta, n)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            out.append({'ruta': p, 'archivo': n, 'bytes': st.st_size, 'cuando': int(st.st_mtime)})
+    out.sort(key=lambda r: r['archivo'], reverse=True)          # el nombre lleva la fecha: ordena bien
+    return out
+
+
+def podar_respaldos(db, registro=None, conservar=RESPALDOS_A_CONSERVAR):
+    """Borra los respaldos de la base más viejos que los `conservar` más recientes. → bytes liberados."""
+    libres = 0
+    for r in respaldos(db)[conservar:]:
+        try:
+            os.remove(r['ruta'])
+            libres += r['bytes']
+        except OSError as e:
+            if registro:
+                registro(f'No se pudo borrar el respaldo viejo {r["archivo"]}: {e}')
+    if libres and registro:
+        registro(f'Respaldos viejos de la base borrados: quedan los {conservar} más recientes '
+                 f'({libres / 1048576:.0f} MB liberados)')
+    return libres
+
+
 def respaldo(db, registro):
     destino = f'{db}.bak-{time.strftime("%Y%m%d-%H%M%S")}'
     src = sqlite3.connect(db, timeout=60)
@@ -124,6 +165,7 @@ def respaldo(db, registro):
     src.close()
     dst.close()
     registro(f'Respaldo de la base: {destino}')
+    podar_respaldos(db, registro)
     return destino
 
 
