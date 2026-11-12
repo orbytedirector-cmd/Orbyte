@@ -1706,8 +1706,9 @@ def api_salud_compat24_ahora():
 @app.route('/api/salud/danadas')
 def api_salud_danadas():
     try:
-        return jsonify(ok=True, albumes=salud.danadas(request.args.get('ignorados') == '1'),
-                       raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+        albumes = salud.danadas(request.args.get('ignorados') == '1')
+        return jsonify(ok=True, albumes=albumes, raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica',
+                       revisando=len(saneador.estado().get('revisar') or []))
     except Exception as e:
         log.exception('Salud: pistas dañadas')
         return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
@@ -1931,6 +1932,18 @@ def api_salud_sanear():
           or forzar and _forzable(med.get(r) or {})]
     saneador.sanear(ok, forzar=forzar)
     return jsonify(ok=True, en_cola=len(ok), saltadas=len(rutas) - len(ok))
+
+
+@app.route('/api/salud/revisar', methods=['POST'])
+def api_salud_revisar():
+    """«Volver a revisar» pistas de la lista de Salud (sin re-escanear la biblioteca)."""
+    rutas = [r for r in (request.get_json(silent=True) or {}).get('rutas') or [] if isinstance(r, str)]
+    if not rutas:
+        return jsonify(ok=False, error='Nada seleccionado'), 400
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    saneador.revisar(rutas[:2000])
+    return jsonify(ok=True, en_cola=len(rutas[:2000]))
 
 
 @app.route('/api/salud/tags/reparar', methods=['POST'])
