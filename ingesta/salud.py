@@ -785,6 +785,10 @@ class Saneador:
         self._ev = threading.Event()
         self.actual = None
         self.ultimos = []           # resultados de sanear recientes (para la página)
+        self.revisadas = []         # «Volver a revisar»: resultados recientes (para la página)
+        self.rev_total = 0          # pistas encargadas en la tanda actual
+        self.rev_hechas = 0
+        self.rev_desde = None       # cuándo empezó la pista que se está revisando
         salud.saneador = self
         threading.Thread(target=self._bucle, name='saneador', daemon=True).start()
 
@@ -809,10 +813,13 @@ class Saneador:
         with self._lock:
             ya = set(self._cola) | ({self.actual} if self.actual else set())
             pos = sum(1 for a, _ in self._cola if a != 'medir')
+            if not any(a == 'revisar' for a, _ in self._cola) and not (self.actual and self.actual[0] == 'revisar'):
+                self.rev_total = self.rev_hechas = 0          # tanda nueva
             for r in rutas:
                 if ('revisar', r) not in ya:
                     self._cola.insert(pos, ('revisar', r))
                     pos += 1
+                    self.rev_total += 1
         self._ev.set()
 
     def sanear(self, rutas, forzar=False):
@@ -824,7 +831,11 @@ class Saneador:
                     'sanear': [r for a, r in self._cola if a in ('sanear', 'forzar')],
                     'revisar': [r for a, r in self._cola if a == 'revisar'] + (
                         [self.actual[1]] if self.actual and self.actual[0] == 'revisar' else []),
-                    'ultimos': self.ultimos[-30:]}
+                    'ultimos': self.ultimos[-30:],
+                    'revisadas': self.revisadas[-40:], 'rev_total': self.rev_total, 'rev_hechas': self.rev_hechas,
+                    'rev_actual': self.actual[1] if self.actual and self.actual[0] == 'revisar' else None,
+                    'rev_seg': round(time.time() - self.rev_desde) if self.rev_desde and self.actual
+                    and self.actual[0] == 'revisar' else None}
 
     def _correr(self, accion, ruta, *extra):
         os.makedirs(self.tmp, exist_ok=True)
@@ -846,7 +857,19 @@ class Saneador:
             accion, ruta = self.actual
             try:
                 if accion == 'revisar':
-                    self.salud.revisar_una(ruta)
+                    self.rev_desde = time.time()
+                    try:
+                        estado = self.salud.revisar_una(ruta)
+                    finally:
+                        self.rev_hechas += 1
+                    with self.salud._con() as c:
+                        f = c.execute('SELECT errores FROM pistas WHERE ruta=?', (ruta,)).fetchone()
+                    notas = json.loads(f['errores'] or '[]') if f else []
+                    self.revisadas.append({'ruta': ruta, 'archivo': os.path.basename(ruta),
+                                           'album': os.path.basename(analisis.carpeta_album(os.path.dirname(ruta))),
+                                           'estado': estado, 'nota': notas[0] if notas else '',
+                                           'seg': round(time.time() - self.rev_desde), 'cuando': int(time.time())})
+                    del self.revisadas[:-200]
                     continue
                 if not os.path.isfile(ruta):
                     continue
