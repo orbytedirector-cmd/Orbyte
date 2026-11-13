@@ -140,10 +140,10 @@
                  ('aviso', 'Avisos', 'Para tu información.')] %}
 {% set ACEPTAR = {'duplicado': 'Conservar ambos', 'elegir_edicion': 'Mantener el año propuesto',
                   'sin_caratula': 'Seguir sin carátula', 'anio_conflicto': 'Aceptar el propuesto',
-                  'sin_anio': 'Seguir sin año'} %}
+                  'sin_anio': 'Seguir sin año', 'copias_mezcladas': 'Conservar las dos copias'} %}
 {% set ACEPTABLES = ('multicanal', 'lossy_bajo', 'errores_menores', 'varios_artistas', 'artista_inferido', 'album_inferido',
                      'subcarpetas', 'pista_repetida', 'sin_numero', 'unknown_artist', 'duplicado', 'anio_conflicto',
-                     'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla') %}
+                     'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla', 'copias_mezcladas') %}
 {% set A_TAGS = ('sin_artista', 'artista_inferido', 'sin_album', 'album_inferido', 'unknown_artist', 'varios_artistas',
                  'pista_repetida', 'sin_numero', 'sin_anio') %}
 <section class="seccion">
@@ -168,6 +168,7 @@
             {% if p.codigo == 'elegir_edicion' %}<a class="btn chico" href="#edicion">Ver ediciones ↓</a>{% endif %}
             {% if p.codigo == 'sin_caratula' %}<a class="btn chico" href="#caratula">Elegir carátula ↓</a>{% endif %}
             {% if p.codigo in A_TAGS %}<a class="btn chico" href="#tags" data-abrir="tags">Editar tags ↓</a>{% endif %}
+            {% if p.codigo == 'copias_mezcladas' %}<button class="btn chico oro" data-mejor='{{ p.pistas|tojson }}' data-texto="{{ p.opciones_txt or 'Quedarse con la mejor' }}">{{ p.opciones_txt or 'Quedarse con la mejor' }}</button>{% endif %}
             {% if p.codigo == 'duplicado' %}<a class="btn chico" href="#duplicados">Reemplazar, descartar o conservar ambos ↓</a>
             {% elif p.codigo in ACEPTABLES %}<button class="btn chico" data-aceptar="{{ p.codigo }}">{{ ACEPTAR.get(p.codigo, 'Aceptar') }}</button>{% endif %}
           </div>{% endif %}</li>
@@ -322,36 +323,46 @@
 
 {# ── editor de tags de un álbum ya ubicado ── #}
 {% if lib or lib_error %}{% set lib_api = '/api/album/%d' % a.id %}{% include '_editor_biblioteca.html' %}{% endif %}
+{% if lib and a.estado in ('completado', 'error_metadata') %}{% set elim_api = '/api/album/%d' % a.id %}{% include '_eliminar_biblioteca.html' %}{% endif %}
 
 {# ── pistas ── #}
-{% set danadas_rep = [] %}
-{% for disco in r.discos or [] %}{% for p in disco.pistas if p.legible and not p.decodifica and not p.error_por_id3 and not p.imagen_cue and not (p.error_completo and p.dsf_irregular) %}{% set _ = danadas_rep.append(a.ruta ~ '/' ~ p.archivo) %}{% endfor %}{% endfor %}
+{# ── pistas dañadas: medir, sanear, reparar, re-descargar (13-11-2026) ── #}
+{% if a.estado in ('revisado', 'requiere_revision', 'error', 'error_ubicar') and not r.fallo %}
+  {% set pd_pistas = [] %}
+  {% for disco in r.discos or [] %}{% for p in disco.pistas if p.legible and not p.decodifica and not p.error_por_id3 and not p.imagen_cue and not (p.error_completo and p.dsf_irregular) %}{% set _ = pd_pistas.append({'ruta': a.ruta ~ '/' ~ p.archivo, 'archivo': p.archivo, 'titulo': p.titulo or p.tags.titulo, 'estado': 'errores' if p.error_completo else 'danada', 'errores': (p.errores or [])[:2]}) %}{% endfor %}{% endfor %}
+  {% with pd_modo='bandeja', pd_aid=a.id, pd_artista=r.artista, pd_album=r.album %}{% include '_panel_danadas.html' %}{% endwith %}
+{% elif lib and a.estado in ('completado', 'error_metadata') %}
+  {% with pd_modo='biblioteca', pd_aid=a.id, pd_carpeta=(a.ubicado_en or a.ruta), pd_todas=(lib.plan|map(attribute='clave')|map('prepend_ruta', a.ubicado_en or a.ruta)|list), pd_artista=lib.tags_album.artista, pd_album=lib.tags_album.album %}{% include '_panel_danadas.html' %}{% endwith %}
+{% endif %}
 <section class="seccion">
   <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivo{{ 's' if r.n_archivos_audio != 1 }} de audio</span></h2>
-  {% if danadas_rep and a.estado in ('revisado', 'requiere_revision', 'error', 'error_ubicar') and not r.fallo %}
-  <div class="acciones" style="margin:0 0 .7rem"><button class="btn oro" id="reparar-pistas" data-rutas='{{ danadas_rep|tojson }}'
-      title="Baja de Tidal solo las pistas con errores y las reemplaza con su misma metadata; después se vuelve a revisar">Reparar {{ danadas_rep|length }} pista{{ 's' if danadas_rep|length != 1 }} dañada{{ 's' if danadas_rep|length != 1 }}</button>
-    <span class="s tenue" id="reparar-estado"></span></div>
-  {% endif %}
+  {% set marcar = editable and a.estado != 'descartado' and not r.fallo and not (a.cambios or {}).get('union') %}
+  {% set eliminadas = (a.cambios or {}).get('eliminadas') or [] %}
+  {% if marcar %}<div class="acciones" style="margin:0 0 .7rem" id="el-bandeja-barra"><button class="btn" id="el-bandeja" disabled>Eliminar las marcadas</button>
+    <span class="s tenue" id="el-bandeja-msg">Marca pistas para mandarlas a la papelera; después se vuelve a revisar el álbum.</span></div>{% endif %}
   <div class="tabla-wrap">
   {% for disco in r.discos %}
     {% if r.n_discos > 1 %}<div class="disco-tit">DISCO {{ disco.numero }}</div>{% endif %}
     <table>
-      <tr><th>#</th><th>Título</th><th>Formato</th><th class="der">Duración</th><th class="der oculto-movil">Pico</th><th>Decodifica</th><th class="oculto-movil">Nombre final</th></tr>
+      <tr>{% if marcar %}<th style="width:1%"></th>{% endif %}<th>#</th><th>Título</th><th>Formato</th><th class="der">Duración</th><th class="der oculto-movil">Pico</th><th>Decodifica</th><th class="oculto-movil">Nombre final</th></tr>
       {% for p in disco.pistas %}
       {% set act = (actuales or {}).get(p.archivo) if not p.imagen_cue else none %}
-      <tr>
+      {% set en_papelera = p.archivo in eliminadas %}
+      <tr{% if en_papelera %} class="en-papelera" title="Eliminada: está en la papelera (Salud → Espacio)"{% endif %}>
+        {% if marcar %}<td>{% if not p.imagen_cue %}<input type="checkbox" data-el-archivo="{{ p.archivo }}">{% endif %}</td>{% endif %}
         <td class="num">{{ (act.numero if act else p.numero) or '—' }}</td>
         {% if act %}
         <td><div class="t">{{ act.titulo or act.clave.split('/')[-1] }}</div>
           {% set art_act = act.artista or act.artista_album %}
           {% if art_act and art_act != (lib.tags_album.artista if lib else r.artista) %}<div class="s">{{ art_act }}</div>{% endif %}
           <div class="s mono" title="Archivo de origen">origen: {{ p.archivo }}</div>
+          {% if en_papelera %}<div class="s med">en la papelera</div>{% endif %}
           {% for n in p.notas or [] %}<div class="s med">{{ n }}</div>{% endfor %}</td>
         {% else %}
         <td><div class="t">{{ p.titulo or p.tags.titulo or p.archivo.split('/')[-1] }}</div>
           {% if p.tags.artista and p.tags.artista != r.artista %}<div class="s">{{ p.tags.artista }}</div>{% endif %}
           <div class="s mono">{{ p.archivo }}</div>
+          {% if en_papelera %}<div class="s med">en la papelera</div>{% endif %}
           {% for n in p.notas or [] %}<div class="s med">{{ n }}</div>{% endfor %}</td>
         {% endif %}
         <td>{% if p.legible %}<span class="chip q-{{ p.clase }}"><span class="led"></span>{{ p.formato }}</span>
@@ -372,7 +383,7 @@
         {% for cue in r.cues %}{% for ref in cue.referencias if ref.archivo == p.archivo %}
           {% for cp in cue.pistas if cp.archivo_cue == ref.archivo_cue %}
           {% set act = (actuales or {}).get(cue.archivo ~ '#' ~ cp.num) %}
-          <tr><td class="num">{{ act.numero if act and act.numero else cp.num }}</td>
+          <tr>{% if marcar %}<td></td>{% endif %}<td class="num">{{ act.numero if act and act.numero else cp.num }}</td>
             <td><div class="t">{{ act.titulo if act and act.titulo else cp.titulo }}</div>{% set inter = (act.artista if act else cp.interprete) %}{% if inter and inter != (lib.tags_album.artista if lib else r.artista) %}<div class="s">{{ inter }}</div>{% endif %}</td>
             <td><span class="s">desde {{ cp.inicio|duracion }}</span></td><td></td><td class="oculto-movil"></td><td></td>
             <td class="oculto-movil"><span class="nombre">{{ act.clave if act else cp.nombre_destino }}</span></td></tr>
@@ -545,6 +556,31 @@ document.querySelectorAll('[data-accion]').forEach(b => b.onclick = async () => 
 document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); });
 document.querySelectorAll('[data-sacd]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {sacd_area: b.dataset.sacd}); });
 document.querySelectorAll('[data-aceptar]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {aceptar: b.dataset.aceptar}); });
+// Eliminar pistas antes de ubicar (13-11-2026): a la papelera y se vuelve a revisar
+const elB = document.getElementById('el-bandeja');
+function elMarcadas() { return [...document.querySelectorAll('[data-el-archivo]:checked')].map(c => c.dataset.elArchivo); }
+async function elEnviar(b, archivos, pregunta, texto) {
+  if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = pregunta; return; }
+  b.disabled = true; b.textContent = 'Moviendo a la papelera…';
+  const r = await post(`/api/album/${AID}/eliminar`, {archivos});
+  if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); b.disabled = false; delete b.dataset.seguro;
+    b.classList.remove('oro'); b.textContent = texto; return; }
+  location.reload();
+}
+if (elB) {
+  document.addEventListener('change', e => {
+    if (e.target.dataset.elArchivo === undefined) return;
+    const n = elMarcadas().length;
+    elB.disabled = !n; delete elB.dataset.seguro; elB.classList.remove('oro');
+    elB.textContent = n ? `Eliminar las marcadas (${n})` : 'Eliminar las marcadas';
+  });
+  elB.onclick = () => { const l = elMarcadas(); if (l.length) elEnviar(elB, l, `¿Seguro? ${l.length} a la papelera`, `Eliminar las marcadas (${l.length})`); };
+}
+document.querySelectorAll('[data-mejor]').forEach(b => b.onclick = () => {
+  const l = JSON.parse(b.dataset.mejor);
+  document.querySelectorAll('[data-el-archivo]').forEach(c => c.checked = l.includes(c.dataset.elArchivo));
+  elEnviar(b, l, `¿Seguro? ${l.length} pistas a la papelera`, b.dataset.texto);
+});
 document.querySelectorAll('[data-anio]').forEach(b => b.onclick = () => {
   b.disabled = true;
   const tags = Object.assign({}, {{ ((r.cambios or {}).tags or {}) | tojson if r else '{}' }}, {anio: b.dataset.anio});

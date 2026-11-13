@@ -39,6 +39,24 @@ class FalloProceso(Exception):
     pass
 
 
+def llevar_respaldos(plan, origen, tmp):
+    """Los originales que dejó Sanear junto a una pista de la entrada (<carpeta>/.orbyte-respaldo/<archivo>) viajan
+    con el álbum: quedan junto a la pista ubicada, con su nombre nuevo. → [(pista, respaldo)] relativas al destino."""
+    from .sanear import RESPALDO
+    out = []
+    for x in plan:
+        f = os.path.join(origen, x['origen'])
+        r = os.path.join(os.path.dirname(f), RESPALDO, os.path.basename(f))
+        if not os.path.isfile(r):
+            continue
+        d_rel = x['destino']
+        r_rel = os.path.join(os.path.dirname(d_rel), RESPALDO, os.path.basename(d_rel))
+        os.makedirs(os.path.join(tmp, os.path.dirname(r_rel)), exist_ok=True)
+        shutil.copy2(r, os.path.join(tmp, r_rel))
+        out.append((d_rel, r_rel))
+    return out
+
+
 def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
     """Ejecuta la etapa 2. Devuelve la ruta final. Lanza FalloProceso con el motivo si algo sale mal."""
     if mutagen is None:
@@ -97,6 +115,10 @@ def ubicar(rep, ajustes, registro, borrar_origen=True, trabajadores=2):
         registro('Carátula')
         guardar_caratulas(rep, origen, tmp, registro)
         n_extras = copiar_extras(rep, origen, tmp)
+        llevados = llevar_respaldos(plan, origen, tmp)
+        if llevados:
+            registro(f'Originales de Sanear: {len(llevados)} a «.orbyte-respaldo/» (se borran desde Salud → Espacio)')
+        rep['_respaldos'] = [(os.path.join(destino, d), os.path.join(destino, r)) for d, r in llevados]
         if n_extras:
             registro(f'Extras (escaneos, .log…): {n_extras} archivos en «Extras/»')
 
@@ -479,6 +501,7 @@ def copiar_extras(rep, origen, tmp):
         usados.add(d['archivo'])
     n = 0
     for raiz, dirs, archivos in os.walk(origen):
+        dirs[:] = [d for d in dirs if not d.startswith('.')]       # .orbyte-respaldo (Sanear) no es un extra
         for a in archivos:
             ext = os.path.splitext(a)[1].lower()
             rel = os.path.relpath(os.path.join(raiz, a), origen)

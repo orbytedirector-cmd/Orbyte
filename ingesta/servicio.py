@@ -8,6 +8,7 @@ Orbyte y solo responde a la red de la casa / Tailscale.
 Arranque:  ./ingesta/start.sh   (o  python -m ingesta  desde la raíz del repo)
 Variables: INGESTA_PORT (5005) · INGESTA_DATOS (<repo>/ingesta_datos) · ORBYTE_DB (<repo>/music.db)
 """
+import contextlib
 import difflib
 import hashlib
 import ipaddress
@@ -51,6 +52,8 @@ from . import popularidad as popularidad_mod
 from . import salud as salud_mod
 from . import calidad as calidad_mod
 from . import reparar as reparar_mod
+from . import papelera as papelera_mod
+from . import eliminar as eliminar_mod
 import threading
 import traceback
 
@@ -104,6 +107,23 @@ def _ingesta_ocupada():
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
 saneador = salud_mod.Saneador(salud, DATOS, REPO)
+papelera = papelera_mod.Papelera(DATOS)
+
+
+def _papelera_bucle():
+    """Cada 2 min: se vacía lo vencido y se devuelve a music.db lo de los álbumes restaurados ya reindexados."""
+    while True:
+        time.sleep(120)
+        try:
+            aj = almacen.ajustes()
+            if procesador.biblioteca_lista():
+                papelera.purgar(papelera_mod.horas(aj))
+                papelera.reponer(aj.get('db_orbyte'), log.info)
+        except Exception:  # noqa: BLE001
+            log.exception('Papelera')
+
+
+threading.Thread(target=_papelera_bucle, name='papelera', daemon=True).start()
 try:            # los que se juntaron antes de que hubiera límite (llegaron a 274 / 78 GB)
     if almacen.ajustes().get('db_orbyte'):
         artistas_mod.podar_respaldos(almacen.ajustes()['db_orbyte'], log.info)
@@ -183,6 +203,11 @@ def _db_orbyte():
 
 
 # ─────────────────────────── formatos para plantillas ───────────────────────────
+
+@app.template_filter('prepend_ruta')
+def _f_prepend_ruta(clave, ruta):
+    return os.path.join(ruta, clave)
+
 
 @app.template_filter('duracion')
 def f_duracion(seg):
@@ -281,9 +306,10 @@ def album(aid):
     dup_filas = _comparativa_dup(a) if (a.get('reporte') or {}).get('duplicados') else []
     actuales = ajustar_mod.pistas_actuales(a.get('reporte'), lib) if lib else {}
     portada = _portada_vista(a['ubicado_en'] or a['ruta']) if lib else None
+    fmt = portada_mod.formatos(a['ubicado_en'] or a['ruta'], lib['plan']) if lib else {}
     sin_indexar = a['estado'] == 'error_metadata'          # «Borrar de la biblioteca y descartar»
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
-                           actuales=actuales, portada=portada, sin_indexar=sin_indexar,
+                           actuales=actuales, portada=portada, sin_indexar=sin_indexar, fmt=fmt,
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
@@ -310,6 +336,10 @@ def ajustes():
             nuevo['buscar_estrellas'] = str(max(0, min(50, int(request.form.get('buscar_estrellas') or 5))))
         except ValueError:
             nuevo['buscar_estrellas'] = '5'
+        try:
+            nuevo['papelera_horas'] = f'{max(1.0, min(24 * 90.0, float(request.form.get("papelera_horas") or 48))):g}'
+        except ValueError:
+            nuevo['papelera_horas'] = '48'
         nuevo['python_scripts'] = (request.form.get('python_scripts') or '').strip()
         nuevo['sacd_extract'] = (request.form.get('sacd_extract') or '').strip()
         if nuevo['sacd_extract'] and not (os.path.isfile(nuevo['sacd_extract'])
@@ -1949,9 +1979,12 @@ def api_salud_espacio():
         bytes_db = None
     resp = artistas_mod.respaldos(db) if db else []
     orig = salud.originales()
+    horas = papelera_mod.horas(almacen.ajustes())
+    pap = papelera.listar(horas)
     return jsonify(ok=True, db=db, bytes_db=bytes_db, respaldos=resp, conservar=artistas_mod.RESPALDOS_A_CONSERVAR,
                    bytes_respaldos=sum(r['bytes'] for r in resp), originales=orig,
-                   bytes_originales=sum(o['bytes'] for o in orig), raiz=almacen.ajustes().get('biblioteca') or '')
+                   bytes_originales=sum(o['bytes'] for o in orig), raiz=almacen.ajustes().get('biblioteca') or '',
+                   papelera=pap, bytes_papelera=sum(x['bytes'] or 0 for x in pap), papelera_horas=horas)
 
 
 @app.route('/api/salud/espacio/originales/borrar', methods=['POST'])
@@ -1966,6 +1999,330 @@ def api_salud_borrar_originales():
     if not d.get('todos') and not lista:
         return jsonify(ok=False, error='Nada seleccionado'), 400
     return jsonify(ok=True, **salud.borrar_originales(None if d.get('todos') else lista))
+
+
+# ─────────────────────────── eliminar y papelera (pedido de Niko, 13-11-2026) ───────────────────────────
+
+def _album_db_de_ruta(ruta):
+    con = sqlite3.connect(f'file:{_db_orbyte()}?mode=ro', uri=True, timeout=30)
+    con.row_factory = sqlite3.Row
+    try:
+        r = con.execute('SELECT al.id, al.name, ar.name AS artista, (SELECT COUNT(*) FROM tracks t WHERE '
+                        't.album_id=al.id) AS n FROM albums al LEFT JOIN artists ar ON ar.id=al.artist_id '
+                        'WHERE al.path=? OR al.path=?', (ruta, ruta + '/')).fetchone()
+        dentro = [dict(x) for x in con.execute('SELECT name, path FROM albums WHERE substr(path, 1, ?) = ? AND '
+                                                'path<>? AND path<>?', (len(ruta) + 1, ruta + '/', ruta, ruta + '/'))]
+        return (dict(r) if r else None), dentro
+    finally:
+        con.close()
+
+
+def _elim_error(texto, codigo=409):
+    return jsonify(ok=False, error=texto), codigo
+
+
+def _eliminar_biblioteca(ruta, claves=None, todo=False):
+    """Pistas (claves de ajustar.leer) o el álbum entero de la biblioteca → papelera, y fuera de music.db."""
+    ruta = (ruta or '').rstrip('/')
+    aj = almacen.ajustes()
+    bib = aj.get('biblioteca') or '/mnt/musica'
+    if not procesador.biblioteca_lista():
+        return _elim_error('La biblioteca no está montada')
+    if not os.path.isdir(ruta) or not papelera_mod._dentro(ruta, bib):
+        return _elim_error('La carpeta del álbum no está en la biblioteca')
+    aid = almacen.fila_de_ruta(ruta)
+    a = almacen.album(aid) if aid else None
+    if a and a['estado'] not in EN_BIBLIOTECA:
+        return _elim_error('El álbum se está procesando: espera a que termine')
+    db = _db_orbyte()
+    al, dentro = _album_db_de_ruta(ruta)
+    titulo = f'{al["artista"]} — {al["name"]}' if al else os.path.basename(ruta)
+
+    def reg(m):
+        log.info('%s', m)
+        if aid:
+            almacen.registrar(aid, m)
+
+    if todo:
+        if dentro:
+            return _elim_error(f'Su carpeta contiene otro álbum de Orbyte («{dentro[0]["name"]}»): elimina sus pistas, '
+                               'no el álbum entero')
+        try:
+            eid = papelera.mover(bib, [ruta], 'album', 'biblioteca', titulo,
+                                 detalle=f'{al["n"]} pistas' if al else '', extra={'album_ruta': ruta})
+        except papelera_mod.FalloPapelera as e:
+            return _elim_error(str(e))
+        try:
+            extra = eliminar_mod.quitar_album(db, al['id'], reg) if al else {}
+        except Exception as e:
+            log.exception('Eliminar álbum %s', ruta)
+            papelera.restaurar(eid)
+            return _elim_error(f'No se pudo sacar de Orbyte (no se eliminó nada): {e}', 500)
+        papelera.poner_extra(eid, dict(extra, album_ruta=ruta))
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(ruta))            # la carpeta del artista, si quedó vacía
+        if aid:
+            almacen.borrar_album(aid)
+        return jsonify(ok=True, ir=url_for('biblioteca_pagina'), papelera=eid)
+
+    try:
+        lib = ajustar_mod.leer(ruta)
+    except ajustar_mod.FalloAjuste as e:
+        return _elim_error(str(e))
+    plan = {x['clave']: x for x in lib['plan']}
+    claves = [c for c in (claves or []) if isinstance(c, str)]
+    if not claves:
+        return _elim_error('Nada seleccionado', 400)
+    if any(c not in plan for c in claves):
+        return _elim_error('La lista de pistas cambió: recarga la página')
+    rutas = [os.path.join(ruta, c) for c in claves]
+    pistas = eliminar_mod.pistas_de(db, rutas)
+    elim_rep = []
+    if a and (a.get('reporte') or {}).get('discos'):      # la ficha de la Bandeja marca las de la revisión
+        inv = {x['clave']: k for k, x in ajustar_mod.pistas_actuales(a['reporte'], lib).items()}
+        elim_rep = [inv[c] for c in claves if c in inv]
+    nombres = ', '.join(os.path.basename(c) for c in claves)
+    try:
+        eid = papelera.mover(bib, rutas, 'pistas', 'biblioteca', titulo,
+                             detalle=nombres if len(nombres) < 400 else f'{len(claves)} pistas',
+                             extra={'album_ruta': ruta})
+    except papelera_mod.FalloPapelera as e:
+        return _elim_error(str(e))
+    try:
+        extra = eliminar_mod.quitar_pistas(db, pistas, reg)
+    except Exception as e:
+        log.exception('Eliminar pistas %s', ruta)
+        papelera.restaurar(eid)
+        return _elim_error(f'No se pudo sacar de Orbyte (no se eliminó nada): {e}', 500)
+    papelera.poner_extra(eid, dict(extra, album_ruta=ruta, aid=aid, eliminadas_rep=elim_rep))
+    if elim_rep:
+        cam = dict(a.get('cambios') or {})
+        cam['eliminadas'] = sorted(set(cam.get('eliminadas') or []) | set(elim_rep))
+        almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
+    return jsonify(ok=True, papelera=eid, n=len(claves))
+
+
+def _eliminar_bandeja(a, archivos):
+    """Pistas de un álbum en revisión (antes de ubicar) → papelera, y se vuelve a revisar."""
+    if not _editable(a):
+        return _elim_error('Solo antes de ubicar el álbum')
+    if (a.get('cambios') or {}).get('union'):
+        return _elim_error('Es un álbum unido: quita el disco desde «Unir como discos»')
+    aj = almacen.ajustes()
+    raiz = (aj.get('biblioteca') or '/mnt/musica') if a.get('origen') == 'reproceso' else aj.get('carpeta_entrada')
+    if not raiz or not os.path.isdir(a['ruta']) or not papelera_mod._dentro(a['ruta'], raiz):
+        return _elim_error('Este álbum no está en una carpeta que se pueda tocar (¿una ISO?)')
+    archivos = [f for f in archivos or [] if isinstance(f, str)]
+    if not archivos:
+        return _elim_error('Nada seleccionado', 400)
+    rutas = []
+    for f in archivos:
+        p = os.path.join(a['ruta'], f)
+        if not papelera_mod._dentro(p, a['ruta']) or not os.path.isfile(p):
+            return _elim_error(f'No está {f}: vuelve a revisar el álbum')
+        rutas.append(p)
+    rep = a.get('reporte') or {}
+    titulo = f'{rep.get("artista") or a.get("artista") or "?"} — {rep.get("album") or a.get("album") or a["rel"]}'
+    nombres = ', '.join(os.path.basename(f) for f in archivos)
+    try:
+        eid = papelera.mover(raiz, rutas, 'pistas', 'bandeja', titulo,
+                             detalle=nombres if len(nombres) < 400 else f'{len(archivos)} pistas',
+                             extra={'aid': a['id'], 'album_ruta': a['ruta']})
+    except papelera_mod.FalloPapelera as e:
+        return _elim_error(str(e))
+    almacen.registrar(a['id'], f'{len(archivos)} pista(s) a la papelera: {nombres[:300]}')
+    _requeue(a['id'])
+    return jsonify(ok=True, papelera=eid, n=len(archivos))
+
+
+@app.route('/api/album/<int:aid>/eliminar', methods=['POST'])
+def api_album_eliminar(aid):
+    a = almacen.album(aid)
+    if not a:
+        return jsonify(ok=False), 404
+    d = request.get_json(silent=True) or {}
+    if a['estado'] in EN_BIBLIOTECA:
+        return _eliminar_biblioteca(a['ubicado_en'] or a['ruta'], d.get('claves'), bool(d.get('album')))
+    return _eliminar_bandeja(a, d.get('archivos'))
+
+
+@app.route('/api/biblioteca/<int:oid>/eliminar', methods=['POST'])
+def api_biblioteca_eliminar(oid):
+    o = _album_orbyte(oid)
+    if not o or not o['ruta']:
+        return jsonify(ok=False, error='Ese álbum ya no está en Orbyte'), 404
+    d = request.get_json(silent=True) or {}
+    return _eliminar_biblioteca(o['ruta'], d.get('claves'), bool(d.get('album')))
+
+
+# ─────────────────────────── ficha: pistas dañadas (mismas acciones que Salud, 13-11-2026) ───────────────────────────
+
+_san_pend = {}                 # aid de la Bandeja → rutas por sanear; al terminar la última se vuelve a revisar
+_san_lock = threading.Lock()
+
+
+def _al_sanear(ruta):
+    listos = []
+    with _san_lock:
+        for aid, rutas in list(_san_pend.items()):
+            rutas.discard(ruta)
+            if not rutas:
+                del _san_pend[aid]
+                listos.append(aid)
+    for aid in listos:
+        a = almacen.album(aid)
+        if a and _editable(a):
+            almacen.registrar(aid, 'Sanear terminó: se vuelve a revisar')
+            _requeue(aid)
+
+
+saneador.al_terminar = _al_sanear
+procesador.al_respaldo = salud.registrar_original
+
+
+def _rutas_tocables(rutas):
+    """Solo archivos de la biblioteca o de la carpeta de entrada (Sanear y Reparar tags los reescriben)."""
+    aj = almacen.ajustes()
+    raices = [r for r in (aj.get('biblioteca') or '/mnt/musica', aj.get('carpeta_entrada')) if r]
+    out = []
+    for r in rutas or []:
+        if isinstance(r, str) and os.path.isfile(r) and any(papelera_mod._dentro(r, x) for x in raices) \
+                and f'/{papelera_mod.NOMBRE}/' not in r:
+            out.append(r)
+    return out
+
+
+def _sanear_estado_de(rutas, carpeta=None):
+    """Lo del saneador que toca a esta ficha: sus pistas, o todo lo que está dentro de `carpeta`."""
+    e = saneador.estado()
+    nuestras = set(rutas)
+    pref = carpeta.rstrip('/') + '/' if carpeta else None
+
+    def es(r):
+        return r in nuestras or bool(pref and r.startswith(pref))
+    return {'actual': e['actual'] if e['actual'] and es(e['actual'][1]) else None,
+            'seg': e['seg'], 'en_cola': [r for r in e['sanear'] if es(r)],
+            'ultimos': [u for u in e['ultimos'] if es(u['ruta'])],
+            'revisando': [r for r in e.get('revisar') or [] if es(r)]}
+
+
+@app.route('/api/ficha/danadas', methods=['POST'])
+def api_ficha_danadas():
+    """Medición (ms perdidos, tramos) de las pistas de una ficha; con `carpeta` (Biblioteca) además la lista de
+    pistas dañadas que dejó la revisión de Salud. Las que faltan medir se encargan."""
+    d = request.get_json(silent=True) or {}
+    pistas = []
+    if d.get('carpeta'):
+        carpeta = str(d['carpeta']).rstrip('/')
+        aj = almacen.ajustes()
+        if os.path.isdir(carpeta) and any(papelera_mod._dentro(carpeta, x) for x in
+                                          (aj.get('biblioteca') or '/mnt/musica', aj.get('carpeta_entrada')) if x):
+            pistas = salud.de_carpeta(carpeta)
+        rutas = [p['ruta'] for p in pistas]
+    else:
+        rutas = _rutas_tocables(d.get('rutas'))
+    flac = [r for r in rutas if r.lower().endswith('.flac')]
+    cambiadas = [p['ruta'] for p in pistas if p.get('cambio')]
+    if cambiadas:
+        saneador.revisar(cambiadas)
+    return jsonify(ok=True, pistas=pistas, medidas=salud.medidas(flac),
+                   estado=_sanear_estado_de(rutas, d.get('carpeta') if pistas or d.get('carpeta') else None))
+
+
+@app.route('/api/ficha/sanear', methods=['POST'])
+def api_ficha_sanear():
+    d = request.get_json(silent=True) or {}
+    rutas = _rutas_tocables(d.get('rutas'))
+    if not rutas:
+        return jsonify(ok=False, error='Nada que sanear'), 400
+    forzar = bool(d.get('forzar'))
+    med = salud.medidas(rutas)
+    ok = [r for r in rutas if (med.get(r) or {}).get('saneable') or forzar and _forzable(med.get(r) or {})]
+    if not ok:
+        return jsonify(ok=False, error='Ninguna se puede sanear (todavía se están midiendo o pierden demasiado)'), 409
+    a = almacen.album(int(d['aid'])) if str(d.get('aid') or '').isdigit() else None
+    if a and _editable(a):
+        with _san_lock:
+            _san_pend.setdefault(a['id'], set()).update(ok)
+        almacen.registrar(a['id'], f'Sanear: {len(ok)} pista(s) en cola')
+    saneador.sanear(ok, forzar=forzar)
+    return jsonify(ok=True, en_cola=len(ok), saltadas=len(rutas) - len(ok))
+
+
+@app.route('/api/ficha/tags', methods=['POST'])
+def api_ficha_tags():
+    """Reparar tags MP3 (letra/comentario UTF-16 con BOM malo) de una ficha."""
+    d = request.get_json(silent=True) or {}
+    rutas = [r for r in _rutas_tocables(d.get('rutas')) if r.lower().endswith('.mp3')]
+    if not rutas:
+        return jsonify(ok=False, error='Nada que reparar'), 400
+    out = []
+    for r in rutas:
+        try:
+            res = salud_mod.tags_mp3.reparar(r)
+            out.append({'ruta': r, 'ok': True, 'texto': f'{res["rescatados"]} rescatados, {res["quitados"]} quitados'})
+        except Exception as e:  # noqa: BLE001
+            out.append({'ruta': r, 'ok': False, 'texto': str(e)})
+    a = almacen.album(int(d['aid'])) if str(d.get('aid') or '').isdigit() else None
+    if a and _editable(a):
+        _requeue(a['id'])
+    else:
+        saneador.revisar([x['ruta'] for x in out if x['ok']])
+    return jsonify(ok=True, resultados=out, revisar=bool(a and _editable(a)))
+
+
+@app.route('/api/ficha/revisar', methods=['POST'])
+def api_ficha_revisar():
+    """Biblioteca: vuelve a decodificar las pistas del álbum (la misma revisión de Salud, sin esperar el ciclo)."""
+    d = request.get_json(silent=True) or {}
+    rutas = _rutas_tocables(d.get('rutas'))
+    if rutas:
+        saneador.revisar(rutas)
+    return jsonify(ok=True, n=len(rutas))
+
+
+@app.route('/api/papelera/<int:eid>/restaurar', methods=['POST'])
+def api_papelera_restaurar(eid):
+    if not procesador.biblioteca_lista():
+        return _elim_error('La biblioteca no está montada')
+    try:
+        f = papelera.restaurar(eid)
+    except papelera_mod.FalloPapelera as e:
+        return _elim_error(str(e))
+    extra = f.get('extra') or {}
+    ir = None
+    if f['origen'] == 'biblioteca':
+        ruta = extra.get('album_ruta')
+        aid = almacen.de_biblioteca(ruta)
+        a = almacen.album(aid)
+        if extra.get('eliminadas_rep') and a:
+            cam = dict(a.get('cambios') or {})
+            cam['eliminadas'] = [k for k in cam.get('eliminadas') or [] if k not in set(extra['eliminadas_rep'])]
+            almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
+        if a and a['estado'] in ('completado', 'error_metadata', 'ubicado'):
+            almacen.actualizar(aid, estado='por_metadata', progreso='En cola para la metadata (restaurado)')
+            almacen.registrar(aid, f'Restaurado de la papelera: {f["detalle"] or f["titulo"]}')
+            procesador.ya()
+        if extra.get('pistas') or extra.get('albumes'):
+            papelera.pendiente(dict(extra, titulo=f['titulo']))
+        ir = url_for('album', aid=aid)
+    else:
+        a = almacen.album(extra.get('aid')) if extra.get('aid') else None
+        if a and _editable(a):
+            _requeue(a['id'])
+            ir = url_for('album', aid=a['id'])
+    return jsonify(ok=True, ir=ir)
+
+
+@app.route('/api/papelera/vaciar', methods=['POST'])
+def api_papelera_vaciar():
+    d = request.get_json(silent=True) or {}
+    ids = d.get('ids')
+    if not d.get('todos') and not (isinstance(ids, list) and ids):
+        return _elim_error('Nada seleccionado', 400)
+    if ids is not None and not all(isinstance(i, int) for i in ids):
+        return _elim_error('Lista inválida', 400)
+    return jsonify(ok=True, **papelera.vaciar(None if d.get('todos') else ids))
 
 
 @app.route('/api/salud/revisar', methods=['POST'])

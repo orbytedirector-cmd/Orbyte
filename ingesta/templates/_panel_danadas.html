@@ -1,0 +1,128 @@
+{# Panel «Pistas dañadas» de una ficha (13-11-2026): las mismas acciones que Salud sin salir del álbum.
+   Variables: pd_modo ('bandeja' | 'biblioteca'), pd_pistas (bandeja: [{ruta, archivo, titulo, estado, errores}]),
+   pd_carpeta (biblioteca), pd_todas (biblioteca: rutas de todas sus pistas), pd_aid, pd_artista, pd_album.
+   «Reparar pistas dañadas» abre _reparar.html (abrirReparar), que la página debe incluir. #}
+<section class="seccion" id="panel-danadas"{% if pd_modo == 'bandeja' and not pd_pistas %} hidden{% endif %}>
+  <h2 class="rotulo">Pistas dañadas <span class="cuenta" id="pd-cuenta"></span></h2>
+  <div class="panel">
+    <div class="s tenue" id="pd-ayuda" style="margin-bottom:.6rem">Sanear rellena los cuadros dañados continuando la forma de onda (mismos bits, frecuencia, tags y carátula); el original queda en «.orbyte-respaldo» y se borra desde Salud → Espacio. Si se pierde más de 1 s conviene reemplazarla (Reparar o Re-descargar).</div>
+    <div id="pd-progreso" class="s" style="margin-bottom:.5rem"></div>
+    <div class="tabla-wrap" id="pd-tabla"></div>
+    <div class="acciones" id="pd-acciones">
+      <button class="btn oro" id="pd-sanear-todas" style="display:none"></button>
+      {% if pd_modo == 'bandeja' %}<button class="btn" id="reparar-pistas" data-rutas='{{ pd_pistas|map(attribute="ruta")|list|tojson }}'
+        title="Baja de Tidal solo las pistas con errores y las reemplaza con su misma metadata; después se vuelve a revisar">Reparar pistas dañadas (Tidal)</button>
+      {% else %}<button class="btn" id="pd-reparar" style="display:none" title="Baja de Tidal solo las pistas dañadas y las reemplaza con su misma metadata">Reparar pistas dañadas (Tidal)</button>{% endif %}
+      <a class="btn" id="pd-redescargar" href="#">Re-descargar el álbum</a>
+      {% if pd_modo == 'biblioteca' %}<button class="btn" id="pd-revisar" title="Vuelve a decodificar todas las pistas del álbum ahora (la misma revisión de Salud)">Revisar las pistas ahora</button>{% endif %}
+      <span class="s tenue" id="reparar-estado"></span>
+    </div>
+  </div>
+</section>
+<script>
+(function () {
+  const P = {modo: {{ pd_modo|tojson }}, aid: {{ (pd_aid or none)|tojson }}, carpeta: {{ (pd_carpeta or '')|tojson }},
+             todas: {{ (pd_todas or [])|tojson }}, artista: {{ (pd_artista or '')|tojson }}, album: {{ (pd_album or '')|tojson }}};
+  let pistas = {{ (pd_pistas or [])|tojson }}, medidas = {}, est = {}, encargado = false, reloj = null;
+  const $ = id => document.getElementById(id);
+  const msTxt = ms => ms >= 1000 ? `${(ms / 1000).toFixed(1).replace('.', ',')} s` : `${String(ms).replace('.', ',')} ms`;
+  const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  $('pd-redescargar').href = '/buscar?' + new URLSearchParams({q: `${P.artista} ${P.album.replace(/\s*[\[(].*$/, '')}`.trim()});
+  const flac = p => p.ruta.toLowerCase().endsWith('.flac');
+  const forzable = m => m && !m.saneada && (m.forzable ?? (m.tramos && !m.fatal && [16, 24, 32].includes(m.bits)));
+  function medTxt(p) {
+    if (!flac(p)) return p.solo_tags ? '<span class="tenue">El audio está bien: solo el tag de la letra o un comentario está mal codificado</span>'
+      : '<span class="tenue">No es FLAC: no se puede sanear</span>';
+    const m = medidas[p.ruta];
+    if (!m || m.midiendo) return '<span class="tenue">Midiendo el daño…</span>';
+    if (m.saneada) return `<span class="ok">Saneada: ${msTxt(m.ms)} rellenados</span>`;
+    if (m.fatal && !m.ms) return `<span class="tenue">No se pudo medir: ${esc(m.fatal)}</span>`;
+    if (!m.tramos) return `<span class="tenue">libFLAC la lee sin cuadros dañados${m.fatal ? ` (${esc(m.fatal)})` : ''}</span>`;
+    const donde = (m.puntos || []).slice(0, 4).map(x => mmss(x.en_s)).join(', ') + (m.tramos > 4 ? '…' : '');
+    return `<span class="${m.saneable ? 'med' : 'mal'}">Pierde ${msTxt(m.ms)} en ${m.tramos} punto${m.tramos > 1 ? 's' : ''}${donde ? ` (${donde})` : ''}</span>`
+      + (m.saneable ? '' : ' · <span class="tenue">mucho para sanear sin preguntar</span>');
+  }
+  function accionesDe(p, i) {
+    const m = medidas[p.ruta];
+    const ult = (est.ultimos || []).filter(u => u.ruta === p.ruta).slice(-1)[0];
+    if (est.actual && est.actual[1] === p.ruta) return `<span class="med">Saneando… ${est.seg || 0} s</span>`;
+    if ((est.en_cola || []).includes(p.ruta)) return '<span class="tenue">En cola para sanear</span>';
+    if (ult && !ult.ok) return `<span class="mal" title="${esc(ult.texto || '')}">No se pudo sanear</span>`;
+    if (p.solo_tags) return `<button class="btn chico oro" data-pd-tags="${i}">Reparar tags</button>`;
+    if (!flac(p) || !m || m.midiendo || m.saneada) return '';
+    if (m.saneable) return `<button class="btn chico oro" data-pd-san="${i}">Sanear</button>`;
+    if (forzable(m)) return `<button class="btn chico" data-pd-forzar="${i}" title="Rellena igual los ${msTxt(m.ms)}; el original queda en .orbyte-respaldo">Sanear igual</button>`;
+    return '';
+  }
+  function pintar() {
+    const sec = $('panel-danadas');
+    if (P.modo === 'bandeja') sec.hidden = !pistas.length;
+    $('pd-cuenta').textContent = pistas.length ? `${pistas.length} pista${pistas.length === 1 ? '' : 's'}` : 'ninguna según la última revisión';
+    $('pd-tabla').innerHTML = pistas.length ? `<table><tr><th>Pista</th><th>Problema</th><th>Daño</th><th></th></tr>${pistas.map((p, i) => `<tr>
+        <td><div class="t">${esc(p.titulo || p.archivo.split('/').pop())}</div><div class="s mono tenue">${esc(p.archivo)}</div></td>
+        <td>${p.estado === 'danada' ? '<span class="mal">✗ dañada</span>' : '<span class="med">⚠ errores, pero completa</span>'}
+          ${(p.errores || []).slice(0, 2).map(e => `<div class="s mono tenue">${esc(e)}</div>`).join('')}</td>
+        <td><div class="s">${medTxt(p)}</div></td>
+        <td style="white-space:nowrap">${accionesDe(p, i)}</td></tr>`).join('')}</table>`
+      : '<div class="sin-problemas">Sin pistas dañadas según la última revisión de Salud.</div>';
+    const san = pistas.filter(p => flac(p) && (medidas[p.ruta] || {}).saneable && !(est.en_cola || []).includes(p.ruta));
+    const bT = $('pd-sanear-todas');
+    bT.style.display = san.length < 2 ? 'none' : ''; bT.textContent = `Sanear todas las de menos de 1 s (${san.length})`;
+    bT.onclick = () => sanear(san.map(p => p.ruta), false, bT);
+    const rep = pistas.filter(p => !p.solo_tags);
+    const bR = $('pd-reparar');
+    if (bR) { bR.style.display = rep.length ? '' : 'none'; bR.onclick = () => abrirReparar({rutas: rep.map(p => p.ruta), aid: P.aid}); }
+    const ocupado = est.actual || (est.en_cola || []).length || (est.revisando || []).length;
+    $('pd-progreso').innerHTML = (est.actual ? `<span class="med">Saneando «${esc(est.actual[1].split('/').pop())}» · ${est.seg || 0} s</span>` : '')
+      + ((est.en_cola || []).length ? ` <span class="tenue">· ${est.en_cola.length} en cola</span>` : '')
+      + ((est.revisando || []).length ? ` <span class="tenue">Revisando ${est.revisando.length} pista${est.revisando.length === 1 ? '' : 's'}…</span>` : '')
+      + (est.ultimos || []).slice(-6).map(u => `<div class="${u.ok ? 'ok' : 'mal'}">${u.ok ? '✓' : '✗'} ${esc(u.archivo)}: ${esc(u.texto || '')}</div>`).join('')
+      + (!ocupado && encargado && P.modo === 'bandeja' ? '<div class="med">Listo: se vuelve a revisar el álbum…</div>' : '');
+    $('pd-tabla').querySelectorAll('[data-pd-san]').forEach(b => b.onclick = () => sanear([pistas[+b.dataset.pdSan].ruta], false, b));
+    $('pd-tabla').querySelectorAll('[data-pd-tags]').forEach(b => b.onclick = () => tags([pistas[+b.dataset.pdTags].ruta], b));
+    $('pd-tabla').querySelectorAll('[data-pd-forzar]').forEach(b => b.onclick = () => {
+      if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = '¿Seguro? Sanear igual'; return; }
+      sanear([pistas[+b.dataset.pdForzar].ruta], true, b);
+    });
+  }
+  async function cargar() {
+    clearTimeout(reloj);
+    let r;
+    try { r = await post('/api/ficha/danadas', P.modo === 'biblioteca' ? {carpeta: P.carpeta} : {rutas: pistas.map(p => p.ruta)}); }
+    catch (e) { reloj = setTimeout(cargar, 8000); return; }
+    if (!r || !r.ok) return;
+    if (P.modo === 'biblioteca') pistas = r.pistas;
+    medidas = r.medidas || {}; est = r.estado || {};
+    pintar();
+    const ocupado = est.actual || (est.en_cola || []).length || (est.revisando || []).length
+      || Object.values(medidas).some(m => m && m.midiendo);
+    if (ocupado) reloj = setTimeout(cargar, 3000);
+    else if (encargado && P.modo === 'bandeja') setTimeout(() => location.reload(), 1500);   // el álbum se vuelve a revisar
+    else if (encargado) { encargado = false; reloj = setTimeout(cargar, 4000); }
+  }
+  async function sanear(rutas, forzar, b) {
+    if (b) b.disabled = true;
+    const r = await post('/api/ficha/sanear', {rutas, forzar, aid: P.aid});
+    if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); if (b) b.disabled = false; return; }
+    encargado = true; cargar();
+  }
+  async function tags(rutas, b) {
+    b.disabled = true;
+    const r = await post('/api/ficha/tags', {rutas, aid: P.aid});
+    if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); b.disabled = false; return; }
+    const mal = r.resultados.filter(x => !x.ok);
+    if (mal.length) toast('No se pudo reparar', mal.map(x => x.texto).join('; '));
+    if (r.revisar) { location.reload(); return; }
+    encargado = true; cargar();
+  }
+  const bRev = $('pd-revisar');
+  if (bRev) bRev.onclick = async () => {
+    bRev.disabled = true;
+    const r = await post('/api/ficha/revisar', {rutas: P.todas});
+    bRev.disabled = false;
+    if (!r || !r.ok) { toast('No se pudo', (r && r.error) || ''); return; }
+    encargado = true; cargar();
+  };
+  document.addEventListener('DOMContentLoaded', cargar);
+})();
+</script>

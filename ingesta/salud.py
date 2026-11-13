@@ -567,6 +567,24 @@ class Salud:
             out.append({'ruta': ruta, 'ok': estado == 'ok', 'texto': notas[0] if notas else estado})
         return out
 
+    def de_carpeta(self, carpeta):
+        """Pistas dañadas o con errores de un álbum (para su ficha) → [{ruta, archivo, estado, errores, solo_tags,
+        cambio}]. `cambio`: el archivo ya no es el que se revisó (se reemplazó o se saneó)."""
+        with self._con() as c:
+            filas = [dict(r) for r in c.execute(
+                "SELECT ruta, tamano, mtime, estado, errores FROM pistas WHERE ruta LIKE ? ESCAPE '\\' "
+                "AND estado IN ('danada', 'errores')", (_like_prefijo(carpeta),))]
+        out = []
+        for f in filas:
+            if not os.path.isfile(f['ruta']):
+                continue
+            errs = json.loads(f['errores'] or '[]')
+            out.append({'ruta': f['ruta'], 'archivo': os.path.relpath(f['ruta'], carpeta), 'estado': f['estado'],
+                        'errores': errs[:3], 'cambio': self._cambio(f),
+                        'solo_tags': f['estado'] == 'errores' and f['ruta'].lower().endswith('.mp3')
+                        and tags_mp3.solo_tags(errs)})
+        return sorted(out, key=lambda p: p['archivo'])
+
     # ── originales que dejó Sanear en <álbum>/.orbyte-respaldo/ ──
     def registrar_original(self, ruta, respaldo):
         if not self._es_original(respaldo):
@@ -877,6 +895,7 @@ class Saneador:
         self.san_total = 0          # Sanear: pistas encargadas en la tanda actual
         self.san_hechas = 0
         self.desde = None           # cuándo empezó lo que se está haciendo (sanear o medir)
+        self.al_terminar = None     # f(ruta) tras sanear una pista (la ficha de la Bandeja vuelve a revisar el álbum)
         salud.saneador = self
         threading.Thread(target=self._bucle, name='saneador', daemon=True).start()
 
@@ -982,6 +1001,11 @@ class Saneador:
                         self._sanear(ruta, forzar=accion == 'forzar')
                     finally:
                         self.san_hechas += 1
+                        if self.al_terminar:
+                            try:
+                                self.al_terminar(ruta)
+                            except Exception:  # noqa: BLE001
+                                log.exception('Sanear: aviso de fin')
             except Exception:  # noqa: BLE001
                 log.exception('Sanear: %s %s', accion, ruta)
             finally:
@@ -1010,8 +1034,9 @@ class Saneador:
         ok, errores, _pico, seg = analisis.decodificar(ruta, prefijo=_prefijo())
         estado, notas = clasificar(ruta, ok, errores, seg, dur)
         st = os.stat(ruta)
-        self.salud._guardar(ruta, f['album_id'] if f else None, st.st_size, st.st_mtime, estado,
-                            [nota] if estado == 'ok' else [nota] + list(notas), seg, dur)
+        if f:           # una pista de la Bandeja (todavía en la entrada) no entra a la lista de Salud
+            self.salud._guardar(ruta, f['album_id'], st.st_size, st.st_mtime, estado,
+                                [nota] if estado == 'ok' else [nota] + list(notas), seg, dur)
         self.salud.guardar_medida(ruta, dict(r, saneable=False, saneada=True))
         self.ultimos.append({'ruta': ruta, 'archivo': nombre, 'ok': estado == 'ok',
                              'texto': nota if estado == 'ok' else f'{nota}, pero ffmpeg todavía avisa: '

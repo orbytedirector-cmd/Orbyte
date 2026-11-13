@@ -39,6 +39,8 @@
 
 {% if lib or lib_error %}{% set lib_api = '/api/biblioteca/%d' % o.id %}{% set lib_abierto = true %}{% include '_editor_biblioteca.html' %}{% endif %}
 {% if lib %}{% include '_pistas_biblioteca.html' %}{% endif %}
+{% if lib and not (a and a.estado in VIVOS) %}{% with pd_modo='biblioteca', pd_aid=(a.id if a else none), pd_carpeta=o.ruta, pd_todas=(lib.plan|map(attribute='clave')|map('prepend_ruta', o.ruta)|list), pd_artista=o.artista, pd_album=o.album %}{% include '_panel_danadas.html' %}{% endwith %}{% include '_reparar.html' %}{% endif %}
+{% if lib and not (a and a.estado in VIVOS) %}{% set elim_api = '/api/biblioteca/%d' % o.id %}{% include '_eliminar_biblioteca.html' %}{% endif %}
 {% if not (a and a.estado in VIVOS) %}{% with cal_oid=o.id %}{% include '_calidad.html' %}{% endwith %}{% endif %}
 {% if portada %}<section class="seccion">{% with pk='b', pid=o.id, artista_q=o.artista, album_q=o.album, ocupado=(a and a.estado in VIVOS) %}{% include '_portada_biblioteca.html' %}{% endwith %}</section>{% endif %}
 {% endblock %}

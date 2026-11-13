@@ -1,0 +1,58 @@
+{# Eliminar pistas o el álbum entero de la biblioteca → papelera (13-11-2026).
+   Variables: lib (ajustar.leer), fmt (portada.formatos, opcional), elim_api (…/eliminar) #}
+<section class="seccion" id="eliminar-lib">
+  <details>
+    <summary class="rotulo" style="cursor:pointer">Eliminar <span class="cuenta">pistas o el álbum · van a la papelera</span></summary>
+    <div class="panel" style="margin-top:.7rem">
+      <p class="s tenue" style="margin:0 0 .7rem">Lo eliminado sale de Orbyte y sus archivos van a la papelera (Salud → Espacio), donde se pueden restaurar hasta que venza. Si queda en el álbum una pista equivalente (mismo número y título), sus escuchas, favoritos y playlists pasan a esa.</p>
+      <div class="tabla-wrap"><table>
+        <tr><th style="width:1%"><input type="checkbox" id="el-todas" title="Marcar todas"></th><th>#</th><th>Título</th><th>Formato</th><th class="oculto-movil">Archivo</th></tr>
+        {% for x in lib.plan %}{% set f = (fmt or {}).get(x.clave) or (none, none) %}
+        <tr>
+          <td><input type="checkbox" data-el-clave="{{ x.clave }}"></td>
+          <td class="num">{% if lib.n_discos > 1 %}{{ x.disco }}-{% endif %}{{ x.numero or '—' }}</td>
+          <td><div class="t">{{ x.titulo or x.clave.split('/')[-1] }}</div></td>
+          <td>{% if f[0] %}<span class="chip {{ 'q-' ~ f[1] if f[1] }}"><span class="led"></span>{{ f[0] }}</span>{% endif %}</td>
+          <td class="oculto-movil"><span class="nombre">{{ x.clave }}</span></td>
+        </tr>
+        {% endfor %}
+      </table></div>
+      <div class="acciones">
+        <button class="btn" id="el-marcadas" disabled>Eliminar las marcadas</button>
+        <button class="btn" id="el-album">Eliminar el álbum completo</button>
+        <span class="s tenue" id="el-msg"></span>
+      </div>
+    </div>
+  </details>
+</section>
+<script>
+(function () {
+  const API = {{ elim_api|tojson }};
+  const raiz = document.getElementById('eliminar-lib');
+  const cajas = () => [...raiz.querySelectorAll('[data-el-clave]')];
+  const marcadas = () => cajas().filter(c => c.checked).map(c => c.dataset.elClave);
+  const bM = document.getElementById('el-marcadas'), bA = document.getElementById('el-album');
+  const msg = document.getElementById('el-msg');
+  function contar() {
+    const n = marcadas().length;
+    bM.disabled = !n; delete bM.dataset.seguro; bM.classList.remove('oro');
+    bM.textContent = n ? `Eliminar las marcadas (${n})` : 'Eliminar las marcadas';
+  }
+  raiz.addEventListener('change', e => { if (e.target.dataset.elClave !== undefined) contar(); });
+  document.getElementById('el-todas').onchange = e => { cajas().forEach(c => c.checked = e.target.checked); contar(); };
+  async function enviar(b, datos, pregunta) {
+    if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = pregunta; return; }
+    b.disabled = true; b.textContent = 'Moviendo a la papelera…';
+    let r;
+    try { r = await post(`${API}/eliminar`, datos); } catch (e) { r = {ok: false, error: String(e)}; }
+    if (!r || r.ok === false) {
+      msg.innerHTML = `<span style="color:var(--error)">${esc((r && r.error) || 'No se pudo')}</span>`;
+      b.disabled = false; delete b.dataset.seguro; b.classList.remove('oro');
+      b.textContent = b === bA ? 'Eliminar el álbum completo' : 'Eliminar las marcadas'; contar(); return;
+    }
+    location.href = r.ir || location.href.split('#')[0];
+  }
+  bM.onclick = () => { const l = marcadas(); if (l.length) enviar(bM, {claves: l}, `¿Seguro? ${l.length} a la papelera`); };
+  bA.onclick = () => enviar(bA, {album: true}, `¿Seguro? Todo el álbum (${cajas().length} pistas) a la papelera`);
+})();
+</script>
