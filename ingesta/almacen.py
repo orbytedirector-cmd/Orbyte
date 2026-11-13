@@ -217,6 +217,12 @@ class Almacen:
             c.execute(f'UPDATE albumes SET {sets}, reproceso=NULL, progreso=NULL WHERE id=?', (*antes.values(), aid))
             return True
 
+    def rutas_ubicadas(self):
+        """Carpetas de la biblioteca de los álbumes que ubicó la ingesta (Reemplazar no las toca)."""
+        with self._con() as c:
+            return [r[0].rstrip('/') for r in c.execute("SELECT ubicado_en FROM albumes WHERE ubicado_en IS NOT NULL "
+                                                         "AND ubicado_en != '' AND estado != 'descartado'")]
+
     def fila_de_ruta(self, ruta):
         ruta = (ruta or '').rstrip('/')
         with self._con() as c:

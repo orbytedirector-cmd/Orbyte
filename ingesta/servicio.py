@@ -1072,7 +1072,8 @@ def _eliminar_seguro(e, destino=None, todas=None):
     def trabajo():
         try:
             res = repetidos_mod.eliminar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', grupo, [e['ruta']],
-                                         destino, lambda m: almacen.unificacion_log(uid, m), sin_destino=not destino)
+                                         destino, lambda m: almacen.unificacion_log(uid, m), sin_destino=not destino,
+                                         proteger=[x for x in almacen.rutas_ubicadas() if x != e['ruta'].rstrip('/')])
             while True:                              # sus filas de Ingesta (si las ubicó ella) también salen
                 fila = almacen.fila_de_ruta(e['ruta'])
                 if not fila:
@@ -3151,7 +3152,9 @@ def api_repetidos_eliminar():
     def trabajo():
         try:
             res = repetidos_mod.eliminar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', g, borrar, destino,
-                                         lambda m: almacen.unificacion_log(uid, m))
+                                         lambda m: almacen.unificacion_log(uid, m),
+                                         proteger=[x for x in almacen.rutas_ubicadas()
+                                                   if x not in {b.rstrip('/') for b in borrar}])
             almacen.cerrar_unificacion(uid, 'ok', res)
             if len(quedan) > 1:          # elegiste quedarte con varias: el grupo queda revisado así
                 almacen.marcar_repetido(g['clave'], '|'.join(sorted(quedan)))

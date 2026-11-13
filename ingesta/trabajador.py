@@ -260,14 +260,20 @@ class Procesador(threading.Thread):
         try:
             if not nueva or not os.path.abspath(nueva).startswith(os.path.abspath(biblioteca) + os.sep):
                 raise RuntimeError('el álbum nuevo no está ubicado en la biblioteca: no se borra nada')
-            ids = _ids_de(db, list(rep['reemplazar']) + [nueva])
+            viejas_rutas = [r.rstrip('/') for r in rep['reemplazar']]
+            if any(nueva == r or nueva.startswith(r + '/') for r in viejas_rutas):
+                raise RuntimeError('el álbum nuevo quedó dentro de la carpeta del que reemplaza: no se borra nada')
+            ids = _ids_de(db, viejas_rutas + [nueva], excluir=[nueva])
             if not ids.get(nueva):
                 raise RuntimeError('el álbum nuevo no aparece en music.db')
-            viejas = [r for r in rep['reemplazar'] if ids.get(r)]
-            res = {'liberado': 0, 'movidas': 0}
+            viejas = [r for r in viejas_rutas if ids.get(r)]
+            res = {'liberado': 0, 'movidas': 0, 'saltadas': [], 'avisos': []}
             if viejas:
                 grupo = {'ediciones': [{'ruta': r, 'albumes': ids[r]} for r in viejas + [nueva]]}
-                res = repetidos.eliminar(db, biblioteca, grupo, viejas, nueva, reg)
+                proteger = [x for x in self.almacen.rutas_ubicadas() if x.rstrip('/') not in viejas]
+                res = repetidos.eliminar(db, biblioteca, grupo, viejas, nueva, reg, proteger=proteger,
+                                         exigir_cobertura=True)
+                viejas = [r for r in viejas if r not in res.get('saltadas', [])]
                 for r in viejas:                     # filas de Ingesta de las ediciones que salieron (si las ubicó ella)
                     while True:
                         otra = self.almacen.fila_de_ruta(r)
@@ -289,9 +295,15 @@ class Procesador(threading.Thread):
                 self.almacen.actualizar(aid, **campos)
             cam = dict((self.almacen.album(aid) or {}).get('cambios') or {}, reemplazo_hecho=True)
             self.almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
-            self.almacen.avisar('ok', f'{_nombre(a)}: reemplazó a la edición anterior',
-                                f'{res["liberado"] / 1e9:.2f} GB liberados · {res["movidas"]} referencias '
-                                f'(escuchas, favoritos, playlists) pasadas al nuevo', aid)
+            if res.get('saltadas'):
+                self.almacen.avisar('revision', f'{_nombre(a)}: la edición anterior NO se borró',
+                                    ' · '.join(res['avisos'])[:900], aid)
+            if viejas:
+                self.almacen.avisar('ok', f'{_nombre(a)}: reemplazó a la edición anterior',
+                                    f'{res["liberado"] / 1e9:.2f} GB liberados · {res["movidas"]} referencias '
+                                    f'(escuchas, favoritos, playlists) pasadas al nuevo'
+                                    + (f' · {len(res["avisos"]) - len(res.get("saltadas") or [])} aviso(s) en el registro'
+                                       if len(res.get('avisos') or []) > len(res.get('saltadas') or []) else ''), aid)
         except Exception as e:
             log.error('Reemplazo %s:\n%s', aid, traceback.format_exc())
             reg(f'ERROR en el reemplazo: {type(e).__name__}: {e}')
@@ -353,12 +365,29 @@ def borrar_union(almacen, ruta):
         shutil.rmtree(tanda, ignore_errors=True)
 
 
-def _ids_de(db, rutas):
+def _ids_de(db, rutas, excluir=()):
+    """Álbumes de Orbyte de cada edición: su carpeta y sus subcarpetas de disco («CD 1», «Disc 2»…). Otro álbum
+    que esté dentro de la carpeta NO es de la edición (13-11-2026: «OMIR» tenía su carpeta en la del artista y un
+    «Reemplazar» se llevó los 7 álbumes recién ubicados dentro de ella). Nada dentro de `excluir` (el nuevo)."""
     import sqlite3
+    from .analisis import carpeta_album
+    excluir = [x.rstrip('/') for x in excluir]
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     try:
-        return {r: [x[0] for x in con.execute('SELECT id FROM albums WHERE path=? OR path LIKE ?',
-                                             (r, r.replace('%', '_') + '/%'))] for r in rutas}
+        out = {}
+        for r in rutas:
+            r = r.rstrip('/')
+            ids = []
+            for aid, path in con.execute('SELECT id, path FROM albums WHERE path=? OR path=? OR path LIKE ?',
+                                         (r, r + '/', r.replace('%', '_') + '/%')):
+                p = (path or '').rstrip('/')
+                if p != r and carpeta_album(p) != r:
+                    continue
+                if p != r and r not in excluir and any(p == x or p.startswith(x + '/') for x in excluir):
+                    continue
+                ids.append(aid)
+            out[r] = ids
+        return out
     finally:
         con.close()
 

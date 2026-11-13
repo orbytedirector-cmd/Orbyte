@@ -897,6 +897,7 @@ def biblioteca(db, raiz='/mnt/musica'):
     con.close()
     grupos = {}
     artistas = {}
+    album_en_artista = set()
     nombres = {}
     for f in filas:
         nombres.setdefault(_norm(f['artista']), Counter())[f['artista']] += 1
@@ -919,6 +920,8 @@ def biblioteca(db, raiz='/mnt/musica'):
         rel = os.path.relpath(ruta, raiz).split(os.sep) if ruta.startswith(raiz + os.sep) else []
         if len(rel) >= 3 and len(rel[0]) == 1:
             artistas.setdefault(_norm(f['artista']), Counter())[(rel[0], rel[1])] += 1
+        elif len(rel) == 2 and len(rel[0]) == 1:
+            album_en_artista.add((rel[0], rel[1]))      # un álbum con su carpeta en la del artista
     for g in grupos.values():
         g['tag'] = g['tags'].most_common(1)[0][0] if g['tags'] else None
         g['tags'] = dict(g['tags'])
@@ -926,7 +929,8 @@ def biblioteca(db, raiz='/mnt/musica'):
         g['mqa'] = mqa_info(n_mqa, n_studio, n_mqb, g['bits'], g['sr'], mqa_sr) if g['tag'] == 'MQA' else None
         g['n_artista'] = _norm(g['artista'])
         g['n_album'] = _norm_album(g['album'])
-    datos = {'grupos': list(grupos.values()), 'artistas': artistas, 'nombres': nombres}
+    datos = {'grupos': list(grupos.values()), 'artistas': artistas, 'nombres': nombres,
+             'album_en_artista': album_en_artista}
     _CACHE_BIB.update(clave=clave, datos=datos)
     return datos
 
@@ -964,7 +968,12 @@ def carpeta_artista_existente(bib, artista):
         return None
     c = bib['artistas'].get(_norm(artista))
     if c:
-        return c.most_common(1)[0][0]
+        # una carpeta de artista que a la vez es un álbum (todo revuelto en la raíz del artista, caso Dimash
+        # 13-11-2026) no se usa: el álbum nuevo quedaría dentro de otro álbum
+        malas = bib.get('album_en_artista') or set()
+        for par, _n in c.most_common():
+            if par not in malas:
+                return par
     return None
 
 
