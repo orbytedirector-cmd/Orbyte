@@ -429,9 +429,21 @@ def _mapa(pistas_viejas, pistas_nuevas):
     return mapa
 
 
-def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_destino=False):
+def _dentro_de(p, carpeta):
+    return p == carpeta or p.startswith(carpeta + '/')
+
+
+def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_destino=False, proteger=(),
+             exigir_cobertura=False):
     """Borra del disco y de Orbyte las ediciones `rutas_borrar`; lo usado pasa a `ruta_destino`. IRRECUPERABLE.
-    Con sin_destino=True (eliminar un álbum suelto desde la Biblioteca, «a ninguna»), su historial se pierde."""
+    Con sin_destino=True (eliminar un álbum suelto desde la Biblioteca, «a ninguna»), su historial se pierde.
+
+    Resguardos (13-11-2026, caso Dimash: un «Reemplazar» borró 7 álbumes que estaban dentro de la carpeta de la
+    edición vieja):
+    - nunca se borra un archivo que esté dentro de la carpeta de otro álbum (de Orbyte, de `proteger` —los que
+      ubicó la ingesta— o el que se queda), salvo que esa carpeta contenga a la edición que sale;
+    - con `exigir_cobertura`, una edición con pistas (con archivo) que no tienen equivalente en la que se queda
+      no se toca: se avisa y quedan las dos."""
     biblioteca = os.path.abspath(biblioteca)
     eds = {e['ruta']: e for e in grupo['ediciones']}
     if not rutas_borrar or any(r not in eds for r in rutas_borrar):
@@ -448,15 +460,45 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
     destino = eds[ruta_destino] if not sin_destino else None
     pistas_destino = _pistas(con, destino['albumes']) if destino else []
     album_de_pista = {p['id']: p['album_id'] for p in pistas_destino}
-    resumen = {'liberado': 0, 'ediciones': 0, 'archivos': 0, 'movidas': 0, 'quitadas': 0, 'avisos': []}
+    resumen = {'liberado': 0, 'ediciones': 0, 'archivos': 0, 'movidas': 0, 'quitadas': 0, 'avisos': [],
+               'saltadas': [], 'protegidos': 0}
+    proteger = {str(x).rstrip('/') for x in proteger or () if x}
+    if ruta_destino and not sin_destino:
+        proteger.add(ruta_destino.rstrip('/'))
     try:
         for ruta in rutas_borrar:
             e = eds[ruta]
+            # solo los álbumes de la edición: su carpeta y sus subcarpetas de disco; otro álbum que esté dentro
+            # (o dentro de una carpeta protegida) no sale, ni de Orbyte ni del disco
+            r0 = ruta.rstrip('/')
+            propios = []
+            for aid in e['albumes']:
+                fila = con.execute('SELECT path FROM albums WHERE id=?', (aid,)).fetchone()
+                p0 = ((fila[0] if fila else '') or '').rstrip('/')
+                if p0 and (p0 == r0 or analisis.carpeta_album(p0) == r0) and not any(
+                        x != r0 and _dentro_de(p0, x) and not _dentro_de(r0, x) for x in proteger):
+                    propios.append(aid)
+                elif fila:
+                    registro(f'  ⚠ «{os.path.relpath(p0, biblioteca)}» es otro álbum dentro de la carpeta: no se toca')
+                    resumen['avisos'].append(f'«{os.path.relpath(p0, biblioteca)}» no se tocó: es otro álbum')
+            e = dict(e, albumes=propios)
+            if not propios:
+                continue
             pistas = _pistas(con, e['albumes'])
             carpetas = sorted(set(_rutas_albumes(con, e['albumes'])) | {ruta}, key=len, reverse=True)
             mapa = _mapa(pistas, pistas_destino)
             registro(f'«{os.path.relpath(ruta, biblioteca)}»: {len(mapa)}/{len(pistas)} pistas con equivalente '
                      f'en la edición que se queda')
+            if exigir_cobertura and not sin_destino:
+                faltan = [p for p in pistas if p['id'] not in mapa and p['file_path'] and os.path.isfile(p['file_path'])]
+                if faltan:
+                    txt = (f'«{os.path.relpath(ruta, biblioteca)}» no se borró: tiene {len(faltan)} pista(s) que la '
+                           f'nueva no trae ({", ".join((p["title"] or "?") for p in faltan[:4])}'
+                           f'{"…" if len(faltan) > 4 else ""}); quedan las dos ediciones')
+                    registro('⚠ ' + txt)
+                    resumen['avisos'].append(txt)
+                    resumen['saltadas'].append(ruta)
+                    continue
             # 1) base: lo que apunta a sus pistas pasa a la edición que se queda; la edición sale de Orbyte
             with con:
                 for aid in e['albumes']:
@@ -470,11 +512,20 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
                                                dest[0][0] if dest else (destino['albumes'][0] if destino else None))
                     resumen['movidas'] += mov
                     resumen['quitadas'] += qui
-            # 2) disco: sus archivos de audio y luego sus carpetas
+            # 2) disco: sus archivos de audio y luego sus carpetas. Las carpetas de otros álbumes que quedan
+            # (Orbyte, los ubicados por la ingesta, el que se queda) se respetan aunque estén dentro de la suya.
             otras = [r[0] for r in con.execute('SELECT path FROM albums WHERE path IS NOT NULL')]
+            propias = [c.rstrip('/') for c in carpetas]
+            ajenas_todas = {o.rstrip('/') for o in otras} | proteger
+            ajenas_todas = {a for a in ajenas_todas if a and not _dentro_de(r0, a)}
             for p in pistas:
                 f = p['file_path']
                 if f and os.path.isfile(f):
+                    duena = next((a for a in ajenas_todas if f.startswith(a + '/')), None)
+                    if duena:
+                        resumen['protegidos'] += 1
+                        registro(f'  ⚠ no se borra {os.path.relpath(f, biblioteca)}: está en la carpeta de otro álbum')
+                        continue
                     resumen['liberado'] += os.path.getsize(f)
                     os.remove(f)
                     resumen['archivos'] += 1
@@ -482,7 +533,7 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
                 if not os.path.isdir(carpeta):
                     continue
                 rel = os.path.relpath(carpeta, biblioteca)
-                ajenas = [o for o in otras if o == carpeta or o.startswith(carpeta.rstrip('/') + '/')]
+                ajenas = [o for o in ajenas_todas if _dentro_de(o, carpeta.rstrip('/'))]
                 if not ajenas and len(rel.split(os.sep)) >= 3:      # Letra/Artista/Álbum… : la carpeta entera
                     resumen['liberado'] += _tamano(carpeta)
                     shutil.rmtree(carpeta)
@@ -500,6 +551,9 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
         con.close()
     registro(f'Listo: {resumen["ediciones"]} edición(es) eliminada(s), {resumen["liberado"] / 1e9:.2f} GB liberados, '
              f'{resumen["movidas"]} referencias pasadas a la edición que se queda')
+    if resumen['protegidos']:
+        resumen['avisos'].append(f'{resumen["protegidos"]} archivo(s) no se borraron porque están en la carpeta de '
+                                 'otro álbum')
     for a in resumen['avisos']:
         registro('⚠ ' + a)
     return resumen

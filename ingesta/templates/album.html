@@ -267,7 +267,7 @@
   {% endif %}
   {% if dup_pend %}
   <div class="acciones">
-    <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas salen de la biblioteca (escuchas, favoritos y playlists pasan a la nueva)">Reemplazar las marcadas por A</button>
+    <button class="btn oro" data-dup="reemplazar" title="Se ubica la nueva y, cuando su metadata termina bien, las marcadas se borran del disco (escuchas, favoritos y playlists pasan a la nueva). Una marcada que tiene pistas que la nueva no trae no se borra: quedan las dos y te avisa. Nunca se toca otro álbum que esté dentro de su carpeta.">Reemplazar las marcadas por A</button>
     {% if a.origen == 'reproceso' %}<button class="btn" data-dup="descartar" title="Se cancela el reproceso; el álbum queda en la biblioteca tal como estaba">Cancelar reproceso</button>
     {% else %}<button class="btn" data-dup="descartar" title="Se queda la de la biblioteca; la nueva se borra de la entrada">Descartar A (la nueva)</button>{% endif %}
     <button class="btn" data-dup="ambos">Conservar todas</button>
