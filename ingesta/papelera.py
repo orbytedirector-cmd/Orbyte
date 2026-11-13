@@ -184,15 +184,16 @@ class Papelera:
             ids = [r['id'] for r in c.execute('SELECT id FROM elementos WHERE cuando < ?', (limite,))]
         return self.vaciar(ids) if ids else {'borrados': 0, 'bytes': 0, 'errores': []}
 
-    def restaurar(self, eid):
-        """Devuelve los archivos a su lugar. → el elemento (con `extra`) para que quien llamó lo vuelva a sumar."""
+    def restaurar(self, eid, pisar=False):
+        """Devuelve los archivos a su lugar. → el elemento (con `extra`) para que quien llamó lo vuelva a sumar.
+        `pisar`: lo que ocupa su lugar se reemplaza (la versión dañada que se cambió al reparar)."""
         f = self.elemento(eid)
         if not f:
             raise FalloPapelera('Ese elemento ya no está en la papelera')
         d = self.carpeta(f['raiz'], eid)
         if not os.path.isdir(d):
             raise FalloPapelera('Sus archivos ya no están (¿disco desmontado?)')
-        choques = [rel for rel in f['rels'] if os.path.lexists(os.path.join(f['raiz'], rel))]
+        choques = [] if pisar else [rel for rel in f['rels'] if os.path.lexists(os.path.join(f['raiz'], rel))]
         if choques:
             raise FalloPapelera(f'Ya hay algo en su lugar: {choques[0]}')
         for rel in f['rels']:

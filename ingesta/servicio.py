@@ -2177,6 +2177,22 @@ def _al_sanear(ruta):
 
 
 saneador.al_terminar = _al_sanear
+
+
+def _vieja_a_papelera(ruta, _it):
+    """Reparar: la versión dañada va a la papelera justo antes de que la de Tidal ocupe su lugar."""
+    aj = almacen.ajustes()
+    for raiz, origen in ((aj.get('biblioteca') or '/mnt/musica', 'biblioteca'), (aj.get('carpeta_entrada'), 'bandeja')):
+        if raiz and papelera_mod._dentro(ruta, raiz):
+            carpeta = analisis.carpeta_album(os.path.dirname(ruta))
+            papelera.mover(raiz, [ruta], 'pistas', origen, f'Reparar: {os.path.basename(carpeta)}',
+                           detalle=f'{os.path.basename(ruta)} (la versión dañada, reemplazada por la de Tidal)',
+                           extra={'reemplazo': True, 'album_ruta': carpeta, 'aid': almacen.fila_de_ruta(carpeta)})
+            return True
+    return False
+
+
+reparar_mod.al_reemplazar = _vieja_a_papelera
 procesador.al_respaldo = salud.registrar_original
 
 
@@ -2285,12 +2301,16 @@ def api_ficha_revisar():
 def api_papelera_restaurar(eid):
     if not procesador.biblioteca_lista():
         return _elim_error('La biblioteca no está montada')
+    previo = papelera.elemento(eid)
+    reemplazo = bool(previo and (previo.get('extra') or {}).get('reemplazo'))
     try:
-        f = papelera.restaurar(eid)
+        f = papelera.restaurar(eid, pisar=reemplazo)
     except papelera_mod.FalloPapelera as e:
         return _elim_error(str(e))
     extra = f.get('extra') or {}
     ir = None
+    if reemplazo:          # vuelve la versión dañada: Salud la revisa de nuevo
+        saneador.revisar([os.path.join(f['raiz'], rel) for rel in f['rels']])
     if f['origen'] == 'biblioteca':
         ruta = extra.get('album_ruta')
         aid = almacen.de_biblioteca(ruta)
@@ -2402,8 +2422,10 @@ def api_reparar_plan():
         return jsonify(ok=False, error='Alguna pista no está en la biblioteca ni en la entrada'), 400
     try:
         elegir = {_ruta_reparable(k): v for k, v in (d.get('elegir') or {}).items()}
+        sueltas = {_ruta_reparable(k): v for k, v in (d.get('sueltas') or {}).items()}
         p = reparar_mod.plan(rutas, almacen.ajustes().get('db_orbyte'), d.get('edicion_id'),
-                             busqueda=d.get('busqueda'), elegir={k: v for k, v in elegir.items() if k})
+                             busqueda=d.get('busqueda'), elegir={k: v for k, v in elegir.items() if k},
+                             sueltas={k: v for k, v in sueltas.items() if k})
     except reparar_mod.Fallo as e:
         return jsonify(ok=False, error=str(e)), 409
     except Exception as e:
@@ -2415,6 +2437,23 @@ def api_reparar_plan():
     token = secrets.token_hex(8)
     _PLANES[token] = (ahora, p)
     return jsonify(ok=True, token=token, **p)
+
+
+@app.route('/api/reparar/buscar_pista', methods=['POST'])
+def api_reparar_buscar_pista():
+    """«Buscar esta pista»: candidatas de Tidal para una pista dañada, por título y artista (o ISRC o enlace)."""
+    d = request.get_json(silent=True) or {}
+    ruta = _ruta_reparable(d.get('ruta') or '')
+    if not ruta:
+        return jsonify(ok=False, error='La pista no está en la biblioteca ni en la entrada'), 400
+    try:
+        q, res = reparar_mod.buscar_pista(ruta, d.get('q'), almacen.ajustes().get('db_orbyte'), d.get('artista'))
+    except (reparar_mod.Fallo, tienda_mod.FalloTienda) as e:
+        return jsonify(ok=False, error=str(e)), 409
+    except Exception as e:
+        log.exception('Reparar: buscar pista')
+        return jsonify(ok=False, error=f'{type(e).__name__}: {e}'), 500
+    return jsonify(ok=True, consulta=q, resultados=res)
 
 
 @app.route('/api/reparar', methods=['GET', 'POST'])

@@ -42,6 +42,8 @@ PAUSA_REINTENTO_S = 20
 # Pista elegida a mano que dura distinto de la vieja: hasta este margen se puede confirmar («Usar igual»);
 # más allá no es la misma pista y se bloquea.
 MAX_DIF_CONFIRMABLE_S = 10.0
+# f(ruta, ítem) → mueve la pista vieja a la papelera antes de reemplazarla (lo pone servicio.py); None = se pisa
+al_reemplazar = None
 _TIDAL_URL_RE = re.compile(r'tidal\.com/(?:browse/)?(album|track)/(\d+)', re.I)
 # Tags de la pista (no del álbum): no se copian de una pista vecina.
 _TAGS_DE_PISTA = ('title', 'tracknumber', 'isrc', 'lyrics', 'unsyncedlyrics', 'syncedlyrics', 'length', 'comment',
@@ -338,9 +340,11 @@ def _ediciones(artista, album, n_pistas, upc=None, isrcs=None):
     return por_codigo + salida
 
 
-def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
+def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None, sueltas=None):
     """Qué se haría con cada pista dañada. `rutas`: archivos dañados (se resuelven los enlaces de una unión).
-    `busqueda`: búsqueda manual en Tidal (texto o enlace); `elegir`: {ruta: id de pista de Tidal} elegidas a mano."""
+    `busqueda`: búsqueda manual en Tidal (texto o enlace); `elegir`: {ruta: id de pista de Tidal} elegidas a mano
+    en la edición; `sueltas`: {ruta: id de pista de Tidal} elegidas con «Buscar esta pista» (de cualquier álbum).
+    Si no hay edición, o la edición no tiene una pista segura para alguna, se busca esa pista por su cuenta."""
     rutas = [os.path.realpath(r) for r in rutas if r]
     if not rutas:
         raise Fallo('No hay pistas para reparar')
@@ -348,6 +352,7 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
     if faltan:
         raise Fallo(f'No está el archivo {os.path.basename(faltan[0])}')
     elegir = {os.path.realpath(k): str(v) for k, v in (elegir or {}).items() if v}
+    sueltas = {os.path.realpath(k): str(v) for k, v in (sueltas or {}).items() if v}
     busqueda = (busqueda or '').strip() or None
     carpeta = analisis.carpeta_album(os.path.dirname(rutas[0]))
     n_pistas = len(tienda._audios(carpeta))
@@ -377,8 +382,11 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
             aviso = f'Tidal no tiene «{artista} — {album}»: búscalo a mano'
         else:
             aviso = 'No se sabe el artista ni el álbum de la pista: búscalo a mano'
-        return dict(base, edicion=None, ediciones=[], pistas_tidal=[], aviso=aviso,
-                    pistas=[_item(r, carpeta, db, None, None, album_q) for r in rutas])
+        items = _con_sueltas([_item(r, carpeta, db, None, None, album_q) for r in rutas], carpeta, db, album_q,
+                             sueltas, artista)
+        if any(it.get('suelta') for it in items):
+            aviso += ' · se buscó cada pista por su título y duración'
+        return dict(base, edicion=None, ediciones=[], pistas_tidal=[], aviso=aviso, pistas=items)
     ed = next((e for e in eds if e['id'] == str(edicion_id)), None) if edicion_id else eds[0]
     if not ed:
         raise Fallo('Esa edición ya no aparece en Tidal')
@@ -387,6 +395,7 @@ def plan(rutas, db=None, edicion_id=None, busqueda=None, elegir=None):
         elegir[rutas[0]] = pista_enlace
     por_isrc = ed.get('pista_isrc') or {}             # la misma grabación (ISRC) en esa edición
     items = [_item(r, carpeta, db, pistas_t, elegir.get(r), album_q, por_isrc.get(r)) for r in rutas]
+    items = _con_sueltas(items, carpeta, db, album_q, sueltas, artista)
     campos = ('id', 'titulo', 'artista', 'anio', 'n_pistas', 'hires', 'como', 'portada')
     return dict(base, aviso=None,
                 edicion={k: ed.get(k) for k in campos + ('url',)},
@@ -407,7 +416,7 @@ def _item(r, carpeta, db, pistas_t, elegida, album_q, por_isrc=None):
                                           're-descarga el álbum completo')
         return it
     if pistas_t is None:
-        it.update(reparable=False, motivo='falta elegir la edición en Tidal')
+        it.update(reparable=False, motivo='falta la edición en Tidal: búscala arriba o usa «Buscar esta pista»')
         return it
     if elegida:
         p = next((x for x in pistas_t if str(x['id']) == str(elegida)), None)
@@ -441,6 +450,92 @@ def _item(r, carpeta, db, pistas_t, elegida, album_q, por_isrc=None):
                     'duracion': p.get('duracion'), 'bits': tb, 'sr': ts, 'calidad': etiqueta(tb, ts)}
     it['igual'] = (tb, ts) == tuple(album_q) if album_q[1] else (tb, ts) == (b, s)
     return it
+
+
+# ─────────────────────────── buscar una pista suelta (13-11-2026) ───────────────────────────
+# A veces el álbum no aparece en Tidal con el mismo nombre (o no trae código), pero sus pistas sí: en un
+# recopilatorio, un single o la otra edición. Se busca la pista por «artista + título» y se elige por la duración.
+
+MAX_AUTO = 12            # pistas que se buscan solas al abrir la ventana (cada una es una búsqueda en Tidal)
+
+
+def consulta_pista(ruta, db=None, artista_album=None):
+    f, bd = _ficha(ruta, db)
+    t = _tags(ruta)
+    artista = _valido(t.get('artist')) or _valido(bd.get('artista')) or _valido(artista_album) \
+        or _valido(t.get('albumartist'))
+    titulo = re.sub(r'\s*\((?:CD|HR)-[^)]*\)\s*$', '', f.get('titulo') or '')
+    return f'{artista or ""} {titulo}'.strip(), f
+
+
+def buscar_pista(ruta, q=None, db=None, artista_album=None, limite=10):
+    """Candidatas de Tidal para la pista dañada `ruta` → (consulta, [pista + dif_duracion, calza, parecido]).
+    Primero las que duran lo mismo (dentro de la tolerancia) y con el título más parecido; luego Hi-Res."""
+    auto, f = consulta_pista(ruta, db, artista_album)
+    q = (q or '').strip() or auto
+    if not q:
+        raise Fallo('La pista no tiene título ni artista para buscar: escríbelos')
+    tienda.preparar_tidal()
+    c = tienda.cliente('tidal')
+    if _ISRC_RE.match(q):
+        pares = c.pistas_por_isrc(q.replace('-', ''))
+        res = [c.pista(tid) for tid, _a in pares[:limite]]
+    else:
+        m = _TIDAL_URL_RE.search(q)
+        res = [c.pista(m.group(2))] if m and m.group(1).lower() == 'track' else c.buscar_pistas(q, limite=25)
+    ref = f.get('duracion')
+    tol = rescate.tolerancia(ref)
+    out = []
+    for p in res:
+        if not p.get('disponible', True) or not p.get('lossless', True):
+            continue
+        dif = round(float(p['duracion']) - float(ref), 1) if ref and p.get('duracion') else None
+        out.append(dict(p, dif_duracion=dif, calza=dif is not None and abs(dif) <= tol,
+                        parecido=round(rescate._parecido(f.get('titulo'), p.get('titulo')), 2)))
+    # las que calzan en duración, por título; las demás, por la duración más cercana
+    out.sort(key=lambda p: (not p['calza'], -p['parecido'] if p['calza'] else abs(p['dif_duracion'] or 999),
+                            abs(p['dif_duracion'] or 999), not p.get('hires')))
+    return q, out[:limite]
+
+
+def _item_suelta(r, carpeta, db, tid, album_q, auto=False):
+    """La pista dañada emparejada con una pista suelta de Tidal (de cualquier álbum): mismas verificaciones."""
+    p = tienda.cliente('tidal').pista(tid)
+    it = _item(r, carpeta, db, [p], tid, album_q)
+    it.update(suelta=True, auto=auto, manual=not auto, como='búsqueda por pista')
+    if it.get('pareja'):
+        it['pareja'].update(album=p.get('album'), artista=p.get('artista'), url=p.get('url'), portada=p.get('portada'))
+    return it
+
+
+def _con_sueltas(items, carpeta, db, album_q, sueltas, artista_album):
+    """Las elegidas con «Buscar esta pista» reemplazan su ítem; las FLAC que no tienen pareja segura en la
+    edición (o no hay edición) se buscan solas: queda la mejor si dura lo mismo y el título calza."""
+    out, buscadas = [], 0
+    for it in items:
+        r = it['ruta']
+        if r in sueltas:
+            try:
+                it = _item_suelta(r, carpeta, db, sueltas[r], album_q)
+            except Exception as e:  # noqa: BLE001
+                it = dict(it, reparable=False, motivo=f'no se pudo leer esa pista de Tidal ({type(e).__name__})')
+        elif not it.get('pareja') and r.lower().endswith('.flac') and buscadas < MAX_AUTO:
+            buscadas += 1
+            try:
+                _q, cands = buscar_pista(r, None, db, artista_album, limite=5)
+            except Exception as e:  # noqa: BLE001
+                log.warning('Reparar: búsqueda por pista %s: %s', r, e)
+                cands = []
+            mejor = next((c for c in cands if c['calza'] and c['parecido'] >= 0.85), None)
+            if mejor:
+                try:
+                    it = _item_suelta(r, carpeta, db, mejor['id'], album_q, auto=True)
+                except Exception:  # noqa: BLE001
+                    pass
+            elif cands:
+                it = dict(it, motivo=(it.get('motivo') or 'sin pareja') + ' · usa «Buscar esta pista»')
+        out.append(it)
+    return out
 
 
 # ─────────────────────────── reparar una pista ───────────────────────────
@@ -629,6 +724,12 @@ def reparar_pista(it, job, aj, reg, salud=None):
         if os.path.getsize(provisorio) != os.path.getsize(nuevo):
             os.remove(provisorio)
             raise Fallo('la copia a la biblioteca quedó incompleta')
+        if al_reemplazar:
+            try:
+                if al_reemplazar(ruta, it):
+                    reg('   · la vieja quedó en la papelera (Salud → Espacio)')
+            except Exception as e:  # noqa: BLE001
+                log.warning('Reparar: la vieja no fue a la papelera (%s): %s', ruta, e)
         os.replace(provisorio, ruta)
         reg(f'   ✓ {it["archivo"]}: reemplazada por la de Tidal ({etiqueta(b, s)})'
             f'{" · título: " + titulo if distinta or fuente_meta else ""}')
@@ -767,14 +868,16 @@ class Reparador:
             c.execute("UPDATE reparaciones SET estado='reparando', registro='' WHERE id=?", (jid,))
         aj = self.ajustes_fn()
         ed = trabajo.get('edicion') or {}
-        reg(f'Reparar {len(trabajo["pistas"])} pista(s) con Tidal · edición «{ed.get("titulo")}»'
-            f'{" (" + str(ed.get("anio")) + ")" if ed.get("anio") else ""} · {ed.get("como") or ""}')
+        reg(f'Reparar {len(trabajo["pistas"])} pista(s) con Tidal · '
+            + (f'edición «{ed.get("titulo")}»{" (" + str(ed.get("anio")) + ")" if ed.get("anio") else ""} · '
+               f'{ed.get("como") or ""}' if ed else 'búsqueda pista por pista'))
         bien, mal, sanas = 0, 0, 0
         for i, it in enumerate(trabajo['pistas']):
             if i:
                 time.sleep(PAUSA_S)
-            reg(f'· {it["archivo"]} → Tidal {it["pareja"].get("disco") or 1}-{it["pareja"].get("numero")} '
-                f'«{it["pareja"].get("titulo")}»')
+            pa = it['pareja']
+            reg(f'· {it["archivo"]} → Tidal {pa.get("disco") or 1}-{pa.get("numero")} «{pa.get("titulo")}»'
+                + (f' de «{pa.get("album")}» (búsqueda por pista)' if it.get('suelta') else ''))
             try:
                 reparar_pista(it, trabajo, aj, reg, self.salud)
                 bien += 1

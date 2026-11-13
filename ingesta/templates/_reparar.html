@@ -5,15 +5,20 @@
   #r-modal .modal { max-height: 92vh; }
   #r-cuerpo > * { flex-shrink: 0; }
   #r-cuerpo .tabla-wrap { overflow-y: visible; }
-  #r-q { font-family: inherit; letter-spacing: normal; font-size: .95rem; }
+  #r-q, #r-bp-q { font-family: inherit; letter-spacing: normal; font-size: .95rem; }
   .r-ed { display: flex; gap: .6rem; align-items: center; padding: .35rem .5rem; border-radius: 8px; cursor: pointer; border: 1px solid transparent; }
   .r-ed.sel { border-color: var(--borde-oro); background: var(--oro-tenue); }
   .r-ed img, .r-ed .r-sin { width: 40px; height: 40px; border-radius: 4px; flex: none; }
+  /* «Buscar esta pista» (13-11-2026) */
+  .r-bp td { background: var(--fondo-2, rgba(255,255,255,.03)); }
+  .r-cand { display: flex; gap: .6rem; align-items: center; padding: .35rem 0; border-top: 1px solid var(--borde); }
+  .r-cand:first-child { border-top: 0; }
+  .r-cand img, .r-cand .r-sin { width: 40px; height: 40px; border-radius: 4px; flex: none; }
 </style>
 <div class="modal-fondo" id="r-modal" hidden>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="r-tit" style="width:min(980px,100%)">
     <div class="modal-cab"><b id="r-tit">Reparar pistas dañadas</b>
-      <span class="s tenue" style="display:block;margin-top:.3rem">Se baja de Tidal solo cada pista marcada, se verifica (decodifica sin errores y dura lo mismo), recibe la metadata de la vieja (o, si no se puede leer, la del álbum y la de Orbyte) y la reemplaza en el mismo lugar con el mismo nombre. Para Orbyte es el mismo archivo: escuchas, favoritos y playlists no cambian.</span></div>
+      <span class="s tenue" style="display:block;margin-top:.3rem">Se baja de Tidal solo cada pista marcada, se verifica (decodifica sin errores y dura lo mismo), recibe la metadata de la vieja (o, si no se puede leer, la del álbum y la de Orbyte) y la reemplaza en el mismo lugar con el mismo nombre; la vieja queda en la papelera. Para Orbyte es el mismo archivo: escuchas, favoritos y playlists no cambian. Si el álbum no aparece, «Buscar esta pista» la busca suelta por título y duración.</span></div>
     <div class="modal-cuerpo" id="r-cuerpo"></div>
     <div class="modal-pie"><span class="tenue t-nota" id="r-nota"></span>
       <span style="display:flex;gap:.5rem"><button class="btn" id="r-cancelar">Cancelar</button>
@@ -33,7 +38,7 @@
     cuerpo.innerHTML = `<div class="estado-vivo"><span class="giro"></span>${st.busqueda ? 'Buscando en Tidal…' : 'Buscando la edición en Tidal y emparejando las pistas…'}</div>`;
     ok.disabled = true; nota.textContent = '';
     const r = await post('/api/reparar/plan', {rutas: st.rutas, edicion_id: st.edicion || null,
-                                               busqueda: st.busqueda || null, elegir: st.elegir});
+                                               busqueda: st.busqueda || null, elegir: st.elegir, sueltas: st.sueltas || {}});
     if (!r || r.ok === false) {
       cuerpo.innerHTML = buscador(st.busqueda || '') + `<div class="flash error">${esc((r && r.error) || 'No se pudo')}</div>`;
       enlazarBuscador(); return;
@@ -52,11 +57,11 @@
   }
   function enlazarBuscador() {
     const q = document.getElementById('r-q');
-    const ir = () => { const v = q.value.trim(); if (!v) return; st.busqueda = v; st.edicion = null; st.elegir = {}; st.verEds = true; cargar(); };
+    const ir = () => { const v = q.value.trim(); if (!v) return; st.busqueda = v; st.edicion = null; st.elegir = {}; st.sueltas = {}; st.verEds = true; cargar(); };
     document.getElementById('r-buscar').onclick = ir;
     q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ir(); } };
     const a = document.getElementById('r-auto');
-    if (a) a.onclick = () => { st.busqueda = null; st.edicion = null; st.elegir = {}; st.verEds = false; cargar(); };
+    if (a) a.onclick = () => { st.busqueda = null; st.edicion = null; st.elegir = {}; st.sueltas = {}; st.verEds = false; cargar(); };
   }
   const edHtml = (e, sel, radio) => `<label class="r-ed${sel ? ' sel' : ''}">
       ${radio ? `<input type="radio" name="r-ed" value="${esc(e.id)}" ${sel ? 'checked' : ''}>` : ''}
@@ -106,19 +111,26 @@
             }
           }
           const opciones = (p.pistas_tidal || []).map(t => `<option value="${esc(t.id)}" ${pa && String(pa.id) === String(t.id) ? 'selected' : ''}>${num(t.disco, t.numero)} ${esc(t.titulo)} · ${mmss(t.duracion)}</option>`).join('');
-          const enTidal = (p.pistas_tidal || []).length
+          const suelta = x.suelta && pa
+            ? `<div class="t">${esc(pa.titulo || '')}</div>
+               <div class="s tenue">${esc(pa.artista || '')} · de «${esc(pa.album || '?')}»</div>
+               <div class="s">${mmss(pa.duracion)}${difTxt(x.dif_duracion)} · ${chipQ(pa.calidad)} · <span class="tenue">${x.auto ? 'encontrada por título y duración' : 'elegida con «Buscar esta pista»'}</span></div>
+               <button class="btn chico" type="button" data-sin-suelta="${i}" style="margin-top:.3rem">${(p.pistas_tidal || []).length ? 'Volver a la edición' : 'Quitar'}</button>` : '';
+          const enTidal = (suelta || ((p.pistas_tidal || []).length
             ? `<select data-elegir="${i}" aria-label="Pista de Tidal para ${esc(x.titulo || x.archivo)}" style="max-width:100%">
                  ${pa ? '' : '<option value="" selected>— elige la pista —</option>'}${opciones}</select>
                ${pa ? `<div class="s">${mmss(pa.duracion)}${difTxt(x.dif_duracion)} · ${chipQ(pa.calidad)}${x.manual ? ' · <span class="tenue">elegida a mano</span>' : ''}</div>` : ''}`
-            : '<span class="tenue">—</span>';
+            : '<span class="tenue">—</span>'))
+            + (/\.flac$/i.test(x.ruta) ? `<div style="margin-top:.3rem"><button class="btn chico" type="button" data-bp="${i}">${st.bp && st.bp.i === i ? 'Cerrar búsqueda' : 'Buscar esta pista'}</button></div>` : '');
           return `<tr><td><input type="checkbox" data-on="${i}" ${s.on ? 'checked' : ''} ${(!x.reparable || !pa) ? 'disabled' : ''} aria-label="Reparar ${esc(x.titulo || x.archivo)}"></td>
             <td><div class="t">${num(x.disco, x.numero)} ${esc(x.titulo || '')}</div>
               <div class="s">${mmss(x.duracion)} · ${chipQ(x.calidad)}</div><div class="s mono muy-tenue" style="word-break:break-all">${esc(x.archivo)}</div></td>
             <td style="min-width:240px">${enTidal}</td>
-            <td>${que}</td></tr>`;
+            <td>${que}</td></tr>${st.bp && st.bp.i === i ? bpHtml(x) : ''}`;
         }).join('')}
       </table></div>`;
     enlazarBuscador();
+    enlazarBp();
     cuerpo.querySelectorAll('input[name=r-ed]').forEach(r => r.onchange = () => { st.edicion = r.value; st.elegir = {}; st.verEds = false; cargar(); });
     const ver = document.getElementById('r-ver-eds');
     if (ver) ver.onclick = () => { st.verEds = true; pintar(); };
@@ -141,6 +153,59 @@
       pintar();
     });
     resumen();
+  }
+  // ── «Buscar esta pista»: Tidal por título y artista (o ISRC o enlace), elegida por la duración ──
+  function bpHtml(x) {
+    const b = st.bp;
+    const lista = b.cargando ? '<div class="estado-vivo"><span class="giro"></span>Buscando en Tidal…</div>'
+      : b.error ? `<div class="flash error">${esc(b.error)}</div>`
+      : !b.res ? '' : !b.res.length ? '<div class="s tenue">Tidal no encontró nada con eso: prueba con otro texto (sin «feat.», «Remastered»…) o el ISRC.</div>'
+      : b.res.map((c, k) => `<div class="r-cand">
+          ${c.portada ? `<img src="${esc(c.portada)}" alt="" loading="lazy">` : '<span class="r-sin"></span>'}
+          <span style="min-width:0;flex:1"><span class="t">${esc(c.titulo)}</span>
+            <span class="s tenue" style="display:block">${esc(c.artista || '')} · «${esc(c.album || '?')}»${c.disco > 1 ? ` · disco ${c.disco}` : ''} · pista ${c.numero || '?'}</span>
+            <span class="s" style="display:block">${mmss(c.duracion)} ${c.dif_duracion == null ? '' : `<span class="${c.calza ? 'ok' : 'mal'}">(${Math.abs(c.dif_duracion) < 0.5 ? 'misma duración' : (c.dif_duracion > 0 ? '+' : '−') + Math.abs(c.dif_duracion).toFixed(1).replace('.', ',') + ' s'})</span>`}
+              ${c.hires ? ' · <span class="chip q-HR"><span class="led"></span>Hi-Res</span>' : ''}${c.mqa ? ' · <span class="chip">MQA</span>' : ''}</span></span>
+          <a class="btn chico" href="${esc(c.url)}" target="_blank" rel="noopener" title="Abrir en Tidal">↗</a>
+          <button class="btn chico ${c.calza ? 'oro' : ''}" type="button" data-usar="${k}">Usar esta</button></div>`).join('');
+    return `<tr class="r-bp"><td></td><td colspan="3">
+      <div class="campo" style="margin:0 0 .5rem"><label for="r-bp-q">Buscar «${esc(x.titulo || x.archivo)}» en Tidal</label>
+        <div class="ayuda">Artista y título de la pista, su ISRC o el enlace de Tidal de la pista. Puede venir de otro álbum (recopilatorio, single, otra edición): la duración dice si es la misma grabación.</div>
+        <div class="fila-in"><input type="text" id="r-bp-q" value="${esc(b.q || '')}" style="flex:1;min-width:0">
+          <button class="btn chico" id="r-bp-ir" type="button">Buscar</button></div></div>
+      ${lista}</td></tr>`;
+  }
+  async function bpBuscar(q) {
+    const x = st.plan.pistas[st.bp.i];
+    st.bp = Object.assign(st.bp, {q, cargando: true, error: null});
+    pintar();
+    const r = await post('/api/reparar/buscar_pista', {ruta: x.ruta, q: q || null, artista: st.plan.artista});
+    if (!st.bp) return;
+    st.bp.cargando = false;
+    if (!r || r.ok === false) st.bp.error = (r && r.error) || 'No se pudo buscar';
+    else { st.bp.res = r.resultados; st.bp.q = r.consulta; }
+    pintar();
+  }
+  function enlazarBp() {
+    cuerpo.querySelectorAll('[data-bp]').forEach(b => b.onclick = () => {
+      const i = +b.dataset.bp;
+      if (st.bp && st.bp.i === i) { st.bp = null; pintar(); return; }
+      st.bp = {i}; bpBuscar('');
+    });
+    cuerpo.querySelectorAll('[data-sin-suelta]').forEach(b => b.onclick = () => {
+      const x = st.plan.pistas[+b.dataset.sinSuelta];
+      delete st.sueltas[x.ruta]; st.edicion = (st.plan.edicion || {}).id || null; cargar();
+    });
+    const q = document.getElementById('r-bp-q');
+    if (!q) return;
+    const ir = () => bpBuscar(q.value.trim());
+    document.getElementById('r-bp-ir').onclick = ir;
+    q.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); ir(); } };
+    cuerpo.querySelectorAll('[data-usar]').forEach(b => b.onclick = () => {
+      const x = st.plan.pistas[st.bp.i], c = st.bp.res[+b.dataset.usar];
+      st.sueltas[x.ruta] = c.id; delete st.elegir[x.ruta];
+      st.edicion = (st.plan.edicion || {}).id || null; st.bp = null; cargar();
+    });
   }
   const lista = x => {
     const s = st.sel[x.ruta];
@@ -177,11 +242,11 @@
     }
     // Quedan pistas sin resolver (p. ej. están en otra edición): la ventana sigue con ellas.
     toast(`${encoladas.size} en cola`, `Quedan ${resto.length} por resolver: prueba otra edición o búscala a mano`);
-    st = {rutas: resto, aid: st.aid, edicion: null, busqueda: null, elegir: {}, verEds: true, resto: true};
+    st = {rutas: resto, aid: st.aid, edicion: null, busqueda: null, elegir: {}, sueltas: {}, verEds: true, resto: true};
     cargar();
   };
   window.abrirReparar = function (o) {
-    st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}, verEds: false};
+    st = {rutas: o.rutas || [], aid: o.aid || null, edicion: null, busqueda: null, elegir: {}, sueltas: {}, verEds: false};
     m.hidden = false;
     cargar();
   };

@@ -402,6 +402,30 @@ class Tidal:
         d = self._get('search', query=q, types='ALBUMS', limit=limite)
         return [self._album(a) for a in (d.get('albums') or {}).get('items', [])]
 
+    @staticmethod
+    def _pista(t):
+        """Una pista suelta de Tidal (búsqueda por pista de Reparar, 13-11-2026), con su álbum de origen."""
+        tags = (t.get('mediaMetadata') or {}).get('tags') or []
+        al = t.get('album') or {}
+        cover = al.get('cover')
+        hires = 'HIRES_LOSSLESS' in tags or t.get('audioQuality') == 'HI_RES_LOSSLESS'
+        return {'id': str(t['id']), 'titulo': _con_version(t.get('title') or '', t.get('version')),
+                'artista': (t.get('artist') or {}).get('name') or ', '.join(x.get('name', '') for x in t.get('artists') or []),
+                'album': al.get('title') or '', 'album_id': str(al.get('id') or ''), 'numero': t.get('trackNumber'),
+                'disco': t.get('volumeNumber') or 1, 'duracion': t.get('duration'), 'isrc': t.get('isrc'),
+                'hires': hires, 'mqa': 'MQA' in tags or t.get('audioQuality') == 'HI_RES',
+                'lossless': hires or 'LOSSLESS' in tags or t.get('audioQuality') in ('LOSSLESS', 'HI_RES'),
+                'disponible': t.get('streamReady', True) is not False and not (tags and set(tags) <= {'DOLBY_ATMOS'}),
+                'portada': f'https://resources.tidal.com/images/{cover.replace("-", "/")}/160x160.jpg' if cover else None,
+                'url': f'https://tidal.com/browse/track/{t["id"]}'}
+
+    def buscar_pistas(self, q, limite=25):
+        d = self._get('search', query=q, types='TRACKS', limit=limite)
+        return [self._pista(t) for t in (d.get('tracks') or {}).get('items', [])]
+
+    def pista(self, pista_id):
+        return self._pista(self._get(f'tracks/{pista_id}'))
+
     # ── por código: catálogo v2 (openapi.tidal.com), con la misma sesión; si no responde, la búsqueda v1 ──
     OPENAPI = 'https://openapi.tidal.com/v2/'
 
