@@ -109,7 +109,7 @@
   <div id="l-caratulas"></div>
 </section>
 <section id="p-espacio" hidden>
-  <div class="s tenue" style="margin-bottom:.8rem">Lo que la ingesta guarda por las dudas. Antes de reemplazar, unificar o limpiar, hace una copia completa de <span class="mono">music.db</span> y conserva solo las más recientes. Sanear deja el original de cada pista en <span class="mono">.orbyte-respaldo/</span>, dentro de la carpeta del álbum, hasta que lo borres aquí.</div>
+  <div class="s tenue" style="margin-bottom:.8rem">Lo que la ingesta guarda por las dudas. Antes de reemplazar, unificar o limpiar, hace una copia completa de <span class="mono">music.db</span> y conserva solo las más recientes. Sanear deja el original de cada pista en <span class="mono">.orbyte-respaldo/</span>, dentro de la carpeta del álbum, hasta que lo borres aquí. Lo que eliminas desde las fichas queda en la papelera hasta que vence (Ajustes → Papelera).</div>
   <div class="panel s-panel" id="esp-estado"><div class="estado-vivo"><span class="giro"></span>Cargando…</div></div>
   <div id="l-espacio"></div>
 </section>
@@ -757,19 +757,36 @@ async function cargarEspacio() {
   esp = r;
   const vivos = new Set(r.originales.map(o => o.respaldo));
   espSel = new Set([...espSel].filter(x => vivos.has(x)));
-  document.getElementById('n-espacio').textContent = tamTxt(r.bytes_respaldos + r.bytes_originales);
-  const nO = r.originales.length;
+  const total = r.bytes_respaldos + r.bytes_originales + (r.bytes_papelera || 0);
+  document.getElementById('n-espacio').textContent = tamTxt(total);
+  const nO = r.originales.length, nP = (r.papelera || []).length;
   document.getElementById('esp-estado').innerHTML = `<div class="s-fila"><div style="min-width:0">
-      <div class="t">${tamTxt(r.bytes_respaldos + r.bytes_originales)} en respaldos</div>
+      <div class="t">${tamTxt(total)} en respaldos y papelera</div>
       <div class="s">Respaldos de la base: ${r.respaldos.length} · ${tamTxt(r.bytes_respaldos)} <span class="tenue">(se conservan los ${r.conservar} más recientes; <span class="mono">music.db</span> pesa ${tamTxt(r.bytes_db)})</span></div>
-      <div class="s">Originales de Sanear: ${nO} pista${nO === 1 ? '' : 's'} · ${tamTxt(r.bytes_originales)}</div></div>
-      <div class="acciones" style="margin:0">${nO ? `<button class="btn chico" id="esp-todos">Borrar los originales ya saneados (${nO} · ${tamTxt(r.bytes_originales)})</button>` : ''}</div></div>
+      <div class="s">Originales de Sanear: ${nO} pista${nO === 1 ? '' : 's'} · ${tamTxt(r.bytes_originales)}</div>
+      <div class="s">Papelera: ${nP} elemento${nP === 1 ? '' : 's'} · ${tamTxt(r.bytes_papelera || 0)} <span class="tenue">(se vacía sola a las ${String(r.papelera_horas).replace('.', ',')} h)</span></div></div>
+      <div class="acciones" style="margin:0">${nO ? `<button class="btn chico" id="esp-todos">Borrar los originales ya saneados (${nO} · ${tamTxt(r.bytes_originales)})</button>` : ''}
+        ${nP ? `<button class="btn chico" id="pap-vaciar">Vaciar papelera (${tamTxt(r.bytes_papelera)})</button>` : ''}</div></div>
     <div class="s" id="esp-msg"></div>`;
   const bTodos = document.getElementById('esp-todos');
   if (bTodos) bTodos.onclick = () => espBorrar(bTodos, {todos: true}, `¿Seguro? Borrar los ${nO} originales`);
   const cont = document.getElementById('l-espacio');
   const fecha = t => new Date(t * 1000).toLocaleString('es-CL');
-  cont.innerHTML = `<h2 class="rotulo" style="margin:1.4rem 0 .6rem">Respaldos de la base</h2>
+  const vence = t => { const h = (t * 1000 - Date.now()) / 3600000;
+    return h <= 0 ? 'en minutos' : h < 1 ? `en ${Math.max(1, Math.round(h * 60))} min` : h < 48 ? `en ${Math.round(h)} h` : `en ${Math.round(h / 24)} días`; };
+  const bPV = document.getElementById('pap-vaciar');
+  if (bPV) bPV.onclick = () => papAccion(bPV, '/api/papelera/vaciar', {todos: true}, `¿Seguro? Se borra todo para siempre`);
+  cont.innerHTML = `<h2 class="rotulo" style="margin:1.4rem 0 .6rem">Papelera</h2>
+    ${nP ? `<div class="tabla-wrap"><table><tr><th>Qué</th><th>De</th><th>Eliminado</th><th>Se borra</th><th>Tamaño</th><th></th></tr>
+      ${r.papelera.map(x => `<tr><td><div class="t">${esc(x.titulo)}</div><div class="s tenue">${x.tipo === 'album' ? 'álbum completo' : `${x.n} pista${x.n === 1 ? '' : 's'}`}${x.detalle ? ` · ${esc(x.detalle)}` : ''}</div>
+          ${x.existe ? '' : '<div class="s mal">sus archivos no están (¿disco desmontado?)</div>'}</td>
+        <td><div class="s">${x.origen === 'bandeja' ? 'Bandeja' : 'Biblioteca'}</div></td>
+        <td><div class="s">${fecha(x.cuando)}</div></td><td><div class="s">${vence(x.vence)}</div></td>
+        <td><div class="s">${tamTxt(x.bytes)}</div></td>
+        <td style="white-space:nowrap"><button class="btn chico oro" data-pap-rest="${x.id}">Restaurar</button>
+          <button class="btn chico" data-pap-borrar="${x.id}">Borrar ya</button></td></tr>`).join('')}
+    </table></div>` : '<div class="sin-problemas">La papelera está vacía.</div>'}
+    <h2 class="rotulo" style="margin:1.4rem 0 .6rem">Respaldos de la base</h2>
     ${r.respaldos.length ? `<div class="tabla-wrap"><table><tr><th>Archivo</th><th>Fecha</th><th>Tamaño</th></tr>
       ${r.respaldos.map(x => `<tr><td><div class="s mono">${esc(x.archivo)}</div></td><td><div class="s">${fecha(x.cuando)}</div></td><td><div class="s">${tamTxt(x.bytes)}</div></td></tr>`).join('')}
     </table></div>` : '<div class="sin-problemas">No hay respaldos de la base.</div>'}
@@ -788,6 +805,24 @@ async function cargarEspacio() {
   if (bM) bM.onclick = () => { espSel = espSel.size === nO ? new Set() : new Set(r.originales.map(o => o.respaldo)); cargarEspacio(); };
   const bS = document.getElementById('esp-sel');
   if (bS) bS.onclick = () => espBorrar(bS, {respaldos: [...espSel]}, `¿Seguro? Borrar ${espSel.size}`);
+  cont.querySelectorAll('[data-pap-rest]').forEach(b => b.onclick = () =>
+    papAccion(b, `/api/papelera/${b.dataset.papRest}/restaurar`, {}, '¿Restaurar? Vuelve a su carpeta'));
+  cont.querySelectorAll('[data-pap-borrar]').forEach(b => b.onclick = () =>
+    papAccion(b, '/api/papelera/vaciar', {ids: [+b.dataset.papBorrar]}, '¿Seguro? Para siempre'));
+}
+async function papAccion(b, url, datos, pregunta) {
+  if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = pregunta; return; }
+  b.disabled = true;
+  let r;
+  try { r = await post(url, datos); } catch (e) { r = {ok: false, error: String(e)}; }
+  await cargarEspacio();
+  const m = document.getElementById('esp-msg');
+  if (!m) return;
+  if (!r || r.ok === false) { m.innerHTML = `<span style="color:var(--error)">${esc((r && r.error) || 'No se pudo')}</span>`; return; }
+  m.innerHTML = r.borrados !== undefined
+    ? `<span class="ok">✓ ${r.borrados} borrado${r.borrados === 1 ? '' : 's'} para siempre · ${tamTxt(r.bytes)} liberados</span>`
+      + (r.errores && r.errores.length ? `<div style="color:var(--error)">${r.errores.map(esc).join('<br>')}</div>` : '')
+    : `<span class="ok">✓ Restaurado: volvió a su carpeta y el álbum se vuelve a revisar o indexar</span>${r.ir ? ` · <a href="${esc(r.ir)}">ver el álbum</a>` : ''}`;
 }
 async function espBorrar(b, datos, pregunta) {
   if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.classList.add('oro'); b.textContent = pregunta; return; }

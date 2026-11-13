@@ -29,6 +29,7 @@ class Procesador(threading.Thread):
         self.almacen = almacen
         self.despertar = threading.Event()
         self.actual = None
+        self.al_respaldo = None         # f(pista, respaldo): un original de Sanear viajó con el álbum (Salud lo anota)
 
     def ya(self):
         self.despertar.set()
@@ -143,6 +144,12 @@ class Procesador(threading.Thread):
                                     str(e).splitlines()[0], aid)
             self.actual = None
             return
+        for pista, resp in rep.get('_respaldos') or []:
+            if self.al_respaldo:
+                try:
+                    self.al_respaldo(pista, resp)
+                except Exception:  # noqa: BLE001
+                    log.exception('Respaldo de Sanear %s', resp)
         es_iso = bool(rep.get('origen_entrada'))
         if es_iso:
             self._cerrar_iso(aid, rep, aj, reg)

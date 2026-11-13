@@ -585,3 +585,6 @@ tr.p-editor td { background: var(--card-2); }
 .c-grupos .filtro { display: inline-flex; align-items: center; gap: .35rem; }
 .c-grupos .filtro .chip { margin: 0; }
 .c-registro { flex-basis: 100%; margin-top: .6rem; max-height: 14rem; overflow: auto; }
+/* pista eliminada (en la papelera) en la tabla de la revisión */
+tr.en-papelera > td { opacity: .45; }
+tr.en-papelera .t { text-decoration: line-through; }

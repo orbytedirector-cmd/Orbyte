@@ -98,6 +98,12 @@
       <div class="ayuda">Al buscar un artista, los más escuchados de cada sección (álbumes, EPs, recopilatorios, en vivo) llevan ★. Score: 0,7 Last.fm (oyentes, pistas en su top, reproducciones) + 0,3 Tidal (popularidad y pistas más escuchadas).</div>
       <input type="number" id="buscar_estrellas" name="buscar_estrellas" min="0" max="50" value="{{ aj.buscar_estrellas or 5 }}" style="max-width:120px"></div>
   </div>
+  <div class="bloque">
+    <div class="rotulo">Papelera</div>
+    <div class="campo"><label for="papelera_horas">Horas en la papelera</label>
+      <div class="ayuda">Las pistas y álbumes que eliminas desde las fichas van a «.orbyte-papelera» en la raíz del mismo disco (biblioteca o entrada). Pasado este tiempo se borran para siempre; antes se pueden restaurar o vaciar desde Salud → Espacio.</div>
+      <input type="number" id="papelera_horas" name="papelera_horas" min="1" max="2160" step="1" value="{{ aj.papelera_horas or 48 }}" style="max-width:120px"></div>
+  </div>
   <div><button class="btn oro">Guardar</button></div>
 </form>
 

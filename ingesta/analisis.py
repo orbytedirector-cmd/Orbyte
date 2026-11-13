@@ -70,7 +70,8 @@ NIVELES = ('error', 'decision', 'correccion', 'aviso')
 # Decisiones que se pueden aceptar tal cual con un botón (las demás se resuelven eligiendo algo)
 ACEPTABLES = {'multicanal', 'lossy_bajo', 'errores_menores', 'varios_artistas', 'artista_inferido',
               'album_inferido', 'subcarpetas', 'pista_repetida', 'sin_numero', 'unknown_artist', 'duplicado',
-              'anio_conflicto', 'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla'}
+              'anio_conflicto', 'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla',
+              'copias_mezcladas'}
 
 
 # ─────────────────────────── utilidades ───────────────────────────
@@ -155,6 +156,47 @@ def dividir_por_disco(nombre):
 
 
 # ─────────────────────────── detección ───────────────────────────
+
+def _calidad_pista(p):
+    """Para comparar dos copias de la misma pista: sin pérdida > con pérdida; luego DSD, bits y frecuencia."""
+    return (0 if p.get('lossy') else 1, 1 if p.get('dsd') else 0, p.get('bits') or 0, p.get('sr') or 0)
+
+
+def _copias_mezcladas(pistas, problemas):
+    """Dos copias del mismo disco en una carpeta, en distinta calidad (caso Deep Purple «Whoosh!», 13-11-2026: las
+    13 pistas en 16/44.1 y otra vez en 24/44.1). Casi todos los números están exactamente dos veces, la pareja
+    tiene el mismo título o la misma duración, y en todas gana la misma calidad. → decisión «copias_mezcladas»
+    con las peores en `pistas` (el botón «Quedarse con la mejor» las manda a la papelera)."""
+    grupos = {}
+    for p in pistas:
+        if p.get('legible') and not p.get('imagen_cue') and p.get('numero'):
+            grupos.setdefault((p.get('disco'), p['numero']), []).append(p)
+    pares = [g for g in grupos.values() if len(g) == 2]
+    if len(pares) < 2 or len(pares) < 0.8 * len(grupos):
+        return
+
+    def tit(p):
+        return re.sub(r'[^a-z0-9]+', '', sin_acentos(p.get('titulo') or '').lower())
+
+    peores, mejores = [], []
+    for g in pares:
+        a, b = sorted(g, key=_calidad_pista)
+        if _calidad_pista(a) == _calidad_pista(b):
+            return
+        if tit(a) != tit(b) and abs((a.get('duracion') or 0) - (b.get('duracion') or 0)) > 2:
+            return
+        peores.append(a)
+        mejores.append(b)
+    if len({_calidad_pista(p) for p in peores}) != 1 or len({_calidad_pista(p) for p in mejores}) != 1:
+        return
+    mejor, peor = mejores[0].get('formato') or '?', peores[0].get('formato') or '?'
+    problemas.append({'nivel': 'decision', 'codigo': 'copias_mezcladas',
+                      'texto': f'Hay dos copias del disco en la misma carpeta: {len(pares)} pistas están en {mejor} '
+                               f'y otra vez en {peor}. Conviene quedarse con las de {mejor}; las otras van a la '
+                               f'papelera.',
+                      'pistas': sorted(p['archivo'] for p in peores), 'opciones': [],
+                      'opciones_txt': f'Quedarse con las {mejor}'})
+
 
 def detectar_albumes(entrada):
     """
@@ -1541,6 +1583,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
             problema('decision', 'sin_numero',
                      f'Disco {d}: pistas sin número (ni en tags ni en el nombre)',
                      [p['archivo'] for p in del_disco if p.get('numero') is None])
+    _copias_mezcladas(pistas, problemas)
     if sin_num:
         problema('correccion', 'numero_de_nombre', 'Número de pista tomado del nombre de archivo', sin_num)
     if sin_titulo:
