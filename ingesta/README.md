@@ -13,5 +13,5 @@ Herramienta web aparte de Orbyte (puerto `5005`) para incorporar material nuevo 
 5. **Modo desatendido** (Ajustes): lo que queda «Listo» pasa solo por 3 y 4.
 
 - Solo responde a la red de la casa / Tailscale; entra una cuenta **admin** de Orbyte.
-- Datos propios en `ingesta_datos/` (fuera de git). Claves en el `.env` del repo: `LASTFM_API_KEY`, `ACOUSTID_API_KEY`.
+- Datos propios en `ingesta_datos/` (fuera de git). Claves en el `.env` del repo: `LASTFM_API_KEY`, `ACOUSTID_API_KEY`, `DISCOGS_TOKEN` (token personal de discogs.com → Settings → Developers; ✦ Autocorregir lo usa para buscar discos y números de pista).
 - AcoustID en la identificación de edición necesita `fpcalc` (`sudo apt install libchromaprint-tools`).

@@ -44,6 +44,7 @@ from . import artistas as artistas_mod
 from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
+from . import numeracion as numeracion_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
 from . import tienda as tienda_mod
@@ -504,15 +505,32 @@ def api_autocorregir(aid):
         except ajustar_mod.FalloAjuste as e:
             return jsonify(ok=False, error=str(e)), 409
         rep = dict(lib, edicion_mb=(rep or {}).get('edicion_mb'), cambios={})
+        carpeta = a['ubicado_en'] or a['ruta']
     elif not rep or not rep.get('plan'):
         return jsonify(ok=False, error='El álbum todavía no tiene revisión'), 409
     else:
         rep = dict(rep, cambios=a.get('cambios') or rep.get('cambios') or {})
+        carpeta = a['ruta']
     try:
         bib = analisis.biblioteca(almacen.ajustes().get('db_orbyte'), almacen.ajustes().get('biblioteca') or '/mnt/musica')
     except Exception:
         bib = None
-    return jsonify(ok=True, **autocorregir_mod.proponer(rep, bib))
+    num, pantalla = _numeracion(rep, carpeta, request.get_json(silent=True) or {})
+    return jsonify(ok=True, numeracion=pantalla, **autocorregir_mod.proponer(rep, bib, num))
+
+
+def _numeracion(rep, carpeta, d):
+    """Discos y números desde MusicBrainz, Discogs o Tidal, solo si la pantalla lo pide (el botón ✦ Autocorregir;
+    el aviso antes de ubicar no consulta nada). d: {numeracion, fuente: 'mb:<id>'|…|'ninguna', discogs: enlace}."""
+    if not d.get('numeracion') or d.get('fuente') == 'ninguna':
+        return None, ({'candidatas': [], 'elegida': None, 'notas': [], 'sin_pareja': [], 'faltan': [], 'ninguna': True}
+                      if d.get('numeracion') else None)
+    rutas = [os.path.join(carpeta, x['clave']) for x in rep.get('plan') or [] if '#' not in x['clave']] if carpeta else []
+    res = numeracion_mod.buscar(rep, vigilante.cliente_mb, vigilante.cliente_mb.ruta_cache,
+                                rutas=[r for r in rutas if os.path.isfile(r)][:4],
+                                eleccion=d.get('fuente') or None, discogs=(d.get('discogs') or '').strip() or None,
+                                usar_mb=almacen.ajustes().get('musicbrainz', '1') == '1')
+    return res, numeracion_mod.para_pantalla(res)
 
 
 @app.route('/api/album/<int:aid>/ubicar', methods=['POST'])
@@ -1112,7 +1130,7 @@ def _album_orbyte(oid):
         con.close()
 
 
-def _propuesta_lib(ruta, fila=None):
+def _propuesta_lib(ruta, fila=None, pedido=None):
     lib = ajustar_mod.leer(ruta)
     rep = dict(lib, edicion_mb=((fila or {}).get('reporte') or {}).get('edicion_mb'), cambios={})
     aj = almacen.ajustes()
@@ -1120,7 +1138,8 @@ def _propuesta_lib(ruta, fila=None):
         bib = analisis.biblioteca(aj.get('db_orbyte'), aj.get('biblioteca') or '/mnt/musica')
     except Exception:
         bib = None
-    return autocorregir_mod.proponer(rep, bib)
+    num, pantalla = _numeracion(rep, ruta, pedido or {})
+    return dict(autocorregir_mod.proponer(rep, bib, num), numeracion=pantalla)
 
 
 @app.route('/biblioteca/album/<int:oid>')
@@ -2705,7 +2724,8 @@ def api_biblioteca_autocorregir(oid):
         return jsonify(ok=False, error='Ese álbum ya no está en Orbyte'), 404
     aid = almacen.fila_de_ruta(o['ruta'])
     try:
-        return jsonify(ok=True, **_propuesta_lib(o['ruta'], almacen.album(aid) if aid else None))
+        return jsonify(ok=True, **_propuesta_lib(o['ruta'], almacen.album(aid) if aid else None,
+                                                 request.get_json(silent=True) or {}))
     except ajustar_mod.FalloAjuste as e:
         return jsonify(ok=False, error=str(e)), 409
 

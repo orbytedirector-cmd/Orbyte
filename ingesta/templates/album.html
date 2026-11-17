@@ -312,7 +312,7 @@
         </tr>
         {% endfor %}
       </table></div>
-      <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
+      <div class="acciones"><button class="btn" id="autocorregir" title="Propone títulos, álbum, artista y género ordenados, y discos y números de pista desde MusicBrainz, Discogs o Tidal; nada se guarda hasta que lo apruebes">✦ Autocorregir</button>
         <button class="btn" id="separar-discos" title="Ordena por nombre de archivo y propone el disco donde se reinicia la numeración; revisa la columna Disco antes de guardar">Separar en discos</button>
         <button class="btn oro" id="guardar-tags">Guardar y volver a revisar</button>
         {% if cam.tags or cam.pistas %}<button class="btn" id="borrar-tags">Deshacer mis cambios</button>{% endif %}</div>
@@ -700,8 +700,8 @@ document.addEventListener('DOMContentLoaded', () => {   // editorDiscos está en
 });
 // ✦ Autocorregir: llena el formulario con la propuesta (antes → después) y se puede desmarcar por grupo
 const CAMPO_TAG = {artista: 't-artista', album: 't-album', genero: 't-genero', genero_secundario: 't-genero2'};
-const CAMPO_PISTA = {titulo: '.p-titulo', artista: '.p-artista', numero: '.p-numero'};
-let propuesta = null;
+const CAMPO_PISTA = {titulo: '.p-titulo', artista: '.p-artista', numero: '.p-numero', disco: '.p-disco'};
+let propuesta = null, fuentesNum = null;
 function camposPropuesta() {
   const l = [];
   for (const [k, c] of Object.entries(propuesta.tags)) l.push([document.getElementById(CAMPO_TAG[k]), c]);
@@ -721,22 +721,18 @@ function aplicarPropuesta() {
   }
 }
 const ac = document.getElementById('autocorregir');
-if (ac) ac.onclick = async () => {
-  ac.disabled = true; ac.textContent = 'Revisando…';
-  const r = await post(`/api/album/${AID}/autocorregir`);
+async function pedirAuto(cuerpo) {
+  ac.disabled = true; ac.textContent = cuerpo.numeracion ? 'Buscando…' : 'Revisando…';
+  const r = await post(`/api/album/${AID}/autocorregir`, cuerpo);
   ac.disabled = false; ac.textContent = '✦ Autocorregir';
-  if (!r.ok) { toast('No se pudo', r.error || ''); return; }
+  if (!r || !r.ok) { toast('No se pudo', (r && r.error) || ''); return; }
+  if (propuesta) for (const [el, c] of camposPropuesta()) { el.value = c.antes; el.classList.remove('auto'); el.title = ''; }
   propuesta = r;
-  const panel = document.getElementById('auto-panel');
-  panel.hidden = false;
-  panel.innerHTML = r.grupos.length ? `
-    <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
-    <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
-    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «Guardar y volver a revisar».</div>`
-    : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
-  panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicarPropuesta);
+  fuentesNum = pintarAuto(document.getElementById('auto-panel'), r, fuentesNum, !!(cuerpo.fuente || cuerpo.discogs),
+                          pedirAuto, aplicarPropuesta, 'Guardar y volver a revisar');
   aplicarPropuesta();
-};
+}
+if (ac) ac.onclick = () => pedirAuto({numeracion: true});
 const bt = document.getElementById('borrar-tags');
 if (bt) bt.onclick = () => { bt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags: {}, pistas: {}}); };
 
