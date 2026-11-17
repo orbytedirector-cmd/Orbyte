@@ -326,6 +326,17 @@
 {% if lib and a.estado in ('completado', 'error_metadata') %}{% set elim_api = '/api/album/%d' % a.id %}{% include '_eliminar_biblioteca.html' %}{% endif %}
 
 {# ── pistas ── #}
+{% if pend_reemp %}
+<section class="seccion" id="reemplazo-pendiente">
+  <div class="flash" style="border-color:var(--oro)">
+    <b>La edición anterior no se borró.</b>
+    {% for r in pend_reemp %}<div class="mono s">{{ r }}</div>{% endfor %}
+    <div class="s" style="margin:.4rem 0 .6rem">Tiene pistas que no encontré en la nueva (el detalle está en el registro). Si es la misma música con otro título, bórrala: escuchas, favoritos y playlists pasan a la nueva.</div>
+    <div class="acciones" style="margin:0"><button class="btn oro" id="rp-reemplazar">Reemplazar igual</button>
+      <button class="btn" id="rp-dejar">Dejar las dos</button></div>
+  </div>
+</section>
+{% endif %}
 {# ── pistas dañadas: medir, sanear, reparar, re-descargar (13-11-2026) ── #}
 {% if a.estado in ('revisado', 'requiere_revision', 'error', 'error_ubicar') and not r.fallo %}
   {% set pd_pistas = [] %}
@@ -556,6 +567,18 @@ document.querySelectorAll('[data-accion]').forEach(b => b.onclick = async () => 
 document.querySelectorAll('[data-mbid]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/edicion`, {mbid: b.dataset.mbid || null}); });
 document.querySelectorAll('[data-sacd]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {sacd_area: b.dataset.sacd}); });
 document.querySelectorAll('[data-aceptar]').forEach(b => b.onclick = () => { b.disabled = true; accion(`/api/album/${AID}/cambios`, {aceptar: b.dataset.aceptar}); });
+// Reemplazo pendiente (17-11-2026): la anterior no se borró por cobertura
+[['rp-reemplazar', 'reemplazar', '¿Seguro? Se borra del disco'], ['rp-dejar', 'dejar', null]].forEach(([id, acc, preg]) => {
+  const b = document.getElementById(id);
+  if (!b) return;
+  b.onclick = async () => {
+    if (preg && !b.dataset.seguro) { b.dataset.seguro = '1'; b.textContent = preg; return; }
+    b.disabled = true;
+    const r = await post(`/api/album/${AID}/reemplazo`, {accion: acc});
+    if (!r || r.ok === false) { toast('No se pudo', (r && r.error) || ''); b.disabled = false; return; }
+    location.reload();
+  };
+});
 // Eliminar pistas antes de ubicar (13-11-2026): a la papelera y se vuelve a revisar
 const elB = document.getElementById('el-bandeja');
 function elMarcadas() { return [...document.querySelectorAll('[data-el-archivo]:checked')].map(c => c.dataset.elArchivo); }

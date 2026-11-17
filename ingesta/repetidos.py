@@ -412,17 +412,45 @@ def _normalizar(r, letras, fuente):
 
 # ─────────────────────────── eliminar ───────────────────────────
 
+def _misma_duracion(p, o):
+    try:
+        a, b = float(p['duration'] or 0), float(o['duration'] or 0)
+    except (TypeError, ValueError, KeyError, IndexError):
+        return False
+    return a > 0 and b > 0 and abs(a - b) <= max(2.0, 0.003 * a)
+
+
 def _mapa(pistas_viejas, pistas_nuevas):
+    """Pista vieja → su equivalente en la edición nueva. En orden: mismo disco y número con el título igual o
+    parecido; el mismo título en cualquier lugar; mismo disco y número con la misma duración (el título lo
+    corrigió MusicBrainz: «Introductions / School Days (Live)» → «Introductions / School Day», caso Elvis
+    Presley «Today», 17-11-2026)."""
     por_num, por_tit, usados, mapa = {}, {}, set(), {}
     for o in pistas_nuevas:
         por_num.setdefault((str(o['disc_number'] or 1), str(o['track_number'] or '')), []).append(o)
         por_tit.setdefault(_titulo(o['title']), []).append(o)
+
+    def lugar(p):
+        return por_num.get((str(p['disc_number'] or 1), str(p['track_number'] or '')), [])
+
+    pendientes = []
     for p in pistas_viejas:
         t = _titulo(p['title'])
-        elegido = next((o for o in por_num.get((str(p['disc_number'] or 1), str(p['track_number'] or '')), [])
-                        if o['id'] not in usados and (not t or _titulo(o['title']) == t)), None)
+        elegido = next((o for o in lugar(p) if o['id'] not in usados
+                        and (not t or _titulo(o['title']) == t)), None)
         if not elegido and t:
             elegido = next((o for o in por_tit.get(t, []) if o['id'] not in usados), None)
+        if elegido:
+            mapa[p['id']] = elegido['id']
+            usados.add(elegido['id'])
+        else:
+            pendientes.append(p)
+    for p in pendientes:
+        elegido = next((o for o in lugar(p) if o['id'] not in usados
+                        and (_mismo_titulo(p['title'], o['title']) or _misma_duracion(p, o))), None)
+        if not elegido:
+            elegido = next((o for o in pistas_nuevas if o['id'] not in usados
+                            and _mismo_titulo(p['title'], o['title']) and _misma_duracion(p, o)), None)
         if elegido:
             mapa[p['id']] = elegido['id']
             usados.add(elegido['id'])
@@ -442,7 +470,8 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
     edición vieja):
     - nunca se borra un archivo que esté dentro de la carpeta de otro álbum (de Orbyte, de `proteger` —los que
       ubicó la ingesta— o el que se queda), salvo que esa carpeta contenga a la edición que sale;
-    - con `exigir_cobertura`, una edición con pistas (con archivo) que no tienen equivalente en la que se queda
+    - con `exigir_cobertura` (True, o las rutas a las que se exige), una edición con pistas (con archivo) que no
+      tienen equivalente en la que se queda
       no se toca: se avisa y quedan las dos."""
     biblioteca = os.path.abspath(biblioteca)
     eds = {e['ruta']: e for e in grupo['ediciones']}
@@ -489,7 +518,7 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
             mapa = _mapa(pistas, pistas_destino)
             registro(f'«{os.path.relpath(ruta, biblioteca)}»: {len(mapa)}/{len(pistas)} pistas con equivalente '
                      f'en la edición que se queda')
-            if exigir_cobertura and not sin_destino:
+            if exigir_cobertura and not sin_destino and (exigir_cobertura is True or ruta in exigir_cobertura):
                 faltan = [p for p in pistas if p['id'] not in mapa and p['file_path'] and os.path.isfile(p['file_path'])]
                 if faltan:
                     txt = (f'«{os.path.relpath(ruta, biblioteca)}» no se borró: tiene {len(faltan)} pista(s) que la '

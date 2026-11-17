@@ -310,6 +310,7 @@ def album(aid):
     sin_indexar = a['estado'] == 'error_metadata'          # «Borrar de la biblioteca y descartar»
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
                            actuales=actuales, portada=portada, sin_indexar=sin_indexar, fmt=fmt,
+                           pend_reemp=_reemplazo_pendiente(a),
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
@@ -2134,6 +2135,66 @@ def _eliminar_bandeja(a, archivos):
     almacen.registrar(a['id'], f'{len(archivos)} pista(s) a la papelera: {nombres[:300]}')
     _requeue(a['id'])
     return jsonify(ok=True, papelera=eid, n=len(archivos))
+
+
+def _reemplazo_pendiente(a):
+    """Ediciones que este álbum debía reemplazar y siguen en Orbyte (se saltaron por cobertura). Sirve también
+    para los reemplazos de antes de que se anotara `reemplazo_pendiente`."""
+    cam = a.get('cambios') or {}
+    rutas = cam.get('reemplazo_pendiente')
+    if rutas is None:
+        rutas = ((a.get('reporte') or {}).get('reemplazar') or []) if cam.get('reemplazo_hecho') else []
+    propia = (a.get('ubicado_en') or '').rstrip('/')
+    # la carpeta donde quedó este álbum (tomó el nombre de la edición que reemplazó) nunca está pendiente
+    rutas = [r.rstrip('/') for r in rutas if r and r.rstrip('/') != propia and not propia.startswith(r.rstrip('/') + '/')]
+    if not rutas or a['estado'] != 'completado':
+        return []
+    try:
+        con = sqlite3.connect(f'file:{_db_orbyte()}?mode=ro', uri=True, timeout=30)
+        try:
+            vivas = []
+            for r in rutas:
+                for (p,) in con.execute('SELECT path FROM albums WHERE path=? OR path=? OR path LIKE ?',
+                                        (r, r + '/', r.replace('%', '_') + '/%')):
+                    p = (p or '').rstrip('/')
+                    if p == r or analisis.carpeta_album(p) == r:
+                        vivas.append(r)
+                        break
+            return vivas
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@app.route('/api/album/<int:aid>/reemplazo', methods=['POST'])
+def api_album_reemplazo(aid):
+    """La edición anterior no se borró al reemplazar (le faltaban pistas a la nueva): «reemplazar» la borra igual
+    (escuchas, favoritos y playlists pasan a la nueva), «dejar» conserva las dos y quita el aviso."""
+    a = almacen.album(aid)
+    if not a:
+        return jsonify(ok=False), 404
+    cam = dict(a.get('cambios') or {})
+    pend = _reemplazo_pendiente(a)
+    if not pend:
+        return jsonify(ok=False, error='No hay un reemplazo pendiente'), 409
+    d = request.get_json(silent=True) or {}
+    if d.get('accion') == 'dejar':
+        cam['reemplazo_pendiente'] = []
+        almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
+        almacen.registrar(aid, 'Se conservan las dos ediciones: ' + ', '.join(os.path.basename(r) for r in pend))
+        return jsonify(ok=True)
+    if d.get('accion') != 'reemplazar':
+        return jsonify(ok=False, error='Acción inválida'), 400
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    rep = dict(a.get('reporte') or {}, reemplazar=pend, destino={})
+
+    def reg(m):
+        almacen.registrar(aid, m)
+    almacen.registrar(aid, 'Reemplazar igual (pedido a mano): ' + ', '.join(os.path.basename(r) for r in pend))
+    procesador._reemplazar(aid, almacen.album(aid), rep, almacen.ajustes(), reg, forzar=True)
+    return jsonify(ok=True)
 
 
 @app.route('/api/album/<int:aid>/eliminar', methods=['POST'])

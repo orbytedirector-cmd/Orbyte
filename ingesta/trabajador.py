@@ -251,7 +251,7 @@ class Procesador(threading.Thread):
         self.actual = None
 
     # ── reemplazar la edición anterior (decisión «Reemplazar el existente») ──
-    def _reemplazar(self, aid, a, rep, aj, reg):
+    def _reemplazar(self, aid, a, rep, aj, reg, forzar=False):
         from . import ajustar as ajustar_mod, repetidos
         db = aj.get('db_orbyte')
         biblioteca = aj.get('biblioteca') or '/mnt/musica'
@@ -271,8 +271,15 @@ class Procesador(threading.Thread):
             if viejas:
                 grupo = {'ediciones': [{'ruta': r, 'albumes': ids[r]} for r in viejas + [nueva]]}
                 proteger = [x for x in self.almacen.rutas_ubicadas() if x.rstrip('/') not in viejas]
+                # la carpeta que se reprocesó (o los discos de una unión) SON el álbum nuevo: no se les exige
+                # cobertura (caso Elvis «Today», 17-11-2026: MusicBrainz corrigió un título y se saltó el reemplazo)
+                cam0 = a.get('cambios') or {}
+                propias = {(a.get('ruta') or '').rstrip('/')} if a.get('origen') == 'reproceso' else set()
+                propias |= {os.path.realpath(u).rstrip('/') for u in cam0.get('union') or []}
+                propias |= {u.rstrip('/') for u in cam0.get('union') or []}
+                exigir = set() if forzar else {r for r in viejas if r not in propias}
                 res = repetidos.eliminar(db, biblioteca, grupo, viejas, nueva, reg, proteger=proteger,
-                                         exigir_cobertura=True)
+                                         exigir_cobertura=exigir)
                 viejas = [r for r in viejas if r not in res.get('saltadas', [])]
                 for r in viejas:                     # filas de Ingesta de las ediciones que salieron (si las ubicó ella)
                     while True:
@@ -294,6 +301,12 @@ class Procesador(threading.Thread):
                     campos['ruta'] = final
                 self.almacen.actualizar(aid, **campos)
             cam = dict((self.almacen.album(aid) or {}).get('cambios') or {}, reemplazo_hecho=True)
+            pend = [r for r in cam.get('reemplazo_pendiente') or [] if r not in viejas] if forzar else []
+            pend = sorted(set(pend) | set(res.get('saltadas') or []))
+            if pend:
+                cam['reemplazo_pendiente'] = pend        # la ficha ofrece «Reemplazar igual» o «Dejar las dos»
+            else:
+                cam.pop('reemplazo_pendiente', None)
             self.almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
             if res.get('saltadas'):
                 self.almacen.avisar('revision', f'{_nombre(a)}: la edición anterior NO se borró',
