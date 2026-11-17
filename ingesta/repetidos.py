@@ -500,12 +500,16 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
             # solo los álbumes de la edición: su carpeta y sus subcarpetas de disco; otro álbum que esté dentro
             # (o dentro de una carpeta protegida) no sale, ni de Orbyte ni del disco
             r0 = ruta.rstrip('/')
+            # sus propias carpetas de disco («CD1 Italian version») no protegen nada aunque la ingesta tenga una
+            # fila de ellas (caso Eros Ramazzotti «Perfetto», 17-11-2026: el reemplazo se saltaba los dos discos)
+            prot = {x for x in proteger if x == (ruta_destino or '').rstrip('/') or
+                    not (_dentro_de(x, r0) and x != r0 and analisis.carpeta_album(x) == r0)}
             propios = []
             for aid in e['albumes']:
                 fila = con.execute('SELECT path FROM albums WHERE id=?', (aid,)).fetchone()
                 p0 = ((fila[0] if fila else '') or '').rstrip('/')
                 if p0 and (p0 == r0 or analisis.carpeta_album(p0) == r0) and not any(
-                        x != r0 and _dentro_de(p0, x) and not _dentro_de(r0, x) for x in proteger):
+                        x != r0 and _dentro_de(p0, x) and not _dentro_de(r0, x) for x in prot):
                     propios.append(aid)
                 elif fila:
                     registro(f'  ⚠ «{os.path.relpath(p0, biblioteca)}» es otro álbum dentro de la carpeta: no se toca')
@@ -545,7 +549,7 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
             # (Orbyte, los ubicados por la ingesta, el que se queda) se respetan aunque estén dentro de la suya.
             otras = [r[0] for r in con.execute('SELECT path FROM albums WHERE path IS NOT NULL')]
             propias = [c.rstrip('/') for c in carpetas]
-            ajenas_todas = {o.rstrip('/') for o in otras} | proteger
+            ajenas_todas = {o.rstrip('/') for o in otras} | prot
             ajenas_todas = {a for a in ajenas_todas if a and not _dentro_de(r0, a)}
             for p in pistas:
                 f = p['file_path']

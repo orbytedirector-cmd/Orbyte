@@ -282,11 +282,14 @@ class Procesador(threading.Thread):
                                          exigir_cobertura=exigir)
                 viejas = [r for r in viejas if r not in res.get('saltadas', [])]
                 for r in viejas:                     # filas de Ingesta de las ediciones que salieron (si las ubicó ella)
-                    while True:
-                        otra = self.almacen.fila_de_ruta(r)
-                        if not otra or otra == aid:
-                            break
-                        self.almacen.borrar_album(otra)
+                    discos = [x for x in self.almacen.rutas_ubicadas()     # y de sus carpetas de disco
+                              if x.startswith(r + '/') and analisis.carpeta_album(x) == r and not os.path.isdir(x)]
+                    for x in [r] + discos:
+                        while True:
+                            otra = self.almacen.fila_de_ruta(x)
+                            if not otra or otra == aid:
+                                break
+                            self.almacen.borrar_album(otra)
             final = (rep.get('destino') or {}).get('final')
             if final and final.rstrip('/') != nueva and not os.path.exists(final):
                 import sqlite3
