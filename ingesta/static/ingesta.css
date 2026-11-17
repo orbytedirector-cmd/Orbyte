@@ -319,6 +319,11 @@ input.mono { font-family: var(--mono); font-size: .86rem; }
 .auto-grupos { display: flex; flex-wrap: wrap; gap: .4rem 1.1rem; font-size: .86rem; }
 .auto-grupos label { display: flex; gap: .4rem; align-items: center; cursor: pointer; }
 .auto-grupos input { accent-color: var(--oro); }
+.auto-num { margin-top: .8rem; padding-top: .7rem; border-top: 1px solid var(--borde-oro); display: flex; flex-direction: column; gap: .35rem; }
+.auto-num-fila { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.auto-num-fila select { flex: 1 1 22rem; min-width: 0; max-width: 100%; padding: .55rem .6rem; background: var(--elev); color: var(--texto); border: 1px solid var(--borde-2); border-radius: 8px; }
+.auto-num-fila input[type=text] { flex: 0 1 16rem; width: auto; min-width: 0; padding: .5rem .7rem; }
+.auto-num .aviso-num { color: var(--oro); }
 input.auto { border-color: var(--oro) !important; background: rgba(200,146,10,.12) !important; }
 
 /* ── repetidos ── */

@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261113">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261117">
 </head>
 <body>
 <header class="cab">
@@ -83,6 +83,48 @@ function editorDiscos(tabla, boton, o) {
     let desde = false;
     filas().forEach(f => { if (f === tr) desde = true; if (desde) marcar(f, v); });
   });
+}
+// ✦ Autocorregir (los dos editores de tags): grupos de la propuesta + discos y números desde MusicBrainz, Discogs o
+// Tidal (17-11-2026), con selector de fuente y un campo para pegar el enlace de Discogs. Devuelve las fuentes vistas
+// (para que el selector las siga mostrando cuando se pide una sola).
+function pintarAuto(panel, r, previas, especifico, pedir, aplicar, guardar) {
+  const num = r.numeracion;
+  let cands = num ? (num.candidatas || []) : (previas || []);
+  if (num && especifico && previas) cands = [...cands, ...previas.filter(p => !cands.some(c => c.clave === p.clave))];
+  const datos = c => [c.anio, c.pais, c.formato].filter(Boolean).join(', ');
+  const etiqueta = c => `${c.nombre} · ${c.titulo}${datos(c) ? ` (${datos(c)})` : ''} · calzan ${c.calzan}/${c.n}` +
+    (c.n_fuente !== c.n ? ` · trae ${c.n_fuente}` : '') + (c.discos > 1 ? ` · ${c.discos} discos` : '');
+  let html = r.grupos.length ? `
+    <div class="rotulo" style="margin-bottom:.4rem">Propuesta · <span class="tenue" style="letter-spacing:0;text-transform:none">${esc(r.fuente)}</span></div>
+    <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
+    <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «${esc(guardar)}».</div>`
+    : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
+  if (num) {
+    const el = cands.find(c => c.clave === num.elegida);
+    for (const k of ['sin_pareja', 'faltan', 'notas']) num[k] = num[k] || [];
+    html += `<div class="auto-num">
+      <div class="rotulo">Discos y números de pista</div>
+      <div class="auto-num-fila">
+        <select data-num-fuente><option value="ninguna">No cambiar la numeración</option>
+          ${cands.map(c => `<option value="${esc(c.clave)}"${c.clave === num.elegida ? ' selected' : ''}>${esc(etiqueta(c))}</option>`).join('')}</select>
+        <input type="text" data-num-discogs placeholder="Enlace o ID de Discogs" autocomplete="off">
+        <button type="button" class="btn" data-num-usar>Usar</button>
+      </div>
+      ${el && el.url ? `<div class="s"><a href="${esc(el.url)}" target="_blank" rel="noopener">Ver en ${esc(el.nombre)} ↗</a></div>` : ''}
+      ${num.sin_pareja.length ? `<div class="s aviso-num">Sin pareja en la fuente (quedan como están, revísalas): ${num.sin_pareja.map(esc).join(' · ')}</div>` : ''}
+      ${num.faltan.length ? `<div class="s tenue">La fuente trae ${num.faltan.length} pista${num.faltan.length === 1 ? '' : 's'} que no tienes: ${num.faltan.slice(0, 12).map(esc).join(' · ')}${num.faltan.length > 12 ? ' …' : ''}</div>` : ''}
+      ${num.notas.map(n => `<div class="s tenue">${esc(n)}</div>`).join('')}
+    </div>`;
+  }
+  panel.hidden = false;
+  panel.innerHTML = html;
+  panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicar);
+  const sel = panel.querySelector('[data-num-fuente]'), dc = panel.querySelector('[data-num-discogs]');
+  const ocupar = () => panel.querySelectorAll('.auto-num select, .auto-num input, .auto-num button').forEach(e => e.disabled = true);
+  if (sel) sel.onchange = () => { ocupar(); pedir({numeracion: true, fuente: sel.value}); };
+  const usar = () => { if (!dc.value.trim()) { dc.focus(); return; } ocupar(); pedir({numeracion: true, discogs: dc.value.trim()}); };
+  if (dc) { panel.querySelector('[data-num-usar]').onclick = usar; dc.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); usar(); } }; }
+  return cands;
 }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function toast(titulo, texto) {

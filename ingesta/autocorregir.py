@@ -10,12 +10,15 @@ Fuentes, en orden:
      - mayúsculas solo si todo viene en MAYÚSCULAS o todo en minúsculas
      - género: uno principal (mismo criterio canónico que RichMeta) + hasta 3 secundarios
      - números de pista: correlativos si faltan o se repiten (un solo disco, numeración corrida)
+  3. con el botón, discos y números de pista desde MusicBrainz, Discogs o Tidal (numeracion.py, 17-11-2026): cada
+     archivo se empareja por título y duración; si MusicBrainz no dio los títulos, también los de esa fuente
 
 Devuelve los cambios agrupados para que la pantalla los muestre (antes → después) y se puedan desmarcar por grupo.
 """
 import re
 
 from . import analisis
+from . import numeracion as numeracion_mod
 
 GRUPOS = {
     'titulos': 'Títulos de pista',
@@ -24,6 +27,7 @@ GRUPOS = {
     'mayusculas': 'Mayúsculas',
     'genero': 'Género principal y secundarios',
     'numeros': 'Números de pista',
+    'discos': 'Discos y números de pista',
 }
 
 # mismo listado y orden que _CANONICAL_GENRES de tools/metadata/RichMetaDSD3.py
@@ -177,7 +181,8 @@ def titulos_mb(rep):
 
 # ─────────────────────────── propuesta ───────────────────────────
 
-def proponer(rep, bib=None):
+def proponer(rep, bib=None, numeracion=None):
+    """numeracion: resultado de numeracion.buscar (con la fuente elegida), o None para no consultar nada."""
     ta = dict(rep.get('tags_album') or {})
     ov = (rep.get('cambios') or {}).get('tags') or {}
     ovp = (rep.get('cambios') or {}).get('pistas') or {}
@@ -232,14 +237,22 @@ def proponer(rep, bib=None):
     sacar_artista = plan and con_artista * 2 >= len(plan)       # «Artista - Título» en la mayoría de las pistas
     un_disco = len({x.get('disco') or 1 for x in plan}) == 1
     numeros = [(ovp.get(x['clave']) or {}).get('numero') or x.get('numero') for x in plan]
-    renumerar = un_disco and (any(not n for n in numeros) or len(set(map(str, numeros))) != len(numeros)
+    fuente_num = (numeracion or {}).get('elegida')
+    mapa_num = fuente_num['mapa'] if fuente_num else {}
+    renumerar = not fuente_num and un_disco and (any(not n for n in numeros) or len(set(map(str, numeros))) != len(numeros)
                               or [int(n) for n in numeros if str(n).isdigit()] != list(range(1, len(plan) + 1)))
     for i, x in enumerate(plan):
         o = ovp.get(x['clave']) or {}
         c = {}
         tit = o.get('titulo') or x.get('titulo') or ''
+        par = mapa_num.get(i)
+        suya = fuente_num['pistas'][par[0]] if par else None
         if titulos:
             cambio(c, 'titulo', tit, titulos[i], 'titulos')
+        elif suya and suya['titulo'] and (par[2] or numeracion_mod._generico(tit)):
+            # sin títulos de MusicBrainz, los de la fuente de la numeración (solo si es la misma canción por título,
+            # o el archivo no trae uno que diga algo)
+            cambio(c, 'titulo', tit, numeracion_mod.limpiar_titulo(suya['titulo']), 'titulos')
         else:
             nuevo = sin_prefijo(tit) if quitar_prefijo else tit
             if sacar_artista:
@@ -255,11 +268,18 @@ def proponer(rep, bib=None):
             cambio(c, 'artista', pa, como_en_biblioteca(derecho(pa), bib), 'artista')
         if renumerar and (x.get('accion') != 'cortar_dsd' and not x.get('corte')):
             cambio(c, 'numero', str(numeros[i] or ''), str(i + 1), 'numeros')
+        if suya:
+            cambio(c, 'disco', str(o.get('disco') or x.get('disco') or 1), str(suya['disco']), 'discos')
+            cambio(c, 'numero', str(numeros[i] or ''), str(suya['numero']), 'discos')
         if c:
             pistas[x['clave']] = c
+    fuente = (f'MusicBrainz: {el.get("titulo")} ({el.get("anio") or "?"}'
+              f'{", " + el["pais"] if el.get("pais") else ""}) + reglas') if titulos else 'reglas de limpieza'
+    if fuente_num:
+        fuente += (f' · discos y números: {fuente_num["nombre"]} «{fuente_num["titulo"]}»'
+                   f' ({", ".join(v for v in (fuente_num.get("anio"), fuente_num.get("pais")) if v) or "?"})')
     return {
-        'fuente': (f'MusicBrainz: {el.get("titulo")} ({el.get("anio") or "?"}'
-                   f'{", " + el["pais"] if el.get("pais") else ""}) + reglas') if titulos else 'reglas de limpieza',
+        'fuente': fuente,
         'tags': tags, 'pistas': pistas,
         'grupos': [{'id': g, 'texto': GRUPOS[g],
                     'n': sum(1 for v in tags.values() if v['grupo'] == g)
