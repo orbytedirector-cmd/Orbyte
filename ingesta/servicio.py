@@ -1073,6 +1073,19 @@ def api_biblioteca_album_eliminar(oid):
     return jsonify(ok=True, uid=res) if ok else (jsonify(ok=False, error=res), 409)
 
 
+def _borrar_filas_edicion(ruta):
+    """Filas de Ingesta de una edición que salió: su carpeta y sus carpetas de disco que ya no existen."""
+    ruta = (ruta or '').rstrip('/')
+    discos = [x for x in almacen.rutas_ubicadas()
+              if x.startswith(ruta + '/') and analisis.carpeta_album(x) == ruta and not os.path.isdir(x)]
+    for x in [ruta] + discos:
+        while True:
+            fila = almacen.fila_de_ruta(x)
+            if not fila:
+                break
+            almacen.borrar_album(fila)
+
+
 def _eliminar_seguro(e, destino=None, todas=None):
     """La eliminación segura de Repetidos (en segundo plano). (True, uid) o (False, motivo)."""
     if procesador.actual:
@@ -1093,11 +1106,14 @@ def _eliminar_seguro(e, destino=None, todas=None):
             res = repetidos_mod.eliminar(aj['db_orbyte'], aj.get('biblioteca') or '/mnt/musica', grupo, [e['ruta']],
                                          destino, lambda m: almacen.unificacion_log(uid, m), sin_destino=not destino,
                                          proteger=[x for x in almacen.rutas_ubicadas() if x != e['ruta'].rstrip('/')])
-            while True:                              # sus filas de Ingesta (si las ubicó ella) también salen
-                fila = almacen.fila_de_ruta(e['ruta'])
-                if not fila:
-                    break
-                almacen.borrar_album(fila)
+            if not res['ediciones']:
+                # nada salió (otro álbum dentro de su carpeta, por ejemplo): no se informa como eliminado
+                motivo = ' · '.join(res['avisos']) or 'No se eliminó nada'
+                almacen.unificacion_log(uid, f'No se eliminó: {motivo}')
+                almacen.cerrar_unificacion(uid, 'error', dict(res, error=motivo))
+                almacen.avisar('error', f'No se eliminó: {titulo}', motivo)
+                return
+            _borrar_filas_edicion(e['ruta'])         # sus filas de Ingesta (si las ubicó ella) también salen
             almacen.cerrar_unificacion(uid, 'ok', res)
             almacen.avisar('ok', f'Eliminado: {titulo}', f'{res["liberado"] / 1e9:.2f} GB liberados · '
                            + (f'{res["movidas"]} referencias pasadas a «{os.path.basename(destino)}»' if destino
@@ -3236,6 +3252,15 @@ def api_repetidos_eliminar():
                                          lambda m: almacen.unificacion_log(uid, m),
                                          proteger=[x for x in almacen.rutas_ubicadas()
                                                    if x not in {b.rstrip('/') for b in borrar}])
+            if not res['ediciones']:
+                motivo = ' · '.join(res['avisos']) or 'No se eliminó nada'
+                almacen.unificacion_log(uid, f'No se eliminó: {motivo}')
+                almacen.cerrar_unificacion(uid, 'error', dict(res, error=motivo))
+                almacen.avisar('error', f'No se eliminó: {titulo}', motivo)
+                return
+            for b in borrar:
+                if b not in res.get('saltadas', []):
+                    _borrar_filas_edicion(b)
             almacen.cerrar_unificacion(uid, 'ok', res)
             if len(quedan) > 1:          # elegiste quedarte con varias: el grupo queda revisado así
                 almacen.marcar_repetido(g['clave'], '|'.join(sorted(quedan)))
