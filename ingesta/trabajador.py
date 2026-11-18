@@ -274,7 +274,10 @@ class Procesador(threading.Thread):
                 # la carpeta que se reprocesó (o los discos de una unión) SON el álbum nuevo: no se les exige
                 # cobertura (caso Elvis «Today», 17-11-2026: MusicBrainz corrigió un título y se saltó el reemplazo)
                 cam0 = a.get('cambios') or {}
-                propias = {(a.get('ruta') or '').rstrip('/')} if a.get('origen') == 'reproceso' else set()
+                # (al ubicar, `ruta` pasa a ser la carpeta nueva: la reprocesada está en cambios.reproceso_de; caso
+                # Fleetwood Mac «1969 to 1974», 17-11-2026: el box reprocesado se quedó por una pista con otro título)
+                propias = ({(a.get('ruta') or '').rstrip('/'), (cam0.get('reproceso_de') or '').rstrip('/')} - {''}
+                           if a.get('origen') == 'reproceso' else set())
                 propias |= {os.path.realpath(u).rstrip('/') for u in cam0.get('union') or []}
                 propias |= {u.rstrip('/') for u in cam0.get('union') or []}
                 exigir = set() if forzar else {r for r in viejas if r not in propias}
