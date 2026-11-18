@@ -337,6 +337,7 @@
   </div>
 </section>
 {% endif %}
+{% include '_historial.html' %}
 {# ── pistas dañadas: medir, sanear, reparar, re-descargar (13-11-2026) ── #}
 {% if a.estado in ('revisado', 'requiere_revision', 'error', 'error_ubicar') and not r.fallo %}
   {% set pd_pistas = [] %}
@@ -692,7 +693,13 @@ if (gt) gt.onclick = () => {
     if (dsc && dsc.value.trim() && (dsc.value.trim() !== dsc.dataset.auto)) o.disco = dsc.value.trim();
     if (Object.keys(o).length) pistas[tr.dataset.clave] = o;
   });
-  gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas});
+  const valor = (cl, k) => {
+    if (!cl) { const e = document.getElementById(CAMPO_TAG[k]); return e ? e.value.trim() : ''; }
+    const tr = [...document.querySelectorAll('tr[data-clave]')].find(t => t.dataset.clave === cl);
+    const e = tr && tr.querySelector(CAMPO_PISTA[k]); return e ? e.value.trim() : '';
+  };
+  gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas, motivos: motivosAuto(propuesta, valor),
+                                                           fuente: propuesta ? propuesta.fuente : ''});
 };
 document.addEventListener('DOMContentLoaded', () => {   // editorDiscos está en base.html (se carga después)
   const t = document.querySelector('#tags .tabla-tags'), b = document.getElementById('separar-discos');

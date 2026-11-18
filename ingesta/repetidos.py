@@ -546,6 +546,7 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
                     registro('⚠ ' + txt)
                     resumen['avisos'].append(txt)
                     resumen['saltadas'].append(ruta)
+                    resumen.setdefault('sin_equivalente', {})[ruta] = [p['title'] or '' for p in faltan]
                     continue
             # 1) base: lo que apunta a sus pistas pasa a la edición que se queda; la edición sale de Orbyte
             with con:
