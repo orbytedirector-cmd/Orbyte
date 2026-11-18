@@ -16,6 +16,7 @@ import time
 import traceback
 
 from . import ajustar as ajustar_mod
+from . import historial
 from . import portada as portada_mod
 from . import analisis, artistas, metadata, procesar, recursos, sacd
 from .almacen import PREVIOS
@@ -162,6 +163,15 @@ class Procesador(threading.Thread):
                                 **({} if es_iso else {'ruta': destino}))
         self.almacen.avisar('ok', f'{rep.get("artista")} — {rep.get("album")}: ubicado en la biblioteca',
                             os.path.relpath(destino, aj.get('biblioteca') or '/'), aid)
+        cam_u = a.get('cambios') or {}
+        rel_d = os.path.relpath(destino, aj.get('biblioteca') or '/')
+        self.almacen.anotar(aid, destino, 'ubicar', f'Ubicado en «{rel_d}»'
+                            + (f' (reproceso de «{os.path.basename(cam_u["reproceso_de"])}»)' if cam_u.get('reproceso_de') else '')
+                            + (f' (unión de {len(cam_u["union"])} álbumes)' if cam_u.get('union') else ''))
+        if cam_u.get('reproceso_de') and cam_u['reproceso_de'].rstrip('/') != destino.rstrip('/'):
+            self.almacen.anotar(None, cam_u['reproceso_de'], 'reproceso', f'Reprocesado: quedó en «{rel_d}»')
+        for u in cam_u.get('union') or []:
+            self.almacen.anotar(None, u, 'union', f'Unido como disco de «{rel_d}»')
         if rep.get('_rehechas'):
             self.almacen.avisar('revision', f'{rep.get("artista")} — {rep.get("album")}: '
                                             f'{len(rep["_rehechas"])} pista(s) se copiaron de nuevo',
@@ -215,6 +225,15 @@ class Procesador(threading.Thread):
 
         hay_tags = bool(pedido.get('tags') or pedido.get('pistas'))
         metadata = hay_tags and aj.get('metadata', '1') == '1'     # cambiar solo la carátula no relee la metadata
+        filas_hist = []
+        if hay_tags:                                 # historial (17-11-2026): lo que había → lo que queda, y por qué
+            try:
+                actual = ajustar_mod.leer(ruta)
+                filas_hist = historial.de_biblioteca(actual, ajustar_mod.propuesta(actual, pedido),
+                                                     pedido.get('motivos') or {},
+                                                     'títulos por normalizar (lote)' if pedido.get('lote') else 'a mano')
+            except Exception:  # noqa: BLE001 - el historial nunca frena el ajuste
+                log.warning('Historial del ajuste %s:\n%s', aid, traceback.format_exc())
         try:
             reg(f'Ajuste en la biblioteca: {os.path.relpath(ruta, aj.get("biblioteca") or "/")}')
             final = ajustar_mod.aplicar(ruta, pedido, aj, reg) if hay_tags else ruta
@@ -231,6 +250,11 @@ class Procesador(threading.Thread):
             self.almacen.avisar('error', f'No se pudo {que} de {nombre}', str(e).splitlines()[0], aid)
             self.actual = None
             return
+        self.almacen.mover_historial(ruta, final)
+        if filas_hist:
+            res_hist = historial.resumen(filas_hist, 'Biblioteca')
+            self.almacen.anotar(aid, final, 'tags', res_hist, pedido.get('fuente') or None, filas_hist)
+            reg(res_hist)
         campos = {'ubicado_en': final}
         # La cabecera (artista — álbum (año)) y Recientes muestran lo que quedó en los archivos,
         # no lo de la revisión original (antes seguía diciendo, p. ej., «Various Artists»).
@@ -249,6 +273,25 @@ class Procesador(threading.Thread):
             hecho = ('tags ajustados' + hecho) if hay_tags else 'carátula cambiada'
             self.almacen.avisar('ok', f'{nombre}: {hecho}', os.path.relpath(final, aj.get('biblioteca') or '/'), aid)
         self.actual = None
+
+    def _por_que_falta(self, aid, a, nueva, sin_equivalente):
+        """Para las pistas «que la nueva no trae»: si fue un título que cambió en el editor de tags, decirlo."""
+        from .fantasmas import _titulo
+        if not sin_equivalente:
+            return []
+        cam = a.get('cambios') or {}
+        hist = self.almacen.historial(aid, [nueva, a.get('ruta'), cam.get('reproceso_de')])
+        cambios = [(h, c) for h in hist if h['tipo'] == 'tags' for c in h['cambios'] if c.get('campo') == 'titulo']
+        notas = []
+        for titulos in sin_equivalente.values():
+            for t in titulos:
+                h, c = next(((h, c) for h, c in cambios if _titulo(c.get('antes')) == _titulo(t)), (None, None))
+                if c:
+                    quien = 'Autocorregir' if c.get('origen') == 'autocorregir' else 'el editor de tags (a mano)'
+                    notas.append(f'«{t}»: {quien} la dejó como «{c.get("despues")}» el '
+                                 f'{time.strftime("%d-%m %H:%M", time.localtime(h["ts"]))}'
+                                 + (f' ({c["motivo"]})' if c.get('motivo') else ''))
+        return notas
 
     # ── reemplazar la edición anterior (decisión «Reemplazar el existente») ──
     def _reemplazar(self, aid, a, rep, aj, reg, forzar=False):
@@ -314,9 +357,23 @@ class Procesador(threading.Thread):
             else:
                 cam.pop('reemplazo_pendiente', None)
             self.almacen.actualizar(aid, cambios=json.dumps(cam, ensure_ascii=False))
+            notas = self._por_que_falta(aid, a, nueva, res.get('sin_equivalente') or {})
+            for n in notas:
+                reg(f'  ↳ {n}')
+            for r in viejas:
+                self.almacen.anotar(None, r, 'reemplazo', f'Reemplazada por «{os.path.basename(final or nueva)}»')
+            for r in res.get('saltadas') or []:
+                self.almacen.anotar(None, r, 'reemplazo', f'No se borró al reemplazarla por «{os.path.basename(final or nueva)}»'
+                                    f' (pistas sin equivalente)')
+            if viejas or res.get('saltadas'):
+                self.almacen.anotar(aid, final or nueva, 'reemplazo',
+                                    (f'Reemplazó a {", ".join("«" + os.path.basename(r) + "»" for r in viejas)}' if viejas
+                                     else 'No reemplazó a la edición anterior')
+                                    + (f'; quedó {", ".join("«" + os.path.basename(r) + "»" for r in res["saltadas"])}'
+                                       if res.get('saltadas') else ''))
             if res.get('saltadas'):
                 self.almacen.avisar('revision', f'{_nombre(a)}: la edición anterior NO se borró',
-                                    ' · '.join(res['avisos'])[:900], aid)
+                                    (' · '.join(res['avisos'] + notas))[:900], aid)
             if viejas:
                 self.almacen.avisar('ok', f'{_nombre(a)}: reemplazó a la edición anterior',
                                     f'{res["liberado"] / 1e9:.2f} GB liberados · {res["movidas"]} referencias '

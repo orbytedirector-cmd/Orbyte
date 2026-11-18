@@ -92,7 +92,13 @@
     });
     if (!Object.keys(tags).length && !Object.keys(pistas).length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
     gl.disabled = true;
-    const r = await post(`${API}/ajustar`, {tags, pistas});
+    const valor = (cl, k) => {
+      const tr = cl && filas().find(t => t.dataset.libClave === cl);
+      const e = cl ? (tr && tr.querySelector(`[data-campo="${k}"]`)) : campoTag(k);
+      return e ? e.value.trim() : '';
+    };
+    const r = await post(`${API}/ajustar`, {tags, pistas, motivos: motivosAuto(propuesta, valor),
+                                            fuente: propuesta ? propuesta.fuente : ''});
     if (r && r.ok === false) { toast('No se pudo', r.error || ''); gl.disabled = false; return; }
     location.href = r.ir || location.href.split('#')[0];
   };

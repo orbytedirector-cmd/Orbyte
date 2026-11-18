@@ -45,6 +45,7 @@ from . import fantasmas as fantasmas_mod
 from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
 from . import numeracion as numeracion_mod
+from . import historial as historial_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
 from . import tienda as tienda_mod
@@ -312,6 +313,8 @@ def album(aid):
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
                            actuales=actuales, portada=portada, sin_indexar=sin_indexar, fmt=fmt,
                            pend_reemp=_reemplazo_pendiente(a),
+                           hist=almacen.historial(aid, [a.get('ubicado_en'), a.get('ruta'),
+                                                        (a.get('cambios') or {}).get('reproceso_de')]),
                            dup_filas=dup_filas,
                            aj_borrar=aj.get('borrar_origen', '1') == '1', aj_metadata=aj.get('metadata', '1') == '1')
 
@@ -439,6 +442,7 @@ def api_cambios(aid):
         return jsonify(ok=False, error='El álbum no se puede cambiar en este estado'), 409
     d = request.get_json(silent=True) or {}
     c = a.get('cambios') or {}
+    c_antes = json.loads(json.dumps(c))
     if 'tags' in d:
         t = {k: str(v).strip()[:300] for k, v in (d['tags'] or {}).items()
              if k in ('artista', 'album', 'anio', 'genero', 'genero_secundario') and str(v or '').strip()}
@@ -472,6 +476,16 @@ def api_cambios(aid):
         c['aceptadas'] = sorted(set(c.get('aceptadas') or []) | {d['aceptar']})
     if d.get('desaceptar'):
         c['aceptadas'] = sorted(set(c.get('aceptadas') or []) - {d['desaceptar']})
+    if 'tags' in d or 'pistas' in d:                  # historial: qué cambió, quién lo propuso y por qué
+        try:
+            filas = historial_mod.de_bandeja(a.get('reporte') or {}, c_antes, c,
+                                             historial_mod.motivos_validos(d.get('motivos')))
+            if filas:
+                res = historial_mod.resumen(filas, 'Bandeja')
+                almacen.anotar(aid, a['ruta'], 'tags', res, str(d.get('fuente') or '')[:300] or None, filas)
+                almacen.registrar(aid, res)
+        except Exception:  # noqa: BLE001 - el historial nunca frena el guardado
+            log.warning('Historial de %s:\n%s', aid, traceback.format_exc())
     _requeue(aid, cambios=c)
     return jsonify(ok=True)
 
@@ -890,7 +904,9 @@ def api_sacar_de_cola(aid):
 def api_ajustar(aid):
     """Tags de un álbum ya ubicado: se valida aquí y el procesador los escribe en la biblioteca."""
     d = request.get_json(silent=True) or {}
-    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}})
+    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {},
+                                                         'motivos': historial_mod.motivos_validos(d.get('motivos')),
+                                                         'fuente': str(d.get('fuente') or '')[:300]})
     if error:
         return jsonify(ok=False, error=error), codigo
     procesador.ya()
@@ -1067,7 +1083,8 @@ def api_biblioteca_album_eliminar(oid):
     if d.get('confirmacion') != 'ELIMINAR':
         return jsonify(ok=False, error='Falta la confirmación'), 400
     destino = d.get('destino') or None
-    if destino and destino not in {o['ruta'] for o in opciones}:
+    # cualquier edición del mismo artista (Salud propone la «versión unida», que puede no estar entre las 8 sugeridas)
+    if destino and not (destino in todas and todas[destino]['artist_id'] == e['artist_id'] and destino != e['ruta']):
         return jsonify(ok=False, error='Esa edición ya no está: recarga la página'), 409
     ok, res = _eliminar_seguro(e, destino, todas)
     return jsonify(ok=True, uid=res) if ok else (jsonify(ok=False, error=res), 409)
@@ -1114,6 +1131,8 @@ def _eliminar_seguro(e, destino=None, todas=None):
                 almacen.avisar('error', f'No se eliminó: {titulo}', motivo)
                 return
             _borrar_filas_edicion(e['ruta'])         # sus filas de Ingesta (si las ubicó ella) también salen
+            almacen.anotar(None, e['ruta'], 'eliminar', 'Eliminada desde la Biblioteca'
+                           + (f' (historial pasado a «{os.path.basename(destino)}»)' if destino else ''))
             almacen.cerrar_unificacion(uid, 'ok', res)
             almacen.avisar('ok', f'Eliminado: {titulo}', f'{res["liberado"] / 1e9:.2f} GB liberados · '
                            + (f'{res["movidas"]} referencias pasadas a «{os.path.basename(destino)}»' if destino
@@ -1184,6 +1203,7 @@ def biblioteca_album(oid):
                     and analisis.dividir_por_disco(h) is not None]) if base != o['ruta'].rstrip('/') else 0
     return render_template('biblioteca_album.html', pagina='biblioteca', o=o, a=a, lib=lib, lib_error=lib_error,
                            portada=portada, fmt=fmt, n_discos=n_discos,
+                           hist=almacen.historial(aid, [o['ruta']] + ([base] if base != o['ruta'].rstrip('/') else [])),
                            reglas=(x or {}).get('reglas') or {}, REGLAS=titulos_mod.REGLAS,
                            ignorado=oid in almacen.titulos_ignorados())
 
@@ -1463,6 +1483,7 @@ def api_reprocesar(k, i):
         fila = None                                   # (vino de una ISO: su fila sigue apuntando a la entrada)
     aid = almacen.iniciar_reproceso(ruta, os.path.relpath(ruta, bib), analisis.firma(ruta))
     almacen.registrar(aid, 'Reproceso: la carpeta de la biblioteca se revisa como un álbum nuevo (no se mueve nada)')
+    almacen.anotar(aid, ruta, 'reproceso', 'Reproceso iniciado (vuelve a la Bandeja)')
     vigilante.ya()
     return jsonify(ok=True, ir=url_for('album', aid=aid))
 
@@ -1640,6 +1661,7 @@ def api_unir():
     almacen.registrar(aid, f'Unir como un álbum de {len(rutas)} discos (no se mueve nada hasta ubicar):')
     for n, r in zip(numeros, rutas):
         almacen.registrar(aid, f'  Disco {n}: {os.path.relpath(fuentes[r], raiz)} · {por_ruta[r]["pistas"]} pistas')
+        almacen.anotar(None, fuentes[r], 'union', f'Se está uniendo como disco {n} ({len(rutas)} discos)')
     vigilante.ya()
     return jsonify(ok=True, ir=url_for('album', aid=aid))
 
@@ -1661,8 +1683,26 @@ def api_salud_discos():
         return jsonify(ok=False, error=f'No se pudo leer music.db: {e}'), 409
     ign = salud.ignorados_discos()
     ver = request.args.get('ignorados') == '1'
-    return jsonify(ok=True, casos=[c for c in casos if (c['clave'] in ign) == ver], n_ignorados=len(ign),
-                   raiz=aj.get('biblioteca') or '/mnt/musica')
+    casos = [dict(c) for c in casos if (c['clave'] in ign) == ver]
+    _marcar_trabajados(casos)
+    return jsonify(ok=True, casos=casos, n_ignorados=len(ign), raiz=aj.get('biblioteca') or '/mnt/musica')
+
+
+def _marcar_trabajados(casos):
+    """«Ya trabajado» (17-11-2026): lo último que se le hizo a alguna de sus carpetas (historial o reprocesos y
+    uniones de antes del historial). c['trabajado'] = {tipo, resumen, ts}."""
+    eventos = [(h['ruta'], h['ts'], h['tipo'], h['resumen']) for h in almacen.historial_todo() if h['ruta']]
+    eventos += almacen.trabajos_previos()
+    if not eventos:
+        return
+    for c in casos:
+        rutas = [m['ruta'].rstrip('/') for m in c['miembros']]
+        ultimo = None
+        for r, ts, tipo, resumen in eventos:
+            if any(r == x or r.startswith(x + '/') for x in rutas) and (not ultimo or ts > ultimo['ts']):
+                ultimo = {'tipo': tipo, 'resumen': resumen, 'ts': ts, 'fecha': f_fecha(ts)}
+        if ultimo:
+            c['trabajado'] = ultimo
 
 
 @app.route('/api/salud/discos/ignorar', methods=['POST'])
@@ -2100,6 +2140,7 @@ def _eliminar_biblioteca(ruta, claves=None, todo=False):
             os.rmdir(os.path.dirname(ruta))            # la carpeta del artista, si quedó vacía
         if aid:
             almacen.borrar_album(aid)
+        almacen.anotar(None, ruta, 'eliminar', 'Álbum a la papelera desde su ficha')
         return jsonify(ok=True, ir=url_for('biblioteca_pagina'), papelera=eid)
 
     try:
@@ -2132,6 +2173,8 @@ def _eliminar_biblioteca(ruta, claves=None, todo=False):
         papelera.restaurar(eid)
         return _elim_error(f'No se pudo sacar de Orbyte (no se eliminó nada): {e}', 500)
     papelera.poner_extra(eid, dict(extra, album_ruta=ruta, aid=aid, eliminadas_rep=elim_rep))
+    almacen.anotar(aid, ruta, 'eliminar', f'{len(claves)} pista(s) a la papelera: '
+                   + ', '.join(historial_mod.etiqueta(c) for c in claves[:6]) + ('…' if len(claves) > 6 else ''))
     if elim_rep:
         cam = dict(a.get('cambios') or {})
         cam['eliminadas'] = sorted(set(cam.get('eliminadas') or []) | set(elim_rep))
@@ -2753,7 +2796,9 @@ def api_biblioteca_ajustar(oid):
         return jsonify(ok=False, error='Ese álbum ya no está en Orbyte'), 404
     d = request.get_json(silent=True) or {}
     aid = almacen.de_biblioteca(o['ruta'], o['artista'], o['album'], o['anio'])
-    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {}})
+    error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {},
+                                                         'motivos': historial_mod.motivos_validos(d.get('motivos')),
+                                                         'fuente': str(d.get('fuente') or '')[:300]})
     if error:
         return jsonify(ok=False, error=error), codigo
     procesador.ya()
@@ -3261,6 +3306,7 @@ def api_repetidos_eliminar():
             for b in borrar:
                 if b not in res.get('saltadas', []):
                     _borrar_filas_edicion(b)
+                    almacen.anotar(None, b, 'eliminar', f'Eliminada en Repetidos (se quedó «{os.path.basename(destino)}»)')
             almacen.cerrar_unificacion(uid, 'ok', res)
             if len(quedan) > 1:          # elegiste quedarte con varias: el grupo queda revisado así
                 almacen.marcar_repetido(g['clave'], '|'.join(sorted(quedan)))

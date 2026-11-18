@@ -76,6 +76,13 @@ class Almacen:
                     id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, clave TEXT, nombres TEXT, final TEXT,
                     estado TEXT, registro TEXT, resultado TEXT
                 );
+                -- qué se le hizo a cada álbum y por qué (tags, reprocesos, uniones, reemplazos; 17-11-2026)
+                CREATE TABLE IF NOT EXISTS historial (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, aid INTEGER, ruta TEXT, tipo TEXT,
+                    resumen TEXT, fuente TEXT, cambios TEXT
+                );
+                CREATE INDEX IF NOT EXISTS historial_ruta ON historial(ruta);
+                CREATE INDEX IF NOT EXISTS historial_aid ON historial(aid);
             ''')
             columnas = {r[1] for r in c.execute('PRAGMA table_info(albumes)')}
             for col, tipo in (('eleccion', 'TEXT'), ('cambios', 'TEXT'), ('registro', 'TEXT'),
@@ -87,6 +94,73 @@ class Almacen:
             columnas = {r[1] for r in c.execute('PRAGMA table_info(descargas)')}
             if 'pendientes' not in columnas:            # pistas con pérdida que esperan tu decisión (JSON)
                 c.execute('ALTER TABLE descargas ADD COLUMN pendientes TEXT')
+
+    # ── historial de cada álbum (17-11-2026) ──
+    def anotar(self, aid, ruta, tipo, resumen, fuente=None, cambios=None):
+        """tipo: tags · reproceso · union · reemplazo · eliminar · separar. cambios: [{pista, campo, antes,
+        despues, origen ('autocorregir'|'a mano'), motivo}]."""
+        with _lock, self._con() as c:
+            c.execute('INSERT INTO historial (ts, aid, ruta, tipo, resumen, fuente, cambios) VALUES (?,?,?,?,?,?,?)',
+                      (time.time(), aid, (ruta or '').rstrip('/') or None, tipo, resumen, fuente,
+                       json.dumps(cambios, ensure_ascii=False) if cambios else None))
+
+    def historial(self, aid=None, rutas=(), limite=200):
+        """Lo anotado para ese álbum (por su fila de Ingesta o por sus carpetas y las de sus discos), lo último primero."""
+        rutas = [r.rstrip('/') for r in rutas if r]
+        cond, args = [], []
+        if aid:
+            cond.append('aid = ?')
+            args.append(aid)
+        for r in rutas:
+            cond.append('(ruta = ? OR substr(ruta, 1, ?) = ?)')
+            args += [r, len(r) + 1, r + '/']
+        if not cond:
+            return []
+        with self._con() as c:
+            filas = c.execute(f'SELECT * FROM historial WHERE {" OR ".join(cond)} ORDER BY ts DESC, id DESC LIMIT ?',
+                              args + [limite]).fetchall()
+        out = []
+        for f in filas:
+            d = dict(f)
+            d['cambios'] = json.loads(d['cambios']) if d['cambios'] else []
+            out.append(d)
+        return out
+
+    def historial_todo(self):
+        """(ruta, aid, tipo, resumen, ts) de todo el historial, para marcar en Salud lo ya trabajado."""
+        with self._con() as c:
+            return [dict(f) for f in c.execute('SELECT ruta, aid, tipo, resumen, ts FROM historial ORDER BY ts')]
+
+    def trabajos_previos(self):
+        """Lo que la ingesta hizo antes de que existiera el historial (reprocesos y uniones ya ubicados):
+        [(ruta, ts, tipo, resumen)]."""
+        out = []
+        with self._con() as c:
+            filas = c.execute("SELECT cambios, ubicado_en, ubicado, terminado FROM albumes WHERE cambios IS NOT NULL "
+                              "AND (cambios LIKE '%reproceso_de%' OR cambios LIKE '%\"union\"%') "
+                              "AND ubicado_en IS NOT NULL").fetchall()
+        for f in filas:
+            try:
+                cam = json.loads(f['cambios'] or '{}')
+            except ValueError:
+                continue
+            ts = f['ubicado'] or f['terminado'] or 0
+            dest = os.path.basename((f['ubicado_en'] or '').rstrip('/'))
+            r = (cam.get('reproceso_de') or '').rstrip('/')
+            if r and r != (f['ubicado_en'] or '').rstrip('/'):
+                out.append((r, ts, 'reproceso', f'Reprocesado: quedó en «{dest}»'))
+            for u in cam.get('union') or []:
+                out.append((u.rstrip('/'), ts, 'union', f'Unido como disco de «{dest}»'))
+        return out
+
+    def mover_historial(self, viejo, nuevo):
+        """La carpeta del álbum cambió de nombre: su historial (y el de sus discos) la sigue."""
+        viejo, nuevo = (viejo or '').rstrip('/'), (nuevo or '').rstrip('/')
+        if not viejo or not nuevo or viejo == nuevo:
+            return
+        with _lock, self._con() as c:
+            c.execute('UPDATE historial SET ruta = ? || substr(ruta, ?) WHERE ruta = ? OR substr(ruta, 1, ?) = ?',
+                      (nuevo, len(viejo) + 1, viejo, len(viejo) + 1, viejo + '/'))
 
     @contextlib.contextmanager
     def _con(self):

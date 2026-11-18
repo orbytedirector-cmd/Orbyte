@@ -173,32 +173,77 @@ function accionCaso(c, i) {
     <a class="btn chico" href="/biblioteca/album/${m.id}">↻ Abrir y reprocesar</a>`;
   return `<a class="btn chico oro" href="/biblioteca/album/${m.id}">${c.tipo === 'subcarpetas' ? '↻ Reprocesar los discos' : '↻ Abrir y reprocesar'}</a>`;
 }
+// «Ya trabajado» y «Ya tienes una versión unida» (17-11-2026)
+const trabajado = c => !!(c.trabajado || c.unida);
+const enFiltro = (c, f) => f === 'todos' || (f === 'trabajados' ? trabajado(c) : c.tipo === f);
+function lineasTrabajo(c, i) {
+  let h = '';
+  if (c.trabajado) h += `<div class="s caso-hecho">✓ Ya trabajado · ${esc(c.trabajado.resumen)} <span class="tenue">· ${esc(c.trabajado.fecha)}</span></div>`;
+  if (c.unida) h += `<div class="s caso-unida">Ya tienes una versión unida: <a href="/biblioteca/album/${c.unida.id}">«${esc(c.unida.album)}»${c.unida.anio ? ` (${esc(c.unida.anio)})` : ''}</a>
+    <span class="tenue">· ${c.unida.n} pistas · trae el ${Math.round(c.unida.cubre * 100)} % de estas</span>
+    <span class="mono muy-tenue" style="display:block">${esc(relR(c.unida.ruta))}</span></div>
+    <div class="caso-elim" data-elim-caja="${i}" hidden></div>`;
+  return h;
+}
 function pintarDiscos() {
-  const cuenta = t => casos.filter(c => t === 'todos' || c.tipo === t).length;
-  document.getElementById('f-discos').innerHTML = [['todos', 'Todos'], ...Object.entries(TIPOS)].map(([k, n]) =>
+  const cuenta = t => casos.filter(c => enFiltro(c, t)).length;
+  document.getElementById('f-discos').innerHTML = [['todos', 'Todos'], ...Object.entries(TIPOS), ['trabajados', 'Trabajados']].map(([k, n]) =>
     `<button class="filtro ${fDiscos === k ? 'activo' : ''}" data-f="${k}">${esc(n)}<b>${cuenta(k)}</b></button>`).join('')
     + `<button class="filtro ${verIgnDiscos ? 'activo' : ''}" id="ver-ign-discos">No son un caso<b>${nIgnDiscos}</b></button>`;
   document.querySelectorAll('#f-discos [data-f]').forEach(b => b.onclick = () => { fDiscos = b.dataset.f; pintarDiscos(); });
   document.getElementById('ver-ign-discos').onclick = () => { verIgnDiscos = !verIgnDiscos; cargarDiscos(); };
-  const lista = casos.map((c, i) => [c, i]).filter(([c]) => fDiscos === 'todos' || c.tipo === fDiscos);
+  const lista = casos.map((c, i) => [c, i]).filter(([c]) => enFiltro(c, fDiscos));
   const cont = document.getElementById('l-discos');
   if (!lista.length) { cont.innerHTML = `<div class="sin-problemas">${verIgnDiscos ? 'Nada marcado como «No es un caso».' : 'Nada por normalizar con este filtro.'}</div>`; return; }
   cont.innerHTML = `<div class="tabla-wrap"><table>
     <tr><th>Álbum</th><th>Qué pasa</th><th class="oculto-movil">Carpeta</th><th style="width:1%"></th></tr>
     ${lista.map(([c, i]) => `<tr>
       <td><div class="t">${esc(c.titulo)}</div><div class="s">${esc(c.artista)} · <span class="tenue">${esc(TIPOS[c.tipo])}</span></div></td>
-      <td><div class="s">${esc(c.detalle)}</div></td>
+      <td><div class="s">${esc(c.detalle)}</div>${lineasTrabajo(c, i)}</td>
       <td class="oculto-movil">${c.miembros.map(m => `<div class="s mono muy-tenue">${esc(relR(m.ruta))}</div>`).join('')}</td>
-      <td><div style="display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end">${verIgnDiscos ? '' : accionCaso(c, i)}
+      <td><div style="display:flex;gap:.35rem;flex-wrap:wrap;justify-content:flex-end">${verIgnDiscos ? '' : (c.unida ? `<button class="btn chico oro" data-elim="${i}" title="Se borra del disco y de Orbyte; escuchas, favoritos y playlists pasan a la versión unida">Eliminar esta copia</button>` + accionCaso(c, i).replaceAll('btn chico oro', 'btn chico') : accionCaso(c, i))}
         <button class="btn chico" data-nocaso="${i}" title="${verIgnDiscos ? 'Vuelve a la lista' : 'Son álbumes distintos (o está bien así): no vuelve a aparecer'}">${verIgnDiscos ? 'Volver a mostrar' : 'No es un caso'}</button></div></td></tr>`).join('')}
   </table></div>`;
   cont.querySelectorAll('[data-nocaso]').forEach(b => b.onclick = async () => {
     b.disabled = true; await post('/api/salud/discos/ignorar', {clave: casos[+b.dataset.nocaso].clave, si: !verIgnDiscos}); cargarDiscos();
   });
+  cont.querySelectorAll('[data-elim]').forEach(b => b.onclick = () => abrirEliminarCopia(+b.dataset.elim));
   cont.querySelectorAll('[data-unir]').forEach(b => b.onclick = () => {
     const c = casos[+b.dataset.unir];
     abrirUnir({ruta: c.miembros[0].ruta, preseleccion: c.miembros.map(m => m.ruta)});
   });
+}
+
+// «Eliminar esta copia»: la eliminación segura de la Biblioteca, con la versión unida como destino del historial
+async function abrirEliminarCopia(i) {
+  const c = casos[i], m = c.miembros[0], caja = document.querySelector(`[data-elim-caja="${i}"]`);
+  caja.hidden = false;
+  caja.innerHTML = '<div class="estado-vivo"><span class="giro"></span>Revisando…</div>';
+  const r = await (await fetch(`/api/biblioteca/album/${m.id}/eliminar`)).json();
+  if (!r.ok) { caja.innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
+  const tam = b => b >= 1e9 ? `${(b / 1e9).toFixed(2)} GB` : `${Math.round((b || 0) / 1e6)} MB`;
+  caja.innerHTML = `<div class="flash error" style="margin:.5rem 0">Se borra del disco y de Orbyte «${esc(relR(r.ruta))}»: ${r.n} pistas · ${tam(r.bytes)}.
+      No pasa por la papelera. ${r.escuchas} escuchas, ${r.playlists} en playlists y ${r.favoritos} favoritos pasan a «${esc(c.unida.album)}».</div>
+    <div style="display:flex;gap:.4rem;flex-wrap:wrap;align-items:center"><input type="text" class="campo-buscar" placeholder="Escribe ELIMINAR" style="max-width:12rem" autocomplete="off">
+      <button class="btn chico peligro" disabled>Eliminar</button><button class="btn chico" data-cancelar>Cancelar</button></div><pre class="registro" hidden></pre>`;
+  const inp = caja.querySelector('input'), ok = caja.querySelector('.peligro'), log = caja.querySelector('pre');
+  inp.oninput = () => { ok.disabled = inp.value.trim() !== 'ELIMINAR'; };
+  caja.querySelector('[data-cancelar]').onclick = () => { caja.hidden = true; caja.innerHTML = ''; };
+  ok.onclick = async () => {
+    ok.disabled = true;
+    const x = await post(`/api/biblioteca/album/${m.id}/eliminar`, {destino: c.unida.ruta, confirmacion: 'ELIMINAR'});
+    if (!x || !x.ok) { toast('No se pudo', (x && x.error) || ''); ok.disabled = false; return; }
+    log.hidden = false;
+    const reloj = setInterval(async () => {
+      const u = await (await fetch(`/api/artistas/unificacion/${x.uid}`)).json();
+      log.textContent = u.registro || '';
+      if (u.estado && u.estado !== 'en_curso') {
+        clearInterval(reloj);
+        toast(u.estado === 'ok' ? 'Copia eliminada' : 'No se eliminó', u.estado === 'ok' ? '' : 'Mira el registro');
+        if (u.estado === 'ok') setTimeout(cargarDiscos, 800);
+      }
+    }, 1500);
+  };
 }
 
 // ── revisión de pistas ──

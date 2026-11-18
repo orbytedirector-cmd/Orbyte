@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261117">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261118">
 </head>
 <body>
 <header class="cab">
@@ -87,6 +87,16 @@ function editorDiscos(tabla, boton, o) {
 // ✦ Autocorregir (los dos editores de tags): grupos de la propuesta + discos y números desde MusicBrainz, Discogs o
 // Tidal (17-11-2026), con selector de fuente y un campo para pegar el enlace de Discogs. Devuelve las fuentes vistas
 // (para que el selector las siga mostrando cuando se pide una sola).
+// Para el historial: qué campos guardados vienen de la propuesta de Autocorregir (y su motivo). valor(clave|null, campo)
+// devuelve lo que hay hoy en el formulario; si coincide con lo propuesto, ese cambio fue de Autocorregir.
+function motivosAuto(prop, valor) {
+  const m = {};
+  if (!prop) return m;
+  for (const [k, c] of Object.entries(prop.tags || {})) if ((valor(null, k) || '') === c.despues) m['|' + k] = {origen: 'autocorregir', motivo: c.motivo || ''};
+  for (const [cl, cs] of Object.entries(prop.pistas || {}))
+    for (const [k, c] of Object.entries(cs)) if ((valor(cl, k) || '') === c.despues) m[cl + '|' + k] = {origen: 'autocorregir', motivo: c.motivo || ''};
+  return m;
+}
 function pintarAuto(panel, r, previas, especifico, pedir, aplicar, guardar) {
   const num = r.numeracion;
   let cands = num ? (num.candidatas || []) : (previas || []);
@@ -99,6 +109,15 @@ function pintarAuto(panel, r, previas, especifico, pedir, aplicar, guardar) {
     <div class="auto-grupos">${r.grupos.map(g => `<label><input type="checkbox" data-grupo="${g.id}" checked> ${esc(g.texto)} <span class="tenue">(${g.n})</span></label>`).join('')}</div>
     <div class="s tenue" style="margin-top:.4rem">Los campos cambiados quedan resaltados (pasa el cursor para ver cómo estaban). Revisa y, si te parece, «${esc(guardar)}».</div>`
     : '<div class="sin-problemas">Todo se ve ordenado: no hay nada que corregir.</div>';
+  // «Qué cambia» (17-11-2026): cada campo con antes → después y por qué; lo desmarcado queda tachado
+  const NOMBRE_CAMPO = {artista: 'Artista', album: 'Álbum', genero: 'Género', genero_secundario: 'Géneros sec.', titulo: 'Título', numero: '#', disco: 'Disco'};
+  const lineas = [...Object.entries(r.tags).map(([k, c]) => ['Álbum', k, c]),
+                  ...Object.entries(r.pistas).flatMap(([cl, cs]) => Object.entries(cs).map(([k, c]) => [cl.replace(/\.[^./]+$/, ''), k, c]))];
+  if (lineas.length) html += `<details class="auto-cambios" open><summary class="rotulo" style="cursor:pointer">Qué cambia · ${lineas.length}</summary>
+    <div class="tabla-wrap"><table class="hist-tabla"><tr><th>Pista</th><th>Campo</th><th>Antes → después</th><th>Por qué</th></tr>
+    ${lineas.map(([p, k, c]) => `<tr data-g="${esc(c.grupo)}"><td class="s">${esc(p)}</td><td class="s">${esc(NOMBRE_CAMPO[k] || k)}</td>
+      <td><span class="hist-antes">${esc(c.antes || '(vacío)')}</span> → <b>${esc(c.despues)}</b></td><td class="s tenue">${esc(c.motivo || '')}</td></tr>`).join('')}
+    </table></div></details>`;
   if (num) {
     const el = cands.find(c => c.clave === num.elegida);
     for (const k of ['sin_pareja', 'faltan', 'notas']) num[k] = num[k] || [];
@@ -118,7 +137,9 @@ function pintarAuto(panel, r, previas, especifico, pedir, aplicar, guardar) {
   }
   panel.hidden = false;
   panel.innerHTML = html;
-  panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = aplicar);
+  const tachar = () => { const act = new Set([...panel.querySelectorAll('input[data-grupo]:checked')].map(c => c.dataset.grupo));
+    panel.querySelectorAll('.auto-cambios tr[data-g]').forEach(tr => tr.classList.toggle('apagado', !act.has(tr.dataset.g))); };
+  panel.querySelectorAll('input[data-grupo]').forEach(c => c.onchange = () => { aplicar(); tachar(); });
   const sel = panel.querySelector('[data-num-fuente]'), dc = panel.querySelector('[data-num-discogs]');
   const ocupar = () => panel.querySelectorAll('.auto-num select, .auto-num input, .auto-num button').forEach(e => e.disabled = true);
   if (sel) sel.onchange = () => { ocupar(); pedir({numeracion: true, fuente: sel.value}); };

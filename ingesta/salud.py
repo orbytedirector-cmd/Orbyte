@@ -800,9 +800,10 @@ def discos_por_normalizar(db, biblioteca):
     bib = analisis.biblioteca(db, biblioteca)
     con = sqlite3.connect(f'file:{db}?mode=ro', uri=True, timeout=30)
     try:
-        pistas = {}
-        for aid, d, td, n in con.execute('SELECT album_id, disc_number, total_discs, track_number FROM tracks'):
+        pistas, titulos = {}, {}
+        for aid, d, td, n, t in con.execute('SELECT album_id, disc_number, total_discs, track_number, title FROM tracks'):
             pistas.setdefault(aid, []).append((_int(d), _int(td), _int(n)))
+            titulos.setdefault(aid, set()).add(_titulo_simple(t))
         rutas = {i: (p or '').rstrip('/') for i, p in con.execute('SELECT id, path FROM albums')}
     finally:
         con.close()
@@ -812,8 +813,9 @@ def discos_por_normalizar(db, biblioteca):
         ps = [x for i in g['ids'] for x in pistas.get(i, [])]
         discos = sorted({d for d, _t, _n in ps if d})
         total = max((t for _d, t, _n in ps), default=0)
-        info = {'ruta': g['ruta'], 'id': g['ids'][0], 'album': g['album'], 'anio': g.get('anio'), 'artista': g['artista'],
-                'n_pistas': g['pistas'], 'tag': g.get('tag'), 'discos': discos, 'total_discos': total}
+        info = {'ruta': g['ruta'], 'id': g['ids'][0], 'ids': list(g['ids']), 'album': g['album'], 'anio': g.get('anio'),
+                'artista': g['artista'], 'n_pistas': g['pistas'], 'tag': g.get('tag'), 'discos': discos,
+                'total_discos': total}
         if len(g['ids']) > 1:
             carpetas = sorted({os.path.basename(rutas.get(i, '')) for i in g['ids']})
             casos.append({'tipo': 'subcarpetas', 'artista': g['artista'], 'titulo': g['album'], 'miembros': [info],
@@ -872,9 +874,49 @@ def discos_por_normalizar(db, biblioteca):
                                      f'{", ".join(map(str, faltan))}'})
     for c in casos:
         c['clave'] = c['tipo'] + '|' + '|'.join(sorted(m['ruta'] for m in c['miembros']))
+    _versiones_unidas(casos, bib['grupos'], titulos)
     casos.sort(key=lambda c: (analisis._norm(c['artista']), analisis._norm(c['titulo'])))
     _CACHE.update(clave=clave, datos=casos)
     return casos
+
+
+def _titulo_simple(t):
+    from .fantasmas import _titulo
+    return _titulo(t or '')
+
+
+COBERTURA_UNIDA = 0.9
+
+
+def _versiones_unidas(casos, grupos, titulos):
+    """«Ya tienes una versión unida» (17-11-2026): otro álbum del mismo artista que trae (casi) todas las pistas del
+    caso — p. ej. el box reprocesado en una sola carpeta mientras los 8 discos sueltos siguen en Orbyte, o una carpeta
+    con medio box (Fleetwood Mac «Then Play On (1970)»). Se marca en el caso: c['unida'] = {ruta, album, id, n}."""
+    en_casos = {m['ruta'].rstrip('/') for c in casos for m in c['miembros']}
+    por_artista = {}
+    for g in grupos:
+        por_artista.setdefault(analisis._norm(g['artista']), []).append(g)
+    for c in casos:
+        rutas = [m['ruta'] for m in c['miembros']]
+        ids = {i for m in c['miembros'] for i in m.get('ids') or [m['id']]}
+        mias = set().union(*[titulos.get(i, set()) for i in ids]) - {''}
+        if len(mias) < 3:
+            continue
+        mejor = None
+        for g in por_artista.get(analisis._norm(c['artista']), []):
+            r = g['ruta'].rstrip('/')
+            if set(g['ids']) & ids or any(r == x or r.startswith(x + '/') or x.startswith(r + '/') for x in rutas):
+                continue
+            suyas = set().union(*[titulos.get(i, set()) for i in g['ids']])
+            cubre = len(mias & suyas) / len(mias)
+            # mejor la que no es a su vez un caso (el box ya unido antes que los 8 discos sueltos)
+            orden = (cubre, r not in en_casos and len(g['ids']) == 1, g['pistas'])
+            if cubre >= COBERTURA_UNIDA and (not mejor or orden > mejor[0]):
+                mejor = (orden, g)
+        if mejor:
+            g = mejor[1]
+            c['unida'] = {'ruta': g['ruta'], 'album': g['album'], 'anio': g.get('anio'), 'id': g['ids'][0],
+                          'n': g['pistas'], 'cubre': round(mejor[0][0], 2)}
 
 
 class Saneador:

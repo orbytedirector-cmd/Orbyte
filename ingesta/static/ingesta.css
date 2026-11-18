@@ -593,3 +593,21 @@ tr.p-editor td { background: var(--card-2); }
 /* pista eliminada (en la papelera) en la tabla de la revisión */
 tr.en-papelera > td { opacity: .45; }
 tr.en-papelera .t { text-decoration: line-through; }
+
+/* historial de cambios del álbum (17-11-2026) */
+details.historial > summary { cursor: pointer; list-style: none; }
+details.historial > summary::-webkit-details-marker { display: none; }
+details.historial > summary::before { content: '▸ '; color: var(--oro); }
+details.historial[open] > summary::before { content: '▾ '; }
+.hist-lista { display: flex; flex-direction: column; gap: .6rem; margin-top: .7rem; }
+.hist-item { border: 1px solid var(--borde-2); border-radius: 10px; padding: .6rem .8rem; background: var(--elev); display: flex; flex-direction: column; gap: .25rem; min-width: 0; }
+.hist-cab { display: flex; flex-wrap: wrap; gap: .5rem; align-items: baseline; }
+.chip.chico { font-size: .72rem; padding: .1rem .5rem; }
+.hist-det > summary { cursor: pointer; color: var(--oro-claro); }
+.hist-tabla td, .hist-tabla th { vertical-align: top; }
+.hist-antes { color: var(--texto-2); text-decoration: line-through; text-decoration-thickness: 1px; }
+.auto-cambios { margin-top: .8rem; padding-top: .7rem; border-top: 1px solid var(--borde-oro); }
+.auto-cambios .tabla-wrap { max-height: 22rem; overflow: auto; }
+.auto-cambios tr.apagado td { opacity: .45; text-decoration: line-through; }
+.caso-hecho { color: var(--ok); margin-top: .35rem; }
+.caso-unida { color: var(--oro-claro); margin-top: .3rem; }

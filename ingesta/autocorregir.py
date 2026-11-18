@@ -29,6 +29,11 @@ GRUPOS = {
     'numeros': 'Números de pista',
     'discos': 'Discos y números de pista',
 }
+MOTIVOS = {      # por qué se propone cada cambio (lo que se ve en «Qué cambia» y queda en el historial)
+    'mayusculas': 'mayúsculas de título (venía todo en mayúsculas o en minúsculas)',
+    'genero': 'género primario + hasta 3 secundarios, con mayúscula inicial',
+    'numeros': 'números correlativos (faltaban o se repetían)',
+}
 
 # mismo listado y orden que _CANONICAL_GENRES de tools/metadata/RichMetaDSD3.py
 CANONICOS = [
@@ -189,26 +194,35 @@ def proponer(rep, bib=None, numeracion=None):
     plan = rep.get('plan') or []
     tags, pistas, usados = {}, {}, set()
 
-    def cambio(destino, campo, antes, despues, grupo):
+    def cambio(destino, campo, antes, despues, grupo, motivo=None):
         if despues and (despues or '') != (antes or ''):
-            destino[campo] = {'antes': antes or '', 'despues': despues, 'grupo': grupo}
+            destino[campo] = {'antes': antes or '', 'despues': despues, 'grupo': grupo,
+                              'motivo': motivo or MOTIVOS.get(grupo) or GRUPOS.get(grupo, grupo)}
             usados.add(grupo)
+
+    def motivo_artista(antes, despues):
+        if derecho(antes) != antes:
+            return 'nombre al derecho («Clash, The» → «The Clash»)'
+        return 'como ya está escrito en la biblioteca'
 
     # artista del álbum
     art = ov.get('artista') or ta.get('artista') or ''
     nuevo_art = como_en_biblioteca(derecho(art), bib)    # el artista no se pasa por mayúsculas: AC/DC, KISS…
     grupo_art = 'artista'
-    cambio(tags, 'artista', art, nuevo_art, grupo_art)
+    cambio(tags, 'artista', art, nuevo_art, grupo_art, motivo_artista(art, nuevo_art))
     art_final = nuevo_art or art
     conservar = {w.upper() for w in art_final.split() if w.isupper() and len(w) > 1}
 
     # álbum
     alb = ov.get('album') or ta.get('album') or ''
     limpio = limpiar_album(alb, art_final)
+    mot_alb = 'sin artista, año, catálogo ni formato en el nombre'
     titulos, el = titulos_mb(rep)
     if el.get('titulo') and analisis._norm(limpiar_album(el['titulo'])) == analisis._norm(limpio):
+        if limpiar_album(el['titulo']) != limpio:
+            mot_alb = 'grafía oficial de MusicBrainz'
         limpio = limpiar_album(el['titulo'])            # la grafía oficial de MusicBrainz
-    cambio(tags, 'album', alb, limpio, 'album')
+    cambio(tags, 'album', alb, limpio, 'album', mot_alb)
     if 'album' not in tags:
         cambio(tags, 'album', alb, mayusculas(alb, conservar), 'mayusculas')
 
@@ -248,29 +262,40 @@ def proponer(rep, bib=None, numeracion=None):
         par = mapa_num.get(i)
         suya = fuente_num['pistas'][par[0]] if par else None
         if titulos:
-            cambio(c, 'titulo', tit, titulos[i], 'titulos')
+            cambio(c, 'titulo', tit, titulos[i], 'titulos', 'título de MusicBrainz')
         elif suya and suya['titulo'] and (par[2] or numeracion_mod._generico(tit)):
             # sin títulos de MusicBrainz, los de la fuente de la numeración (solo si es la misma canción por título,
             # o el archivo no trae uno que diga algo)
-            cambio(c, 'titulo', tit, numeracion_mod.limpiar_titulo(suya['titulo']), 'titulos')
+            cambio(c, 'titulo', tit, numeracion_mod.limpiar_titulo(suya['titulo']), 'titulos',
+                   f'título de {fuente_num["nombre"]}' + (' (el archivo no traía uno)' if not par[2] else ''))
         else:
             nuevo = sin_prefijo(tit) if quitar_prefijo else tit
+            mot = ['sin el número al inicio'] if nuevo != tit else []
             if sacar_artista:
-                nuevo = quitar_artista(nuevo, _arts(x)) or nuevo
+                n2 = quitar_artista(nuevo, _arts(x)) or nuevo
+                if n2 != nuevo:
+                    mot.append('sin el artista')
+                nuevo = n2
             if nuevo != tit:
-                cambio(c, 'titulo', tit, nuevo if estilizado else mayusculas(nuevo, conservar), 'titulos')
+                final = nuevo if estilizado else mayusculas(nuevo, conservar)
+                if final != nuevo:
+                    mot.append('mayúsculas de título')
+                cambio(c, 'titulo', tit, final, 'titulos', ', '.join(mot) or None)
             elif not estilizado:
                 cambio(c, 'titulo', tit, mayusculas(tit, conservar), 'mayusculas')
         pa = o.get('artista') or x.get('artista') or ''
         if pa and pa == art:
-            cambio(c, 'artista', pa, art_final, grupo_art)
+            cambio(c, 'artista', pa, art_final, grupo_art, motivo_artista(pa, art_final))
         elif pa:
-            cambio(c, 'artista', pa, como_en_biblioteca(derecho(pa), bib), 'artista')
+            cambio(c, 'artista', pa, como_en_biblioteca(derecho(pa), bib), 'artista',
+                   motivo_artista(pa, como_en_biblioteca(derecho(pa), bib)))
         if renumerar and (x.get('accion') != 'cortar_dsd' and not x.get('corte')):
             cambio(c, 'numero', str(numeros[i] or ''), str(i + 1), 'numeros')
         if suya:
-            cambio(c, 'disco', str(o.get('disco') or x.get('disco') or 1), str(suya['disco']), 'discos')
-            cambio(c, 'numero', str(numeros[i] or ''), str(suya['numero']), 'discos')
+            mot = (f'{fuente_num["nombre"]} «{fuente_num["titulo"]}»'
+                   f' ({", ".join(v for v in (fuente_num.get("anio"), fuente_num.get("pais")) if v) or "?"})')
+            cambio(c, 'disco', str(o.get('disco') or x.get('disco') or 1), str(suya['disco']), 'discos', mot)
+            cambio(c, 'numero', str(numeros[i] or ''), str(suya['numero']), 'discos', mot)
         if c:
             pistas[x['clave']] = c
     fuente = (f'MusicBrainz: {el.get("titulo")} ({el.get("anio") or "?"}'

@@ -1,0 +1,33 @@
+{# Historial de cambios del álbum (17-11-2026): tags (qué cambió, quién y por qué), reprocesos, uniones,
+   reemplazos y eliminaciones. Variable: hist (almacen.historial). #}
+{% if hist %}
+{% set CAMPO = {'artista': 'Artista', 'album': 'Álbum', 'anio': 'Año', 'genero': 'Género', 'genero_secundario': 'Géneros sec.', 'titulo': 'Título', 'numero': '#', 'disco': 'Disco'} %}
+{% set TIPO = {'tags': 'Tags', 'reproceso': 'Reproceso', 'union': 'Unir', 'reemplazo': 'Reemplazo', 'eliminar': 'Eliminar', 'ubicar': 'Ubicar'} %}
+<section class="seccion">
+  <details class="historial">
+    <summary class="rotulo">Historial de cambios <span class="cuenta">{{ hist|length }}</span></summary>
+    <div class="hist-lista">
+    {% for h in hist %}
+      <div class="hist-item">
+        <div class="hist-cab"><span class="mono s tenue">{{ h.ts|fecha }}</span>
+          <span class="chip chico">{{ TIPO.get(h.tipo, h.tipo) }}</span>
+          <span>{{ h.resumen }}</span></div>
+        {% if h.fuente %}<div class="s tenue">Fuente: {{ h.fuente }}</div>{% endif %}
+        {% if h.cambios %}
+        <details class="hist-det"><summary class="s">Ver {{ h.cambios|length }} cambio{{ 's' if h.cambios|length != 1 }}</summary>
+          <div class="tabla-wrap"><table class="hist-tabla">
+            <tr><th>Pista</th><th>Campo</th><th>Antes → después</th><th>Quién · por qué</th></tr>
+            {% for c in h.cambios %}
+            <tr><td class="s">{{ c.pista or 'Álbum' }}</td><td class="s">{{ CAMPO.get(c.campo, c.campo) }}</td>
+              <td><span class="hist-antes">{{ c.antes or '(vacío)' }}</span> → <b>{{ c.despues or '(vacío)' }}</b></td>
+              <td class="s">{% if c.origen == 'autocorregir' %}<span class="oro">✦ Autocorregir</span>{% else %}{{ c.origen }}{% endif %}{% if c.motivo %} · <span class="tenue">{{ c.motivo }}</span>{% endif %}</td></tr>
+            {% endfor %}
+          </table></div>
+        </details>
+        {% endif %}
+      </div>
+    {% endfor %}
+    </div>
+  </details>
+</section>
+{% endif %}
