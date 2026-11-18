@@ -420,6 +420,21 @@ def _misma_duracion(p, o):
     return a > 0 and b > 0 and abs(a - b) <= max(2.0, 0.003 * a)
 
 
+def _disco(p):
+    """Disco de la pista: el del tag, o el de su carpeta («CD3 - Future Games (1971)») cuando cada disco es un álbum
+    aparte en Orbyte y el tag dice 1 (caso Fleetwood Mac «1969 to 1974», 17-11-2026)."""
+    try:
+        d = int(str(p['disc_number'] or 1).split('/')[0])
+    except (ValueError, TypeError):
+        d = 1
+    carpeta = os.path.dirname(p['file_path'] or '')
+    if d <= 1 and carpeta and analisis.carpeta_album(carpeta) != carpeta:      # es subcarpeta de disco
+        n = analisis.dividir_por_disco(os.path.basename(carpeta))
+        if n:
+            return str(n)
+    return str(d)
+
+
 def _mapa(pistas_viejas, pistas_nuevas):
     """Pista vieja → su equivalente en la edición nueva. En orden: mismo disco y número con el título igual o
     parecido; el mismo título en cualquier lugar; mismo disco y número con la misma duración (el título lo
@@ -427,11 +442,11 @@ def _mapa(pistas_viejas, pistas_nuevas):
     Presley «Today», 17-11-2026)."""
     por_num, por_tit, usados, mapa = {}, {}, set(), {}
     for o in pistas_nuevas:
-        por_num.setdefault((str(o['disc_number'] or 1), str(o['track_number'] or '')), []).append(o)
+        por_num.setdefault((_disco(o), str(o['track_number'] or '')), []).append(o)
         por_tit.setdefault(_titulo(o['title']), []).append(o)
 
     def lugar(p):
-        return por_num.get((str(p['disc_number'] or 1), str(p['track_number'] or '')), [])
+        return por_num.get((_disco(p), str(p['track_number'] or '')), [])
 
     pendientes = []
     for p in pistas_viejas:
