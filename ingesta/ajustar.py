@@ -174,13 +174,18 @@ def cabecera(rep, ruta):
     """
     if not rep or rep.get('fallo') or 'discos' not in rep:
         return {}                     # sin revisión de Ingesta (álbum de la Biblioteca): no se inventa una
-    ta = leer(ruta).get('tags_album') or {}
+    lib = leer(ruta)
+    ta = lib.get('tags_album') or {}
     campos, rep = {}, dict(rep)
     for k in ('artista', 'album', 'anio'):
         if ta.get(k):
             rep[k] = campos[k] = ta[k]
     if not campos:
         return {}
+    plan = lib.get('plan') or []
+    if plan:      # discos y pistas como quedaron (caso Holy Dio, 21-11-2026: separado a mano y seguía «19 pistas»)
+        rep['n_pistas'] = len(plan)
+        rep['n_discos'] = len({_n_disco(x.get('disco')) for x in plan})
     rep['tags_album'] = dict(rep.get('tags_album') or {}, **{k: v for k, v in ta.items() if v})
     if isinstance(rep.get('destino'), dict):
         rep['destino'] = dict(rep['destino'], ruta=ruta)
