@@ -46,6 +46,7 @@ from . import repetidos as repetidos_mod
 from . import autocorregir as autocorregir_mod
 from . import numeracion as numeracion_mod
 from . import historial as historial_mod
+from . import pistas as pistas_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
 from . import tienda as tienda_mod
@@ -313,6 +314,8 @@ def album(aid):
     return render_template('album.html', pagina='bandeja', a=a, r=a.get('reporte'), lib=lib, lib_error=lib_error,
                            actuales=actuales, portada=portada, sin_indexar=sin_indexar, fmt=fmt,
                            pend_reemp=_reemplazo_pendiente(a),
+                           pista_suelta=(_pista_suelta(a)[1] if _editable(a) and (a.get('reporte') or {}).get('plan')
+                                         else None),
                            hist=almacen.historial(aid, [a.get('ubicado_en'), a.get('ruta'),
                                                         (a.get('cambios') or {}).get('reproceso_de')]),
                            dup_filas=dup_filas,
@@ -1309,6 +1312,17 @@ def api_descargas():
             s, i = it.get('servicio'), str(it.get('id') or '')
             if s not in ('tidal', 'qobuz') or not re.fullmatch(r'[0-9A-Za-z]{1,40}', i):   # Qobuz: IDs alfanuméricos
                 continue
+            if it.get('tipo') == 'pista':            # pista suelta (22-11-2026): solo Tidal
+                if s != 'tidal' or not i.isdigit():
+                    continue
+                datos = {k: it.get(k) for k in ('titulo', 'artista', 'album', 'album_id', 'numero', 'disco', 'isrc',
+                                                'duracion', 'hires', 'mqa')}
+                _did, nueva = almacen.nueva_descarga(
+                    'tidal', i, f'https://tidal.com/browse/track/{i}', str(it.get('artista') or '')[:200],
+                    f'{str(it.get("titulo") or "")[:200]} (pista de «{str(it.get("album") or "")[:150]}»)',
+                    'Hi-Res' if it.get('hires') else 'FLAC', 1, tipo='pista', datos=datos)
+                n += nueva
+                continue
             url = f'https://tidal.com/browse/album/{i}' if s == 'tidal' else f'https://open.qobuz.com/album/{i}'
             _did, nueva = almacen.nueva_descarga(s, i, url, str(it.get('artista') or '')[:200],
                                                  str(it.get('album') or '')[:300], str(it.get('calidad') or '')[:40],
@@ -1328,6 +1342,150 @@ def api_descargas():
                 d['bandeja'] = {'id': aid, 'estado': fila['estado']}
                 break
     return jsonify(descargas=lista, pausa=sorted(vigilante.pausa_rutas))
+
+
+def _pista_suelta(a):
+    """Si el álbum de la Bandeja es una sola pista: (ruta del archivo, origen) — origen = la marca de la descarga
+    de Tidal o, si no hay, lo que dicen sus tags."""
+    rep = a.get('reporte') or {}
+    plan = [x for x in rep.get('plan') or [] if '#' not in x['clave']]
+    if len(plan) != 1 or not os.path.isdir(a.get('ruta') or ''):
+        return None, None
+    x = plan[0]
+    ov = ((a.get('cambios') or {}).get('pistas') or {}).get(x['clave']) or {}
+    ta = rep.get('tags_album') or {}
+    m = pistas_mod.marca(a['ruta']) or {}
+    origen = {'titulo': ov.get('titulo') or m.get('titulo') or x.get('titulo'),
+              'artista': ov.get('artista') or m.get('artista') or x.get('artista') or ta.get('artista'),
+              'album': m.get('album') or ta.get('album'), 'disco': m.get('disco') or x.get('disco') or 1,
+              'numero': m.get('numero') or x.get('numero'), 'isrc': m.get('isrc'), 'tidal': bool(m),
+              'duracion': x.get('duracion_origen'), 'archivo': os.path.basename(x['clave']),
+              'ext': os.path.splitext(x['clave'])[1].lower()}
+    return os.path.join(a['ruta'], x['clave']), origen
+
+
+@app.route('/api/album/<int:aid>/pista_destinos')
+def api_pista_destinos(aid):
+    a = almacen.album(aid)
+    if not a or not _editable(a):
+        return jsonify(ok=False, error='Solo antes de ubicar'), 409
+    fuente, origen = _pista_suelta(a)
+    if not fuente:
+        return jsonify(ok=False, error='No es una pista suelta'), 409
+    q = (request.args.get('q') or '').strip() or None
+    cands = pistas_mod.candidatos(_db_orbyte(), origen['artista'], origen['album'], q=q)
+    return jsonify(ok=True, origen=origen, candidatos=cands, raiz=almacen.ajustes().get('biblioteca') or '/mnt/musica')
+
+
+@app.route('/api/album/<int:aid>/pista_a_album', methods=['POST'])
+def api_pista_a_album(aid):
+    """Agrega la pista suelta de la Bandeja a un álbum de la biblioteca: en un lugar libre, reemplazando la que está
+    ahí (va a la papelera; al indexar, sus escuchas y favoritos pasan a la nueva) o como extra al final del disco.
+    Luego ese álbum corre su metadata. La pista sale de la entrada y de la Bandeja."""
+    a = almacen.album(aid)
+    if not a or not _editable(a):
+        return jsonify(ok=False, error='Solo antes de ubicar'), 409
+    fuente, origen = _pista_suelta(a)
+    if not fuente:
+        return jsonify(ok=False, error='No es una pista suelta'), 409
+    d = request.get_json(silent=True) or {}
+    db = _db_orbyte()
+    aj = almacen.ajustes()
+    bib = aj.get('biblioteca') or '/mnt/musica'
+    if not procesador.biblioteca_lista():
+        return jsonify(ok=False, error='La biblioteca no está montada'), 409
+    try:
+        album = pistas_mod.album_por_id(db, int(d.get('album_id') or 0))
+    except (TypeError, ValueError):
+        album = None
+    if not album or not os.path.isdir(album['ruta'] or '') or not papelera_mod._dentro(album['ruta'], bib):
+        return jsonify(ok=False, error='Ese álbum ya no está en la biblioteca'), 409
+    titulo = (str(d.get('titulo') or '').strip() or origen['titulo'] or 'Pista')[:300]
+    modo = d.get('modo') if d.get('modo') in ('agregar', 'reemplazar', 'extra') else 'agregar'
+    try:
+        lugar = pistas_mod.plan(album, d.get('disco'), d.get('numero'), modo, titulo, origen['ext'])
+    except pistas_mod.FalloPista as e:
+        return jsonify(ok=False, error=str(e)), 400
+    dest = album['ruta'].rstrip('/')
+    fila = almacen.fila_de_ruta(dest)
+    fila = fila or almacen.de_biblioteca(dest, album['artista'], album['album'], album['anio'])
+    fa = almacen.album(fila)
+    if fa['estado'] not in EN_BIBLIOTECA:
+        return jsonify(ok=False, error='Ese álbum se está procesando: espera a que termine'), 409
+    final = os.path.join(dest, lugar['nombre'])
+    vieja = lugar['ocupada']['ruta'] if lugar['ocupada'] else None
+    if os.path.lexists(final) and not (vieja and repetidos_mod.misma_carpeta(final, vieja)):
+        return jsonify(ok=False, error=f'Ya existe «{lugar["nombre"]}» en esa carpeta'), 409
+    ref = next((p['ruta'] for p in album['pistas'] if p['ruta'] and os.path.isfile(p['ruta'])
+                and p['ruta'].lower().endswith(origen['ext'])), None) or \
+        next((p['ruta'] for p in album['pistas'] if p['ruta'] and os.path.isfile(p['ruta'])), None)
+
+    def reg(m):
+        log.info('%s', m)
+        almacen.registrar(fila, m)
+
+    tmp = os.path.join(dest, f'.orbyte-pista-{aid}{origen["ext"]}')
+    eid = None
+    try:
+        shutil.copy2(fuente, tmp)
+        pistas_mod.etiquetar(tmp, ref, titulo, origen['artista'], lugar['disco'], lugar['numero'], origen.get('isrc'))
+        if vieja:
+            eid = papelera.mover(bib, [vieja], 'pistas', 'biblioteca', f'{album["artista"]} — {album["album"]}',
+                                 detalle=os.path.basename(vieja), extra={'album_ruta': dest})
+        os.replace(tmp, final)
+    except Exception as e:  # noqa: BLE001
+        log.exception('Pista a álbum %s', aid)
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        if eid:
+            papelera.restaurar(eid)
+        return jsonify(ok=False, error=f'No se pudo agregar (no cambió nada): {e}'), 500
+    rel = os.path.relpath(final, bib)
+    hecho = {'reemplazar': f'reemplazó a «{lugar["ocupada"]["titulo"]}» (a la papelera)' if vieja else '',
+             'extra': 'como extra al final del disco', 'agregar': 'en un lugar libre'}[lugar['modo']]
+    reg(f'Pista agregada desde la Bandeja{" (Tidal)" if origen["tidal"] else ""}: {rel} · {hecho}')
+    almacen.anotar(fila, dest, 'pista', f'Pista {lugar["disco"]}-{lugar["numero"]:02d} «{titulo}» agregada · {hecho}',
+                   'Tidal' if origen['tidal'] else 'Bandeja',
+                   [{'pista': historial_mod.etiqueta(lugar['nombre']), 'campo': 'titulo',
+                     'antes': lugar['ocupada']['titulo'] if vieja else '', 'despues': titulo, 'origen': 'a mano',
+                     'motivo': hecho}])
+    almacen.actualizar(fila, estado='por_metadata' if aj.get('metadata', '1') == '1' else 'completado', progreso=None)
+    procesador.ya()
+    entrada = aj.get('carpeta_entrada')
+    try:
+        if entrada and papelera_mod._dentro(a['ruta'], entrada):
+            procesar.borrar_de_entrada(a['ruta'], entrada)
+    except Exception as e:  # noqa: BLE001
+        log.warning('Pista a álbum %s: no se pudo borrar de la entrada: %s', aid, e)
+    almacen.borrar_album(aid)
+    almacen.avisar('ok', f'Pista agregada a {album["artista"]} — {album["album"]}', f'{rel} · {hecho}', fila)
+    return jsonify(ok=True, ir=f'/biblioteca/album/{album["id"]}', nombre=lugar['nombre'])
+
+
+@app.route('/api/tienda/pistas')
+def api_tienda_pistas():
+    """Buscar → Pistas (22-11-2026): Tidal por artista + título, ISRC o enlace de la pista. Cada una dice si ya
+    está en la biblioteca (álbum y calidad)."""
+    from . import reparar as reparar_mod
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify(ok=True, pistas=[])
+    try:
+        c = tienda_mod.cliente('tidal')
+        if reparar_mod._ISRC_RE.match(q):
+            res = [c.pista(tid) for tid, _a in c.pistas_por_isrc(q.replace('-', ''))[:15]]
+        else:
+            m = reparar_mod._TIDAL_URL_RE.search(q)
+            res = [c.pista(m.group(2))] if m and m.group(1).lower() == 'track' else c.buscar_pistas(q, limite=30)
+    except tienda_mod.FalloTienda as e:
+        return jsonify(ok=False, error=str(e)), 502
+    db = _db_orbyte()
+    out = []
+    for p in res:
+        if not p.get('disponible', True):
+            continue
+        out.append(dict(p, biblioteca=pistas_mod.en_biblioteca(db, p.get('artista'), p.get('titulo'))))
+    return jsonify(ok=True, pistas=out)
 
 
 @app.route('/api/descargas/limpiar', methods=['POST'])

@@ -992,7 +992,51 @@ class Descargador(threading.Thread):
             pass
         return out
 
+    def _una_pista(self, d):
+        """Una pista suelta (22-11-2026): se baja con una copia de la configuración de tidal-dl-ng a una carpeta
+        temporal y se deja en «<entrada>/Pistas sueltas/<Artista> - <Título> [tidal <id>]/» con su marca."""
+        import tempfile
+        from . import pistas as pistas_mod
+        did = d['id']
+        info = json.loads(d.get('datos') or '{}')
+        entrada = (self.almacen.ajustes().get('carpeta_entrada') or '').rstrip('/')
+        if not entrada or not os.path.isdir(entrada):
+            raise FalloTienda('No está configurada la carpeta de entrada')
+        carpeta = os.path.join(entrada, pistas_mod.CARPETA, pistas_mod.nombre_seguro(
+            f'{info.get("artista") or d.get("artista") or "?"} - {info.get("titulo") or "?"} [tidal {d["item_id"]}]'))
+        self.actual, self.cancelar = did, False
+        self._pausar_pendientes({carpeta, os.path.dirname(carpeta)})
+        self.almacen.actualizar_descarga(did, estado='descargando', inicio=time.time(), error=None,
+                                         progreso='Renovando la sesión de Tidal…')
+        preparar_tidal()
+        casa = tempfile.mkdtemp(prefix='pista-', dir=self.datos)
+        try:
+            self.almacen.actualizar_descarga(did, progreso='Descargando la pista…')
+            rc, salida = _bajar_tidal_a(d['url'], os.path.join(casa, 'bajada'), casa, letras=True)
+            lineas = [x for x in salida.splitlines() if x.strip()][-60:]
+            archivos = _audios(os.path.join(casa, 'bajada'))
+            if rc != 0 or not archivos:
+                ultima = next((x for x in reversed(lineas) if x.strip()), f'código {rc}')
+                raise FalloTienda(f'No se descargó la pista: {ultima}')
+            f = archivos[0]
+            cod = codec(f)
+            if cod in CODECS_CON_PERDIDA:
+                raise FalloTienda(f'La pista llegó con pérdida ({cod}): no se guardó')
+            os.makedirs(carpeta, exist_ok=True)
+            # primero la marca y después el audio: el vigilante nunca ve la carpeta a medias
+            pistas_mod.escribir_marca(carpeta, dict(info, tidal_id=d['item_id'], url=d['url'], codec=cod))
+            destino = os.path.join(carpeta, os.path.basename(f))
+            shutil.move(f, destino)
+        finally:
+            shutil.rmtree(casa, ignore_errors=True)
+        self.almacen.actualizar_descarga(did, estado='terminada', fin=time.time(), carpetas=json.dumps([carpeta]),
+                                         progreso='1 pista descargada', registro='\n'.join(lineas))
+        self.almacen.avisar('ok', f'Pista descargada: {d["artista"]} — {info.get("titulo") or d["album"]}',
+                            'Pasa a la Bandeja: ahí eliges a qué álbum agregarla (o la ubicas como sencillo)')
+
     def _una(self, d):
+        if (d.get('tipo') or 'album') == 'pista':
+            return self._una_pista(d)
         did = d['id']
         self.actual, self.cancelar = did, False
         base = carpeta_destino(d['servicio'])

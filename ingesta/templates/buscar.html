@@ -9,10 +9,11 @@
 
 <form class="t-form" id="t-form">
   <label for="t-q" class="oculto-lector">Buscar</label>
-  <input type="search" id="t-q" value="{{ q }}" placeholder="Álbum, artista, ISRC o código de barras" autocomplete="off">
+  <input type="search" id="t-q" value="{{ q }}" placeholder="Álbum, artista, pista, ISRC o código de barras" autocomplete="off">
   <div class="t-modo" role="group" aria-label="Buscar por">
     <button type="button" data-modo="album" class="{{ 'activo' if modo != 'artista' }}">Álbum</button>
     <button type="button" data-modo="artista" class="{{ 'activo' if modo == 'artista' }}">Artista</button>
+    <button type="button" data-modo="pista" class="{{ 'activo' if modo == 'pista' }}">Pista</button>
   </div>
   <button type="submit" class="btn oro">Buscar</button>
 </form>
@@ -27,7 +28,7 @@
 <script>
 (function () {
   const $ = id => document.getElementById(id);
-  let modo = {{ (modo if modo == 'artista' else 'album')|tojson }};
+  let modo = {{ (modo if modo in ('artista', 'pista') else 'album')|tojson }};
   let datos = null;                        // última búsqueda
   const elegidos = new Map();              // clave → versión elegida (modo artista)
   const NOMBRE = {qobuz: 'Qobuz', tidal: 'Tidal'};
@@ -299,11 +300,52 @@
     }
   }
 
+  // ── Pistas (22-11-2026): buscar en Tidal y bajar pistas sueltas; en la Bandeja se agregan a un álbum ──
+  let pistas = null;
+  const pistasElegidas = new Map();
+  const mmss = s => s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '';
+  function pintarPistas() {
+    const r = $('t-res');
+    if (!pistas.length) { r.innerHTML = '<div class="vacio"><p>Sin resultados.</p></div>'; barraPistas(); return; }
+    r.innerHTML = `<div class="muy-tenue t-nota" style="margin-bottom:.6rem">Busca por artista y título, por ISRC o pegando el enlace de la pista. Al descargarla llega a la Bandeja, donde eliges a qué álbum agregarla.</div>
+      <div class="tabla-wrap"><table class="t-tabla"><tr><th></th><th>Pista</th><th>Álbum de origen</th><th>Duración</th><th>Calidad</th><th>En tu biblioteca</th></tr>
+      ${pistas.map((p, i) => `<tr>
+        <td><input type="checkbox" data-pista="${i}" ${pistasElegidas.has(p.id) ? 'checked' : ''} ${p.lossless === false ? 'disabled title="Solo con pérdida en Tidal"' : ''}></td>
+        <td><div style="display:flex;gap:.6rem;align-items:center">${p.portada ? `<img src="${esc(p.portada)}" alt="" width="44" height="44" style="border-radius:4px">` : ''}
+          <div><div class="t">${esc(p.titulo)}</div><div class="s">${esc(p.artista)}</div></div></div></td>
+        <td><div class="s">${esc(p.album)}</div><div class="s muy-tenue">disco ${p.disco || 1} · pista ${p.numero || '?'}${p.isrc ? ` · ${esc(p.isrc)}` : ''}</div></td>
+        <td class="mono s">${mmss(p.duracion)}</td>
+        <td>${p.lossless === false ? '<span class="chip q-Lossy"><span class="led"></span>Lossy</span>'
+              : `<span class="chip ${p.hires ? 'q-HR' : 'q-CD'}"><span class="led"></span>${p.hires ? 'Hi-Res' : 'CD'}</span>`}
+            ${p.mqa ? '<span class="chip q-MQA"><span class="led"></span>MQA</span>' : ''}</td>
+        <td>${(p.biblioteca || []).length ? p.biblioteca.map(b => `<div class="s"><a href="/biblioteca/album/${b.album_id}">${esc(b.album)}</a> <span class="tenue">· ${esc([b.calidad, mmss(b.duracion)].filter(Boolean).join(' · '))}</span></div>`).join('')
+              : '<span class="s tenue">No la tienes</span>'}</td></tr>`).join('')}</table></div>`;
+    barraPistas();
+  }
+  function barraPistas() {
+    const n = pistasElegidas.size;
+    $('t-barra').hidden = modo !== 'pista' || !n;
+    $('t-barra-txt').textContent = `${n} pista${n === 1 ? '' : 's'} · se descargan de a una, con pausa entre cada una`;
+    $('t-barra-btn').textContent = `Descargar ${n} pista${n === 1 ? '' : 's'}`;
+  }
+  async function buscarPistas(q) {
+    pistasElegidas.clear();
+    $('t-avisos').innerHTML = '';
+    $('t-res').innerHTML = '<div class="estado-vivo"><span class="giro"></span><span>Buscando pistas en Tidal…</span></div>';
+    let r;
+    try { r = await (await fetch(`/api/tienda/pistas?${new URLSearchParams({q})}`)).json(); }
+    catch (x) { $('t-res').innerHTML = '<div class="flash error">No se pudo buscar</div>'; return; }
+    if (!r.ok) { $('t-res').innerHTML = `<div class="flash error">Tidal: ${esc(r.error || 'no respondió')}</div>`; return; }
+    pistas = r.pistas;
+    pintarPistas();
+  }
+
   async function buscar(e) {
     if (e) e.preventDefault();
     const q = $('t-q').value.trim();
     if (q.length < 2) return;
     history.replaceState(null, '', `?${new URLSearchParams({q, modo})}`);
+    if (modo === 'pista') return buscarPistas(q);
     elegidos.clear();
     $('t-res').innerHTML = '<div class="estado-vivo"><span class="giro"></span><span>Buscando en Tidal y Qobuz…</span></div>';
     try { datos = await (await fetch(`/api/tienda/buscar?${new URLSearchParams({q, modo})}`)).json(); }
@@ -350,6 +392,15 @@
     if (e.target.closest('[data-top]')) { soloTop = !soloTop; pintar(); }
   });
   $('t-res').addEventListener('change', e => {
+    const cp = e.target.closest('[data-pista]');
+    if (cp) {
+      const p = pistas[+cp.dataset.pista];
+      if (cp.checked) pistasElegidas.set(p.id, {servicio: 'tidal', tipo: 'pista', id: p.id, titulo: p.titulo, artista: p.artista,
+        album: p.album, album_id: p.album_id, numero: p.numero, disco: p.disco, isrc: p.isrc, duracion: p.duracion, hires: p.hires, mqa: p.mqa});
+      else pistasElegidas.delete(p.id);
+      barraPistas();
+      return;
+    }
     const c = e.target.closest('[data-elegir]');
     const rd = e.target.closest('[data-ver]');
     if (c) {
@@ -371,6 +422,13 @@
   });
   $('t-barra-btn').onclick = async () => {
     $('t-barra-btn').disabled = true;
+    if (modo === 'pista') {
+      await encolar([...pistasElegidas.values()]);
+      pistasElegidas.clear();
+      $('t-barra-btn').disabled = false;
+      pintarPistas();
+      return;
+    }
     await encolar([...elegidos.values()]);
     elegidos.clear();
     $('t-barra-btn').disabled = false;

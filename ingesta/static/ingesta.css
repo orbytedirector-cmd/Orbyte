@@ -611,3 +611,17 @@ details.historial[open] > summary::before { content: '▾ '; }
 .auto-cambios tr.apagado td { opacity: .45; text-decoration: line-through; }
 .caso-hecho { color: var(--ok); margin-top: .35rem; }
 .caso-unida { color: var(--oro-claro); margin-top: .3rem; }
+
+/* pista suelta en la Bandeja (22-11-2026) */
+.ps-panel { display: flex; flex-direction: column; gap: .7rem; }
+.ps-que { display: flex; flex-direction: column; gap: .35rem; }
+.ps-fila { display: flex; flex-wrap: wrap; gap: .7rem; align-items: flex-end; }
+.ps-campo { display: flex; flex-direction: column; gap: .25rem; font-size: .85rem; color: var(--texto-2); min-width: 0; }
+.ps-campo select, .ps-campo input { padding: .5rem .6rem; background: var(--elev); color: var(--texto); border: 1px solid var(--borde-2); border-radius: 8px; max-width: 100%; }
+.ps-ancho { flex: 1 1 22rem; }
+.ps-num { flex: 0 0 5.5rem; }
+.ps-buscar { display: flex; gap: .4rem; }
+.ps-lugar { display: flex; flex-direction: column; gap: .4rem; }
+.ps-lugar .aviso-num { color: var(--oro); }
+.ps-pistas .tabla-wrap { max-height: 18rem; overflow: auto; }
+tr.ps-ocupada td { color: var(--oro); }

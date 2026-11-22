@@ -1,0 +1,105 @@
+{# Pista suelta en la Bandeja (22-11-2026): agregarla a un álbum de la biblioteca (lugar libre, reemplazando o como
+   extra) o ubicarla como sencillo. Variables: a (fila), ps (origen: titulo, artista, album, disco, numero, tidal…). #}
+<section class="seccion" id="pista-suelta">
+  <h2 class="rotulo">Pista suelta{% if ps.tidal %} <span class="cuenta">descargada de Tidal</span>{% endif %}</h2>
+  <div class="panel ps-panel">
+    <div class="s">«{{ ps.titulo }}» — {{ ps.artista }}{% if ps.album %} · álbum de origen «{{ ps.album }}»{% endif %}
+      {% if ps.numero %} · disco {{ ps.disco or 1 }}, pista {{ ps.numero }}{% endif %}{% if ps.isrc %} · <span class="mono">{{ ps.isrc }}</span>{% endif %}</div>
+    <div class="ps-que" role="radiogroup" aria-label="Qué hacer con la pista">
+      <label><input type="radio" name="ps-que" value="album"{% if ps.tidal %} checked{% endif %}> Agregar a un álbum de la biblioteca</label>
+      <label><input type="radio" name="ps-que" value="sencillo"{% if not ps.tidal %} checked{% endif %}> Ubicarla como sencillo <span class="tenue">(con «Ubicar en la biblioteca», como siempre)</span></label>
+    </div>
+    <div id="ps-agregar"{% if not ps.tidal %} hidden{% endif %}>
+      <div class="ps-fila">
+        <label class="ps-campo ps-ancho">Álbum
+          <select id="ps-album"><option>Buscando álbumes…</option></select></label>
+        <label class="ps-campo">Buscar otro
+          <span class="ps-buscar"><input type="search" id="ps-q" placeholder="Álbum o artista" autocomplete="off"><button type="button" class="btn chico" id="ps-q-btn">Buscar</button></span></label>
+      </div>
+      <div class="ps-fila">
+        <label class="ps-campo ps-ancho">Título
+          <input type="text" id="ps-titulo" value="{{ ps.titulo }}" autocomplete="off"></label>
+        <label class="ps-campo ps-num">Disco
+          <input type="number" id="ps-disco" min="1" max="30" value="{{ ps.disco or 1 }}"></label>
+        <label class="ps-campo ps-num">#
+          <input type="number" id="ps-numero" min="1" max="999" value="{{ ps.numero or '' }}"></label>
+      </div>
+      <div id="ps-lugar" class="ps-lugar"></div>
+      <div class="acciones" style="margin-top:.6rem">
+        <button type="button" class="btn oro" id="ps-ok" disabled>Agregar al álbum</button>
+        <span class="s tenue" id="ps-estado"></span>
+      </div>
+    </div>
+  </div>
+</section>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  const AID = {{ a.id }};
+  let cands = [], raiz = '';
+  const $ = id => document.getElementById(id);
+  const mmss = s => s ? `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, '0')}` : '';
+  const num = v => parseInt(String(v || '').split('/')[0], 10) || 0;
+  const rel = p => raiz && p && p.startsWith(raiz + '/') ? p.slice(raiz.length + 1) : (p || '');
+  const sel = () => cands.find(c => String(c.id) === $('ps-album').value);
+  function nombre(al, disco, n, titulo) {
+    const discos = new Set(al.pistas.map(p => p.disco)); discos.add(disco);
+    const pref = (discos.size > 1 ? `${disco}-` : '') + String(n).padStart(2, '0');
+    return `${pref} - ${(titulo || 'Pista').replace(/[\\/:*?"<>|]+/g, '_')}{{ ps.ext }}`;
+  }
+  function lugar() {
+    const al = sel(), caja = $('ps-lugar'), ok = $('ps-ok');
+    if (!al) { caja.innerHTML = '<div class="s tenue">Elige un álbum.</div>'; ok.disabled = true; return; }
+    const disco = Math.max(1, num($('ps-disco').value)), n = num($('ps-numero').value), titulo = $('ps-titulo').value.trim();
+    const libres = al.pistas.filter(p => p.disco === disco).map(p => num(p.numero));
+    const ultimo = Math.max(0, ...libres);
+    const ocupada = n ? al.pistas.find(p => p.disco === disco && num(p.numero) === n) : null;
+    const lista = `<details class="ps-pistas"><summary class="s">Ver las ${al.pistas.length} pistas del álbum</summary><div class="tabla-wrap"><table class="hist-tabla">
+      ${al.pistas.map(p => `<tr${ocupada && p.id === ocupada.id ? ' class="ps-ocupada"' : ''}><td class="mono s">${p.disco}-${String(num(p.numero)).padStart(2, '0')}</td><td>${esc(p.titulo)}</td><td class="mono s">${mmss(p.duracion)}</td><td class="s tenue">${esc(p.calidad || '')}</td></tr>`).join('')}</table></div></details>`;
+    let html = `<div class="s mono muy-tenue">${esc(rel(al.ruta))}</div>`;
+    if (!n) {
+      html += `<div class="s">Indica el número de pista (en el disco ${disco} el último es el ${ultimo || '—'}).</div>`;
+      ok.disabled = true;
+    } else if (ocupada) {
+      html += `<div class="s aviso-num">En el disco ${disco}, pista ${n}, ya está «${esc(ocupada.titulo)}» (${mmss(ocupada.duracion)}${ocupada.calidad ? ', ' + esc(ocupada.calidad) : ''}).</div>
+        <div class="ps-que">
+          <label><input type="radio" name="ps-modo" value="reemplazar" checked> Reemplazarla <span class="tenue">(la vieja va a la papelera; sus escuchas y favoritos pasan a la nueva)</span></label>
+          <label><input type="radio" name="ps-modo" value="extra"> Agregarla como extra <span class="tenue">(queda como «${esc(nombre(al, disco, ultimo + 1, titulo))}»)</span></label>
+        </div>
+        <div class="s">Si la reemplazas queda como «<span class="mono">${esc(nombre(al, disco, n, titulo))}</span>».</div>`;
+      ok.disabled = false;
+    } else {
+      html += `<div class="s">Lugar libre: queda como «<span class="mono">${esc(nombre(al, disco, n, titulo))}</span>».</div>`;
+      ok.disabled = false;
+    }
+    caja.innerHTML = html + lista;
+  }
+  async function cargar(q) {
+    $('ps-album').innerHTML = '<option>Buscando álbumes…</option>';
+    const r = await (await fetch(`/api/album/${AID}/pista_destinos?${new URLSearchParams(q ? {q} : {})}`)).json();
+    if (!r.ok) { $('ps-lugar').innerHTML = `<div class="flash error">${esc(r.error || 'No se pudo')}</div>`; return; }
+    cands = r.candidatos; raiz = r.raiz;
+    $('ps-album').innerHTML = cands.length ? cands.map(c => `<option value="${c.id}">${esc(c.artista || '')} — ${esc(c.album)}${c.anio ? ` (${esc(c.anio)})` : ''} · ${c.pistas.length} pistas</option>`).join('')
+      : '<option value="">Ningún álbum encontrado: busca otro</option>';
+    lugar();
+  }
+  document.querySelectorAll('input[name="ps-que"]').forEach(r => r.onchange = () => {
+    $('ps-agregar').hidden = document.querySelector('input[name="ps-que"]:checked').value !== 'album';
+  });
+  ['ps-album', 'ps-disco', 'ps-numero', 'ps-titulo'].forEach(id => $(id).addEventListener('input', lugar));
+  $('ps-album').addEventListener('change', lugar);
+  $('ps-q-btn').onclick = () => cargar($('ps-q').value.trim());
+  $('ps-q').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); cargar($('ps-q').value.trim()); } };
+  $('ps-ok').onclick = async () => {
+    const al = sel();
+    if (!al) return;
+    const m = document.querySelector('input[name="ps-modo"]:checked');
+    $('ps-ok').disabled = true; $('ps-estado').textContent = 'Agregando…';
+    const r = await post(`/api/album/${AID}/pista_a_album`, {album_id: al.id, disco: num($('ps-disco').value),
+      numero: num($('ps-numero').value), titulo: $('ps-titulo').value.trim(), modo: m ? m.value : 'agregar'});
+    if (!r || !r.ok) { $('ps-estado').textContent = ''; $('ps-ok').disabled = false; toast('No se pudo', (r && r.error) || ''); return; }
+    toast('Pista agregada', `«${r.nombre}» · el álbum corre su metadata`);
+    setTimeout(() => { location.href = r.ir; }, 800);
+  };
+  cargar();
+});
+</script>
