@@ -2,7 +2,7 @@
    reemplazos y eliminaciones. Variable: hist (almacen.historial). #}
 {% if hist %}
 {% set CAMPO = {'artista': 'Artista', 'album': 'Álbum', 'anio': 'Año', 'genero': 'Género', 'genero_secundario': 'Géneros sec.', 'titulo': 'Título', 'numero': '#', 'disco': 'Disco'} %}
-{% set TIPO = {'tags': 'Tags', 'reproceso': 'Reproceso', 'union': 'Unir', 'reemplazo': 'Reemplazo', 'eliminar': 'Eliminar', 'ubicar': 'Ubicar'} %}
+{% set TIPO = {'tags': 'Tags', 'reproceso': 'Reproceso', 'union': 'Unir', 'reemplazo': 'Reemplazo', 'eliminar': 'Eliminar', 'ubicar': 'Ubicar', 'pista': 'Pista'} %}
 <section class="seccion">
   <details class="historial">
     <summary class="rotulo">Historial de cambios <span class="cuenta">{{ hist|length }}</span></summary>

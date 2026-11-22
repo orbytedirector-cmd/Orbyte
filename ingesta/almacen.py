@@ -94,6 +94,9 @@ class Almacen:
             columnas = {r[1] for r in c.execute('PRAGMA table_info(descargas)')}
             if 'pendientes' not in columnas:            # pistas con pérdida que esperan tu decisión (JSON)
                 c.execute('ALTER TABLE descargas ADD COLUMN pendientes TEXT')
+            for col in ('tipo', 'datos'):                # pistas sueltas (22-11-2026): tipo 'pista' y sus datos (JSON)
+                if col not in columnas:
+                    c.execute(f'ALTER TABLE descargas ADD COLUMN {col} TEXT')
 
     # ── historial de cada álbum (17-11-2026) ──
     def anotar(self, aid, ruta, tipo, resumen, fuente=None, cambios=None):
@@ -434,15 +437,16 @@ class Almacen:
                       (clave, firma, json.dumps(datos, ensure_ascii=False), time.time()))
 
     # ── descargas (Tidal / Qobuz) ──
-    def nueva_descarga(self, servicio, item_id, url, artista, album, calidad, n_pistas):
+    def nueva_descarga(self, servicio, item_id, url, artista, album, calidad, n_pistas, tipo='album', datos=None):
         with _lock, self._con() as c:
-            r = c.execute("SELECT id FROM descargas WHERE servicio=? AND item_id=? AND estado IN ('en_cola', 'descargando')",
-                          (servicio, item_id)).fetchone()
+            r = c.execute("SELECT id FROM descargas WHERE servicio=? AND item_id=? AND IFNULL(tipo, 'album')=? "
+                          "AND estado IN ('en_cola', 'descargando')", (servicio, item_id, tipo)).fetchone()
             if r:
                 return r[0], False
-            return c.execute("INSERT INTO descargas (ts, servicio, item_id, url, artista, album, calidad, n_pistas, estado) "
-                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'en_cola')",
-                             (time.time(), servicio, item_id, url, artista, album, calidad, n_pistas)).lastrowid, True
+            return c.execute("INSERT INTO descargas (ts, servicio, item_id, url, artista, album, calidad, n_pistas, estado, "
+                             "tipo, datos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'en_cola', ?, ?)",
+                             (time.time(), servicio, item_id, url, artista, album, calidad, n_pistas, tipo,
+                              json.dumps(datos, ensure_ascii=False) if datos else None)).lastrowid, True
 
     def descargas(self, limite=100):
         with self._con() as c:

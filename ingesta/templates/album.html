@@ -146,6 +146,7 @@
                      'elegir_edicion', 'caratula_ilegible', 'sin_anio', 'sin_caratula', 'mezcla', 'copias_mezcladas') %}
 {% set A_TAGS = ('sin_artista', 'artista_inferido', 'sin_album', 'album_inferido', 'unknown_artist', 'varios_artistas',
                  'pista_repetida', 'sin_numero', 'sin_anio') %}
+{% if pista_suelta %}{% set ps = pista_suelta %}{% include '_pista_suelta.html' %}{% endif %}
 <section class="seccion">
   <h2 class="rotulo">Revisión <span class="cuenta">{{ r.problemas|length }} observaciones</span></h2>
   {% if not r.problemas %}
