@@ -211,7 +211,8 @@ def detectar_albumes(entrada):
     sueltos = []
     for raiz, dirs, archivos in os.walk(entrada):
         dirs[:] = sorted(d for d in dirs if not d.startswith('.') and not d.startswith('@'))
-        audio = [a for a in archivos if Path(a).suffix.lower() in AUDIO_EXT and not a.startswith('._')]
+        # archivos ocultos («._x» de Mac, «.sanear-1234.flac» que dejó un Sanear interrumpido): nunca son pistas
+        audio = [a for a in archivos if Path(a).suffix.lower() in AUDIO_EXT and not a.startswith('.')]
         if not audio and any(a.lower().endswith('.iso') for a in archivos) and sacd.iso_de(raiz):
             audio = [os.path.basename(sacd.iso_de(raiz))]      # ISO de SACD: se extrae antes de revisar
         if not audio:
@@ -1149,7 +1150,7 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     for raiz, dirs, archivos in os.walk(ruta):
         dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
         for a in sorted(archivos):
-            if a.startswith('._') or a.lower() in IGNORAR:
+            if a.startswith('.') or a.lower() in IGNORAR:      # ocultos: «._x», «.sanear-1234.flac»…
                 continue
             full = os.path.join(raiz, a)
             ext = Path(a).suffix.lower()

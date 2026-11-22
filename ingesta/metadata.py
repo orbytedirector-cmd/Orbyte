@@ -36,7 +36,7 @@ def _recorrer(ruta):
     igual que para el indexador (index_libraryV3)."""
     for r, dirs, fs in os.walk(ruta):
         dirs[:] = [d for d in dirs if not d.startswith('.')]
-        yield r, dirs, fs
+        yield r, dirs, [f for f in fs if not f.startswith('.')]      # ni archivos ocultos («.sanear-1234.flac»)
 
 
 def limite(paso, n_pistas):

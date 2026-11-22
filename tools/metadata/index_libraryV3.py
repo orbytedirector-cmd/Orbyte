@@ -707,7 +707,8 @@ def index_directories(conn: sqlite3.Connection, dirs: List[str],
             # de 32 bits; ver ingesta/compat24.py) — nunca son pistas de la biblioteca
             subdirs[:] = [x for x in subdirs if not x.startswith(".")]
             for f in sorted(files):
-                if Path(f).suffix.lower() in AUDIO_EXTENSIONS:
+                # archivos ocultos («.sanear-1234.flac» de un Sanear interrumpido, «._x» de Mac): no son pistas
+                if Path(f).suffix.lower() in AUDIO_EXTENSIONS and not f.startswith("."):
                     all_files.append(os.path.join(root, f))
 
     total   = len(all_files)
@@ -829,7 +830,7 @@ def _count_audio(path: str) -> int:
     count = 0
     for _, subdirs, files in os.walk(path):
         subdirs[:] = [x for x in subdirs if not x.startswith(".")]
-        count += sum(1 for f in files if Path(f).suffix.lower() in AUDIO_EXTENSIONS)
+        count += sum(1 for f in files if Path(f).suffix.lower() in AUDIO_EXTENSIONS and not f.startswith("."))
     return count
 
 # ============================================================
