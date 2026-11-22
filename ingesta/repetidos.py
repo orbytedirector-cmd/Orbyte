@@ -15,6 +15,7 @@ import math
 import os
 import re
 import shutil
+import unicodedata
 import sqlite3
 import subprocess
 import urllib.error
@@ -476,8 +477,45 @@ def _dentro_de(p, carpeta):
     return p == carpeta or p.startswith(carpeta + '/')
 
 
+# La biblioteca puede estar en un disco que no distingue mayúsculas (/mnt/musica es un recurso de Windows por cifs):
+# «Es Ist Abend Und…» y «Es ist Abend und…» son LA MISMA carpeta (caso AnnenMayKantereit, 22-11-2026: el reemplazo
+# de la «vieja» borró el álbum recién ubicado). Antes de borrar, todo se compara así.
+def _clave(p):
+    return unicodedata.normalize('NFC', str(p or '').rstrip('/')).casefold()
+
+
+def dentro_ci(p, carpeta):
+    """p es carpeta o está dentro, sin distinguir mayúsculas ni la forma de los acentos."""
+    a, b = _clave(p), _clave(carpeta)
+    return bool(a and b) and (a == b or a.startswith(b + '/'))
+
+
+def misma_carpeta(p, q):
+    """Misma carpeta en el disco: mismo nombre salvo mayúsculas, o el mismo archivo según el sistema."""
+    if _clave(p) == _clave(q):
+        return True
+    try:
+        return os.path.exists(p) and os.path.exists(q) and os.path.samefile(p, q)
+    except OSError:
+        return False
+
+
+def _toca_lo_que_queda(ruta, conservar, archivos_conservar):
+    """¿Borrar `ruta` (archivo o carpeta) se llevaría algo de lo que se queda?"""
+    k = _clave(ruta)
+    if k in archivos_conservar:
+        return True
+    for c in conservar:
+        if dentro_ci(ruta, c) or dentro_ci(c, ruta):
+            return True
+    try:
+        return any(os.path.samefile(ruta, c) for c in conservar if os.path.exists(c)) if os.path.exists(ruta) else False
+    except OSError:
+        return False
+
+
 def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_destino=False, proteger=(),
-             exigir_cobertura=False):
+             exigir_cobertura=False, solo_base=()):
     """Borra del disco y de Orbyte las ediciones `rutas_borrar`; lo usado pasa a `ruta_destino`. IRRECUPERABLE.
     Con sin_destino=True (eliminar un álbum suelto desde la Biblioteca, «a ninguna»), su historial se pierde.
 
@@ -487,7 +525,9 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
       ubicó la ingesta— o el que se queda), salvo que esa carpeta contenga a la edición que sale;
     - con `exigir_cobertura` (True, o las rutas a las que se exige), una edición con pistas (con archivo) que no
       tienen equivalente en la que se queda
-      no se toca: se avisa y quedan las dos."""
+      no se toca: se avisa y quedan las dos;
+    - nada que sea (o esté dentro de) la carpeta que se queda, comparando sin distinguir mayúsculas y por identidad
+      en el disco; `solo_base`: rutas que salen de Orbyte sin tocar el disco (la misma carpeta con otro nombre)."""
     biblioteca = os.path.abspath(biblioteca)
     eds = {e['ruta']: e for e in grupo['ediciones']}
     if not rutas_borrar or any(r not in eds for r in rutas_borrar):
@@ -509,12 +549,20 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
     proteger = {str(x).rstrip('/') for x in proteger or () if x}
     if ruta_destino and not sin_destino:
         proteger.add(ruta_destino.rstrip('/'))
+    solo_base = {str(x).rstrip('/') for x in solo_base or ()}
+    conservar = [ruta_destino.rstrip('/')] if ruta_destino and not sin_destino else []
+    archivos_conservar = {_clave(p['file_path']) for p in pistas_destino if p['file_path']}
     try:
         for ruta in rutas_borrar:
             e = eds[ruta]
             # solo los álbumes de la edición: su carpeta y sus subcarpetas de disco; otro álbum que esté dentro
             # (o dentro de una carpeta protegida) no sale, ni de Orbyte ni del disco
             r0 = ruta.rstrip('/')
+            if conservar and r0 not in solo_base and (misma_carpeta(r0, conservar[0]) or dentro_ci(conservar[0], r0)):
+                # (caso AnnenMayKantereit): en este disco es la carpeta que se queda, o la contiene
+                solo_base.add(r0)
+                registro(f'  ⚠ «{os.path.relpath(r0, biblioteca)}» es la misma carpeta que la que se queda (el disco no '
+                         'distingue mayúsculas) o la contiene: sale de Orbyte, pero del disco no se borra nada')
             # sus propias carpetas de disco («CD1 Italian version») no protegen nada aunque la ingesta tenga una
             # fila de ellas (caso Eros Ramazzotti «Perfetto», 17-11-2026: el reemplazo se saltaba los dos discos)
             prot = {x for x in proteger if x == (ruta_destino or '').rstrip('/') or
@@ -561,17 +609,20 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
                                                dest[0][0] if dest else (destino['albumes'][0] if destino else None))
                     resumen['movidas'] += mov
                     resumen['quitadas'] += qui
+            if r0 in solo_base:
+                resumen['ediciones'] += 1
+                continue
             # 2) disco: sus archivos de audio y luego sus carpetas. Las carpetas de otros álbumes que quedan
             # (Orbyte, los ubicados por la ingesta, el que se queda) se respetan aunque estén dentro de la suya.
             otras = [r[0] for r in con.execute('SELECT path FROM albums WHERE path IS NOT NULL')]
             propias = [c.rstrip('/') for c in carpetas]
             ajenas_todas = {o.rstrip('/') for o in otras} | prot
-            ajenas_todas = {a for a in ajenas_todas if a and not _dentro_de(r0, a)}
+            ajenas_todas = {a for a in ajenas_todas if a and not dentro_ci(r0, a)}
             for p in pistas:
                 f = p['file_path']
                 if f and os.path.isfile(f):
-                    duena = next((a for a in ajenas_todas if f.startswith(a + '/')), None)
-                    if duena:
+                    duena = next((a for a in ajenas_todas if dentro_ci(f, a)), None)
+                    if duena or _toca_lo_que_queda(f, conservar, archivos_conservar):
                         resumen['protegidos'] += 1
                         registro(f'  ⚠ no se borra {os.path.relpath(f, biblioteca)}: está en la carpeta de otro álbum')
                         continue
@@ -582,7 +633,10 @@ def eliminar(db, biblioteca, grupo, rutas_borrar, ruta_destino, registro, sin_de
                 if not os.path.isdir(carpeta):
                     continue
                 rel = os.path.relpath(carpeta, biblioteca)
-                ajenas = [o for o in ajenas_todas if _dentro_de(o, carpeta.rstrip('/'))]
+                ajenas = [o for o in ajenas_todas if dentro_ci(o, carpeta.rstrip('/'))]
+                if _toca_lo_que_queda(carpeta, conservar, archivos_conservar):
+                    registro(f'  ⚠ «{rel}» es (o contiene) la carpeta que se queda: no se borra')
+                    continue
                 if not ajenas and len(rel.split(os.sep)) >= 3:      # Letra/Artista/Álbum… : la carpeta entera
                     resumen['liberado'] += _tamano(carpeta)
                     shutil.rmtree(carpeta)

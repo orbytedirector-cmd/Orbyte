@@ -304,7 +304,13 @@ class Procesador(threading.Thread):
             if not nueva or not os.path.abspath(nueva).startswith(os.path.abspath(biblioteca) + os.sep):
                 raise RuntimeError('el álbum nuevo no está ubicado en la biblioteca: no se borra nada')
             viejas_rutas = [r.rstrip('/') for r in rep['reemplazar']]
-            if any(nueva == r or nueva.startswith(r + '/') for r in viejas_rutas):
+            # el disco de la biblioteca no distingue mayúsculas (cifs): «Es Ist Abend…» ES la carpeta nueva «Es ist
+            # Abend…» (caso AnnenMayKantereit, 22-11-2026). Esa vieja sale de Orbyte, pero del disco no se borra nada.
+            mismas = [r for r in viejas_rutas if repetidos.misma_carpeta(r, nueva)]
+            for r in mismas:
+                reg(f'  ⚠ «{os.path.relpath(r, biblioteca)}» es la misma carpeta que la nueva (el disco no distingue '
+                    'mayúsculas): sale de Orbyte, del disco no se borra nada')
+            if any(repetidos.dentro_ci(nueva, r) for r in viejas_rutas if r not in mismas):
                 raise RuntimeError('el álbum nuevo quedó dentro de la carpeta del que reemplaza: no se borra nada')
             ids = _ids_de(db, viejas_rutas + [nueva], excluir=[nueva])
             if not ids.get(nueva):
@@ -324,8 +330,9 @@ class Procesador(threading.Thread):
                 propias |= {os.path.realpath(u).rstrip('/') for u in cam0.get('union') or []}
                 propias |= {u.rstrip('/') for u in cam0.get('union') or []}
                 exigir = set() if forzar else {r for r in viejas if r not in propias}
+                exigir -= set(mismas)
                 res = repetidos.eliminar(db, biblioteca, grupo, viejas, nueva, reg, proteger=proteger,
-                                         exigir_cobertura=exigir)
+                                         exigir_cobertura=exigir, solo_base=mismas)
                 viejas = [r for r in viejas if r not in res.get('saltadas', [])]
                 for r in viejas:                     # filas de Ingesta de las ediciones que salieron (si las ubicó ella)
                     discos = [x for x in self.almacen.rutas_ubicadas()     # y de sus carpetas de disco
