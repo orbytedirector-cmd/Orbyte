@@ -23,6 +23,7 @@ Uso (desde la carpeta del servidor):
   python3 tools/pendientes_biblioteca.py --dias 7              # solo lo que ingresó en 7 días
   python3 tools/pendientes_biblioteca.py --rutas               # carpetas a procesar (grupos 1-3)
   python3 tools/pendientes_biblioteca.py --csv pendientes.csv
+  python3 tools/pendientes_biblioteca.py --artistas            # por carpeta de artista: cuáles no están en Orbyte
 Para abrir las carpetas desde otro equipo: --enlace-base smb://servidor/musica
 """
 import argparse
@@ -150,6 +151,48 @@ def analizar(a):
     return raiz, disco, filas
 
 
+def por_artista(raiz, disco, tracks):
+    """{«Letra/Artista»: {archivos, indexados, bytes, albumes:set, sin_indexar:set}} según las carpetas.
+    Caso 22-11-2026: un artista que está en el disco pero se perdió de la BD al restaurar un respaldo viejo."""
+    out = {}
+    for ruta, archivos in disco.items():
+        partes = os.path.relpath(ruta, raiz).split(os.sep)
+        if len(partes) < 2:
+            continue
+        art = "/".join(partes[:2])
+        alb = partes[2] if len(partes) >= 3 else "(suelto)"
+        d = out.setdefault(art, {"archivos": 0, "indexados": 0, "bytes": 0, "albumes": set(), "sin_indexar": set()})
+        d["albumes"].add(alb)
+        for nombre, (tam, _) in archivos.items():
+            d["archivos"] += 1
+            d["bytes"] += tam
+            if nfc(os.path.join(ruta, nombre)) in tracks:
+                d["indexados"] += 1
+            else:
+                d["sin_indexar"].add(alb)
+    return out
+
+
+def reporte_artistas(raiz, disco, a):
+    con = sqlite3.connect(f"file:{a.db}?mode=ro", uri=True)
+    tracks = {nfc(p) for (p,) in con.execute("SELECT file_path FROM tracks WHERE file_path IS NOT NULL")}
+    con.close()
+    arts = por_artista(raiz, disco, tracks)
+    gb = lambda b: f"{b / 1e9:.1f} GB" if b >= 1e9 else f"{b / 1e6:.0f} MB"
+    nada = sorted((k, v) for k, v in arts.items() if v["indexados"] == 0)
+    parcial = sorted((k, v) for k, v in arts.items() if 0 < v["indexados"] < v["archivos"])
+    print(f"\n== Artistas que no están en Orbyte ({len(nada)}) ==")
+    for k, v in nada:
+        print(f"{k}   · {cuenta(len(v['albumes']), 'álbum', 'álbumes')} · "
+              f"{cuenta(v['archivos'], 'canción', 'canciones')} · {gb(v['bytes'])}\n    {os.path.join(raiz, k)}")
+    print(f"\n== Artistas con álbumes o canciones sin indexar ({len(parcial)}) ==")
+    for k, v in parcial:
+        print(f"{k}   · faltan {v['archivos'] - v['indexados']} de {v['archivos']} canciones · "
+              f"álbumes: {', '.join(sorted(v['sin_indexar']))}")
+    print(f"\nResumen: {len(arts)} carpetas de artista · {len(nada)} sin nada en Orbyte · "
+          f"{len(parcial)} con algo sin indexar")
+
+
 def reporte_texto(filas, disco, a):
     for g, nombre, _ in GRUPOS:
         fg = [f for f in filas if f["g"] == g]
@@ -193,12 +236,19 @@ def main():
     ap.add_argument("--html", help="guardar el reporte HTML (gráficos, filtros, orden, enlaces)")
     ap.add_argument("--enlace-base", help="prefijo para los enlaces en vez de file:// "
                                           "(ej. smb://servidor/musica)")
+    ap.add_argument("--artistas", action="store_true",
+                    help="resumen por carpeta de artista: los que no tienen nada en Orbyte y los incompletos")
     a = ap.parse_args()
 
     if not os.path.isdir(a.raiz):
         sys.exit(f"No encuentro la carpeta de música: {a.raiz}")
     if not os.path.isfile(a.db):
         sys.exit(f"No encuentro la BD: {a.db} (usa --db)")
+
+    if a.artistas:
+        raiz = os.path.abspath(a.raiz).rstrip("/")
+        reporte_artistas(raiz, leer_disco(raiz), a)
+        return
 
     raiz, disco, filas = analizar(a)
 
