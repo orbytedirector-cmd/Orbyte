@@ -625,3 +625,15 @@ details.historial[open] > summary::before { content: '▾ '; }
 .ps-lugar .aviso-num { color: var(--oro); }
 .ps-pistas .tabla-wrap { max-height: 18rem; overflow: auto; }
 tr.ps-ocupada td { color: var(--oro); }
+
+/* tartamudeos y Parchar (23-11-2026) */
+.tt-panel { display: flex; flex-direction: column; gap: .8rem; }
+.tt-lista { display: flex; flex-direction: column; gap: .7rem; }
+.tt-tramo { border: 1px solid var(--borde-2); border-radius: 10px; padding: .7rem .85rem; background: var(--elev); display: flex; flex-direction: column; gap: .45rem; min-width: 0; }
+.tt-tramo.listo { border-color: var(--borde-oro); }
+.tt-t { flex: 0 0 7.5rem; }
+.tt-vistas { display: flex; flex-wrap: wrap; gap: .8rem; }
+.tt-escuchar { display: flex; flex-direction: column; gap: .3rem; flex: 1 1 18rem; min-width: 0; }
+.tt-escuchar audio { width: 100%; }
+.tt-escuchar .btn { align-self: flex-start; }
+.tt-mano > summary { cursor: pointer; color: var(--oro-claro); font-size: .9rem; }

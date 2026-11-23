@@ -660,6 +660,35 @@ class Salud:
             log.info('Salud: %d originales saneados borrados (%.0f MB)', len(borrados), libres / 1048576)
         return {'borrados': len(borrados), 'bytes': libres, 'errores': errores}
 
+    def restaurar_original(self, respaldo):
+        """Vuelve a poner el original (de Sanear o Parchar) en su lugar, pisando la versión saneada o parchada.
+        → ruta de la pista. ValueError si no se puede."""
+        with self._con() as c:
+            f = c.execute('SELECT ruta FROM originales WHERE respaldo=?', (respaldo,)).fetchone()
+        if not f or not self._es_original(respaldo) or not os.path.isfile(respaldo):
+            raise ValueError('Ese original ya no está')
+        ruta = f['ruta']
+        carpeta = os.path.dirname(ruta)
+        if not os.path.isdir(carpeta):
+            raise ValueError('La carpeta de la pista ya no está (¿se movió o se eliminó el álbum?)')
+        tmp = os.path.join(carpeta, f'.restaurar-{os.getpid()}.flac')       # oculto: nunca es una pista
+        try:
+            shutil.copy2(respaldo, tmp)
+            if os.path.getsize(tmp) != os.path.getsize(respaldo):
+                raise ValueError('La copia quedó incompleta: no se tocó nada')
+            os.replace(tmp, ruta)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+        os.remove(respaldo)
+        with contextlib.suppress(OSError):
+            os.rmdir(os.path.dirname(respaldo))
+        with self._lock, self._con() as c:
+            c.execute('DELETE FROM originales WHERE respaldo=?', (respaldo,))
+            c.execute('DELETE FROM medidas WHERE ruta=?', (ruta,))
+        log.info('Salud: original restaurado en %s', ruta)
+        return ruta
+
     def olvidar(self, rutas):
         """Saca pistas de la lista de Salud (ya no están en Orbyte)."""
         with self._con() as c:
