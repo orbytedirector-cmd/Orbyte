@@ -6,9 +6,11 @@ carpeta: no toca ni la pista ni la otra copia.
 Cómo:
  1. Alinea las dos copias con el audio de antes y de después del tramo (3 s a cada lado), en tres pasadas: envolvente
     cada 10 ms (busca ±10 s), forma de onda a 8 kHz y forma de onda a la frecuencia de la pista. Mide el corrimiento
-    antes y después por separado: si no coinciden, las copias no corren a la misma velocidad y no se parcha.
- 2. Iguala el volumen de la otra copia por canal (mínimos cuadrados sobre el contexto) y detecta la polaridad.
+    antes y después por separado.
+ 2. Iguala el volumen de la otra copia por canal (misma energía que la pista en el contexto) y la polaridad.
  3. Copia el tramo de la otra copia (re-muestreada con soxr) y lo funde 5 ms a cada lado, fuera del tramo dañado.
+    Si el daño corrió el tiempo (la pista quedó con unos ms de más o de menos), se sigue la alineación de antes hasta
+    la mitad del tramo y la de después desde ahí, con un fundido de 10 ms.
     Fuera del tramo y de los fundidos, la pista queda bit a bit igual. Copia tags y carátulas y verifica.
 
 Uso:
@@ -68,12 +70,14 @@ def ncorr(u_pairs):
     return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
 
 
-def mejor_lag(tpl, ref, lags, quitar_media=False):
-    """tpl: [(pos, valor)] de la pista; ref: lista de la otra copia. Lag l: tpl[pos] ~ ref[pos + l]."""
+def mejor_lag(tpl, ref, lags, quitar_media=False, todos=False):
+    """tpl: [(pos, valor)] de la pista; ref: lista de la otra copia. Lag l: tpl[pos] ~ ref[pos + l].
+    → (correlación, lag) del mejor; con todos=True, la lista [(correlación, lag)] de cada lag."""
     if quitar_media:
         m = sum(v for _, v in tpl) / len(tpl)
         tpl = [(p, v - m) for p, v in tpl]
     mejor = (0.0, None)
+    lista = []
     for l in lags:
         par = [(v, ref[p + l]) for p, v in tpl if 0 <= p + l < len(ref)]
         if len(par) < len(tpl) * 0.9:
@@ -82,9 +86,10 @@ def mejor_lag(tpl, ref, lags, quitar_media=False):
             mr = sum(b for _, b in par) / len(par)
             par = [(a, b - mr) for a, b in par]
         c = ncorr(par)
+        lista.append((c, l))
         if abs(c) > abs(mejor[0]):
             mejor = (c, l)
-    return mejor
+    return lista if todos else mejor
 
 
 def main():
@@ -123,27 +128,47 @@ def main():
     fuera = [(i, v) for i, v in enumerate(ep)
              if not (hueco[0] - 0.05 <= d0 + i * paso / sr8 <= hueco[1] + 0.05)]
     rango = int(a.buscar * sr8 / paso) + 2
-    c1, l1 = mejor_lag(fuera, eo, range(-off0 // paso - rango, -off0 // paso + rango + 1), quitar_media=True)
-    if l1 is None:
+    lista = mejor_lag(fuera, eo, range(-off0 // paso - rango, -off0 // paso + rango + 1), quitar_media=True,
+                      todos=True)
+    if not lista:
         raise SystemExit('No se pudo alinear (¿es la misma canción?).')
-    # ── 2) forma de onda a 8 kHz, ±2 cuadros ──
-    tpl8 = [(i, v) for i, v in enumerate(p8)
-            if (hueco[0] - 1.0 <= d0 + i / sr8 < hueco[0] - 0.02) or (hueco[1] + 0.02 < d0 + i / sr8 <= hueco[1] + 1.0)]
-    c2, l2 = mejor_lag(tpl8, o8, range(l1 * paso - 2 * paso, l1 * paso + 2 * paso + 1))
-    if l2 is None:
-        raise SystemExit('No se pudo alinear la forma de onda.')
+    # la música se repite por compases: la envolvente puede confundirse en un pulso. Se prueban sus 6 mejores picos
+    # con la forma de onda (antes y después del tramo juntos, cada 2 muestras) y gana el que mejor calza.
+    picos = [(c, l) for k, (c, l) in enumerate(lista)
+             if c > 0 and all(c >= lista[j][0] for j in range(max(0, k - 3), min(len(lista), k + 4)))]
+    picos = sorted(picos, reverse=True)[:6]
+    tpl_ambos = [(i, v) for i, v in enumerate(p8) if i % 2 == 0 and (
+        hueco[0] - 1.0 <= d0 + i / sr8 < hueco[0] - 0.02 or hueco[1] + 0.02 < d0 + i / sr8 <= hueco[1] + 1.0)]
+    cand = []
+    for c, l in picos:
+        cw, lw = mejor_lag(tpl_ambos, o8, range(l * paso - 3 * paso, l * paso + 3 * paso + 1))
+        if lw is not None:
+            cand.append((abs(cw), c, lw))
+    if not cand:
+        raise SystemExit('No se pudo alinear (¿es la misma canción?).')
+    _cw, c1, l1w = max(cand)
+    # ── 2) forma de onda a 8 kHz, antes y después por separado (±3 cuadros) ──
+    lados = {'antes': (hueco[0] - 1.0, hueco[0] - 0.02), 'después': (hueco[1] + 0.02, hueco[1] + 1.0)}
+    l8 = {}
+    for lado, (t0, t1) in lados.items():
+        tpl8 = [(i, v) for i, v in enumerate(p8) if t0 <= d0 + i / sr8 < t1]
+        l8[lado] = mejor_lag(tpl8, o8, range(l1w - paso, l1w + paso + 1))
+        if l8[lado][1] is None:
+            raise SystemExit('No se pudo alinear la forma de onda.')
+    c2 = max((c for c, _ in l8.values()), key=abs)
     polaridad = -1.0 if c2 < 0 else 1.0
-    corr_s = l2 / sr8 + (max(0.0, o0) - d0)            # tiempo en la otra copia = tiempo en la pista + corr_s
-    print(f'  envolvente {c1:.3f} · onda 8 kHz {abs(c2):.3f} · la otra copia va {corr_s:+.4f} s'
-          + (' · polaridad invertida' if polaridad < 0 else ''))
+    corr_s = {lado: l / sr8 + (max(0.0, o0) - d0) for lado, (_c, l) in l8.items()}   # t_otra = t_pista + corr_s
+    print(f'  envolvente {c1:.3f} · onda 8 kHz antes {abs(l8["antes"][0]):.3f} / después {abs(l8["después"][0]):.3f}'
+          f' · la otra copia va {corr_s["antes"]:+.4f} s' + (' · polaridad invertida' if polaridad < 0 else ''))
 
     # ── 3) a la frecuencia de la pista, antes y después por separado ──
     sr = sr_p
     v0 = a.desde - 0.3
     v1 = a.hasta + 0.3
-    marg = 0.01
-    ventana_o0 = v0 + corr_s - marg
-    po = pcm_f32(otra, ventana_o0, (v1 - v0) + 2 * marg, sr, ch)
+    marg = 0.1
+    cmin = min(corr_s.values())
+    ventana_o0 = v0 + cmin - marg
+    po = pcm_f32(otra, ventana_o0, (v1 - v0) + abs(corr_s['después'] - corr_s['antes']) + 2 * marg, sr, ch)
     # la pista, exacta (libFLAC, cada muestra en su lugar)
     tmp = tempfile.mkdtemp(prefix='.parchar-', dir=carpeta)
     atexit.register(shutil.rmtree, tmp, True)
@@ -152,10 +177,8 @@ def main():
     with open(raw, 'w+b') as f:
         d = sanear._Decodificar(pista, salida=f).correr()
     if d.fatal or d.malas:
-        shutil.rmtree(tmp, ignore_errors=True)
         raise SystemExit('La pista tiene cuadros dañados: primero Sanear.')
     if d.sr != sr:
-        shutil.rmtree(tmp, ignore_errors=True)
         raise SystemExit('Frecuencia distinta entre ffprobe y libFLAC.')
     fb = ch * d.ancho
     vb, ve = int(round(v0 * sr)), int(round(v1 * sr))
@@ -163,76 +186,100 @@ def main():
         f.seek(vb * fb)
         xx = sanear._a_int32(f.read((ve - vb) * fb), d.ancho)
     pp = [[v / 2147483648.0 for v in xx[c::ch]] for c in range(ch)]
-    base = int(round(marg * sr))                        # pp[i] ~ po[i + base] si el corrimiento fuera exacto
-    lags = range(base - 4 * (sr // sr8), base + 4 * (sr // sr8) + 1)
+    suma = [sum(po[c][j] for c in range(ch)) for j in range(len(po[0]))]
+    paso8 = sr // sr8
     res = {}
     for lado, (t0, t1) in (('antes', (v0, a.desde - 0.02)), ('después', (a.hasta + 0.02, v1))):
+        base = int(round((corr_s[lado] - cmin + marg) * sr))      # pp[i] ~ po[i + base]
         i0, i1 = int((t0 - v0) * sr), int((t1 - v0) * sr)
         tpl = [(i, sum(pp[c][i] for c in range(ch))) for i in range(i0, i1, 2)]
-        suma = [sum(po[c][j] for c in range(ch)) for j in range(len(po[0]))]
-        res[lado] = mejor_lag(tpl, suma, lags)
+        c, l = mejor_lag(tpl, suma, range(base - 4 * paso8, base + 4 * paso8 + 1))
+        if l is None:
+            raise SystemExit('No se pudo alinear a la frecuencia de la pista.')
+        # fracción de muestra: parábola por la correlación en l-1, l, l+1
+        cm, _ = mejor_lag(tpl, suma, [l - 1])
+        cp, _ = mejor_lag(tpl, suma, [l + 1])
+        den = cm - 2 * c + cp
+        frac = max(-0.5, min(0.5, 0.5 * (cm - cp) / den)) if den else 0.0
+        res[lado] = (c, l + frac)
     (ca, la), (cd, ld) = res['antes'], res['después']
-    print(f'  a {sr} Hz: antes {abs(ca):.4f} (lag {la}) · después {abs(cd):.4f} (lag {ld})')
-    if la is None or ld is None or abs(la - ld) > 2:
-        raise SystemExit('El corrimiento antes y después no coincide: las copias no corren igual. No se parcha.')
-    lag = la
+    corrido = ld - la
+    print(f'  a {sr} Hz: antes {abs(ca):.4f} · después {abs(cd):.4f}'
+          + (f' · la pista tiene {abs(corrido) / sr * 1000:.2f} ms {"de más" if corrido < 0 else "de menos"} en el '
+             f'tramo (el daño corrió el tiempo; se empalma a la mitad)' if abs(corrido) > 1 else ''))
+    if abs(corrido) > 0.05 * sr:
+        raise SystemExit('El corrimiento antes y después difiere en más de 50 ms: no se parcha.')
+    if abs(corrido) <= 1:
+        la = ld = (la + ld) / 2
 
-    # ── ganancia por canal ──
+    def otra_en(c, j):
+        """Muestra de la otra copia en la posición fraccionaria j (interpolación lineal)."""
+        k = int(math.floor(j))
+        t = j - k
+        return po[c][k] * (1 - t) + po[c][k + 1] * t
+
+    def ctx():
+        for (t0, t1), lag in (((v0, a.desde - 0.02), la), ((a.hasta + 0.02, v1), ld)):
+            for i in range(int((t0 - v0) * sr), int((t1 - v0) * sr)):
+                yield i, lag
+
+    # ── volumen por canal: igual energía que la pista en el contexto ──
     gan = []
+    peor = 1.0
     for c in range(ch):
-        sxy = syy = 0.0
-        for t0, t1 in ((v0, a.desde - 0.02), (a.hasta + 0.02, v1)):
-            for i in range(int((t0 - v0) * sr), int((t1 - v0) * sr)):
-                y = polaridad * po[c][i + lag]
-                sxy += pp[c][i] * y
-                syy += y * y
-        g = sxy / syy if syy else 1.0
-        err = sxx = 0.0
-        for t0, t1 in ((v0, a.desde - 0.02), (a.hasta + 0.02, v1)):
-            for i in range(int((t0 - v0) * sr), int((t1 - v0) * sr)):
-                e = pp[c][i] - g * polaridad * po[c][i + lag]
-                err += e * e
-                sxx += pp[c][i] * pp[c][i]
+        sxy = syy = sxx = 0.0
+        for i, lag in ctx():
+            y = polaridad * otra_en(c, i + lag)
+            sxy += pp[c][i] * y
+            syy += y * y
+            sxx += pp[c][i] * pp[c][i]
+        g = math.sqrt(sxx / syy) if syy else 1.0
+        cor = sxy / math.sqrt(sxx * syy) if sxx and syy else 0.0
+        peor = min(peor, cor)
+        err = sum((pp[c][i] - g * polaridad * otra_en(c, i + lag)) ** 2 for i, lag in ctx())
         gan.append(g)
-        print(f'  canal {c + 1}: volumen ×{g:.4f} ({20 * math.log10(abs(g)):+.2f} dB) · diferencia que queda '
-              f'{10 * math.log10(err / sxx + 1e-20):.1f} dB bajo la música')
+        print(f'  canal {c + 1}: volumen ×{g:.4f} ({20 * math.log10(abs(g)):+.2f} dB) · parecido {cor:.3f} · '
+              f'diferencia {10 * math.log10(err / sxx + 1e-20):.1f} dB bajo la música')
+    if peor < 0.9:
+        print('  Ojo: las copias se parecen poco (otra masterización o mezcla); el parche puede notarse.')
 
     # ── parche sobre el PCM exacto de la pista ──
-    try:
-        total = d.total or d.siguiente
-        ancho, q = d.ancho, 1 << (32 - 8 * d.ancho)
-        F = int(sr * FUNDIDO_MS / 1000)
-        h0, h1 = int(round(a.desde * sr)), int(round(a.hasta * sr))
-        lo, hi = h0 - F, h1 + F
-        with open(raw, 'r+b') as f:
-            f.seek(lo * fb)
-            x = sanear._a_int32(f.read((hi - lo) * fb), ancho)
-            for k in range(hi - lo):
-                n = lo + k
-                if n < h0:
-                    w = (k + 0.5) / F
-                elif n >= h1:
-                    w = 1.0 - (n - h1 + 0.5) / F
-                else:
-                    w = 1.0
-                j = n - vb + lag
-                for c in range(ch):
-                    nuevo = gan[c] * polaridad * po[c][j] * 2147483648.0
-                    v = (1 - w) * x[k * ch + c] + w * nuevo
-                    v = int(round(v / q)) * q
-                    x[k * ch + c] = max(-2147483648, min(2147483647 - (q - 1), v))
-            f.seek(lo * fb)
-            f.write(sanear._de_int32(x, ancho))
-        salida = os.path.join(carpeta, f'{nombre} [parche].flac')
-        quitar_clics.codificar(raw, d, salida)
-        sanear._copiar_metadata(pista, salida)
-        v = sanear._Decodificar(salida).correr()
-        if v.malas or v.fatal or v.total != total:
-            raise SystemExit('La versión parchada no pasó la verificación.')
-        print(f'Parchado {a.desde:.3f}–{a.hasta:.3f} s ({(h1 - h0) / sr * 1000:.0f} ms + {FUNDIDO_MS} ms de fundido '
-              f'a cada lado) → {salida}')
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+    total = d.total or d.siguiente
+    ancho, q = d.ancho, 1 << (32 - 8 * d.ancho)
+    F = int(sr * FUNDIDO_MS / 1000)
+    h0, h1 = int(round(a.desde * sr)), int(round(a.hasta * sr))
+    lo, hi = h0 - F, h1 + F
+    with open(raw, 'r+b') as f:
+        f.seek(lo * fb)
+        x = sanear._a_int32(f.read((hi - lo) * fb), ancho)
+        mitad, X = (h0 + h1) // 2, int(sr * 0.01)
+        for k in range(hi - lo):
+            n = lo + k
+            if n < h0:
+                w = (k + 0.5) / F
+            elif n >= h1:
+                w = 1.0 - (n - h1 + 0.5) / F
+            else:
+                w = 1.0
+            # antes de la mitad se sigue la alineación de antes; después, la de después (fundido de 10 ms)
+            u = min(1.0, max(0.0, (n - (mitad - X // 2) + 0.5) / X))
+            ja, jd = n - vb + la, n - vb + ld
+            for c in range(ch):
+                dn = (1 - u) * otra_en(c, ja) + u * otra_en(c, jd)
+                nuevo = gan[c] * polaridad * dn * 2147483648.0
+                v = (1 - w) * x[k * ch + c] + w * nuevo
+                v = int(round(v / q)) * q
+                x[k * ch + c] = max(-2147483648, min(2147483647 - (q - 1), v))
+        f.seek(lo * fb)
+        f.write(sanear._de_int32(x, ancho))
+    salida = os.path.join(carpeta, f'{nombre} [parche].flac')
+    quitar_clics.codificar(raw, d, salida)
+    sanear._copiar_metadata(pista, salida)
+    v = sanear._Decodificar(salida).correr()
+    if v.malas or v.fatal or v.total != total:
+        raise SystemExit('La versión parchada no pasó la verificación.')
+    print(f'Parchado {a.desde:.3f}–{a.hasta:.3f} s ({(h1 - h0) / sr * 1000:.0f} ms + {FUNDIDO_MS} ms de fundido '
+          f'a cada lado) → {salida}')
 
 
 if __name__ == '__main__':
