@@ -13,12 +13,18 @@ en el audio (archivo sano para libFLAC) no lo ve. Esta herramienta mira las mues
 También dice los bits que de verdad trae el archivo (un FLAC de 32 bit con los 8 de abajo en cero es
 un 24 bit rellenado).
 
+Golpes a distancia constante se informan como serie, con cuánto se parece el audio a sí mismo un paso después:
+cerca de 1 es un TARTAMUDEO (el conversor o el reproductor repitió el mismo trozo de audio; la música original no
+está ahí y no se puede recuperar del archivo, solo reemplazar).
+
 Uso:
   python3 tools/clics.py ARCHIVO [--desde 25] [--hasta 40] [--umbral 12]
+  python3 tools/clics.py CARPETA/*.flac          una línea por pista (álbum entero)
 """
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 from array import array
@@ -118,37 +124,109 @@ def analizar(x, sr, desde, umbral):
     return hallazgos
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('archivo')
-    ap.add_argument('--desde', type=float, default=0)
-    ap.add_argument('--hasta', type=float, default=None)
-    ap.add_argument('--umbral', type=float, default=12, help='veces sobre lo normal para contar un salto')
-    a = ap.parse_args()
-    sr, canales, bits, dur = info(a.archivo)
-    hasta = a.hasta if a.hasta else dur
-    if hasta - a.desde > 60:
-        print('Tramo largo: en Python puro tarda ~1 s por cada 2 s de audio a 192 kHz.', file=sys.stderr)
-    chs = leer(a.archivo, a.desde, hasta, canales)
-    print(f'{a.archivo}')
+TROZO_S = 30
+
+
+def series(saltos, sr, tol=3, minimo=4):
+    """Saltos de un canal a distancia constante (±tol muestras, entre 2 y 50 ms), al menos `minimo` seguidos.
+    → [(inicio, fin, paso, n)] en muestras absolutas."""
+    pos = sorted(saltos)
+    out, usados = [], set()
+    for a_i, a in enumerate(pos):
+        if a in usados:
+            continue
+        for b in pos[a_i + 1:]:
+            paso = b - a
+            if paso > sr * 0.05:
+                break
+            if paso < sr * 0.002:
+                continue
+            cad, cur = [a, b], b
+            while True:
+                sig = [c for c in pos if abs(c - (cur + paso)) <= tol]
+                if not sig:
+                    break
+                cur = sig[0]
+                cad.append(cur)
+            if len(cad) >= minimo:
+                out.append((cad[0], cad[-1], round((cad[-1] - cad[0]) / (len(cad) - 1)), len(cad)))
+                usados.update(cad)
+                break
+    return out
+
+
+def repeticion(ruta, ini, fin, paso, sr, canales):
+    """Correlación entre el audio y el mismo audio `paso` muestras después, dentro de la serie: cerca de 1 = el
+    reproductor/conversor repitió el mismo trozo una y otra vez (tartamudeo) y la música original no está."""
+    a, b = ini / sr, (fin + paso) / sr
+    chs = leer(ruta, a, b, canales)
+    mejor = -1.0
+    for x in chs:
+        n = len(x) - paso
+        if n <= paso:
+            continue
+        sxy = sxx = syy = 0.0
+        for k in range(0, n, 2):
+            u, v = x[k], x[k + paso]
+            sxy += float(u) * v
+            sxx += float(u) * u
+            syy += float(v) * v
+        if sxx > 0 and syy > 0:
+            mejor = max(mejor, sxy / math.sqrt(sxx * syy))
+    return mejor
+
+
+def revisar(ruta, desde, hasta, umbral, resumen):
+    sr, canales, bits, dur = info(ruta)
+    hasta = hasta if hasta else dur
+    todos, bits_vistos = [], 0
+    t = desde
+    while t < hasta:
+        fin = min(hasta, t + TROZO_S)
+        chs = leer(ruta, t, min(hasta, fin + 0.2), canales)
+        bits_vistos = max(bits_vistos, bits_efectivos(chs))
+        base = int(round(t * sr))
+        largo = int(round((fin - t) * sr))
+        for c, x in enumerate(chs):
+            for h in analizar(x, sr, t, umbral):
+                if h[1] < largo:
+                    todos.append((base + h[1], c, (h[0], base + h[1], base + h[2]) + tuple(h[3:])))
+        t = fin
+    todos.sort()
+    sers = []
+    for c in range(canales):
+        for ini, fin_, paso, n in series([h[1] for _, cc, h in todos if cc == c and h[0] == 'salto'], sr):
+            sers.append((ini, fin_, paso, n, c))
+    unidas = []
+    for s in sorted(sers):
+        r = repeticion(ruta, s[0], s[1], s[2], sr, canales)
+        if unidas and s[0] <= unidas[-1][1] + s[2] * 2:
+            u = unidas[-1]
+            unidas[-1] = (u[0], max(u[1], s[1] + s[2] - u[2]), u[2], u[3] + s[3], u[4] | {s[4]}, max(u[5], r))
+        else:
+            unidas.append((s[0], s[1], s[2], s[3], {s[4]}, r))
+    nombre_canal = (lambda c: ('izq', 'der')[c] if canales == 2 else str(c + 1))
+    if resumen:
+        txt = (f'{len(todos)} hallazgos' if todos else 'limpia')
+        if unidas:
+            txt += ' · ' + ' · '.join(
+                f'{"TARTAMUDEO" if u[5] >= 0.98 else "serie"} {tiempo(0, u[0], sr)}–{tiempo(0, u[1] + u[2], sr)} '
+                f'(cada {u[2] * 1000 / sr:.1f} ms, repetición {u[5]:.3f})'
+                for u in unidas)
+        print(f'{os.path.basename(ruta)}: {txt}', flush=True)
+        return
+    print(f'{ruta}')
     print(f'{sr} Hz · {canales} canales · {bits or "?"} bit declarados · '
-          f'{bits_efectivos(chs)} bit con datos en el tramo · tramo {tiempo(a.desde, 0, sr)} a {tiempo(hasta, 0, sr)}')
-    todos = []
-    for c, x in enumerate(chs):
-        for h in analizar(x, sr, a.desde, a.umbral):
-            todos.append((h[1], c, h))
+          f'{bits_vistos} bit con datos en el tramo · tramo {tiempo(desde, 0, sr)} a {tiempo(hasta, 0, sr)}')
     if not todos:
         print('Sin clics, cortes ni recortes en el tramo.')
         return
-    todos.sort()
     for _, c, (tipo, i, j, v, db, nivel) in todos[:200]:
-        canal = ('izq', 'der')[c] if canales == 2 else str(c + 1)
         if tipo == 'salto':
-            print(f'{tiempo(a.desde, i, sr)}  {canal}  salto  {v:5.1f}× lo normal · '
+            print(f'{tiempo(0, i, sr)}  {nombre_canal(c)}  salto  {v:5.1f}× lo normal · '
                   f'golpe {db:6.1f} dBFS · nivel alrededor {nivel:6.1f} dBFS')
         else:
-            ms = v * 1000 / sr
-            print(f'{tiempo(a.desde, i, sr)}  {canal}  {tipo}  {v} muestras ({ms:.2f} ms)')
+            print(f'{tiempo(0, i, sr)}  {nombre_canal(c)}  {tipo}  {v} muestras ({v * 1000 / sr:.2f} ms)')
     if len(todos) > 200:
         print(f'… y {len(todos) - 200} más')
     juntos = {}
@@ -156,6 +234,29 @@ def main():
         juntos.setdefault(round(h[1] / (sr / 1000)), set()).add(c)
     ambos = sum(1 for s in juntos.values() if len(s) > 1)
     print(f'{len(todos)} hallazgos · {ambos} en los dos canales a la vez (±1 ms)')
+    for u in unidas:
+        r = u[5]
+        print(f'Serie {tiempo(0, u[0], sr)}–{tiempo(0, u[1] + u[2], sr)}: {u[3]} golpes cada {u[2] * 1000 / sr:.2f} ms '
+              f'({"/".join(nombre_canal(c) for c in sorted(u[4]))}) · repetición {r:.3f}'
+              + (' → TARTAMUDEO: el mismo trozo repetido, la música original no está ahí' if r >= 0.98 else ''))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('archivos', nargs='+')
+    ap.add_argument('--desde', type=float, default=0)
+    ap.add_argument('--hasta', type=float, default=None)
+    ap.add_argument('--umbral', type=float, default=12, help='veces sobre lo normal para contar un salto')
+    ap.add_argument('--resumen', action='store_true', help='una línea por archivo (para revisar un álbum entero)')
+    a = ap.parse_args()
+    resumen = a.resumen or len(a.archivos) > 1
+    for ruta in a.archivos:
+        if not os.path.isfile(ruta) or ruta.lower().endswith(('.jpg', '.png', '.cue', '.log', '.txt', '.json')):
+            continue
+        try:
+            revisar(ruta, a.desde, a.hasta, a.umbral, resumen)
+        except subprocess.CalledProcessError:
+            print(f'{os.path.basename(ruta)}: no se pudo leer', flush=True)
 
 
 if __name__ == '__main__':
