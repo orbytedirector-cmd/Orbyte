@@ -27,7 +27,7 @@
   if (!RUTAS.length) { document.getElementById('tartamudeos').hidden = true; return; }
   const $ = id => document.getElementById(id);
   const VIVOS = ['en_cola', 'bajando', 'parchando', 'aplicando'];
-  let est = {revisiones: {}, en_cola: [], revisando: null, preparados: [], otras: []}, reloj = null;
+  let est = {revisiones: {}, en_cola: [], revisando: null, preparados: [], otras: []}, reloj = null, firma = '';
   const nombre = r => r.startsWith(CARPETA + '/') ? r.slice(CARPETA.length + 1) : r.split('/').pop();
   const fmt = s => { const m = Math.floor(s / 60); return `${m}:${(s - 60 * m).toFixed(3).padStart(6, '0').replace('.', ',')}`; };
   const num = x => String(x).replace('.', ',');
@@ -81,9 +81,17 @@
     const preps = est.preparados || [];
     const activo = (r, t) => preps.some(p => p.ruta === r && Math.abs(p.desde - t.desde) < 0.001 && Math.abs(p.hasta - t.hasta) < 0.001 && p.estado !== 'error');
     let html = '';
-    conT.forEach((r, i) => (revs[r].tramos || []).forEach((t, j) => {
+    // la lista se vuelve a dibujar solo si cambió lo que muestra (no por el % de avance), y nunca mientras eliges
+    // en una lista o escribes un tiempo: se perdería lo elegido (23-11-2026)
+    const nueva = JSON.stringify([revs, preps, est.otras, !!ocupado]);
+    const foco = document.activeElement;
+    if (nueva === firma || (foco && $('tt-lista').contains(foco) && ['SELECT', 'INPUT'].includes(foco.tagName))) return;
+    firma = nueva;
+    const guardado = {};
+    $('tt-lista').querySelectorAll('select[id], input[id]').forEach(e => { guardado[e.id] = e.value; });
+    conT.forEach(r => (revs[r].tramos || []).forEach((t, j) => {
       if (activo(r, t)) return;
-      const k = `${i}-${j}`;
+      const k = `${RUTAS.indexOf(r)}-${j}`;
       html += `<div class="tt-tramo"><div class="t">${esc(nombre(r))}</div>
         <div class="s"><span class="mal">Tartamudeo ${fmt(t.desde)}–${fmt(t.hasta)}</span> · ${t.golpes} golpes cada ${num(t.paso_ms)} ms · el audio se repite a sí mismo (${num((+t.repeticion).toFixed(3))})</div>
         <div class="ps-fila">${fuenteSel(`tt-f-${k}`)}
@@ -96,6 +104,10 @@
     if (errores.length) html += `<div class="s mal">No se pudo revisar: ${errores.map(r => `${esc(nombre(r))} (${esc(revs[r].error)})`).join('; ')}</div>`;
     if (revisadas.length && !conT.length && !preps.length && !ocupado) html += '<div class="sin-problemas">Sin tartamudeos en las pistas revisadas.</div>';
     $('tt-lista').innerHTML = html;
+    Object.entries(guardado).forEach(([id, v]) => {
+      const e = $(id);
+      if (e && (e.tagName !== 'SELECT' || [...e.options].some(o => o.value === v))) e.value = v;
+    });
     const sel = $('tt-m-pista');
     if (!sel.options.length) sel.innerHTML = RUTAS.map(r => `<option value="${esc(r)}">${esc(nombre(r))}</option>`).join('');
     const mano = document.querySelector('.tt-mano .ps-fila');
