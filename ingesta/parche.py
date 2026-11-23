@@ -39,7 +39,8 @@ log = logging.getLogger('ingesta.parche')
 CONTEXTO_S = 3.0
 FUNDIDO_MS = 5
 MAX_TRAMO_S = 2.0
-MINIMO_PARECIDO = 0.5
+MINIMO_PARECIDO = 0.3        # forma de onda hasta 4 kHz: otra masterización da 0,5–0,7; otra grabación, < 0,2
+AVISO_PARECIDO = 0.7
 VISTA_S = 20
 
 
@@ -79,9 +80,11 @@ def ncorr(u_pairs):
     return sxy / math.sqrt(sxx * syy) if sxx > 0 and syy > 0 else 0.0
 
 
-def mejor_lag(tpl, ref, lags, quitar_media=False, todos=False):
+def mejor_lag(tpl, ref, lags, quitar_media=False, todos=False, signo=None):
     """tpl: [(pos, valor)] de la pista; ref: lista de la otra copia. Lag l: tpl[pos] ~ ref[pos + l].
-    → (correlación, lag) del mejor; con todos=True, la lista [(correlación, lag)] de cada lag."""
+    → (correlación, lag) del mejor; con todos=True, la lista [(correlación, lag)] de cada lag.
+    Sin `signo` gana la mayor en valor absoluto; con signo (+1/−1, la polaridad ya decidida) gana la mayor con ese
+    signo: un bajo de 80 Hz da un pico invertido a medio período (6 ms) que no debe ganar."""
     if quitar_media:
         m = sum(v for _, v in tpl) / len(tpl)
         tpl = [(p, v - m) for p, v in tpl]
@@ -96,7 +99,7 @@ def mejor_lag(tpl, ref, lags, quitar_media=False, todos=False):
             par = [(a, b - mr) for a, b in par]
         c = ncorr(par)
         lista.append((c, l))
-        if abs(c) > abs(mejor[0]):
+        if (signo * c > signo * mejor[0] or mejor[1] is None) if signo else abs(c) > abs(mejor[0]):
             mejor = (c, l)
     return lista if todos else mejor
 
@@ -130,6 +133,9 @@ def parchar(pista, otra, desde, hasta, salida, buscar=10.0, tmpdir=None):
     tmp = tempfile.mkdtemp(prefix='parche-', dir=tmpdir)
     try:
         return _parchar(pista, otra, desde, hasta, salida, buscar, tmp, informe)
+    except Fallo as e:
+        e.lineas = informe['lineas']
+        raise
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -169,20 +175,20 @@ def _parchar(pista, otra, desde, hasta, salida, buscar, tmp, informe):
     for c, l in picos:
         cw, lw = mejor_lag(tpl_ambos, o8, range(l * paso - 3 * paso, l * paso + 3 * paso + 1))
         if lw is not None:
-            cand.append((abs(cw), c, lw))
+            cand.append((abs(cw), c, lw, cw))
     if not cand:
         raise Fallo('No se pudo alinear (¿es la misma canción?).')
-    _cw, c1, l1w = max(cand)
+    _a, c1, l1w, cw = max(cand)
+    # la polaridad es de la grabación entera: se decide una vez, con antes y después juntos
+    polaridad = -1.0 if cw < 0 else 1.0
     # ── 2) forma de onda a 8 kHz, antes y después por separado (±3 cuadros) ──
     lados = {'antes': (hueco[0] - 1.0, hueco[0] - 0.02), 'después': (hueco[1] + 0.02, hueco[1] + 1.0)}
     l8 = {}
     for lado, (t0, t1) in lados.items():
         tpl8 = [(i, v) for i, v in enumerate(p8) if t0 <= d0 + i / sr8 < t1]
-        l8[lado] = mejor_lag(tpl8, o8, range(l1w - paso, l1w + paso + 1))
+        l8[lado] = mejor_lag(tpl8, o8, range(l1w - paso, l1w + paso + 1), signo=polaridad)
         if l8[lado][1] is None:
             raise Fallo('No se pudo alinear la forma de onda.')
-    c2 = max((c for c, _ in l8.values()), key=abs)
-    polaridad = -1.0 if c2 < 0 else 1.0
     corr_s = {lado: l / sr8 + (max(0.0, o0) - d0) for lado, (_c, l) in l8.items()}   # t_otra = t_pista + corr_s
     informe['lineas'].append(f'envolvente {c1:.3f} · onda 8 kHz antes {abs(l8["antes"][0]):.3f} / después {abs(l8["después"][0]):.3f}'
           f' · la otra copia va {corr_s["antes"]:+.4f} s' + (' · polaridad invertida' if polaridad < 0 else ''))
@@ -216,18 +222,19 @@ def _parchar(pista, otra, desde, hasta, salida, buscar, tmp, informe):
         base = int(round((corr_s[lado] - cmin + marg) * sr))      # pp[i] ~ po[i + base]
         i0, i1 = int((t0 - v0) * sr), int((t1 - v0) * sr)
         tpl = [(i, sum(pp[c][i] for c in range(ch))) for i in range(i0, i1, 2)]
-        c, l = mejor_lag(tpl, suma, range(base - 4 * paso8, base + 4 * paso8 + 1))
+        c, l = mejor_lag(tpl, suma, range(base - 4 * paso8, base + 4 * paso8 + 1), signo=polaridad)
         if l is None:
             raise Fallo('No se pudo alinear a la frecuencia de la pista.')
         # fracción de muestra: parábola por la correlación en l-1, l, l+1
         cm, _ = mejor_lag(tpl, suma, [l - 1])
         cp, _ = mejor_lag(tpl, suma, [l + 1])
-        den = cm - 2 * c + cp
+        c_, cm, cp = polaridad * c, polaridad * cm, polaridad * cp
+        den = cm - 2 * c_ + cp
         frac = max(-0.5, min(0.5, 0.5 * (cm - cp) / den)) if den else 0.0
         res[lado] = (c, l + frac)
     (ca, la), (cd, ld) = res['antes'], res['después']
     corrido = ld - la
-    informe['lineas'].append(f'a {sr} Hz: antes {abs(ca):.4f} · después {abs(cd):.4f}'
+    informe['lineas'].append(f'a {sr} Hz: antes {polaridad * ca:+.4f} · después {polaridad * cd:+.4f}'
           + (f' · la pista tiene {abs(corrido) / sr * 1000:.2f} ms {"de más" if corrido < 0 else "de menos"} en el '
              f'tramo (el daño corrió el tiempo; se empalma a la mitad)' if abs(corrido) > 1 else ''))
     if abs(corrido) > 0.05 * sr:
@@ -262,12 +269,17 @@ def _parchar(pista, otra, desde, hasta, salida, buscar, tmp, informe):
         err = sum((pp[c][i] - g * polaridad * otra_en(c, i + lag)) ** 2 for i, lag in ctx())
         gan.append(g)
         informe['volumen_db'].append(round(20 * math.log10(abs(g)), 2))
-        informe['lineas'].append(f'canal {c + 1}: volumen ×{g:.4f} ({20 * math.log10(abs(g)):+.2f} dB) · parecido {cor:.3f} · '
+        informe['lineas'].append(f'canal {c + 1}: volumen ×{g:.4f} ({20 * math.log10(abs(g)):+.2f} dB) · parecido a toda frecuencia {cor:.3f} · '
               f'diferencia {10 * math.log10(err / sxx + 1e-20):.1f} dB bajo la música')
-    informe.update(parecido=round(peor, 3), corrimiento_ms=round(corrido / sr * 1000, 2))
-    if peor < MINIMO_PARECIDO:
-        raise Fallo(f'Las copias casi no se parecen (parecido {peor:.2f}): no es la misma grabación, no se parcha.')
-    if peor < 0.9:
+    # «parecido»: la forma de onda hasta 4 kHz (a 8 kHz), con la polaridad decidida, el peor de antes y después.
+    # A toda frecuencia dos masterizaciones distintas se parecen mucho menos (agudos, fase del EQ) aunque sea la
+    # misma grabación; eso queda en las líneas de cada canal.
+    parecido = min(polaridad * l8['antes'][0], polaridad * l8['después'][0])
+    informe.update(parecido=round(parecido, 3), parecido_completo=round(peor, 3),
+                   corrimiento_ms=round(corrido / sr * 1000, 2))
+    if parecido < MINIMO_PARECIDO:
+        raise Fallo(f'Las copias casi no se parecen (parecido {parecido:.2f}): no es la misma grabación, no se parcha.')
+    if parecido < AVISO_PARECIDO:
         informe['aviso'] = 'Las copias se parecen poco (otra masterización o mezcla): escucha bien antes de aplicar.'
 
     # ── parche sobre el PCM exacto de la pista ──

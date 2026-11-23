@@ -30,6 +30,8 @@ def main():
         inf = parche.parchar(os.path.abspath(a.pista), os.path.abspath(a.otra), a.desde, a.hasta, salida,
                              buscar=a.buscar, tmpdir=os.path.abspath(a.carpeta))
     except parche.Fallo as e:
+        for linea in getattr(e, 'lineas', []):
+            print(f'  {linea}')
         raise SystemExit(str(e))
     for linea in inf['lineas']:
         print(f'  {linea}')
