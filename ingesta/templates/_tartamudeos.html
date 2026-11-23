@@ -1,0 +1,160 @@
+{# Panel «Tartamudeos» de una ficha (23-11-2026): buscar a pedido los tramos donde el audio se repite a sí mismo
+   (la música original no está en el archivo) y reemplazarlos con el mismo tramo de otra copia (Tidal u otra pista),
+   alineado y convertido a los bits y la frecuencia de la pista. Ver ingesta/parche.py.
+   Variables: tt_rutas (rutas de las pistas del álbum), tt_carpeta (carpeta del álbum, para mostrar nombres). #}
+<section class="seccion" id="tartamudeos">
+  <h2 class="rotulo">Tartamudeos <span class="cuenta" id="tt-cuenta"></span></h2>
+  <div class="panel tt-panel">
+    <div class="s tenue">Un tartamudeo es un trozo de pocos milisegundos que el conversor o el reproductor repitió una y otra vez al crear el archivo: suena como un zumbido o un raspado y la música original no está ahí, así que Sanear no sirve. Se reemplaza solo ese tramo con el mismo tramo de otra copia (Tidal u otra pista), alineado a la muestra y convertido a los bits y la frecuencia de la pista; el resto queda idéntico y el original va a «.orbyte-respaldo».</div>
+    <div class="acciones" style="margin:0"><button class="btn" id="tt-buscar"></button><span class="s" id="tt-progreso"></span></div>
+    <div id="tt-lista" class="tt-lista"></div>
+    <details class="tt-mano">
+      <summary>Agregar un tramo a mano</summary>
+      <div class="ps-fila" style="margin-top:.6rem">
+        <label class="ps-campo ps-ancho">Pista<select id="tt-m-pista"></select></label>
+        <label class="ps-campo tt-t">Desde<input id="tt-m-desde" placeholder="0:32,74"></label>
+        <label class="ps-campo tt-t">Hasta<input id="tt-m-hasta" placeholder="0:33,19"></label>
+        <button class="btn" id="tt-m-ir">Preparar parche</button>
+      </div>
+      <div class="s tenue" style="margin-top:.35rem">Hasta 2 s, con 3 s de audio sano antes y después. Deja un margen de unos 20 ms a cada lado del daño.</div>
+    </details>
+  </div>
+</section>
+<script>
+(function () {
+  const RUTAS = {{ (tt_rutas or [])|list|tojson }}.filter(r => r.toLowerCase().endsWith('.flac'));
+  const CARPETA = {{ (tt_carpeta or '')|tojson }};
+  if (!RUTAS.length) { document.getElementById('tartamudeos').hidden = true; return; }
+  const $ = id => document.getElementById(id);
+  const VIVOS = ['en_cola', 'bajando', 'parchando', 'aplicando'];
+  let est = {revisiones: {}, en_cola: [], revisando: null, preparados: [], otras: []}, reloj = null;
+  const nombre = r => r.startsWith(CARPETA + '/') ? r.slice(CARPETA.length + 1) : r.split('/').pop();
+  const fmt = s => { const m = Math.floor(s / 60); return `${m}:${(s - 60 * m).toFixed(3).padStart(6, '0').replace('.', ',')}`; };
+  const num = x => String(x).replace('.', ',');
+  function leerT(txt) {
+    const t = String(txt || '').trim().replace(',', '.');
+    const m = t.match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+    return m ? (m[1] ? +m[1] * 60 : 0) + +m[2] : NaN;
+  }
+  function fuenteSel(id) {
+    return `<label class="ps-campo ps-ancho">Otra copia<select id="${id}"><option value="tidal">Tidal: la misma pista (por ISRC, o título y duración)</option>
+      ${est.otras.map(o => `<option value="${esc(o.ruta)}">Pista suelta de la Bandeja: ${esc(o.nombre)}</option>`).join('')}</select></label>`;
+  }
+  function estadoPrep(p) {
+    const inf = p.informe || {};
+    const fu = inf.fuente || {};
+    const de = p.fuente === 'tidal' ? (fu.album ? `Tidal · «${esc(fu.titulo || '')}» de ${esc(fu.album)}${fu.hires ? ' (Hi-Res)' : ''} · encontrada por ${esc(fu.por || '')}` : 'Tidal')
+      : `otra copia · ${esc(fu.archivo || (p.otra || '').split('/').pop())}`;
+    const cab = `<div class="t">${esc(nombre(p.ruta))} · ${fmt(p.desde)}–${fmt(p.hasta)}</div><div class="s tenue">${de}</div>`;
+    if (p.estado === 'en_cola') return cab + '<div class="s med">En cola…</div>';
+    if (p.estado === 'bajando') return cab + '<div class="s med">Bajando la pista de Tidal…</div>';
+    if (p.estado === 'parchando') return cab + '<div class="s med">Alineando y parchando (la pista se decodifica completa: 1–2 min a 192 kHz)…</div>';
+    if (p.estado === 'aplicando') return cab + '<div class="s med">Aplicando: el original va a .orbyte-respaldo y la parchada toma su lugar…</div>';
+    if (p.estado === 'error') return cab + `<div class="s mal">✗ ${esc(p.error || 'No se pudo')}</div>
+      <div class="acciones" style="margin:0"><button class="btn chico" data-tt-desc="${p.token}">Quitar</button></div>`;
+    if (p.estado === 'aplicado') return cab + `<div class="s ok">✓ Parche aplicado. El original quedó en ${esc((inf.respaldo || '').split('/').slice(-2).join('/'))} (se restaura o se borra en Salud → Espacio).</div>
+      <div class="acciones" style="margin:0"><button class="btn chico" data-tt-desc="${p.token}">Ocultar</button></div>`;
+    const v = inf.vista || {};
+    const vol = (inf.volumen_db || []).map(x => `${x > 0 ? '+' : ''}${num(x)} dB`).join(' / ');
+    const corr = Math.abs(inf.corrimiento_ms || 0) > 0.01 ? ` · el daño corrió el tiempo ${num(Math.abs(inf.corrimiento_ms))} ms (se empalma a la mitad)` : '';
+    const reprod = cual => `<div class="tt-escuchar"><div class="s">${cual === 'original' ? 'Original (con el daño)' : 'Parchada'}</div>
+      <audio controls preload="none" src="/api/parche/${p.token}/vista/${cual}" data-tt-audio="${cual}"></audio>
+      <button class="btn chico" data-tt-ir="${p.token}|${cual}" title="Salta a 3 s antes del tramo">▶ Desde el tramo</button></div>`;
+    return cab + `<div class="s">Parecido entre las copias <b>${num(inf.parecido)}</b> · volumen de la otra copia ${vol}${corr} · se reemplazan ${inf.ms} ms + ${inf.fundido_ms} ms de fundido a cada lado (${inf.bits} bit / ${num((inf.sr || 0) / 1000)} kHz, como la pista)</div>
+      ${inf.aviso ? `<div class="s med">⚠ ${esc(inf.aviso)}</div>` : ''}
+      ${p.vistas ? `<div class="s tenue">${v.inicio !== undefined ? `20 s alrededor del tramo (empieza en ${fmt(v.inicio)}; el tramo está en ${num(v.tramo_en.toFixed(1))}–${num(v.tramo_hasta.toFixed(1))} s del reproductor), en FLAC 24 bit para el navegador.` : ''}</div>
+        <div class="tt-vistas">${reprod('original')}${reprod('parchada')}</div>` : ''}
+      <div class="acciones" style="margin:0"><button class="btn chico oro" data-tt-apl="${p.token}">Aplicar el parche</button>
+        <button class="btn chico" data-tt-desc="${p.token}">Descartar</button></div>`;
+  }
+  function pintar() {
+    const revs = est.revisiones || {};
+    const revisadas = RUTAS.filter(r => revs[r]);
+    const conT = RUTAS.filter(r => (revs[r] || {}).tramos && revs[r].tramos.length);
+    const ocupado = est.revisando || (est.en_cola || []).length;
+    const b = $('tt-buscar');
+    b.disabled = !!ocupado;
+    b.textContent = revisadas.length ? `Volver a buscar tartamudeos (${RUTAS.length} pista${RUTAS.length === 1 ? '' : 's'})` : `Buscar tartamudeos en el álbum (${RUTAS.length} pista${RUTAS.length === 1 ? '' : 's'} FLAC)`;
+    $('tt-cuenta').textContent = revisadas.length ? `${conT.length ? `${conT.length} pista${conT.length === 1 ? '' : 's'} con tartamudeos` : 'ninguno'} · ${revisadas.length} de ${RUTAS.length} revisadas` : '';
+    $('tt-progreso').innerHTML = est.revisando ? ` <span class="med">Revisando «${esc(nombre(est.revisando.ruta))}» ${Math.round((est.revisando.avance || 0) * 100)} %</span>`
+      + ((est.en_cola || []).length ? ` <span class="tenue">· ${est.en_cola.length} en cola</span>` : '') : (est.en_cola || []).length ? ` <span class="tenue">${est.en_cola.length} en cola</span>` : '';
+    const preps = est.preparados || [];
+    const activo = (r, t) => preps.some(p => p.ruta === r && Math.abs(p.desde - t.desde) < 0.001 && Math.abs(p.hasta - t.hasta) < 0.001 && p.estado !== 'error');
+    let html = '';
+    conT.forEach((r, i) => (revs[r].tramos || []).forEach((t, j) => {
+      if (activo(r, t)) return;
+      const k = `${i}-${j}`;
+      html += `<div class="tt-tramo"><div class="t">${esc(nombre(r))}</div>
+        <div class="s"><span class="mal">Tartamudeo ${fmt(t.desde)}–${fmt(t.hasta)}</span> · ${t.golpes} golpes cada ${num(t.paso_ms)} ms · el audio se repite a sí mismo (${num((+t.repeticion).toFixed(3))})</div>
+        <div class="ps-fila">${fuenteSel(`tt-f-${k}`)}
+          <label class="ps-campo tt-t">Desde<input id="tt-d-${k}" value="${fmt(t.desde)}"></label>
+          <label class="ps-campo tt-t">Hasta<input id="tt-h-${k}" value="${fmt(t.hasta)}"></label>
+          <button class="btn oro" data-tt-prep="${esc(r)}" data-k="${k}">Preparar parche</button></div></div>`;
+    }));
+    html += preps.map(p => `<div class="tt-tramo${p.estado === 'listo' ? ' listo' : ''}">${estadoPrep(p)}</div>`).join('');
+    const errores = RUTAS.filter(r => (revs[r] || {}).error);
+    if (errores.length) html += `<div class="s mal">No se pudo revisar: ${errores.map(r => `${esc(nombre(r))} (${esc(revs[r].error)})`).join('; ')}</div>`;
+    if (revisadas.length && !conT.length && !preps.length && !ocupado) html += '<div class="sin-problemas">Sin tartamudeos en las pistas revisadas.</div>';
+    $('tt-lista').innerHTML = html;
+    const sel = $('tt-m-pista');
+    if (!sel.options.length) sel.innerHTML = RUTAS.map(r => `<option value="${esc(r)}">${esc(nombre(r))}</option>`).join('');
+    const mano = document.querySelector('.tt-mano .ps-fila');
+    if (!$('tt-m-fuente')) mano.insertAdjacentHTML('afterbegin', fuenteSel('tt-m-fuente'));
+    $('tt-lista').querySelectorAll('[data-tt-prep]').forEach(b => b.onclick = () => {
+      const k = b.dataset.k;
+      preparar(b.dataset.ttPrep, $(`tt-d-${k}`).value, $(`tt-h-${k}`).value, $(`tt-f-${k}`).value, b);
+    });
+    $('tt-lista').querySelectorAll('[data-tt-apl]').forEach(b => b.onclick = async () => {
+      if (!b.dataset.seguro) { b.dataset.seguro = '1'; b.textContent = '¿Seguro? Reemplazar la pista'; return; }
+      b.disabled = true;
+      const r = await post(`/api/parche/${b.dataset.ttApl}/aplicar`, {});
+      if (!r || !r.ok) toast('No se pudo aplicar', (r && r.error) || '');
+      cargar();
+    });
+    $('tt-lista').querySelectorAll('[data-tt-desc]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      const r = await post(`/api/parche/${b.dataset.ttDesc}/descartar`, {});
+      if (!r || !r.ok) toast('No se pudo', (r && r.error) || '');
+      cargar();
+    });
+    $('tt-lista').querySelectorAll('[data-tt-ir]').forEach(b => b.onclick = () => {
+      const [tok, cual] = b.dataset.ttIr.split('|');
+      const p = preps.find(x => x.token === tok);
+      const au = b.parentElement.querySelector('audio');
+      document.querySelectorAll('#tt-lista audio').forEach(a => { if (a !== au) a.pause(); });
+      const ir = () => { au.currentTime = Math.max(0, ((p.informe || {}).vista || {}).tramo_en - 3 || 0); au.play(); };
+      if (au.readyState >= 1) ir(); else { au.preload = 'auto'; au.addEventListener('loadedmetadata', ir, {once: true}); au.load(); }
+    });
+    $('tt-lista').querySelectorAll('audio').forEach(a => a.onplay = () =>
+      document.querySelectorAll('#tt-lista audio').forEach(o => { if (o !== a) o.pause(); }));
+  }
+  async function preparar(ruta, d, h, fuente, b) {
+    const desde = leerT(d), hasta = leerT(h);
+    if (!(hasta > desde)) { toast('Tramo inválido', 'Escribe los tiempos como 0:32,74 o 32,74'); return; }
+    if (b) b.disabled = true;
+    const datos = {ruta, desde, hasta, fuente: fuente === 'tidal' ? 'tidal' : 'archivo', otra: fuente === 'tidal' ? null : fuente};
+    const r = await post('/api/parche/preparar', datos);
+    if (!r || !r.ok) { toast('No se pudo', (r && r.error) || ''); if (b) b.disabled = false; return; }
+    cargar();
+  }
+  async function cargar() {
+    clearTimeout(reloj);
+    let r;
+    try { r = await post('/api/parche/estado', {rutas: RUTAS}); } catch (e) { reloj = setTimeout(cargar, 8000); return; }
+    if (!r || !r.ok) return;
+    const tocando = [...document.querySelectorAll('#tt-lista audio')].some(a => !a.paused);
+    est = r;
+    if (!tocando) pintar();            // mientras suena una vista previa no se repinta (se cortaría)
+    const vivo = est.revisando || (est.en_cola || []).length || (est.preparados || []).some(p => VIVOS.includes(p.estado));
+    if (vivo || tocando) reloj = setTimeout(cargar, vivo ? 3000 : 6000);
+  }
+  $('tt-buscar').onclick = async () => {
+    $('tt-buscar').disabled = true;
+    const r = await post('/api/parche/detectar', {rutas: RUTAS});
+    if (!r || !r.ok) { toast('No se pudo', (r && r.error) || ''); $('tt-buscar').disabled = false; return; }
+    cargar();
+  };
+  $('tt-m-ir').onclick = () => preparar($('tt-m-pista').value, $('tt-m-desde').value, $('tt-m-hasta').value, $('tt-m-fuente').value, $('tt-m-ir'));
+  document.addEventListener('DOMContentLoaded', cargar);
+})();
+</script>

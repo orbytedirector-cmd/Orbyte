@@ -57,6 +57,7 @@ from . import calidad as calidad_mod
 from . import reparar as reparar_mod
 from . import papelera as papelera_mod
 from . import eliminar as eliminar_mod
+from . import parche as parche_mod
 import threading
 import traceback
 
@@ -110,6 +111,7 @@ def _ingesta_ocupada():
 
 salud = salud_mod.Salud(DATOS, almacen.ajustes, _ingesta_ocupada, almacen.avisar)
 saneador = salud_mod.Saneador(salud, DATOS, REPO)
+parchador = parche_mod.Parchador(DATOS, REPO, almacen.ajustes)
 papelera = papelera_mod.Papelera(DATOS)
 
 
@@ -2222,6 +2224,25 @@ def api_salud_espacio():
                    papelera=pap, bytes_papelera=sum(x['bytes'] or 0 for x in pap), papelera_horas=horas)
 
 
+@app.route('/api/salud/espacio/originales/restaurar', methods=['POST'])
+def api_salud_restaurar_original():
+    """Devuelve a su lugar el original que dejó Sanear o Parchar (pisa la versión saneada o parchada)."""
+    d = request.get_json(silent=True) or {}
+    try:
+        ruta = salud.restaurar_original(str(d.get('respaldo') or ''))
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 409
+    carpeta = analisis.carpeta_album(os.path.dirname(ruta))
+    aid = almacen.fila_de_ruta(carpeta)
+    almacen.anotar(aid, carpeta, 'parche', f'«{os.path.basename(ruta)}»: se restauró el original (Salud → Espacio)')
+    a = almacen.album(aid) if aid else None
+    if a and _editable(a):
+        _requeue(aid)
+    else:
+        saneador.revisar([ruta])
+    return jsonify(ok=True, ruta=ruta)
+
+
 @app.route('/api/salud/espacio/originales/borrar', methods=['POST'])
 def api_salud_borrar_originales():
     """«Borrar los originales ya saneados»: todos, o los de `respaldos` (rutas dentro de .orbyte-respaldo/)."""
@@ -2593,6 +2614,112 @@ def api_ficha_revisar():
     if rutas:
         saneador.revisar(rutas)
     return jsonify(ok=True, n=len(rutas))
+
+
+# ─────────────────────────── ficha: tartamudeos y Parchar (23-11-2026) ───────────────────────────
+
+def _fmt_t(s):
+    m = int(s // 60)
+    return f'{m}:{s - 60 * m:06.3f}'.replace('.', ',')
+
+
+def _al_parchar(ruta, respaldo, f):
+    """Tras reemplazar una pista con su versión parchada: el original queda en Salud → Espacio, se anota en el
+    historial del álbum y Salud la vuelve a revisar; en la Bandeja el álbum se vuelve a revisar."""
+    salud.registrar_original(ruta, respaldo)
+    carpeta = analisis.carpeta_album(os.path.dirname(ruta))
+    inf = f.get('informe') or {}
+    fu = inf.get('fuente') or {}
+    de = (f'Tidal ({fu.get("album") or "?"}{", Hi-Res" if fu.get("hires") else ""}; por {fu.get("por")})'
+          if f['fuente'] == 'tidal' else f'otra copia ({fu.get("archivo") or "?"})')
+    resumen = (f'Parche en «{os.path.basename(ruta)}» {_fmt_t(f["desde"])}–{_fmt_t(f["hasta"])} con {de} · '
+               f'parecido {str(inf.get("parecido")).replace(".", ",")}; el original quedó en {os.path.basename(os.path.dirname(respaldo))}/')
+    aid = almacen.fila_de_ruta(carpeta)
+    almacen.anotar(aid, carpeta, 'parche', resumen, de)
+    a = almacen.album(aid) if aid else None
+    if a and _editable(a):
+        almacen.registrar(aid, 'Parchar terminó: se vuelve a revisar')
+        _requeue(aid)
+    else:
+        saneador.revisar([ruta])
+
+
+parchador.al_aplicar = _al_parchar
+
+
+def _otras_copias():
+    """Pistas sueltas de la Bandeja (FLAC): candidatas a «otra copia» para parchar."""
+    entrada = (almacen.ajustes().get('carpeta_entrada') or '').rstrip('/')
+    base = os.path.join(entrada, pistas_mod.CARPETA) if entrada else ''
+    out = []
+    if base and os.path.isdir(base):
+        for d in sorted(os.listdir(base)):
+            for a in sorted(tienda_mod._audios(os.path.join(base, d))):
+                if a.lower().endswith('.flac') and not os.path.basename(a).startswith('.'):
+                    out.append({'ruta': a, 'nombre': d})
+    return out
+
+
+@app.route('/api/parche/estado', methods=['POST'])
+def api_parche_estado():
+    d = request.get_json(silent=True) or {}
+    rutas = [r for r in _rutas_tocables(d.get('rutas')) if r.lower().endswith('.flac')]
+    return jsonify(ok=True, otras=_otras_copias(), **parchador.estado(rutas))
+
+
+@app.route('/api/parche/detectar', methods=['POST'])
+def api_parche_detectar():
+    d = request.get_json(silent=True) or {}
+    rutas = [r for r in _rutas_tocables(d.get('rutas')) if r.lower().endswith('.flac')]
+    if not rutas:
+        return jsonify(ok=False, error='No hay pistas FLAC que revisar'), 400
+    parchador.detectar(rutas)
+    return jsonify(ok=True, n=len(rutas))
+
+
+@app.route('/api/parche/preparar', methods=['POST'])
+def api_parche_preparar():
+    d = request.get_json(silent=True) or {}
+    rutas = _rutas_tocables([d.get('ruta')])
+    if not rutas or not rutas[0].lower().endswith('.flac'):
+        return jsonify(ok=False, error='Solo se parchan pistas FLAC de la biblioteca o de la entrada'), 400
+    otra = None
+    if d.get('fuente') == 'archivo':
+        otras = _rutas_tocables([d.get('otra')])
+        if not otras or os.path.realpath(otras[0]) == os.path.realpath(rutas[0]):
+            return jsonify(ok=False, error='Elige otra copia (una pista de la Bandeja o de la biblioteca)'), 400
+        otra = otras[0]
+    try:
+        token = parchador.preparar(rutas[0], d.get('desde'), d.get('hasta'), d.get('fuente'), otra)
+    except (parche_mod.Fallo, TypeError, ValueError) as e:
+        return jsonify(ok=False, error=str(e) or 'Tramo inválido'), 400
+    return jsonify(ok=True, token=token)
+
+
+@app.route('/api/parche/<token>/aplicar', methods=['POST'])
+def api_parche_aplicar(token):
+    try:
+        parchador.aplicar(token)
+    except parche_mod.Fallo as e:
+        return jsonify(ok=False, error=str(e)), 409
+    return jsonify(ok=True)
+
+
+@app.route('/api/parche/<token>/descartar', methods=['POST'])
+def api_parche_descartar(token):
+    try:
+        parchador.descartar(token)
+    except parche_mod.Fallo as e:
+        return jsonify(ok=False, error=str(e)), 409
+    return jsonify(ok=True)
+
+
+@app.route('/api/parche/<token>/vista/<cual>')
+def api_parche_vista(token, cual):
+    p = parchador.archivo(token, cual)
+    if not p:
+        abort(404)
+    return send_file(p, mimetype='audio/flac', conditional=True, max_age=0)
 
 
 @app.route('/api/papelera/<int:eid>/restaurar', methods=['POST'])

@@ -344,8 +344,11 @@
   {% set pd_pistas = [] %}
   {% for disco in r.discos or [] %}{% for p in disco.pistas if p.legible and not p.decodifica and not p.error_por_id3 and not p.imagen_cue and not (p.error_completo and p.dsf_irregular) %}{% set _ = pd_pistas.append({'ruta': a.ruta ~ '/' ~ p.archivo, 'archivo': p.archivo, 'titulo': p.titulo or p.tags.titulo, 'estado': 'errores' if p.error_completo else 'danada', 'errores': (p.errores or [])[:2]}) %}{% endfor %}{% endfor %}
   {% with pd_modo='bandeja', pd_aid=a.id, pd_artista=r.artista, pd_album=r.album %}{% include '_panel_danadas.html' %}{% endwith %}
+  {% set tt_rutas = [] %}{% for disco in r.discos or [] %}{% for p in disco.pistas if p.legible and not p.imagen_cue %}{% set _ = tt_rutas.append(a.ruta ~ '/' ~ p.archivo) %}{% endfor %}{% endfor %}
+  {% with tt_carpeta=a.ruta %}{% include '_tartamudeos.html' %}{% endwith %}
 {% elif lib and a.estado in ('completado', 'error_metadata') %}
   {% with pd_modo='biblioteca', pd_aid=a.id, pd_carpeta=(a.ubicado_en or a.ruta), pd_todas=(lib.plan|map(attribute='clave')|map('prepend_ruta', a.ubicado_en or a.ruta)|list), pd_artista=lib.tags_album.artista, pd_album=lib.tags_album.album %}{% include '_panel_danadas.html' %}{% endwith %}
+  {% with tt_carpeta=(a.ubicado_en or a.ruta), tt_rutas=(lib.plan|map(attribute='clave')|map('prepend_ruta', a.ubicado_en or a.ruta)|list) %}{% include '_tartamudeos.html' %}{% endwith %}
 {% endif %}
 <section class="seccion">
   <h2 class="rotulo">Pistas <span class="cuenta">{{ r.n_archivos_audio }} archivo{{ 's' if r.n_archivos_audio != 1 }} de audio</span></h2>
