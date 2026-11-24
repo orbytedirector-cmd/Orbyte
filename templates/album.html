@@ -198,6 +198,10 @@
       </span>
       <span class="track-title">
         <button class="track-title-btn" onclick="showTrackInfo({{ track.id }})">{{ track.title }}</button>
+        {# 23-11-2026: en un recopilatorio cada pista dice su intérprete (texto chico, debajo del título) #}
+        {% if track.artist and (track.artist|trim|lower) != ((album.artist_name or '')|trim|lower) %}
+        <span class="track-performer">{{ track.artist|trim }}</span>
+        {% endif %}
         {% if track.meta_mood %}
         <span class="tl-mood-chip" title="Mood: estado de ánimo">🎭 {{ MOOD_LABELS.get(track.meta_mood, track.meta_mood) }}</span>
         {% endif %}
@@ -281,6 +285,8 @@
   vertical-align: middle;
 }
 .album-artist-page-link { color:var(--accent); text-decoration:none; }
+.track-performer { display:block; font-size:0.72rem; color:var(--text-muted); line-height:1.25; margin-top:0.1rem;
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .album-artist-page-link:hover { text-decoration:underline; }
 
 .album-tracklist-title {

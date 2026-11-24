@@ -2840,6 +2840,22 @@ def api_v1_home_facets():
     finally:
         conn.close()
 
+def _interpretes_album(conn, tracks, album_artist_name, album_artist_id):
+    """23-11-2026 · intérprete de cada pista de un álbum (recopilatorios: «Various Artists» es el artista del álbum,
+    cada pista trae el suyo): {track_id: (nombre, artist_id)}. Sin intérprete propio queda el del álbum; el id es
+    el de su página en la biblioteca si la tiene, si no el del álbum."""
+    nombres = {(t['artist'] or '').strip() for t in tracks} - {''}
+    ids = {}
+    for n in nombres:
+        r = conn.execute('SELECT id FROM artists WHERE name = ? COLLATE NOCASE LIMIT 1', (n,)).fetchone()
+        ids[n.lower()] = r['id'] if r else None
+    out = {}
+    for t in tracks:
+        n = (t['artist'] or '').strip()
+        out[t['id']] = (n, ids.get(n.lower()) or album_artist_id) if n else (album_artist_name, album_artist_id)
+    return out
+
+
 @app.route('/api/v1/albums/<int:album_id>/tracks')
 @api_login_required
 def api_v1_album_tracks(album_id):
@@ -2847,7 +2863,8 @@ def api_v1_album_tracks(album_id):
     token en vez de cookie de sesión."""
     conn = get_db_connection()
     try:
-        alb = conn.execute('SELECT name, cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        alb = conn.execute('SELECT al.name, al.cover_path, al.artist_id, ar.name AS artist_name FROM albums al '
+                           'LEFT JOIN artists ar ON ar.id = al.artist_id WHERE al.id=?', (album_id,)).fetchone()
         album_cover     = clean_db_path(alb['cover_path']) if alb else None
         album_artist_id = alb['artist_id'] if alb else None
         album_name      = alb['name'] if alb else None
@@ -2855,6 +2872,7 @@ def api_v1_album_tracks(album_id):
             'SELECT * FROM tracks WHERE album_id=? ORDER BY CAST(disc_number AS INTEGER), CAST(track_number AS INTEGER)',
             (album_id,)
         ).fetchall()
+        interpretes = _interpretes_album(conn, tracks, alb['artist_name'] if alb else None, album_artist_id)
         result = []
         for t in tracks:
             d = dict(t)
@@ -2868,7 +2886,8 @@ def api_v1_album_tracks(album_id):
                 'duration_fmt': _fmt_seconds(d.get('duration')),
                 'format_display': fmt,
                 'format_color': led,
-                'artist_id': album_artist_id,
+                'artist_id': interpretes[d['id']][1],
+                'artist_name': interpretes[d['id']][0],
                 'album_name': album_name,
                 'cover_url': cover_url_filter(album_cover),
                 'stream_url': f'/api/v1/stream/{d["id"]}',
@@ -3106,7 +3125,7 @@ def api_v1_favorites_detailed():
             # pop_score (no se muestran en esta lista).
             rows = conn.execute(
                 '''SELECT uif.added_at, t.*, a.name as album_name, a.cover_path,
-                          a.year as album_year, ar.id as artist_id, ar.name as artist_name
+                          a.year as album_year, COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
                    FROM user_item_favorites uif
                    JOIN tracks t ON t.id = uif.item_id
                    LEFT JOIN albums a ON a.id = t.album_id
@@ -3299,7 +3318,7 @@ def api_v1_playlist_detail(playlist_id):
         cache = {}
         rows = conn.execute('''
             SELECT t.*, pt.position, pt.added_by AS pt_added_by, al.name as album_name, al.year as album_year,
-                   al.cover_path, al.artist_id, ar.name as artist_name,
+                   al.cover_path, COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), al.artist_id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name,
                    COALESCE(tm.genre_primary, t.genre) as genre_primary,
                    tm.mood, tm.tema_lirico
             FROM playlist_tracks pt
@@ -3742,6 +3761,7 @@ def api_v1_album_detail(album_id):
         album_meta = {**_AM_DEFAULTS, **(dict(am) if am else {})}
 
         track_list = []
+        interpretes = _interpretes_album(conn, tracks, alb.get('artist_name'), alb.get('artist_id'))
         for t in tracks:
             d = dict(t)
             fmt, led = _fmt_format(d)
@@ -3750,7 +3770,8 @@ def api_v1_album_detail(album_id):
                 'track_number': d.get('track_number'), 'disc_number': d.get('disc_number'),
                 'duration': d.get('duration'), 'duration_fmt': _fmt_seconds(d.get('duration')),
                 'format_display': fmt, 'format_color': led,
-                'artist_id': alb.get('artist_id'), 'album_name': alb.get('name'),
+                'artist_id': interpretes[d['id']][1], 'artist_name': interpretes[d['id']][0],
+                'album_name': alb.get('name'),
                 'cover_url': alb['cover_url'],
                 'stream_url': f'/api/v1/stream/{d["id"]}',
                 'is_dsd': d.get('is_dsd'),
@@ -3837,7 +3858,7 @@ def api_v1_track_detail(track_id):
     conn = get_db_connection()
     try:
         t = conn.execute('''
-            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
             FROM tracks t
             LEFT JOIN albums a ON t.album_id=a.id
             LEFT JOIN artists ar ON a.artist_id=ar.id
@@ -4437,7 +4458,7 @@ def api_v1_alexa_track(track_id):
         if not user or not user['is_approved']:
             return jsonify({'error': 'not_authenticated'}), 401
         t = conn.execute('''
-            SELECT t.id, t.title, ar.name as artist_name, a.name as album_name, a.cover_path
+            SELECT t.id, t.title, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name, a.name as album_name, a.cover_path
             FROM tracks t
             LEFT JOIN albums a ON t.album_id=a.id
             LEFT JOIN artists ar ON a.artist_id=ar.id
@@ -4596,7 +4617,7 @@ def api_v1_search():
                       t.bit_depth, t.is_mqa, t.file_path,
                       t.codec, t.bitrate, t.compression_mode, t.duration, t.sample_rate_real,
                       a.id as album_id, a.name as album_name, a.cover_path,
-                      ar.id as artist_id, ar.name as artist_name,
+                      COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name,
                       tm.mood as meta_mood, tm.momento as meta_momento, tm.tier as meta_tier
                FROM tracks t
                LEFT JOIN albums a ON t.album_id=a.id
@@ -5683,7 +5704,7 @@ def _collab_entregar(conn, sess, items):
     ids = [it['track_id'] for it in items]
     rows = conn.execute(
         f'''SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
-                   al.artist_id, ar.name as artist_name
+                   COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), al.artist_id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
             FROM tracks t
             LEFT JOIN albums al ON t.album_id=al.id
             LEFT JOIN artists ar ON al.artist_id=ar.id
@@ -6448,7 +6469,7 @@ def _collab_pistas_detalle(conn, sess, ids):
         f'''SELECT t.id, t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
                    t.is_mqa, t.codec, t.bitrate, t.compression_mode, t.sample_rate_real, t.genre,
                    al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
-                   ar.id AS artist_id, ar.name AS artist_name
+                   COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) AS artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END AS artist_name
             FROM tracks t
             LEFT JOIN albums al ON al.id = t.album_id
             LEFT JOIN artists ar ON ar.id = al.artist_id
@@ -6651,7 +6672,7 @@ def _collab_items_sesion(conn, sess):
                   t.title, t.duration, t.led_color, t.is_dsd, t.dsd_rate, t.bit_depth,
                   t.is_mqa, t.codec, t.bitrate, t.compression_mode, t.sample_rate_real,
                   al.id AS album_id, al.name AS album_name, al.cover_path, al.year AS album_year,
-                  ar.id AS artist_id, ar.name AS artist_name,
+                  COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) AS artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END AS artist_name,
                   cp.name, cp.avatar_category, cp.avatar_file, cp.device_key, cp.user_id,
                   u.nickname AS u_nickname, u.avatar AS u_avatar, u.email AS u_email
            FROM collab_queue_items cqi
@@ -7826,7 +7847,7 @@ def track(track_id):
     conn = get_db_connection()
     try:
         t = conn.execute('''
-            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
             FROM tracks t
             LEFT JOIN albums a ON t.album_id=a.id
             LEFT JOIN artists ar ON a.artist_id=ar.id
@@ -8543,7 +8564,7 @@ def _api_search_advanced_payload(args, page_size=None):
             offset = (page - 1) * effective_page_size
             data_sql = f'''SELECT t.*, al.id as album_id, al.name as album_name,
                                   al.year as album_year, al.cover_path,
-                                  ar.id as artist_id, ar.name as artist_name,
+                                  COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name,
                                   tm.mood, tm.momento, tm.era, tm.tema_lirico, tm.idioma,
                                   tm.genre_primary, tm.genre_secondary, tm.bpm, tm.energy,
                                   tm.bailabilidad, tm.tier, COALESCE(tpc.pop_score,0) as pop_score
@@ -8957,7 +8978,7 @@ def api_track(track_id):
     conn = get_db_connection()
     try:
         t = conn.execute('''
-            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, ar.name as artist_name
+            SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
             FROM tracks t
             LEFT JOIN albums a ON t.album_id=a.id
             LEFT JOIN artists ar ON a.artist_id=ar.id
@@ -9000,7 +9021,7 @@ def api_track_similar(track_id):
         placeholders = ','.join('?' * len(ids))
         rows = conn.execute(
             f'''SELECT t.*, a.name as album_name, a.cover_path, a.year as album_year,
-                       ar.id as artist_id, ar.name as artist_name
+                       COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
                 FROM tracks t
                 LEFT JOIN albums a ON t.album_id=a.id
                 LEFT JOIN artists ar ON a.artist_id=ar.id
@@ -9048,7 +9069,8 @@ def api_track_similar_artists(track_id):
 def api_album_tracks(album_id):
     conn = get_db_connection()
     try:
-        alb = conn.execute('SELECT name, cover_path, artist_id FROM albums WHERE id=?', (album_id,)).fetchone()
+        alb = conn.execute('SELECT al.name, al.cover_path, al.artist_id, ar.name AS artist_name FROM albums al '
+                           'LEFT JOIN artists ar ON ar.id = al.artist_id WHERE al.id=?', (album_id,)).fetchone()
         album_cover      = clean_db_path(alb['cover_path']) if alb else None
         album_artist_id  = alb['artist_id'] if alb else None
         album_name       = alb['name'] if alb else None
@@ -9057,6 +9079,7 @@ def api_album_tracks(album_id):
             (album_id,)
         ).fetchall()
         result = []
+        interpretes = _interpretes_album(conn, tracks, alb['artist_name'] if alb else None, album_artist_id)
         for t in tracks:
             d = dict(t)
             d['file_path']  = clean_db_path(d.get('file_path'))
@@ -9067,7 +9090,7 @@ def api_album_tracks(album_id):
             d['format_display'] = fmt
             d['format_color']   = led
             d['duration_fmt']   = _fmt_seconds(d.get('duration'))
-            d['artist_id']      = album_artist_id   # needed by player for navigation
+            d['artist_name'], d['artist_id'] = interpretes[d['id']]   # intérprete de la pista (o el del álbum)
             d['album_name']     = album_name        # needed by player for display/navigation
             tm = conn.execute('SELECT * FROM track_meta WHERE track_id=?', (t['id'],)).fetchone()
             if tm:
@@ -9107,7 +9130,7 @@ def api_tracks_resolve():
         placeholders = ','.join('?' * len(cleaned))
         rows = conn.execute(f'''
             SELECT t.*, al.name as album_name, al.cover_path, al.year as album_year,
-                   al.artist_id, ar.name as artist_name
+                   COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), al.artist_id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name
             FROM tracks t
             LEFT JOIN albums al ON t.album_id=al.id
             LEFT JOIN artists ar ON al.artist_id=ar.id
@@ -10012,7 +10035,7 @@ def _api_meta_tracks_payload(args, page_size=None):
                    t.sample_rate_real, t.bit_depth, t.is_mqa, t.codec, t.bitrate, t.compression_mode,
                    t.duration, t.track_number, t.file_path,
                    a.id as album_id, a.name as album_name, a.cover_path, a.year as album_year,
-                   ar.id as artist_id, ar.name as artist_name,
+                   COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), ar.id) as artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name,
                    tm.mood, tm.momento, tm.tier, tm.bpm, tm.tonalidad,
                    tm.energy, tm.bailabilidad, tm.lrclib_id, tm.has_lyrics, tm.has_synced_lrc,
                    tm.tema_lirico, tm.idioma, tm.genre_primary,
@@ -12166,7 +12189,7 @@ def _desk_pistas(conn, ids):
     for i in range(0, len(unicos), 500):
         parte = unicos[i:i + 500]
         for r in conn.execute(f'''SELECT t.*, al.name AS album_name, al.cover_path AS album_cover,
-                                         al.artist_id AS al_artist_id, ar.name AS artist_name
+                                         COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), al.artist_id) AS al_artist_id, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END AS artist_name
                                     FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
                                     LEFT JOIN artists ar ON ar.id = al.artist_id
                                    WHERE t.id IN ({','.join('?' * len(parte))})''', parte):
@@ -13702,7 +13725,7 @@ _TV_SQL_RANKING = (
     "GROUP BY cp.id ORDER BY n DESC, MIN(cqi.id) ASC LIMIT 5"
 )
 _TV_SQL_EVENTOS = (
-    "SELECT cqi.id AS item_id, t.title AS t_title, ar.name AS t_artist, cp.*, " + _COLLAB_SQL_USER_COLS + " "
+    "SELECT cqi.id AS item_id, t.title AS t_title, CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END AS t_artist, cp.*, " + _COLLAB_SQL_USER_COLS + " "
     "FROM collab_queue_items cqi "
     "JOIN tracks t ON t.id = cqi.track_id "
     "LEFT JOIN albums al ON al.id = t.album_id "
@@ -14546,8 +14569,8 @@ def _social_pista(conn, track_id):
     """Pista con el mismo formato que el detalle de playlist (las apps la
     reproducen o la agregan a la cola sin pedir nada más)."""
     d = conn.execute(
-        'SELECT t.*, al.name as album_name, al.year as album_year, al.cover_path, al.artist_id, '
-        'ar.name as artist_name FROM tracks t LEFT JOIN albums al ON al.id = t.album_id '
+        'SELECT t.*, al.name as album_name, al.year as album_year, al.cover_path, COALESCE((SELECT ai.id FROM artists ai WHERE ai.name = TRIM(t.artist) COLLATE NOCASE LIMIT 1), al.artist_id) as artist_id, '
+        'CASE WHEN LENGTH(TRIM(t.artist)) > 0 THEN TRIM(t.artist) ELSE ar.name END as artist_name FROM tracks t LEFT JOIN albums al ON al.id = t.album_id '
         'LEFT JOIN artists ar ON al.artist_id = ar.id WHERE t.id=?', (track_id,)).fetchone()
     if not d:
         return None
