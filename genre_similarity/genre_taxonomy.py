@@ -130,7 +130,7 @@ GENRE_TAXONOMY = {
             "Dubstep", "DanceHall", "Drum & Bass",
         ],
         "Ambient/Experimental": [
-            "Ambient", "Dark Ambient", "Chill", "Lo-Fi", "Experimental",
+            "Ambient", "Dark Ambient", "Chill", "Lo-Fi", "Experimental", "Meditation & Relaxation",
         ],
         "Urban Electronic": [
             "Trip-Hop",
