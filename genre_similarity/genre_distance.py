@@ -12,16 +12,28 @@ DISTINTO pero cercano").
 """
 from .genre_taxonomy import GENRE_TAXONOMY
 
+try:                                   # una sola forma por genero (ingesta/generos.py): «Post-Punk» = «Post Punk»
+    from ingesta.generos import normalizar as _normalizar
+except Exception:
+    _normalizar = None
+
+
+def _key(genre: str) -> str:
+    g = (genre or "").strip()
+    n = _normalizar(g) if _normalizar else None
+    return (n or g).lower()
+
+
 _GENRE_TO_PATH = {}
 for _family, _subfams in GENRE_TAXONOMY.items():
     for _subfam, _genres in _subfams.items():
         for _g in _genres:
-            _GENRE_TO_PATH[_g.lower()] = (_family, _subfam)
+            _GENRE_TO_PATH.setdefault(_key(_g), (_family, _subfam))
 
 
 def genre_path(genre: str):
     """(familia, subfamilia) para un genero, o None si no esta en la taxonomia."""
-    return _GENRE_TO_PATH.get(genre.strip().lower())
+    return _GENRE_TO_PATH.get(_key(genre))
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -70,7 +82,7 @@ def _regional_override(g1_lower: str, g2_lower: str):
 
 def genre_similarity(g1: str, g2: str) -> float:
     g1_lower, g2_lower = g1.strip().lower(), g2.strip().lower()
-    if g1_lower == g2_lower:
+    if g1_lower == g2_lower or _key(g1) == _key(g2):
         return 1.0  # no se usa en la practica (ver docstring), pero coherente
 
     override = _regional_override(g1_lower, g2_lower)

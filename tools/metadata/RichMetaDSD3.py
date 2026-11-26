@@ -714,10 +714,10 @@ _CANONICAL_GENRES = [
     # Rock
     "Punk Rock","Hard Rock","Classic Rock","Progressive Rock","Psychedelic Rock",
     "Alternative Rock","Indie Rock","Garage Rock","Blues Rock","Southern Rock",
-    "Gothic Rock","Post Rock","Grunge","New Wave","Post-Punk",
+    "Gothic Rock","Post Rock","Grunge","New Wave","Post Punk",
     # Otros géneros base
     "Rock","Blues","Jazz","Soul","Funk","Reggae","Country","Folk",
-    "Classical","Electronic","Ambient","Techno","House","Trance","Drum and Bass",
+    "Classical","Electronic","Ambient","Techno","House","Trance","Drum & Bass",
     "Hip Hop","Rap","R&B","Pop","Disco",
 ]
 _CANONICAL_NORM = {_norm(g): g for g in _CANONICAL_GENRES}
@@ -792,7 +792,19 @@ def consenso_generos(lastfm_tags, mb_genres) -> tuple[str, list[str]]:
     lf_counts = {_norm(t): c for t, c in lf_clean}
     primary   = _pick_primary(pool, lastfm_counts=lf_counts)
     secondary = [g for g in pool if _norm(g) != _norm(primary)][:3]
-    return primary, secondary
+    return _una_forma(primary, secondary)
+
+
+def _una_forma(primary, secondary):
+    """Géneros con una sola forma (ingesta/generos.py): «Post-Punk» → «Post Punk», «Drum and Bass» → «Drum & Bass»,
+    sinónimos unificados y fuera países, décadas y etiquetas que no son géneros."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        from ingesta import generos
+    except Exception:
+        return primary, secondary
+    pri, sec = generos.repartir(primary, secondary)
+    return (pri or ""), sec[:3]
 
 def obtener_ab_features(mbid: str) -> Optional[dict]:
     """

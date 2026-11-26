@@ -39,6 +39,41 @@ MUSIC_ROOT       = "/mnt/musica/"
 DB_PATH          = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "music.db")
 AUDIO_EXTENSIONS = {'.flac', '.dsf', '.dff', '.wav', '.aiff', '.mp3'}
 
+# Géneros con una sola forma (ingesta/generos.py): tracks.genre guarda solo el principal; los demás géneros del
+# tag («Pop, Rock, Metal») pasan a track_meta.genre_secondary si la pista ya tiene esa fila.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from ingesta import generos as _generos
+except Exception:                                   # sin la ingesta al lado: el tag tal cual
+    _generos = None
+
+
+def _genero_del_tag(valor):
+    """GENRE del archivo → (principal, [otros]) con la regla de géneros."""
+    if _generos is None:
+        return (valor or ""), []
+    gs = _generos.separar(valor)
+    return (gs[0] if gs else ""), gs[1:]
+
+
+def _sumar_secundarios(cur, track_id, otros):
+    """Los géneros extra del tag se suman a track_meta.genre_secondary (sin crear la fila)."""
+    if not otros or _generos is None:
+        return
+    try:
+        fila = cur.execute("SELECT genre_primary, genre_secondary FROM track_meta WHERE track_id=?",
+                           (track_id,)).fetchone()
+    except sqlite3.OperationalError:                 # base sin track_meta (o sin columnas de género)
+        return
+    if not fila:
+        return
+    pri, sec = _generos.repartir(fila[0], fila[1])
+    junt = [g for g in sec + otros if g != pri]
+    junt = list(dict.fromkeys(junt))
+    if junt != sec:
+        cur.execute("UPDATE track_meta SET genre_secondary=? WHERE track_id=?",
+                    (json.dumps(junt, ensure_ascii=False), track_id))
+
 COVER_FILENAMES  = [
     'cover.jpg', 'cover.jpeg', 'cover.png', 'folder.jpg', 'folder.png',
     'front.jpg', 'front.png', 'albumart.jpg', 'artwork.jpg', 'thumb.jpg',
@@ -335,7 +370,8 @@ def extract_metadata(file_path: str) -> dict:
         "disc_number":              disc_num,
         "total_discs":              total_discs,
         "year":                     year,
-        "genre":                    tags.get("genre", ""),
+        "genre":                    _genero_del_tag(tags.get("genre", ""))[0],
+        "genre_otros":              _genero_del_tag(tags.get("genre", ""))[1],
         "publisher":                tags.get("publisher", ""),
         "copyright":                tags.get("copyright", ""),
         "encoded_by":               tags.get("encoded_by") or tags.get("encodedby") or "",
@@ -736,6 +772,7 @@ def index_directories(conn: sqlite3.Connection, dirs: List[str],
 
             if mode == "update" and file_path in indexed:
                 _update_track(cur, indexed[file_path], meta)
+                _sumar_secundarios(cur, indexed[file_path], meta.get("genre_otros"))
                 updated += 1
             else:
                 try:
@@ -749,6 +786,7 @@ def index_directories(conn: sqlite3.Connection, dirs: List[str],
                         ).fetchone()
                         if tid:
                             _update_track(cur, tid[0], meta)
+                            _sumar_secundarios(cur, tid[0], meta.get("genre_otros"))
                             updated += 1
 
             updated_albums.add(album_id)

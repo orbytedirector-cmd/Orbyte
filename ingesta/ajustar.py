@@ -14,6 +14,7 @@ import re
 import sqlite3
 
 from . import analisis, dsd, procesar
+from . import generos as generos_mod
 
 CALIDAD_RE = re.compile(r'\s*\[([^\]]+)\]\s*$')
 
@@ -231,6 +232,9 @@ def propuesta(actual, cambios):
     if 'genero_secundario' in ov:
         ta['genero_secundario'] = [g.strip() for g in re.split(r'\s*;\s*', ov['genero_secundario'] or '')
                                    if g.strip()][:3]
+    if ta.get('genero') or ta.get('genero_secundario'):   # la vista previa muestra la forma única que se guardará
+        g, sec = generos_mod.repartir(ta.get('genero'), ta.get('genero_secundario'))
+        ta['genero'], ta['genero_secundario'] = g or '', sec[:3]
     pistas = []
     for x in actual['plan']:
         o = ovp.get(x['clave']) or {}

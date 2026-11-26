@@ -21,6 +21,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from . import analisis
+from . import generos as generos_mod
 from . import dsd
 
 try:
@@ -289,6 +290,9 @@ def _ultima_linea(texto):
 # ─────────────────────────── tags ───────────────────────────
 
 def _valores(x, ta):
+    # géneros con una sola forma (ingesta/generos.py): «Pop, Rock» → GENRE «Pop» + secundarios «Rock»
+    genero, secundarios = generos_mod.repartir(ta.get('genero'), ta.get('genero_secundario'))
+    ta = dict(ta, genero=genero, genero_secundario=secundarios[:3])
     d = {
         'titulo': x.get('titulo'), 'artista': x.get('artista') or ta.get('artista'),
         'artista_album': ta.get('artista'), 'album': ta.get('album'),

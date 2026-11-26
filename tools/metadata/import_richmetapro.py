@@ -21,6 +21,20 @@ from collections import Counter
 from typing import Optional
 
 MUSIC_ROOT = "/mnt/musica"
+
+# Géneros con una sola forma (ingesta/generos.py): principal + secundarios ya normalizados y sin repetir
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+try:
+    from ingesta import generos as _generos
+except Exception:
+    _generos = None
+
+
+def _repartir_generos(principal, secundarios):
+    if _generos is None:
+        return (principal.strip() if isinstance(principal, str) and principal.strip() else None), \
+            list(secundarios or [])
+    return _generos.repartir(principal, secundarios)
 DB_PATH    = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "music.db")
 
 logging.basicConfig(
@@ -106,8 +120,9 @@ def extract_track_fields(r: dict) -> dict:
         "sources_json":     src_json,
         "richmetapro_ver":  version,
         # Géneros (nuevo — RichMetaPro >= 2026-05)
-        "genre_primary":    _clean(r.get("genre_primary")),
-        "genre_secondary":  json.dumps(r.get("genre_secondary") or [], ensure_ascii=False),
+        "genre_primary":    _repartir_generos(r.get("genre_primary"), r.get("genre_secondary"))[0],
+        "genre_secondary":  json.dumps(_repartir_generos(r.get("genre_primary"), r.get("genre_secondary"))[1],
+                                       ensure_ascii=False),
     }
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
