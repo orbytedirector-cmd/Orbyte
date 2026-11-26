@@ -298,6 +298,8 @@
       </div>
       <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
         <input type="text" id="t-genero2" value="{{ (cam.tags or {}).genero_secundario or (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
+      <div id="t-generos-revision" class="generos-revision s" hidden></div>
+      {% if ta.genero_fijo %}<p class="s tenue" style="font-size:.76rem;margin:.3rem 0 0">Fijado a mano: {{ ta.genero_fijo | join(' y ') }} — la metadata lo respeta. Vacía el campo para que vuelva a decidir la metadata.</p>{% endif %}
       <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">El año y el género vienen propuestos (edición identificada, tags, tu biblioteca, MusicBrainz o Last.fm): cámbialos si hace falta. Año vacío = el propuesto. Lo que escribas aquí manda sobre los tags de los archivos.</p>
       <div id="auto-panel" class="auto-panel" hidden></div>
       <div class="tabla-wrap"><table class="tabla-tags">
@@ -676,6 +678,8 @@ if (iaBtn) iaBtn.onclick = async () => {
 if (iaPanel) fetch(`/api/album/${AID}/duplicado/ia`).then(r => r.json()).then(d => { if (d.ok) pintarIA(d); });
 
 // editor de tags
+const revGeneros = revisorGeneros([document.getElementById('t-genero'), document.getElementById('t-genero2')],
+                                  document.getElementById('t-generos-revision'));
 const gt = document.getElementById('guardar-tags');
 if (gt) gt.onclick = () => {
   const ta = {{ (r.tags_album or {}) |tojson if r else '{}' }};
@@ -683,6 +687,9 @@ if (gt) gt.onclick = () => {
   for (const k of ['artista', 'album', 'genero']) { const v = val('t-' + k); if (v && v !== (ta[k] || '')) tags[k] = v; }
   const g2 = val('t-genero2'), g2i = document.getElementById('t-genero2');
   if (g2 && g2 !== g2i.dataset.orig) tags.genero_secundario = g2;
+  const vacios = [];                                       // campo vaciado: suelta lo que habías escrito (y lo fijado)
+  if (!val('t-genero') && ta.genero) vacios.push('genero');
+  if (!g2 && g2i.dataset.orig) vacios.push('genero_secundario');
   // El año viene escrito con el propuesto: solo se guarda como tuyo si lo cambiaste (o ya lo habías fijado).
   const ai = document.getElementById('t-anio'), anio = val('t-anio');
   if (anio && (anio !== ai.dataset.orig || ai.dataset.tuyo)) tags.anio = anio;
@@ -703,7 +710,8 @@ if (gt) gt.onclick = () => {
     const e = tr && tr.querySelector(CAMPO_PISTA[k]); return e ? e.value.trim() : '';
   };
   gt.disabled = true; accion(`/api/album/${AID}/cambios`, {tags, pistas, motivos: motivosAuto(propuesta, valor),
-                                                           fuente: propuesta ? propuesta.fuente : ''});
+                                                           fuente: propuesta ? propuesta.fuente : '',
+                                                           vacios, mantener: revGeneros.mantener()});
 };
 document.addEventListener('DOMContentLoaded', () => {   // editorDiscos está en base.html (se carga después)
   const t = document.querySelector('#tags .tabla-tags'), b = document.getElementById('separar-discos');

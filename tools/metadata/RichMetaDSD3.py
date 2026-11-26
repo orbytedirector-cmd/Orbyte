@@ -795,6 +795,29 @@ def consenso_generos(lastfm_tags, mb_genres) -> tuple[str, list[str]]:
     return _una_forma(primary, secondary)
 
 
+def _respetar_fijados(path, primary, secondary):
+    """Géneros fijados a mano en la ingesta (tag ORBYTE_GENERO_FIJO, ingesta/generos.py): lo fijado se conserva tal
+    como está en el archivo; Last.fm y MusicBrainz solo completan lo que no se fijó."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        from ingesta import generos
+    except Exception:
+        return primary, secondary
+    fijo, pri_arch, sec_arch = generos.leer_fijo(path)
+    if not fijo:
+        return primary, secondary
+    consenso = ([primary] if primary else []) + list(secondary or [])
+    if 'principal' in fijo and pri_arch:
+        primary = generos.normalizar(pri_arch) or primary
+        log.info("  · Género principal fijado a mano: %s", primary)
+    if 'secundarios' in fijo:
+        secondary = [g for g in generos.separar(sec_arch) if g != primary][:3]
+        log.info("  · Géneros secundarios fijados a mano: %s", ", ".join(secondary) or "(ninguno)")
+    else:                                   # lo que decía la metadata (su principal incluido) pasa a secundario
+        secondary = [g for g in consenso if g != primary][:3]
+    return primary, secondary
+
+
 def _una_forma(primary, secondary):
     """Géneros con una sola forma (ingesta/generos.py): «Post-Punk» → «Post Punk», «Drum and Bass» → «Drum & Bass»,
     sinónimos unificados y fuera países, décadas y etiquetas que no son géneros."""
@@ -2413,6 +2436,7 @@ def procesar(path: str, audit_log: list) -> dict:
         if propio and not _tag_empty(propio):
             genre_primary = propio
             log.info("  · Género: sin datos en Last.fm ni MusicBrainz — se conserva el del archivo: %s", propio)
+    genre_primary, genre_secondary = _respetar_fijados(path, genre_primary, genre_secondary)
     genres_final = ([genre_primary] + genre_secondary) if genre_primary else genre_secondary
 
     ab_features = obtener_ab_features(mbid)

@@ -122,6 +122,7 @@ def leer(ruta):
           'anio': str(_mayoria([x['anio'] for x in plan]) or '') or None,
           'genero': _mayoria([x['genero'] for x in plan]) or '',
           'genero_secundario': _secundarios(os.path.join(ruta, plan[0]['clave'])),
+          'genero_fijo': sorted(generos_mod.leer_fijo(os.path.join(ruta, plan[0]['clave']))[0]),
           'total_discos': max([x['total_discos'] or 0 for x in plan] + [len(discos)])}
     return {'ruta': ruta, 'tags_album': ta, 'plan': plan, 'n_discos': len(discos)}
 
@@ -232,6 +233,17 @@ def propuesta(actual, cambios):
     if 'genero_secundario' in ov:
         ta['genero_secundario'] = [g.strip() for g in re.split(r'\s*;\s*', ov['genero_secundario'] or '')
                                    if g.strip()][:3]
+    # géneros fijados a mano (generos.FIJO_TAG): lo que editaste tú (no ✦ Autocorregir) queda fijado y la metadata lo
+    # respeta; al vaciar el campo se suelta y vuelve a decidir la metadata
+    fijo = set(ta0.get('genero_fijo') or ())
+    motivos = cambios.get('motivos') or {}
+    vacios = set(cambios.get('vacios') or ())
+    for k, cual in (('genero', 'principal'), ('genero_secundario', 'secundarios')):
+        if k in vacios or (k == 'genero_secundario' and k in ov and not (ov[k] or '').strip()):
+            fijo.discard(cual)
+        elif (ov.get(k) or '').strip():
+            (fijo.discard if (motivos.get('|' + k) or {}).get('origen') == 'autocorregir' else fijo.add)(cual)
+    ta['genero_fijo'] = sorted(fijo)
     if ta.get('genero') or ta.get('genero_secundario'):   # la vista previa muestra la forma única que se guardará
         g, sec = generos_mod.repartir(ta.get('genero'), ta.get('genero_secundario'))
         ta['genero'], ta['genero_secundario'] = g or '', sec[:3]
@@ -277,7 +289,8 @@ def propuesta(actual, cambios):
     nuevos = [p['nuevo'].lower() for p in pistas]
     if len(set(nuevos)) != len(nuevos):
         raise FalloAjuste('Dos pistas quedarían con el mismo nombre de archivo (¿número repetido?)')
-    album_cambia = any(ta.get(k) != ta0.get(k) for k in ('artista', 'album', 'genero', 'anio', 'genero_secundario'))
+    album_cambia = any(ta.get(k) != ta0.get(k) for k in ('artista', 'album', 'genero', 'anio', 'genero_secundario',
+                                                         'genero_fijo'))
     if discos_cambian:
         ta['total_discos'] = n_discos
     return {'tags_album': ta, 'pistas': pistas, 'album_cambia': album_cambia, 'discos_cambian': discos_cambian,
@@ -359,7 +372,8 @@ def aplicar(ruta, cambios, aj, reg):
             por_disco[d] = max([p['numero'] or 0 for p in del_d] + [len(del_d)])
         base_ta = {'artista': ta['artista'], 'album': ta['album'], 'genero': ta['genero'] or None,
                    'total_discos': n_discos if prop['discos_cambian'] else (ta.get('total_discos') or n_discos),
-                   'genero_secundario': ta.get('genero_secundario') or None}
+                   'genero_secundario': ta.get('genero_secundario') or None,
+                   'genero_fijo': ta.get('genero_fijo') or []}
         if ta.get('anio') != ta0.get('anio'):
             base_ta['fecha'] = str(ta['anio'])                       # si el año no cambia, la fecha queda como está
         for p in tocadas:

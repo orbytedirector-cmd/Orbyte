@@ -49,6 +49,8 @@ from . import historial as historial_mod
 from . import pistas as pistas_mod
 from . import sacd as sacd_mod
 from . import portada as portada_mod
+from . import genero_auto as genero_auto_mod
+from . import generos as generos_mod
 from . import tienda as tienda_mod
 from . import nacionalidades as nacionalidades_mod
 from . import popularidad as popularidad_mod
@@ -439,6 +441,58 @@ def _requeue(aid, **campos):
     vigilante.ya()
 
 
+# ─────────────────────────── géneros escritos a mano (26-11-2026) ───────────────────────────
+
+def _generos_existentes():
+    """Los géneros que ya hay en la biblioteca (y la lista canónica), con su forma única."""
+    try:
+        return set(genero_auto_mod.vocabulario(almacen.ajustes().get('db_orbyte')).values())
+    except Exception:  # noqa: BLE001 - sin la base se valida solo con la regla
+        return set()
+
+
+def _vacios(d):
+    return [k for k in (d.get('vacios') or []) if k in ('genero', 'genero_secundario')]
+
+
+def _mantener(d):
+    return [str(x)[:120] for x in (d.get('mantener') or []) if isinstance(x, str)][:20]
+
+
+def _validar_generos_tags(tags, motivos, mantener):
+    """Valida el género y los secundarios que escribiste (tags del editor) y los deja con su forma única:
+    error de tipeo → el existente; no existe y cumple la regla → nuevo; país, década… → fuera. Anota el motivo para
+    el historial. → mensaje de error o None. Lo que vino de ✦ Autocorregir no se valida (ya viene normalizado)."""
+    existentes = _generos_existentes()
+    for k in ('genero', 'genero_secundario'):
+        if not str(tags.get(k) or '').strip() or (motivos.get('|' + k) or {}).get('origen') == 'autocorregir':
+            continue
+        lista, notas = generos_mod.validar(tags[k], existentes, mantener)
+        if k == 'genero':
+            if not lista:
+                return f'«{tags[k]}» no es un género (país, década, artista o etiqueta suelta)'
+            tags['genero'] = lista[0]
+            if lista[1:]:                                   # «Pop, Rock» en el principal: el resto a secundarios
+                prev = generos_mod.separar(tags.get('genero_secundario'))
+                tags['genero_secundario'] = '; '.join(lista[1:] + [g for g in prev if g not in lista])
+        else:
+            tags[k] = '; '.join(lista)
+        dichos = [f'género nuevo «{n["resultado"]}»' if n['tipo'] == 'nuevo' else
+                  f'«{n["escrito"]}» corregido a «{n["resultado"]}»' if n['tipo'] == 'corregido' else
+                  f'«{n["escrito"]}» no es un género' for n in notas]
+        if dichos:
+            motivos['|' + k] = {'origen': 'a mano', 'motivo': '; '.join(dichos)[:300]}
+    return None
+
+
+@app.route('/api/generos/validar', methods=['POST'])
+def api_generos_validar():
+    """Revisión en vivo del editor de tags: cómo quedaría lo que escribiste."""
+    d = request.get_json(silent=True) or {}
+    lista, notas = generos_mod.validar(str(d.get('texto') or '')[:600], _generos_existentes(), _mantener(d))
+    return jsonify(ok=True, generos=lista, notas=notas)
+
+
 @app.route('/api/album/<int:aid>/cambios', methods=['POST'])
 def api_cambios(aid):
     """Guarda lo que decides en pantalla (tags, carátula, decisiones aceptadas, año) y vuelve a revisar."""
@@ -453,6 +507,28 @@ def api_cambios(aid):
              if k in ('artista', 'album', 'anio', 'genero', 'genero_secundario') and str(v or '').strip()}
         if t.get('anio') and not re.fullmatch(r'(1[89]|20)\d\d', t['anio']):
             return jsonify(ok=False, error='Año inválido'), 400
+        vacios = {k for k in (d.get('vacios') or []) if k in ('artista', 'album', 'genero', 'genero_secundario')}
+        enviados = set(t)
+        for k in ('artista', 'album', 'genero', 'genero_secundario'):   # lo que ya habías escrito y no tocaste sigue
+            if k not in t and k not in vacios and (c.get('tags') or {}).get(k):
+                t[k] = c['tags'][k]
+        motivos = historial_mod.motivos_validos(d.get('motivos'))
+        error = _validar_generos_tags(t, motivos, _mantener(d)) if enviados & {'genero', 'genero_secundario'} else None
+        if error:
+            return jsonify(ok=False, error=error), 400
+        d['motivos'] = motivos
+        # géneros fijados a mano: los que editaste tú (no ✦ Autocorregir); al vaciar el campo se sueltan
+        fijo = set(c['genero_fijo'] if 'genero_fijo' in c else
+                   ((a.get('reporte') or {}).get('tags_album') or {}).get('genero_fijo') or ())
+        for k, cual in (('genero', 'principal'), ('genero_secundario', 'secundarios')):
+            if k in vacios:
+                fijo.discard(cual)
+            elif k in enviados:
+                if (motivos.get('|' + k) or {}).get('origen') == 'autocorregir':
+                    fijo.discard(cual)
+                else:
+                    fijo.add(cual)
+        c['genero_fijo'] = sorted(fijo)
         c['tags'] = t
     if 'pistas' in d:
         pistas = {}
@@ -911,7 +987,8 @@ def api_ajustar(aid):
     d = request.get_json(silent=True) or {}
     error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {},
                                                          'motivos': historial_mod.motivos_validos(d.get('motivos')),
-                                                         'fuente': str(d.get('fuente') or '')[:300]})
+                                                         'fuente': str(d.get('fuente') or '')[:300],
+                                                         'mantener': _mantener(d), 'vacios': _vacios(d)})
     if error:
         return jsonify(ok=False, error=error), codigo
     procesador.ya()
@@ -922,6 +999,11 @@ def _encolar_ajuste(a, pedido, lote=False):
     """Valida el pedido y deja el álbum «En cola: ajustar tags». Devuelve (error, código) o (None, None)."""
     if not a or a['estado'] not in EN_BIBLIOTECA:
         return 'Solo se ajustan álbumes ya ubicados y con la metadata terminada (o con error de metadata)', 409
+    tags = pedido.get('tags') or {}
+    if any(str(tags.get(k) or '').strip() for k in ('genero', 'genero_secundario')):
+        error = _validar_generos_tags(tags, pedido.setdefault('motivos', {}), pedido.get('mantener') or [])
+        if error:
+            return error, 400
     try:
         prop = ajustar_mod.propuesta(ajustar_mod.leer(a['ubicado_en'] or a['ruta']), pedido)
     except ajustar_mod.FalloAjuste as e:
@@ -3083,7 +3165,8 @@ def api_biblioteca_ajustar(oid):
     aid = almacen.de_biblioteca(o['ruta'], o['artista'], o['album'], o['anio'])
     error, codigo = _encolar_ajuste(almacen.album(aid), {'tags': d.get('tags') or {}, 'pistas': d.get('pistas') or {},
                                                          'motivos': historial_mod.motivos_validos(d.get('motivos')),
-                                                         'fuente': str(d.get('fuente') or '')[:300]})
+                                                         'fuente': str(d.get('fuente') or '')[:300],
+                                                         'mantener': _mantener(d), 'vacios': _vacios(d)})
     if error:
         return jsonify(ok=False, error=error), codigo
     procesador.ya()
