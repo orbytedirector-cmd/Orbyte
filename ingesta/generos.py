@@ -49,7 +49,7 @@ _ALIAS = {
     'Rock': ['Rock General', 'Ro.'],
     'Pop': ['Pop Music'],
     'Latin': ['Latin Music'],
-    'Lo Fi': ['Lo Fi Beats', 'Lo-Fi Beats'],
+    'Lo Fi': ['Lo Fi Beats', 'Lo-Fi Beats', 'Lofi'],
     'R&B': ['Rhythm & Blues', 'Rhythm and Blues', 'Rhythm&Blues', 'RnB', 'R and B'],
     'Thrash Metal': ['Trash Metal'],
     'Hardcore Punk': ['Harcore Punk'],
@@ -59,15 +59,15 @@ _ALIAS = {
     'Female Voice': ['Female Vocalist', 'Female Vocalists', 'Female Vocals'],
     'Male Voice': ['Male Soul Vocalists', 'Male Vocalist', 'Male Vocalists'],
     'Soft Rock': ['SoftR.'],
-    'Synth Pop': ['Synth-P.'],
+    'Synth Pop': ['Synth-P.', 'Synthpop'],
     'Dance Pop': ['Dance-P.'],
     'Contemporary R&B': ['Co.R&B'],
     'Vocal': ['Voc.'],
     'Rock & Roll': ["Rock 'n' Roll", "Rock'n'Roll", 'Rock n Roll', 'Rock and Roll'],
     # una palabra pegada ↔ la forma con espacio: gana la de espacio (como «K Pop», «Post Punk»)
     'K Pop': ['Kpop'], 'J Pop': ['Jpop'], 'J Rock': ['Jrock'], 'Electro Pop': ['Electropop'],
-    'Synth Pop': ['Synthpop'], 'Hip Hop': ['Hiphop'], 'Trip Hop': ['Triphop'], 'Post Punk': ['Postpunk'],
-    'Post Rock': ['Postrock'], 'Nu Metal': ['Numetal'], 'Lo Fi': ['Lofi'], 'Synth Wave': ['Synthwave'],
+    'Hip Hop': ['Hiphop'], 'Trip Hop': ['Triphop'], 'Post Punk': ['Postpunk'],
+    'Post Rock': ['Postrock'], 'Nu Metal': ['Numetal'], 'Synth Wave': ['Synthwave'],
     'Dark Wave': ['Darkwave'], 'Cold Wave': ['Coldwave'], 'Power Pop': ['Powerpop'],
 }
 
@@ -111,6 +111,7 @@ def _clave(g):
 
 
 ALIAS = {_clave(v): destino for destino, vs in _ALIAS.items() for v in vs}
+assert len(_ALIAS) == len(set(_ALIAS)), 'géneros repetidos en _ALIAS'   # (un dict literal pisa la clave repetida)
 QUITAR = {_clave(q) for q in _QUITAR}
 # las formas acordadas también se reconocen a sí mismas (p. ej. «R&B» antes de partir en palabras)
 ALIAS.update({_clave(d): d for d in _ALIAS})
