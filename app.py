@@ -43,6 +43,7 @@ import behavior_engine  # Ticket AI-02 — motor de comportamiento (colección),
 import estadisticas     # estadísticas de uso para el administrador (solo lectura)
 import estadisticas_ia  # «Resumen IA» de esas estadísticas
 import login_seguro as _ls  # límite de intentos, recuperar contraseña, versión de sesión
+from ingesta import generos as _generos
 from ingesta import compat24  # FLAC de 32 bits: copia 24 bit para los clientes que no los abren
 import versiones as _versiones  # versiones de un álbum (una carta en la discografía)
 import smtplib
@@ -2113,6 +2114,7 @@ def api_v1_profile_update():
             conn.execute('UPDATE users SET nickname=? WHERE id=?', (nickname or None, g.api_user['id']))
         if 'favorite_genres' in data:
             genres = data['favorite_genres'] if isinstance(data['favorite_genres'], list) else []
+            genres = _generos.separar(genres)          # una sola forma por género (ingesta/generos.py)
             conn.execute('UPDATE users SET favorite_genres_json=? WHERE id=?',
                          (json.dumps(genres), g.api_user['id']))
         conn.commit()

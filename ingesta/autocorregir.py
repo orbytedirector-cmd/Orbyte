@@ -18,6 +18,7 @@ Devuelve los cambios agrupados para que la pantalla los muestre (antes → despu
 import re
 
 from . import analisis
+from . import generos as _generos
 from . import numeracion as numeracion_mod
 
 GRUPOS = {
@@ -43,9 +44,9 @@ CANONICOS = [
     "Nu Metal", "Alternative Metal", "Metalcore", "Melodic Death Metal",
     "Punk Rock", "Hard Rock", "Classic Rock", "Progressive Rock", "Psychedelic Rock",
     "Alternative Rock", "Indie Rock", "Garage Rock", "Blues Rock", "Southern Rock",
-    "Gothic Rock", "Post Rock", "Grunge", "New Wave", "Post-Punk",
+    "Gothic Rock", "Post Rock", "Grunge", "New Wave", "Post Punk",
     "Rock", "Blues", "Jazz", "Soul", "Funk", "Reggae", "Country", "Folk",
-    "Classical", "Electronic", "Ambient", "Techno", "House", "Trance", "Drum and Bass",
+    "Classical", "Electronic", "Ambient", "Techno", "House", "Trance", "Drum & Bass",
     "Hip Hop", "Rap", "R&B", "Pop", "Disco",
 ]
 
@@ -135,21 +136,15 @@ def mayusculas(s, conservar=()):
 
 
 def generos(texto):
-    """«rock, funk, reggae, jazz» → ('Rock', ['Funk', 'Reggae', 'Jazz'])."""
-    partes, vistos = [], set()
-    for g in re.split(r'\s*[,;/|]\s*', texto or ''):
-        g = g.strip()
-        if g and g.lower() not in vistos:
-            vistos.add(g.lower())
-            partes.append(g)
+    """«rock, funk, reggae, jazz» → ('Rock', ['Funk', 'Reggae', 'Jazz']), con la regla de una sola forma por género
+    (ingesta/generos.py)."""
+    partes = _generos.separar(texto)
     if not partes:
         return None, []
-    canon = {analisis._norm(c): c for c in CANONICOS}
-    presentes = {analisis._norm(g): g for g in partes}
-    primario = next((canon[n] for n in canon if n in presentes), None) or partes[0]
-    bonito = lambda g: canon.get(analisis._norm(g)) or (g.title() if g.islower() or g.isupper() else g)
-    secundarios = [bonito(g) for g in partes if analisis._norm(g) != analisis._norm(primario)][:3]
-    return bonito(primario), secundarios
+    presentes = set(partes)
+    primario = next((c for c in CANONICOS if c in presentes), None) or partes[0]
+    secundarios = [g for g in partes if g != primario][:3]
+    return primario, secundarios
 
 
 def como_en_biblioteca(nombre, bib):

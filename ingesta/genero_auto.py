@@ -16,6 +16,7 @@ import urllib.parse
 from collections import Counter
 
 from . import analisis, edicion
+from . import generos as _generos
 
 MAX_SECUNDARIOS = 3
 LASTFM_MIN = 15                  # relevancia mínima (0-100) de una etiqueta de Last.fm
@@ -32,8 +33,8 @@ def _canonicos():
 
 
 def _bonito(g):
-    g = (g or '').strip()
-    return g.title() if g.islower() or g.isupper() else g
+    """La forma única del género (ingesta/generos.py), o None si no es un género."""
+    return _generos.normalizar(g)
 
 
 def _columnas(con, tabla):
@@ -63,7 +64,8 @@ def vocabulario(db):
                     cuenta.update(r[0] for r in con.execute(
                         "SELECT genre FROM tracks WHERE genre IS NOT NULL AND genre != ''"))
                 for g, _n in cuenta.most_common():
-                    vocab.setdefault(analisis._norm(g), g.strip())
+                    for n in _generos.separar(g):
+                        vocab.setdefault(analisis._norm(n), n)
             finally:
                 con.close()
         except sqlite3.Error:
@@ -145,17 +147,20 @@ def proponer(db, cliente, artista, album, grupo_id=None, varios=False):
 
     def ajustar(lista, solo_conocidos):
         fuera, vistos = [], set()
-        for g in lista:
-            n = analisis._norm(g)
-            if not n or n in vistos or g.lower() in BASURA:
+        for crudo in lista:
+            if (crudo or '').lower() in BASURA:
                 continue
-            if n in vocab:
-                fuera.append(vocab[n])
-            elif not solo_conocidos:
-                fuera.append(_bonito(g))
-            else:
-                continue
-            vistos.add(n)
+            for g in _generos.separar(crudo):      # una sola forma; fuera países, décadas y etiquetas sueltas
+                n = analisis._norm(g)
+                if not n or n in vistos:
+                    continue
+                if n in vocab:
+                    fuera.append(vocab[n])
+                elif not solo_conocidos:
+                    fuera.append(g)
+                else:
+                    continue
+                vistos.add(n)
         return fuera
 
     fuentes = []
