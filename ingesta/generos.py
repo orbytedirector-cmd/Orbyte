@@ -64,6 +64,13 @@ _ALIAS = {
     'Contemporary R&B': ['Co.R&B'],
     'Vocal': ['Voc.'],
     'Rock & Roll': ["Rock 'n' Roll", "Rock'n'Roll", 'Rock n Roll', 'Rock and Roll'],
+    # 26-11-2026, sobre la lista final
+    'Alternative Rock': ['Rock Alternativo'],
+    'Andina': ['Musica Andina', 'Música Andina'],
+    'Chill': ['Chillout', 'Chill Out'],
+    'City Pop': ['Japanese City Pop'],
+    'Comedy': ['Humor'],
+    'Guitarist': ['Guitar'],
     # una palabra pegada ↔ la forma con espacio: gana la de espacio (como «K Pop», «Post Punk»)
     'K Pop': ['Kpop'], 'J Pop': ['Jpop'], 'J Rock': ['Jrock'], 'Electro Pop': ['Electropop'],
     'Hip Hop': ['Hiphop'], 'Trip Hop': ['Triphop'], 'Post Punk': ['Postpunk'],
