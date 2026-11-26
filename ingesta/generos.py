@@ -71,6 +71,13 @@ _ALIAS = {
     'City Pop': ['Japanese City Pop'],
     'Comedy': ['Humor'],
     'Guitarist': ['Guitar'],
+    # 26-11-2026: música de relajación y meditación, un solo género
+    'Meditation & Relaxation': ['Meditation', 'Meditación', 'Meditation Music', 'Música para Meditar',
+                                'Relaxation', 'Relajación', 'Relax', 'Relaxing', 'Relaxing Music', 'Relajante',
+                                'Música Relajante', 'Musica para Relajarse', 'Relaxation & Meditation',
+                                'Meditation/Relaxation', 'Relaxation/Meditation', 'Mindfulness', 'Zen', 'Spa',
+                                'Sleep', 'Sleep Music', 'Música para Dormir', 'Yoga', 'Healing', 'Healing Music',
+                                'Reiki', 'Chakra', 'Chakras'],
     # una palabra pegada ↔ la forma con espacio: gana la de espacio (como «K Pop», «Post Punk»)
     'K Pop': ['Kpop'], 'J Pop': ['Jpop'], 'J Rock': ['Jrock'], 'Electro Pop': ['Electropop'],
     'Hip Hop': ['Hiphop'], 'Trip Hop': ['Triphop'], 'Post Punk': ['Postpunk'],
