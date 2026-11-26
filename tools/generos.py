@@ -49,6 +49,7 @@ def calcular(con):
     formas = defaultdict(Counter)       # forma escrita → {resultado: veces}
     resultado = Counter()               # género final → usos
     otros_tag = {}                      # track_id → géneros extra del tag GENRE
+    principal_tag = {}                  # track_id → género principal del tag GENRE
 
     def anotar(crudo):
         for parte in _crudos(crudo):
@@ -60,6 +61,8 @@ def calcular(con):
             anotar(g)
             gs = G.separar(g)
             nuevo = gs[0] if gs else ''
+            if gs:
+                principal_tag[tid] = gs[0]
             if gs[1:]:
                 otros_tag[tid] = gs[1:]
             if nuevo:
@@ -76,6 +79,9 @@ def calcular(con):
             for o in otros_tag.get(tid, []):
                 if o != pri and o not in sec:
                     sec.append(o)
+            if not pri and (principal_tag.get(tid) or sec):   # sin principal: el del tag, o el primer secundario
+                pri = principal_tag.get(tid) or sec[0]
+                sec = [g for g in sec if g != pri]
             nuevo_s = _json(sec, gs)
             if pri:
                 resultado[pri] += 1
@@ -155,7 +161,9 @@ def aplicar(db, cambios):
                         [(p, s, i) for i, p, s in cambios['track_meta']])
         src.executemany('UPDATE album_meta SET genre_primary=?, genre_secondary=? WHERE album_id=?',
                         [(p, s, i) for i, p, s in cambios['album_meta']])
-        src.executemany('UPDATE users SET favorite_genres_json=? WHERE id=?', [(f, i) for i, f in cambios['users']])
+        if cambios['users']:
+            src.executemany('UPDATE users SET favorite_genres_json=? WHERE id=?',
+                            [(f, i) for i, f in cambios['users']])
         src.execute('COMMIT')
     except Exception:
         src.execute('ROLLBACK')
