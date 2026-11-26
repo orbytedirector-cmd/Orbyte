@@ -26,6 +26,7 @@ from .mqa import _es_url as mqa_tags_url
 from . import sacd
 from . import edicion as edicion_mod
 from . import genero_auto
+from . import generos
 
 try:
     import mutagen
@@ -1481,6 +1482,18 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
     if ov.get('genero'):
         genero = ov['genero']
     genero_sec = [g.strip() for g in re.split(r'\s*;\s*', ov.get('genero_secundario') or '') if g.strip()][:3]
+    # géneros fijados a mano (generos.FIJO_TAG): lo que decidiste en «Editar tags»; si no tocaste el género en esta
+    # revisión, la marca que ya traen los archivos (un álbum que vuelve de la biblioteca la conserva)
+    if 'genero_fijo' in cambios:
+        genero_fijo = sorted(set(cambios.get('genero_fijo') or ()))
+    else:
+        genero_fijo = None
+        for p in legibles[:1]:
+            fijo, g_arch, sec_arch = generos.leer_fijo(os.path.join(ruta, p['archivo']))
+            if fijo:
+                genero_fijo = sorted(fijo)
+                if 'secundarios' in fijo and not genero_sec:
+                    genero_sec = generos.separar(sec_arch)[:3]
     ov_pistas = cambios.get('pistas') or {}
     anio_tags = _mayoria(tag('anio'))
     anio_orig = _mayoria(tag('anio_original'))
@@ -1934,7 +1947,8 @@ def analizar_album(unidad, ajustes, progreso=None, trabajadores=3, cliente_mb=No
         'artista': artista, 'album': album, 'anio': anio,
         'fecha': ed_el.get('fecha') if ed_el.get('anio') == anio else anio,
         'anio_original': ed_el.get('anio_original') or edicion.get('anio_original'),
-        'genero': genero, 'genero_secundario': genero_sec, 'mbid': ed_el.get('id') or edicion.get('mbid'),
+        'genero': genero, 'genero_secundario': genero_sec, 'genero_fijo': genero_fijo,
+        'mbid': ed_el.get('id') or edicion.get('mbid'),
         'mb_grupo': ed_el.get('grupo_id') or edicion.get('mb_grupo'),
         'sello': ed_el.get('sello') or edicion.get('sello'), 'catalogo': ed_el.get('catalogo') or edicion.get('catalogo'),
         'pais': ed_el.get('pais') or edicion.get('pais'), 'barcode': ed_el.get('barcode') or edicion.get('barcode'),

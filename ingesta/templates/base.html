@@ -6,7 +6,7 @@
 <meta name="csrf" content="{{ csrf }}">
 <meta name="theme-color" content="#000000">
 <title>{% block titulo %}Ingesta{% endblock %} · Orbyte</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261123">
+<link rel="stylesheet" href="{{ url_for('static', filename='ingesta.css') }}?v=20261126">
 </head>
 <body>
 <header class="cab">
@@ -89,6 +89,32 @@ function editorDiscos(tabla, boton, o) {
 // (para que el selector las siga mostrando cuando se pide una sola).
 // Para el historial: qué campos guardados vienen de la propuesta de Autocorregir (y su motivo). valor(clave|null, campo)
 // devuelve lo que hay hoy en el formulario; si coincide con lo propuesto, ese cambio fue de Autocorregir.
+// Géneros escritos a mano (26-11-2026): mientras escribes se revisan contra los que ya hay en la biblioteca.
+// Error de tipeo → el existente (con «Mantener como lo escribí»), lo que no existe → nuevo, país/década… → fuera.
+function revisorGeneros(campos, caja) {
+  campos = campos.filter(Boolean);
+  if (!caja || !campos.length) return {mantener: () => []};
+  const mantener = new Set();
+  let espera = null, turno = 0;
+  async function revisar() {
+    const texto = campos.map(c => c.value.trim()).filter(Boolean).join('; ');
+    const yo = ++turno;
+    if (!texto) { caja.hidden = true; caja.innerHTML = ''; return; }
+    const r = await post('/api/generos/validar', {texto, mantener: [...mantener]});
+    if (yo !== turno || !r || !r.ok) return;
+    const notas = r.notas || [];
+    caja.hidden = !notas.length;
+    caja.innerHTML = notas.map(n => {
+      if (n.tipo === 'corregido') return `<div>«${esc(n.escrito)}» → <b>${esc(n.resultado)}</b> <span class="tenue">(corregido: ya existe)</span>
+        <button type="button" class="btn btn-mini" data-mantener="${esc(n.escrito)}">Mantener como lo escribí</button></div>`;
+      if (n.tipo === 'nuevo') return `<div><b>${esc(n.resultado)}</b> <span class="tenue">· género nuevo: se crea al guardar</span></div>`;
+      return `<div>«${esc(n.escrito)}» <span class="tenue">no es un género (país, década, artista o etiqueta): no se guarda</span></div>`;
+    }).join('');
+    caja.querySelectorAll('[data-mantener]').forEach(b => b.onclick = () => { mantener.add(b.dataset.mantener); revisar(); });
+  }
+  campos.forEach(c => c.addEventListener('input', () => { clearTimeout(espera); espera = setTimeout(revisar, 450); }));
+  return {mantener: () => [...mantener]};
+}
 function motivosAuto(prop, valor) {
   const m = {};
   if (!prop) return m;

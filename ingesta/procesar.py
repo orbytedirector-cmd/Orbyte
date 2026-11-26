@@ -327,6 +327,7 @@ def escribir_tags(ruta, x, ta, rep):
                 f.tags[clave] = str(v[k])
         if v.get('genero_secundario'):          # como lo escribe RichMeta: un valor por género
             f.tags['GENRE_SECONDARY'] = list(v['genero_secundario'])
+        _fijo_vorbis(f.tags, ta)
         for viejo in ('TOTALTRACKS', 'TOTALDISCS'):
             if viejo in f.tags:
                 del f.tags[viejo]
@@ -338,7 +339,7 @@ def escribir_tags(ruta, x, ta, rep):
                 f.tags[mqa_mod.TAG_SR] = str(int(m['sr_original']))
         f.save(deleteid3=bool(x.get('quitar_id3')))
     elif ext in ('.mp3', '.dsf', '.aif', '.aiff', '.dff'):
-        _tags_id3(ruta, v, ext)
+        _tags_id3(ruta, v, ext, ta.get('genero_fijo'))
     elif ext in ('.m4a', '.mp4'):
         from mutagen.easymp4 import EasyMP4, EasyMP4Tags
         # EasyMP4 no trae estas claves: se registran como átomos «----:com.apple.iTunes:…» (los nombres de Picard)
@@ -363,16 +364,40 @@ def escribir_tags(ruta, x, ta, rep):
         for k, clave in VORBIS.items():
             if k in v:
                 f[clave] = str(v[k])
+        if f.tags is not None:
+            _fijo_vorbis(f.tags, ta)
         f.save()
     # otros formatos (WMA…): se dejan los tags que traen
 
 
-def _tags_id3(ruta, v, ext):
+def _fijo_vorbis(tags, ta):
+    """Marca de géneros fijados a mano (generos.FIJO_TAG): con «genero_fijo» en ta se escribe o se borra; sin la
+    clave el archivo queda como estaba."""
+    if 'genero_fijo' not in ta or ta['genero_fijo'] is None:
+        return
+    texto = generos_mod.fijo_a_texto(ta['genero_fijo'])
+    if texto:
+        tags[generos_mod.FIJO_TAG] = texto
+    elif generos_mod.FIJO_TAG in tags:
+        del tags[generos_mod.FIJO_TAG]
+
+
+def _fijo_id3(t, fijo):
+    if fijo is None:
+        return
+    texto = generos_mod.fijo_a_texto(fijo)
+    t.delall(f'TXXX:{generos_mod.FIJO_TAG}')
+    if texto:
+        t.add(TXXX(encoding=3, desc=generos_mod.FIJO_TAG, text=texto))
+
+
+def _tags_id3(ruta, v, ext, fijo=None):
     if ext == '.dff':
         # .dff (solo queda si es DST): el ID3 va como bloque «ID3 » al final, nunca pegado al inicio
         datos = dsd.id3_dff(ruta)
         t = ID3(io.BytesIO(datos)) if datos else ID3()
         _frames_id3(t, v)
+        _fijo_id3(t, fijo)
         b = io.BytesIO()
         t.save(b, v2_version=3)
         dsd.escribir_id3_dff(ruta, b.getvalue())
@@ -390,6 +415,7 @@ def _tags_id3(ruta, v, ext):
             t = ID3()
         f = None
     _frames_id3(t, v)
+    _fijo_id3(t, fijo)
     if f is not None:
         f.save()
     else:

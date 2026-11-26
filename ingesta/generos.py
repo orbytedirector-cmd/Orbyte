@@ -112,6 +112,7 @@ _QUITAR = [
 MENORES_A_AMP = {'and', "'n'", 'n', "n'", "'n"}
 SUELTAS = {'&', 'De', 'Y', 'The', 'Of', 'En', 'El', 'La', 'Los', 'Las', 'A', 'E'}   # solas no son un género
 _SEPARA = re.compile(r'\s*(?:[,;|]|/)\s*|\s+[-–—]\s+')     # «electronic - experimental»: guion con espacios
+_SEPARA_FUERTE = re.compile(r'\s*[,;|]\s*|\s+[-–—]\s+')
 _PALABRAS = re.compile(r"[\s\-_‐‑–—]+")
 
 
@@ -166,9 +167,8 @@ def normalizar(g):
     return out
 
 
-def separar(valor):
-    """Un valor que puede traer varios géneros («Pop, Rock», «Hip-Hop/Rap», lista JSON) → [géneros] en orden, sin
-    repetir y sin lo que no es género."""
+def partes(valor):
+    """Los géneros tal como están escritos (sin normalizar), en orden: «Pop, Rock», «Hip-Hop/Rap», lista JSON."""
     if valor is None:
         return []
     if isinstance(valor, (list, tuple)):
@@ -187,11 +187,26 @@ def separar(valor):
         c = c.replace('\x00', ';')
         # el valor completo puede ser un alias con «/» («Singer/Songwriter», «AC/DC»): se mira antes de partir
         k = _clave(c)
-        trozos = [c] if (k in ALIAS or k in QUITAR) else _SEPARA.split(c)
-        for t in trozos:
-            n = normalizar(t)
-            if n and n not in out:
-                out.append(n)
+        if k in ALIAS or k in QUITAR:
+            out.append(c.strip())
+            continue
+        for t in _SEPARA_FUERTE.split(c):             # «,», «;», «|», « - »; la «/» solo si no es un alias
+            if not t or not t.strip():
+                continue
+            kt = _clave(t)
+            trozos = [t] if (kt in ALIAS or kt in QUITAR) else t.split('/')
+            out.extend(x.strip() for x in trozos if x and x.strip())
+    return out
+
+
+def separar(valor):
+    """Un valor que puede traer varios géneros («Pop, Rock», «Hip-Hop/Rap», lista JSON) → [géneros] en orden, sin
+    repetir y sin lo que no es género."""
+    out = []
+    for t in partes(valor):
+        n = normalizar(t)
+        if n and n not in out:
+            out.append(n)
     return out
 
 
@@ -206,3 +221,131 @@ def repartir(principal, secundarios=None):
         if g != pri and g not in sec:
             sec.append(g)
     return pri, sec
+
+
+# ─────────────────────────── géneros escritos a mano (26-11-2026) ───────────────────────────
+# Lo que escribes en «Editar tags» se valida contra los géneros que ya hay: un error de tipeo adopta el existente,
+# lo que no existe y cumple la regla se crea. Lo editado a mano queda «fijado» en el archivo (FIJO_TAG) y la metadata
+# (RichMeta) lo respeta; lo no fijado lo sigue decidiendo la metadata.
+
+FIJO_TAG = 'ORBYTE_GENERO_FIJO'          # «principal», «secundarios» o «principal;secundarios»
+FIJOS = ('principal', 'secundarios')
+
+
+def fijo_de_texto(texto):
+    return {x.strip().lower() for x in re.split(r'[;,\s]+', str(texto or '')) if x.strip().lower() in FIJOS}
+
+
+def fijo_a_texto(fijo):
+    return ';'.join(x for x in FIJOS if x in (fijo or ()))
+
+
+def leer_fijo(ruta):
+    """→ (fijo {'principal', 'secundarios'}, principal del archivo, [secundarios del archivo]). Nunca lanza."""
+    try:
+        import io
+        import mutagen
+        if ruta.lower().endswith('.dff'):
+            from mutagen.id3 import ID3
+            from . import dsd
+            datos = dsd.id3_dff(ruta)
+            t = ID3(io.BytesIO(datos)) if datos else None
+        else:
+            f = mutagen.File(ruta)
+            t = f.tags if f is not None else None
+        if t is None:
+            return set(), None, []
+        if hasattr(t, 'getall'):                                    # ID3 (MP3, DSF, AIFF, DFF)
+            def txxx(desc):
+                fr = t.getall(f'TXXX:{desc}')
+                return ';'.join(str(x) for x in fr[0].text) if fr else ''
+            fijo = fijo_de_texto(txxx(FIJO_TAG))
+            tcon = t.getall('TCON')
+            pri = str(tcon[0].text[0]) if tcon and tcon[0].text else None
+            sec = txxx('genre_secondary')
+        else:                                                       # Vorbis (FLAC, OGG)
+            def vorbis(k):
+                v = t.get(k) or t.get(k.lower()) or []
+                return list(v) if isinstance(v, list) else [str(v)]
+            fijo = fijo_de_texto(';'.join(vorbis(FIJO_TAG)))
+            g = vorbis('GENRE')
+            pri = g[0] if g else None
+            sec = ';'.join(vorbis('GENRE_SECONDARY'))
+        return fijo, pri, [x.strip() for x in sec.split(';') if x.strip()]
+    except Exception:
+        return set(), None, []
+
+
+def _distancia(a, b):
+    """Damerau-Levenshtein (transposición de dos letras vecinas = 1)."""
+    d = [[0] * (len(b) + 1) for _ in range(len(a) + 1)]
+    for i in range(len(a) + 1):
+        d[i][0] = i
+    for j in range(len(b) + 1):
+        d[0][j] = j
+    for i in range(1, len(a) + 1):
+        for j in range(1, len(b) + 1):
+            c = 0 if a[i - 1] == b[j - 1] else 1
+            d[i][j] = min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + c)
+            if i > 1 and j > 1 and a[i - 1] == b[j - 2] and a[i - 2] == b[j - 1]:
+                d[i][j] = min(d[i][j], d[i - 2][j - 2] + 1)
+    return d[len(a)][len(b)]
+
+
+def _sin_tildes(s):
+    s = unicodedata.normalize('NFKD', s)
+    return ''.join(ch for ch in s if not unicodedata.combining(ch)).lower()
+
+
+def parecido(g, existentes):
+    """El género existente del que «g» parece un error de tipeo, o None.
+    Mismo género con otro espaciado («Deathmetal» → «Death Metal»), o las mismas palabras salvo una que difiere en
+    una letra (palabras de 4 a 6 letras) o dos (7 o más): «Trhash Metal» → «Thrash Metal», «Relaxtion» →
+    «Relaxation». No toca palabras cortas («J Rock» ≠ «K Rock») ni cambios de dos letras en palabras cortas
+    («Folk Metal» ≠ «Funk Metal»)."""
+    k = _clave(g)
+    for e in existentes:
+        if _clave(e) == k:
+            return e
+    pg = _sin_tildes(g).split()
+    mejor = None
+    for e in existentes:
+        pe = _sin_tildes(e).split()
+        if len(pe) != len(pg):
+            continue
+        dif = [(a, b) for a, b in zip(pg, pe) if a != b]
+        if len(dif) != 1:
+            continue
+        a, b = dif[0]
+        if min(len(a), len(b)) < 4:
+            continue
+        tope = 1 if max(len(a), len(b)) <= 6 else 2
+        dist = _distancia(a, b)
+        if dist <= tope and (mejor is None or dist < mejor[0]):
+            mejor = (dist, e)
+    return mejor[1] if mejor else None
+
+
+def validar(valor, existentes, mantener=()):
+    """Lo escrito a mano → ([géneros], [notas]). Cada nota: {escrito, resultado, tipo} con tipo
+    «quitado» (no es un género: país, década, artista…), «corregido» (error de tipeo de uno que ya existe) o «nuevo»
+    (no existe y cumple la regla: se crea). «mantener»: lo que pediste dejar como lo escribiste (no se corrige)."""
+    existentes = set(existentes or ())
+    existentes.update(_ALIAS)                              # las formas acordadas siempre existen
+    guardar = {_clave(m) for m in (mantener or ()) if m}
+    out, notas = [], []
+    for crudo in partes(valor):
+        n = normalizar(crudo)
+        if not n:
+            notas.append({'escrito': crudo, 'resultado': None, 'tipo': 'quitado'})
+            continue
+        if n not in existentes:
+            cerca = None if (_clave(crudo) in guardar or _clave(n) in guardar) else parecido(n, existentes)
+            if cerca:
+                notas.append({'escrito': crudo, 'resultado': cerca, 'tipo': 'corregido'})
+                n = cerca
+            else:
+                notas.append({'escrito': crudo, 'resultado': n, 'tipo': 'nuevo'})
+        if n not in out:
+            out.append(n)
+    return out, notas

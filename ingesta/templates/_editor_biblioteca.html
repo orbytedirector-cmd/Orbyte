@@ -14,6 +14,8 @@
       </div>
       <div class="campo" style="margin-top:.7rem"><label>Géneros secundarios <span class="tenue" style="font-weight:400">· hasta 3, separados por «;»</span></label>
         <input type="text" data-tag="genero_secundario" value="{{ (ta.genero_secundario or []) | join('; ') }}" data-orig="{{ (ta.genero_secundario or []) | join('; ') }}"></div>
+      <div id="lib-generos-revision" class="generos-revision s" hidden></div>
+      {% if ta.genero_fijo %}<p class="s tenue" style="font-size:.76rem;margin:.3rem 0 0">Fijado a mano: {{ ta.genero_fijo | join(' y ') }} — la metadata lo respeta. Vacía el campo para que vuelva a decidir la metadata.</p>{% endif %}
       <p class="s tenue" style="font-size:.76rem;margin:.4rem 0 .8rem">Se reescriben los tags de los archivos y sus nombres (y la carpeta si cambian artista, álbum o año). Con varios discos, los nombres quedan «2-01 - Título» en la misma carpeta. Cada pista conserva su ID en Orbyte: escuchas, favoritos y playlists no se pierden. Después se corre la metadata.</p>
       <div id="auto-panel-lib" class="auto-panel" hidden></div>
       <div class="tabla-wrap"><table class="tabla-tags">
@@ -77,12 +79,15 @@
     aplicar();
   }
   ac.onclick = () => pedir({numeracion: true});
+  const revGeneros = revisorGeneros([raiz.querySelector('[data-tag="genero"]'), raiz.querySelector('[data-tag="genero_secundario"]')],
+                                    document.getElementById('lib-generos-revision'));
   const gl = document.getElementById('guardar-lib');
   gl.onclick = async () => {
-    const tags = {};
+    const tags = {}, vacios = [];
     raiz.querySelectorAll('[data-tag]').forEach(e => {
       const v = e.value.trim(), k = e.dataset.tag;
       if (k === 'genero_secundario' ? v !== e.dataset.orig : (v && v !== e.dataset.orig)) tags[k] = v;
+      if (k === 'genero' && !v && e.dataset.orig) vacios.push('genero');   // vaciado: suelta el fijado
     });
     const pistas = {};
     filas().forEach(tr => {
@@ -90,7 +95,7 @@
       tr.querySelectorAll('[data-campo]').forEach(e => { const v = e.value.trim(); if (v && v !== e.dataset.orig) o[e.dataset.campo] = v; });
       if (Object.keys(o).length) pistas[tr.dataset.libClave] = o;
     });
-    if (!Object.keys(tags).length && !Object.keys(pistas).length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
+    if (!Object.keys(tags).length && !Object.keys(pistas).length && !vacios.length) { toast('Sin cambios', 'No modificaste ningún campo'); return; }
     gl.disabled = true;
     const valor = (cl, k) => {
       const tr = cl && filas().find(t => t.dataset.libClave === cl);
@@ -98,7 +103,8 @@
       return e ? e.value.trim() : '';
     };
     const r = await post(`${API}/ajustar`, {tags, pistas, motivos: motivosAuto(propuesta, valor),
-                                            fuente: propuesta ? propuesta.fuente : ''});
+                                            fuente: propuesta ? propuesta.fuente : '',
+                                            vacios, mantener: revGeneros.mantener()});
     if (r && r.ok === false) { toast('No se pudo', r.error || ''); gl.disabled = false; return; }
     location.href = r.ir || location.href.split('#')[0];
   };
